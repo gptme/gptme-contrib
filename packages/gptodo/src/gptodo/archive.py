@@ -127,8 +127,46 @@ def _git(cwd: Path, *args: str) -> Optional[str]:
     return result.stdout
 
 
-def _last_change(task: TaskInfo, in_git: bool) -> Optional[datetime]:
-    """Latest of the ``modified`` field, file mtime and last git commit."""
+def _git_commit_times(directory: Path) -> Optional[Dict[str, int]]:
+    """Last commit time (unix) per file in ``directory``, from one ``git log`` pass.
+
+    Keys are paths relative to ``directory``. Avoids one subprocess per file
+    (that costs ~0.7 s per file on an 18k-commit repo). Merge diffs are included
+    so resolution edits cannot look older than they are; files changed against
+    either parent conservatively receive the merge time.
+    """
+    out = _git(
+        directory,
+        "-c",
+        "core.quotePath=false",
+        "log",
+        "--format=%x00%ct",
+        "--name-only",
+        "-m",
+        "--relative",
+        "--",
+        ".",
+    )
+    if out is None:
+        return None
+    times: Dict[str, int] = {}
+    current: Optional[int] = None
+    for line in out.splitlines():
+        if line.startswith("\0"):
+            stamp = line[1:].strip()
+            current = int(stamp) if stamp.isdigit() else None
+        elif line and current is not None:
+            times.setdefault(line, current)  # log is newest-first: keep the first seen
+    return times
+
+
+def _last_change(
+    task: TaskInfo, in_git: bool, git_times: Optional[Dict[str, int]] = None
+) -> Optional[datetime]:
+    """Latest of the ``modified`` field, file mtime and last git commit.
+
+    ``git_times`` (from ``_git_commit_times``) replaces the per-file ``git log``.
+    """
     stamps: List[datetime] = []
     if "modified" in task.metadata:
         parsed = _to_utc(task.metadata["modified"])
@@ -138,7 +176,9 @@ def _last_change(task: TaskInfo, in_git: bool) -> Optional[datetime]:
         stamps.append(datetime.fromtimestamp(task.path.stat().st_mtime, timezone.utc))
     except OSError:
         return None
-    if in_git:
+    if in_git and git_times is not None and task.path.name in git_times:
+        stamps.append(datetime.fromtimestamp(git_times[task.path.name], timezone.utc))
+    elif in_git:  # no map, or a name the map lacks (untracked): ask git for this file
         out = _git(task.path.parent, "log", "-1", "--format=%ct", "--", task.path.name)
         if out and out.strip().isdigit():
             stamps.append(datetime.fromtimestamp(int(out.strip()), timezone.utc))
@@ -146,7 +186,11 @@ def _last_change(task: TaskInfo, in_git: bool) -> Optional[datetime]:
 
 
 def terminal_evidence(
-    task: TaskInfo, *, in_git: bool = False, cutoff: Optional[datetime] = None
+    task: TaskInfo,
+    *,
+    in_git: bool = False,
+    cutoff: Optional[datetime] = None,
+    git_times: Optional[Dict[str, int]] = None,
 ) -> Tuple[Optional[datetime], str]:
     """Return (when the task became terminal, source of that timestamp).
 
@@ -168,7 +212,7 @@ def terminal_evidence(
             return None, "last-change"
         if mtime > cutoff:
             return mtime, "last-change"
-    return _last_change(task, in_git), "last-change"
+    return _last_change(task, in_git, git_times), "last-change"
 
 
 def _keys(task: TaskInfo) -> Set[str]:
@@ -389,6 +433,7 @@ def plan_archive(
     cutoff = now - timedelta(days=older_than_days)
     archive_dir = tasks_dir / "archive"
     in_git = _git(tasks_dir, "rev-parse", "--is-inside-work-tree") is not None
+    git_times = _git_commit_times(tasks_dir) if in_git else None
 
     plan = ArchivePlan()
     all_tasks = load_tasks(tasks_dir, include_subtasks=False)
@@ -404,7 +449,7 @@ def plan_archive(
             others.append(task)
             plan.skipped.append({"id": task.id, "reason": "recurring task (recur: set)"})
             continue
-        stamp, source = terminal_evidence(task, in_git=in_git, cutoff=cutoff)
+        stamp, source = terminal_evidence(task, in_git=in_git, cutoff=cutoff, git_times=git_times)
         if stamp is None:
             others.append(task)
             if source.startswith("invalid-"):
