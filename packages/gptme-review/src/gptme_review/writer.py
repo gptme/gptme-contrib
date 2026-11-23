@@ -2473,7 +2473,11 @@ def maintainer_commands() -> tuple[str, ...]:
         commands = tuple(declared)
     except TypeError:
         raise ValueError(f"unsupported maintainer commands: {declared!r}") from None
-    unknown = [c for c in commands if c not in _MAINTAINER_COMMAND_TEXT]
+    unknown = [
+        c
+        for c in commands
+        if not isinstance(c, str) or c not in _MAINTAINER_COMMAND_TEXT
+    ]
     if unknown or not commands:
         raise ValueError(f"unsupported maintainer commands: {commands!r}")
     return commands
