@@ -36,6 +36,7 @@ sys.path.insert(0, str(_Path(__file__).parent))
 # Add parent directory so `from twitter.llm import ...` resolves to scripts/twitter/
 sys.path.insert(0, str(_Path(__file__).parent.parent))
 
+import hashlib
 import json
 import logging
 import os
@@ -256,6 +257,17 @@ def _parse_markdown_frontmatter(text: str) -> tuple[dict[str, Any], str] | None:
     return metadata, body
 
 
+def draft_content_digest(text: str, thread: List[str] | None = None) -> str:
+    """Digest of the content a quality score was computed for.
+
+    A saved ``quality_score`` only describes the text that was reviewed. Editing
+    the draft file outside the workflow (a hand edit, an external tool) leaves the
+    score behind, so reuse is gated on this digest matching the current content.
+    """
+    payload = text + "\x00" + "\x00".join(thread or [])
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
 class TweetDraft:
     """Represents a tweet draft with metadata"""
 
@@ -268,6 +280,7 @@ class TweetDraft:
         context: Dict | None = None,
         reject_reason: str | None = None,
         quality_score: int | None = None,
+        scored_digest: str | None = None,
         thread: List[str] | None = None,
         quote_tweet_id: str | None = None,
         posted_id: str | None = None,
@@ -281,6 +294,9 @@ class TweetDraft:
         self.created_at = datetime.now()
         self.reject_reason = reject_reason
         self.quality_score = quality_score  # 0-3 star rating (matches blog post system)
+        # Digest of the text/thread that quality_score describes. A score without
+        # a matching digest (hand-edited file, pre-digest draft) is not reusable.
+        self.scored_digest = scored_digest
         self.thread = thread or []  # List of follow-up tweet texts
         self.quote_tweet_id = quote_tweet_id  # id of the tweet this draft quotes
         self.posted_id = posted_id  # id returned by create_tweet, set on posting
@@ -301,9 +317,11 @@ class TweetDraft:
         # Only include reject_reason if it's set
         if self.reject_reason:
             result["reject_reason"] = self.reject_reason
-        # Only include quality_score if it's set
+        # Only include quality_score if it's set, always paired with the digest
+        # of the content it describes (derived here so it can never go stale).
         if self.quality_score is not None:
             result["quality_score"] = self.quality_score
+            result["scored_digest"] = draft_content_digest(self.text, self.thread)
         # Only include thread if it's set and non-empty
         if self.thread:
             result["thread"] = self.thread
@@ -359,6 +377,7 @@ class TweetDraft:
             context=data.get("context", {}),
             reject_reason=data.get("reject_reason"),  # Optional, backward compatible
             quality_score=data.get("quality_score"),  # Optional, backward compatible
+            scored_digest=data.get("scored_digest"),  # Optional, backward compatible
             thread=fixed_thread,
             quote_tweet_id=data.get("quote_tweet_id", data.get("quote")),
             posted_id=data.get("posted_id"),
@@ -1445,8 +1464,16 @@ def review(
             # twice and can flip the verdict on unchanged text. Drafts in new/ keep
             # the historical behaviour: their score can be stale (a skip after a
             # review leaves it behind), so they are always reviewed afresh.
+            # The saved score is only reused when its digest still matches the
+            # current content, so a hand-edited file is re-reviewed rather than
+            # auto-approved on stale evidence.
             review_result = None
-            if draft.quality_score is not None and status != "new":
+            if (
+                draft.quality_score is not None
+                and status != "new"
+                and draft.scored_digest
+                == draft_content_digest(draft.text, draft.thread)
+            ):
                 quality_score = draft.quality_score
                 approved = quality_score == 3
             else:
@@ -2863,7 +2890,10 @@ def auto(
 
             # Reuse the completed review rather than paying for it every cycle.
             # Three stars requires all criteria passed and an approve recommendation.
-            if draft.quality_score is not None:
+            # Only when the score still describes the current content.
+            if draft.quality_score is not None and draft.scored_digest == (
+                draft_content_digest(draft.text, draft.thread)
+            ):
                 if auto_approve and draft.quality_score == 3:
                     if not dry_run:
                         move_draft(path, "approved")

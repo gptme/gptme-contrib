@@ -1090,6 +1090,54 @@ def test_review_status_review_auto_approves_three_star(
     assert (workflow_module.APPROVED_DIR / parked.name).exists()
 
 
+def test_review_status_review_reviews_a_hand_edited_draft(
+    workflow_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A draft edited outside the workflow keeps its quality_score but no longer
+    matches the scored digest, so the stale score must not auto-approve it."""
+    _set_status_dirs(workflow_module, tmp_path)
+    parked = workflow_module.REVIEW_DIR / "hand-edited.yml"
+    workflow_module.TweetDraft(text="original reviewed text", quality_score=3).save(
+        parked
+    )
+
+    # Simulate a direct file edit that leaves the saved score behind.
+    parked.write_text(
+        parked.read_text().replace(
+            "original reviewed text", "rewritten after the review"
+        )
+    )
+    reloaded = workflow_module.TweetDraft.load(parked)
+    assert reloaded.quality_score == 3
+    assert reloaded.text == "rewritten after the review"
+
+    calls: list[Any] = []
+
+    def record_review(draft: Any) -> Any:
+        calls.append(draft)
+        # The rewritten text is worse than what the stale 3/3 described.
+        return False, SimpleNamespace(
+            criteria_results={"clarity": SimpleNamespace(passed=False, notes="vague")},
+            recommendation="reject",
+            improvements=[],
+        )
+
+    monkeypatch.setattr(workflow_module, "verify_draft", record_review)
+    monkeypatch.setattr(
+        workflow_module,
+        "Prompt",
+        SimpleNamespace(ask=lambda *args, **kwargs: "skip"),
+    )
+
+    workflow_module.review(
+        auto_approve=True, show_context=False, dry_run=False, status="review"
+    )
+
+    assert calls, "hand-edited draft must be re-reviewed"
+    assert parked.exists(), "the stale 3/3 score must not auto-approve it"
+    assert workflow_module.TweetDraft.load(parked).quality_score == 0
+
+
 def test_list_command_lists_review_drafts_with_ids(
     workflow_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
