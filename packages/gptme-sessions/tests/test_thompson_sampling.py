@@ -1228,3 +1228,21 @@ def test_backup_recovery_returns_subclass_state(tmp_path):
     assert isinstance(recovered.state.arms["a"], _LabelledArm)
     empty_dir = tmp_path / "empty"
     assert isinstance(_LabelledBandit(state_dir=empty_dir).state, _LabelledState)
+
+
+def test_arm_fields_this_engine_does_not_know_are_ignored_on_load(tmp_path):
+    """A field written by another tool must not make the whole state unloadable."""
+    state_file = tmp_path / "bandit-state.json"
+    state_file.write_text(
+        json.dumps(
+            {
+                "arms": {"a": {"arm_id": "a", "alpha": 4.0, "beta": 2.0, "last_demoted": "x"}},
+                "contextual_arms": {"a": {"null": {"arm_id": "a", "alpha": 2.0, "note": "y"}}},
+                "total_sessions": 5,
+            }
+        )
+    )
+    bandit = Bandit(state_dir=tmp_path)
+    assert bandit.state.total_sessions == 5
+    assert bandit.state.arms["a"].alpha == 4.0
+    assert bandit.state.contextual_arms["a"]["null"].alpha == 2.0

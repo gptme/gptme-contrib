@@ -38,7 +38,7 @@ import os
 import random
 import sys
 import tempfile
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields as dataclass_fields
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, ClassVar, Iterator, Protocol
@@ -598,19 +598,24 @@ class Bandit:
             created=data.get("created", ""),
             last_updated=data.get("last_updated", ""),
         )
-        for arm_id, arm_data in data.get("arms", {}).items():
-            # Support old format where key was 'lesson_path'
+        arm_class = cls.state_class.arm_class
+        known = {f.name for f in dataclass_fields(arm_class)}
+
+        def build(arm_data: dict) -> BanditArm:
             arm_data = dict(arm_data)
+            # Support old format where key was 'lesson_path'
             if "lesson_path" in arm_data and "arm_id" not in arm_data:
                 arm_data["arm_id"] = arm_data.pop("lesson_path")
-            state.arms[arm_id] = cls.state_class.arm_class(**arm_data)
+            # Fields this engine does not know (written by another tool or a newer
+            # version) are ignored on load rather than corrupting the whole state.
+            return arm_class(**{k: v for k, v in arm_data.items() if k in known})
+
+        for arm_id, arm_data in data.get("arms", {}).items():
+            state.arms[arm_id] = build(arm_data)
         for arm_id, contexts in data.get("contextual_arms", {}).items():
-            state.contextual_arms[arm_id] = {}
-            for ctx_key, arm_data in contexts.items():
-                arm_data = dict(arm_data)
-                if "lesson_path" in arm_data and "arm_id" not in arm_data:
-                    arm_data["arm_id"] = arm_data.pop("lesson_path")
-                state.contextual_arms[arm_id][ctx_key] = cls.state_class.arm_class(**arm_data)
+            state.contextual_arms[arm_id] = {
+                ctx_key: build(arm_data) for ctx_key, arm_data in contexts.items()
+            }
         return state
 
     def _load_state(self) -> BanditState:
