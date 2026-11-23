@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+from typing import get_args, get_type_hints
 
 import pytest
 from gptme_body_protocol import (
@@ -74,3 +75,10 @@ def test_require_command_result_allows_omitted_protocol() -> None:
         {"type": "command_result", "command_id": "remote-0001"},
         "remote-0001",
     )
+
+
+def test_sensor_frame_command_roundtrips() -> None:
+    assert "sensor_frame" in get_args(get_type_hints(Command)["command"])
+    command = Command("sf-1", "voice", "sensor_frame")
+    assert command.command == "sensor_frame"
+    assert json.loads(encode_message(command))["command"] == "sensor_frame"

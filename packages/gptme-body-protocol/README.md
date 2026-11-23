@@ -7,7 +7,8 @@ movement goals.
 
 **Status:** experimental (`0.1.0`, protocol `bob-body/0`). The wire format may
 change in a new protocol version; the version string is checked on every
-handshake so mismatched peers fail loudly.
+handshake so wire-version mismatches fail loudly. A matching version does not
+promise that a node implements every command listed by the DTO.
 
 ## Why it exists
 
@@ -21,7 +22,8 @@ This package is that shared seam: zero runtime dependencies, stdlib only. The
   the body to the controller. Mutual proof is a later protocol.
 - stable controller and command IDs (command results must repeat `command_id`);
 - command TTLs (`ttl_ms`, default 2000) and a send timestamp (`sent_at_ms`);
-- `status`, relative `move`, relative `turn`, preemptive `stop`, and `interact`;
+- `status`, relative `move`, relative `turn`, preemptive `stop`, `interact`, and
+  `sensor_frame` (a read-only request for the node's latest sensor frame);
 - newline-framed JSON encoding for the current native-local transport.
 
 The package defines DTOs and framing only. Controller leases, idempotency,
@@ -77,7 +79,7 @@ require_command_result(decode_message(await reader.readline()), cmd.command_id)
 |------|---------|
 | `PROTOCOL_VERSION` | `"bob-body/0"` |
 | `Handshake(token, controller_id)` | Frozen dataclass; `type="handshake"` |
-| `Command(command_id, controller_id, command, args={}, ttl_ms=2000)` | Frozen dataclass; `command` is one of `status`, `move`, `turn`, `stop`, `interact` |
+| `Command(command_id, controller_id, command, args={}, ttl_ms=2000)` | Frozen dataclass; `command` is one of `status`, `move`, `turn`, `stop`, `interact`, `sensor_frame` |
 | `encode_message(msg) -> bytes` | Compact JSON + trailing newline |
 | `decode_message(line) -> dict` | Rejects non-object JSON and a foreign `protocol` value |
 | `require_handshake_ok(resp)` | Raises `PermissionError` unless `type == "handshake_ok"`; `ValueError` on protocol mismatch |
@@ -85,5 +87,11 @@ require_command_result(decode_message(await reader.readline()), cmd.command_id)
 
 The `args` payload for each command and the `capabilities` list in
 `handshake_ok` are defined by the body node and its client adapter, not by this
-package. The reference client is `gptme_voice.body.remote_adapter.RemoteAdapter`
+package. Clients must check the node's capabilities before relying on an optional
+command such as `sensor_frame`; the Literal is a static typing aid, not runtime
+validation or capability negotiation. Adding this already-used command name does
+not change the framing, handshake, or existing command payloads, so the wire
+version remains `bob-body/0`.
+
+The reference client is `gptme_voice.body.remote_adapter.RemoteAdapter`
 in [gptme-voice](../gptme-voice/README.md).
