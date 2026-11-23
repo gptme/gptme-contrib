@@ -253,8 +253,8 @@ def load_config() -> Dict[Any, Any]:
         return cast(Dict[Any, Any], yaml.safe_load(f))
 
 
-# Leading run of handles that X prepends to a reply's text.
-_REPLY_PREFIX_RE = re.compile(r"^(?:\s*@\w+)+\s*")
+# A possible inherited handle; punctuation ends the candidate prefix.
+_REPLY_HANDLE_RE = re.compile(r"\s*@([\w]+)(?=\s|$)")
 
 
 def create_tweet_eval_prompt(tweet: Dict, config: Dict) -> str:
@@ -281,25 +281,48 @@ def create_tweet_eval_prompt(tweet: Dict, config: Dict) -> str:
             marker = " (US — our prior message)" if is_us else ""
             thread_context += f"Tweet {i + 1} - @{author}{marker}: {t['text']}\n"
 
-    # Direct mention detection. On a reply the API text starts with an
-    # automatic prefix of the thread's handles, so our handle there is
-    # inherited, not typed (ErikBjare/bob#1519). Only a handle in the body
-    # counts as addressed to us; without thread context we cannot tell them apart.
+    # Reply text may start with inherited thread handles (ErikBjare/bob#1519).
+    # Without API body offsets this is only a heuristic: strip each known
+    # thread author at most once, stopping at an unknown or repeated handle so
+    # a typed mention immediately after the prefix stays in the body.
     tweet_text = tweet.get("text", "")
     handle_re = re.compile(rf"(?<![\w@])@{re.escape(handle_lower)}(?!\w)", re.I)
     is_reply = bool(tweet.get("thread_context"))
-    prefix_match = _REPLY_PREFIX_RE.match(tweet_text) if is_reply else None
-    body = tweet_text[prefix_match.end() :] if prefix_match else tweet_text
-    # A reply to our own latest message is addressed to us even without a
-    # typed handle (thread_context is chronological; its last entry is the parent).
-    replies_to_us = is_reply and (
-        str(tweet["thread_context"][-1].get("author", "")).lower() == handle_lower
+    prefix_end = 0
+    if is_reply:
+        remaining_authors = {
+            str(t.get("author", "")).lower() for t in tweet["thread_context"]
+        }
+        while match := _REPLY_HANDLE_RE.match(tweet_text, prefix_end):
+            author = match.group(1).lower()
+            if author not in remaining_authors:
+                break
+            remaining_authors.remove(author)
+            prefix_end = match.end()
+    body = tweet_text[prefix_end:]
+    # Context contains the whole conversation, including siblings and the
+    # target itself. Only an identified parent proves this is a reply to us.
+    entries = tweet.get("thread_context") or []
+    target_id = tweet.get("id")
+    target: Dict = next(
+        (
+            t
+            for t in entries
+            if target_id is not None and str(t.get("id")) == str(target_id)
+        ),
+        {},
+    )
+    parent_id = target.get("replied_to_id")
+    replies_to_us = parent_id is not None and any(
+        str(t.get("id")) == str(parent_id)
+        and str(t.get("author", "")).lower() == handle_lower
+        for t in entries
     )
     is_direct_mention = bool(handle_re.search(body)) or replies_to_us
     is_inherited_mention = bool(
-        prefix_match
+        prefix_end
         and not is_direct_mention
-        and handle_re.search(prefix_match.group())
+        and handle_re.search(tweet_text[:prefix_end])
     )
 
     # Build identity context. Fire for direct mentions OR when we're in the
@@ -313,8 +336,9 @@ def create_tweet_eval_prompt(tweet: Dict, config: Dict) -> str:
             mention_note += " This tweet is addressed TO us. Evaluate it as relevant to us personally."
         elif is_inherited_mention:
             mention_note += (
-                f" @{twitter_handle} appears only in the automatic reply prefix"
-                " inherited from the thread; the author did not type it."
+                f" @{twitter_handle} appears only in a possible automatic reply prefix"
+                " matching thread participants. Text alone cannot establish whether"
+                " it was inherited or typed; do not assume it addresses us."
                 " Respond only if the message asks us something, corrects us, or a"
                 " reply would add a new useful fact. Ignore praise or commentary"
                 " addressed to someone else, and do not repeat a point our earlier"
