@@ -447,9 +447,7 @@ def plan_archive(
             others.append(task)
             plan.skipped.append({"id": task.id, "reason": "recurring task (recur: set)"})
             continue
-        stamp, source = terminal_evidence(
-            task, in_git=in_git, cutoff=cutoff, git_times=git_times
-        )
+        stamp, source = terminal_evidence(task, in_git=in_git, cutoff=cutoff, git_times=git_times)
         if stamp is None:
             others.append(task)
             if source.startswith("invalid-"):
