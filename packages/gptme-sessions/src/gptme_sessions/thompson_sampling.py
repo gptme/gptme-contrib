@@ -255,6 +255,16 @@ class BanditState:
     #: Arm type this state constructs.  A subclass that keeps a legacy arm API
     #: (e.g. a renamed identity field) overrides it; the engine only ever builds
     #: arms as ``self.arm_class(arm_id=...)``.
+    #:
+    #: Contract: ``arm_class`` is the *single* source of truth for the arm type.
+    #: :meth:`Bandit._decode_state` builds loaded arms from
+    #: ``state_class.arm_class`` and the state instance itself builds new arms
+    #: from ``self.arm_class``; both are the same class attribute, so a state
+    #: subclass can never disagree with the decoder.  To use a subclass arm, set
+    #: ``arm_class`` on a :class:`BanditState` subclass and point
+    #: ``Bandit.state_class`` at that subclass.  Overriding ``arm_class`` without
+    #: also setting ``state_class`` on the bandit is inert: a plain ``Bandit``
+    #: instantiates ``BanditState`` and never sees the override.
     arm_class: ClassVar[type[BanditArm]] = BanditArm
 
     def get_or_create_arm(self, arm_id: str) -> BanditArm:
@@ -545,7 +555,11 @@ class Bandit:
     DEFAULT_STATE_DIR = "state/bandit"
     DEFAULT_STATE_FILE = "bandit-state.json"
 
-    #: State type this bandit loads and persists (see ``BanditState.arm_class``).
+    #: State type this bandit loads and persists.  This is the hook a subclass
+    #: overrides to change the arm type: the arm class is read from
+    #: ``state_class.arm_class`` when decoding and from the instantiated state
+    #: when creating arms, so both paths always agree.  Setting ``arm_class`` on
+    #: a state subclass without setting ``state_class`` here has no effect.
     state_class: ClassVar[type[BanditState]] = BanditState
 
     def __init__(

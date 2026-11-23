@@ -1194,6 +1194,46 @@ def test_default_classes_are_the_plain_engine_types():
     assert Bandit.state_class is BanditState
 
 
+def test_state_class_alone_controls_the_arm_type(tmp_path):
+    """`state_class` is the only bandit-level hook; decode and create agree."""
+
+    class _OtherArm(BanditArm):
+        pass
+
+    class _OtherState(BanditState):
+        arm_class = _OtherArm
+
+    class _OtherBandit(Bandit):
+        state_class = _OtherState
+
+    bandit = _OtherBandit(state_dir=tmp_path)
+    bandit.update(["a"], outcome=1.0, context=("ctx",))
+    # Created arms come from the state instance.
+    assert type(bandit.state.arms["a"]) is _OtherArm
+    # ... and decoding the same file produces the same type, so a reload never
+    # downgrades a subclass arm to the base type.
+    reloaded = _OtherBandit(state_dir=tmp_path)
+    assert type(reloaded.state.arms["a"]) is _OtherArm
+    ctx_arm = reloaded.state.contextual_arms["a"][ts_module._context_key(("ctx",))]
+    assert type(ctx_arm) is _OtherArm
+
+
+def test_arm_class_without_state_class_is_inert(tmp_path):
+    """Documented behaviour: overriding `arm_class` alone does not reach the engine."""
+
+    class _IgnoredArm(BanditArm):
+        pass
+
+    class _IgnoredState(BanditState):
+        arm_class = _IgnoredArm
+
+    # No Bandit.state_class override: the base engine builds plain BanditState.
+    bandit = Bandit(state_dir=tmp_path)
+    bandit.update(["a"], outcome=1.0)
+    assert type(bandit.state.arms["a"]) is BanditArm
+    assert _IgnoredState.arm_class is _IgnoredArm  # the override exists, just unused
+
+
 def test_state_builds_subclass_arms_everywhere(tmp_path):
     bandit = _LabelledBandit(state_dir=tmp_path)
     assert isinstance(bandit.state, _LabelledState)
