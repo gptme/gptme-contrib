@@ -1870,11 +1870,22 @@ def _dirty_task_names(tasks_dir: Path) -> frozenset[str] | None:
                 check=False,
                 env={**os.environ, "LC_ALL": "C"},
             )
-            names = (
-                frozenset()
-                if probe.returncode != 0 and "not a git repository" in probe.stderr
-                else None
-            )
+            if probe.returncode != 0:
+                names = frozenset() if "not a git repository" in probe.stderr else None
+            else:
+                # A fresh `git init` has an unborn HEAD: `git diff HEAD` fails,
+                # but the directory is a repository with no committed baseline,
+                # so every task file is untracked. Keep the documented
+                # untracked-file disk semantics instead of blocking forever.
+                head = subprocess.run(
+                    ["git", "-C", str(tasks_dir), "rev-parse", "--verify", "--quiet", "HEAD"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    check=False,
+                    env={**os.environ, "LC_ALL": "C"},
+                )
+                names = frozenset() if head.returncode == 1 else None
     except (OSError, subprocess.TimeoutExpired):
         names = None
     return names

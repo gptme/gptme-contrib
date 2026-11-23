@@ -158,6 +158,17 @@ def test_staged_archive_rename_checks_original_head_state(tmp_path, committed_st
     assert is_task_ready(tasks["dependent"], tasks) is (committed_state in ("done", "cancelled"))
 
 
+def test_unborn_head_keeps_disk_semantics(tmp_path):
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "dependent.md").write_text(DEPENDENT)
+    (tasks_dir / "prereq.md").write_text(_prereq("done"))
+    _git(tmp_path, "init", "-q")
+    # A fresh repository has no HEAD, so every file is untracked: the documented
+    # untracked-file disk semantics apply instead of blocking forever.
+    assert _ready(tasks_dir)
+
+
 def test_outside_git_keeps_disk_semantics(tmp_path):
     tasks_dir = tmp_path / "tasks"
     tasks_dir.mkdir()
