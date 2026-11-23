@@ -1839,6 +1839,139 @@ def build_dependency_universe(
     )
 
 
+def _dirty_task_names(tasks_dir: Path) -> frozenset[str] | None:
+    """Dirty file names (empty outside git; None when the git check fails).
+
+    Do not cache this across readiness checks: another session can change a
+    previously clean dependency to terminal without committing it.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(tasks_dir), "diff", "--name-only", "--relative", "HEAD", "--", "."],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        if result.returncode == 0:
+            names: frozenset[str] | None = frozenset(
+                line for line in result.stdout.splitlines() if line
+            )
+        else:
+            # A diff failure is not proof that this is a non-git directory.
+            # Only the repository probe's explicit non-git diagnostic permits
+            # disk semantics; timeouts, corrupt repositories and missing HEAD
+            # must not release uncommitted dependencies.
+            probe = subprocess.run(
+                ["git", "-C", str(tasks_dir), "rev-parse", "--is-inside-work-tree"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+                env={**os.environ, "LC_ALL": "C"},
+            )
+            if probe.returncode != 0:
+                names = frozenset() if "not a git repository" in probe.stderr else None
+            else:
+                # A fresh `git init` has an unborn HEAD: `git diff HEAD` fails,
+                # but the directory is a repository with no committed baseline,
+                # so every task file is untracked. Keep the documented
+                # untracked-file disk semantics instead of blocking forever.
+                head = subprocess.run(
+                    ["git", "-C", str(tasks_dir), "rev-parse", "--verify", "--quiet", "HEAD"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    check=False,
+                    env={**os.environ, "LC_ALL": "C"},
+                )
+                names = frozenset() if head.returncode == 1 else None
+    except (OSError, subprocess.TimeoutExpired):
+        names = None
+    return names
+
+
+def _terminal_at_head(path: Path) -> bool:
+    """False only when a task file is terminal on disk but not at HEAD.
+
+    A session that times out can leave ``state: done`` uncommitted in a shared
+    working tree next to its uncommitted work. A dependent task must not become
+    ready on that. Outside git, or when the file is clean, disk state stands.
+    """
+    dirty = _dirty_task_names(path.parent)
+    if dirty is None:
+        return False
+    if path.name not in dirty:
+        return True
+    try:
+        shown = subprocess.run(
+            ["git", "-C", str(path.parent), "show", f"HEAD:./{path.name}"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        if shown.returncode != 0:
+            # `archive` stages renames before committing them. Follow the index
+            # rename back to HEAD, not the index state (which may be uncommitted
+            # completion). Do not restrict the diff to this directory: the old
+            # path can be outside it, which would hide the rename.
+            prefix = subprocess.run(
+                ["git", "-C", str(path.parent), "rev-parse", "--show-prefix"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            renames = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(path.parent),
+                    "diff",
+                    "--cached",
+                    "--name-status",
+                    "-z",
+                    "--find-renames",
+                    "--no-relative",
+                    "HEAD",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            if prefix.returncode != 0 or renames.returncode != 0:
+                return False
+            destination = prefix.stdout.rstrip("\n") + path.name
+            fields = iter(renames.stdout.split("\0"))
+            for status in fields:
+                if not status:
+                    break
+                source = next(fields)
+                if status.startswith(("R", "C")):
+                    target = next(fields)
+                    if status.startswith("R") and target == destination:
+                        shown = subprocess.run(
+                            ["git", "-C", str(path.parent), "show", f"HEAD:{source}"],
+                            capture_output=True,
+                            text=True,
+                            timeout=10,
+                            check=False,
+                        )
+                        break
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if shown.returncode != 0:
+        return False  # new task file, not committed yet
+    try:
+        state = _get_frontmatter().loads(shown.stdout).metadata.get("state")
+    except Exception:
+        # Malformed committed metadata cannot prove a terminal dependency.
+        return False
+    return state in ("done", "cancelled")
+
+
 def is_task_ready(
     task: TaskInfo,
     all_tasks: Dict[str, TaskInfo],
@@ -1848,7 +1981,8 @@ def is_task_ready(
 
     A task is ready if:
     - It has no required dependencies, OR
-    - All its required dependencies are in "done" or "cancelled" state
+    - All its required dependencies are in "done" or "cancelled" state, and
+      a dependency whose file is dirty in git is also terminal at HEAD
     - All URL-based requires are CLOSED (if cache provided)
 
     Uses task.requires (canonical) which includes both explicit requires
@@ -1891,6 +2025,9 @@ def is_task_ready(
             return False
         if dep_task.state not in ["done", "cancelled"]:
             # Dependency not completed = blocked
+            return False
+        if dep_task.path is not None and not _terminal_at_head(Path(dep_task.path)):
+            # Terminal only in the working tree, not committed = blocked
             return False
 
     # Check URL-based requires if cache provided
