@@ -1115,17 +1115,56 @@ def test_recent_contextual_arm_still_wins():
     assert state._resolve_arm_for_sampling("x", ("autonomous",)).alpha == 19.0
 
 
-def test_missing_timestamps_keep_the_contextual_arm():
-    # Backward compatibility: only a proven lag is rejected.
-    state = _lag_state("", global_updated="")
-    assert state._resolve_arm_for_sampling("x", ("autonomous",)).alpha == 19.0
-    naive = _lag_state("2026-09-24T00:00:00")  # naive timestamps read as UTC
+@pytest.mark.parametrize(
+    ("contextual_updated", "expected_alpha"),
+    [
+        ("2026-10-24T00:00:00+00:00", 19.0),  # exactly 30 days: keep
+        ("2026-10-23T23:59:59.999999+00:00", 2.0),  # one microsecond over: skip
+    ],
+)
+def test_contextual_lag_boundary(contextual_updated, expected_alpha):
+    state = _lag_state(contextual_updated)
+    ctx = ("autonomous",)
+    assert state._resolve_arm_for_sampling("x", ctx).alpha == expected_alpha
+    assert ts_module._resolve_mean_readonly(state, "x", ctx) == pytest.approx(
+        expected_alpha / (expected_alpha + 1)
+    )
+
+
+@pytest.mark.parametrize(
+    ("contextual_updated", "global_updated"),
+    [
+        ("", "2026-11-23T00:00:00+00:00"),
+        ("2026-09-24T00:00:00+00:00", ""),
+        ("not-a-timestamp", "2026-11-23T00:00:00+00:00"),
+        ("2026-09-24T00:00:00+00:00", "not-a-timestamp"),
+    ],
+)
+def test_missing_or_invalid_timestamps_keep_the_contextual_arm(contextual_updated, global_updated):
+    # Backward compatibility: either unknown timestamp prevents proving a lag.
+    state = _lag_state(contextual_updated, global_updated)
+    ctx = ("autonomous",)
+    assert state._resolve_arm_for_sampling("x", ctx).alpha == 19.0
+    assert ts_module._resolve_mean_readonly(state, "x", ctx) == pytest.approx(19 / 20)
+
+
+def test_naive_timestamps_are_read_as_utc():
+    naive = _lag_state("2026-09-24T00:00:00")
     assert naive._resolve_arm_for_sampling("x", ("autonomous",)).alpha == 2.0
 
 
 def test_load_bandit_means_applies_the_lag_gate(tmp_path):
     bandit = Bandit(state_dir=tmp_path)
-    bandit.state = _lag_state("2026-09-24T00:00:00+00:00")
+    bandit.state = _lag_state(
+        "2026-09-24T00:00:00+00:00", global_updated="2026-09-24T00:00:00+00:00"
+    )
+    bandit.save()
+    # An old but internally consistent snapshot keeps its contextual mean,
+    # regardless of wall time. Updating only global evidence must displace it.
+    assert load_bandit_means(tmp_path, arm_ids=["x"], context=("autonomous",)) == {
+        "x": pytest.approx(19 / 20)
+    }
+    bandit.state.arms["x"].last_updated = "2026-11-23T00:00:00+00:00"
     bandit.save()
     means = load_bandit_means(tmp_path, arm_ids=["x", "unknown"], context=("autonomous",))
     assert means == {"x": pytest.approx(2 / 3), "unknown": 0.5}
