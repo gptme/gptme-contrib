@@ -1953,8 +1953,12 @@ def _terminal_at_head(path: Path) -> bool:
         return False
     if shown.returncode != 0:
         return False  # new task file, not committed yet
-    match = re.search(r"(?m)^state:\s*['\"]?([a-z_]+)", shown.stdout.split("\n---", 1)[0])
-    return match is not None and match.group(1) in ("done", "cancelled")
+    try:
+        state = _get_frontmatter().loads(shown.stdout).metadata.get("state")
+    except Exception:
+        # Malformed committed metadata cannot prove a terminal dependency.
+        return False
+    return state in ("done", "cancelled")
 
 
 def is_task_ready(

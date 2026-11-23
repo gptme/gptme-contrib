@@ -73,6 +73,30 @@ def test_done_at_head_releases(tmp_path):
     assert _ready(tasks_dir)
 
 
+@pytest.mark.parametrize("state_line", ['"state": done', 'state: "done"'])
+def test_head_state_uses_frontmatter_parser(tmp_path, state_line):
+    tasks_dir = _repo(tmp_path, "done")
+    path = tasks_dir / "prereq.md"
+    path.write_text(_prereq("done").replace("state: done", state_line))
+    _git(tmp_path, "add", ".")
+    _git(
+        tmp_path,
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@example.com",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "-qm",
+        "quoted state",
+    )
+    path.write_text(_prereq("done") + "\nextra note\n")
+    assert _ready(tasks_dir)
+
+
 def test_dirty_but_terminal_at_head_releases(tmp_path):
     tasks_dir = _repo(tmp_path, "done")
     (tasks_dir / "prereq.md").write_text(_prereq("done") + "\nextra note\n")
