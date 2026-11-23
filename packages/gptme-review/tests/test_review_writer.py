@@ -1,4 +1,4 @@
-"""Peer-host contract for gptme_review.writer (writer-port slices 2a–2d, 3a)."""
+"""Peer-host contract for gptme_review.writer (writer-port slices 2a–2d, 3a, 3b)."""
 
 from __future__ import annotations
 
@@ -939,3 +939,105 @@ def test_run_shards_fails_closed_and_keeps_the_error_type(alice_io):
     assert w._run_shards([Shard(index=1)], lambda s: ([{"a": 1}], {})) == [
         ([{"a": 1}], {})
     ]
+
+
+# --- writer-port slice 3b: two-phase publication ------------------------------
+
+
+class _Lock:
+    def __init__(self) -> None:
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _AdvisoryHost(writer.DefaultWriterHost):
+    def __init__(self) -> None:
+        self.rows: list[tuple] = []
+
+    def append_advisories(self, repo, number, sha, advisories):
+        self.rows.append((repo, number, sha, list(advisories)))
+        return len(advisories), []
+
+
+def _publish_io(alice_io, fake_run, *, current=None):
+    lock = _Lock()
+    w = _bound_with(
+        alice_io,
+        run=fake_run,
+        find_marker_comment=lambda repo, number: current,
+        _publication_lock=lambda repo, number: lock,
+    )
+    return w, lock
+
+
+def _publish_kwargs(**over):
+    base = dict(
+        repo="o/r",
+        number=7,
+        full_sha="a" * 40,
+        summary_body="## review",
+        final_state={"sha": "a" * 12, "advisories": [{"title": "adv"}]},
+        previous_state={},
+        inline=[{"path": "x.py", "line": 1, "body": "finding"}],
+        existing=None,
+    )
+    return {**base, **over}
+
+
+def test_publish_review_orders_mutations_through_the_bound_io(alice_io):
+    fake_run, calls = _scripted_run(
+        {
+            ("gh", "api", "repos/o/r/issues/7/comments"): (0, "123\n"),
+            ("gh", "api", "repos/o/r/pulls/7/reviews"): (0, ""),
+            ("gh", "api", "--method", "PATCH"): (0, "https://x/1\n"),
+        }
+    )
+    w, lock = _publish_io(alice_io, fake_run)
+    host = _AdvisoryHost()
+    assert w.publish_review(**_publish_kwargs(), host=host) is True
+    assert [c[2] if c[2] != "--method" else c[4] for c in calls] == [
+        "repos/o/r/issues/7/comments",
+        "repos/o/r/pulls/7/reviews",
+        "repos/o/r/issues/comments/123",
+    ]
+    provisional, final = calls[0][4], calls[2][6]
+    assert "<!-- alice-ai-review-publishing " in provisional
+    assert "<!-- alice-ai-review " in final and "bob-ai-review" not in final
+    assert host.rows == [("o/r", 7, "a" * 40, [{"title": "adv"}])]
+    assert lock.closed
+
+
+def test_publish_review_default_host_records_no_advisories(alice_io):
+    fake_run, _ = _scripted_run(
+        {
+            ("gh", "api", "repos/o/r/issues/7/comments"): (0, "123\n"),
+            ("gh", "api", "repos/o/r/pulls/7/reviews"): (0, ""),
+            ("gh", "api", "--method", "PATCH"): (0, "https://x/1\n"),
+        }
+    )
+    w, _ = _publish_io(alice_io, fake_run)
+    assert w.publish_review(**_publish_kwargs()) is True
+
+
+def test_publish_review_failed_native_review_leaves_the_provisional_marker(alice_io):
+    fake_run, calls = _scripted_run(
+        {
+            ("gh", "api", "repos/o/r/issues/7/comments"): (0, "123\n"),
+            ("gh", "api", "repos/o/r/pulls/7/reviews"): (1, ""),
+        }
+    )
+    w, lock = _publish_io(alice_io, fake_run)
+    host = _AdvisoryHost()
+    assert w.publish_review(**_publish_kwargs(), host=host) is False
+    assert len(calls) == 2  # no final PATCH: the sweep retries, consumers fail closed
+    assert host.rows == [] and lock.closed
+
+
+def test_publish_review_yields_to_a_marker_that_appeared_while_analysing(alice_io):
+    fake_run, calls = _scripted_run({})
+    current = {"id": 9, "body": "<!-- alice-ai-review-publishing {} -->"}
+    w, lock = _publish_io(alice_io, fake_run, current=current)
+    assert w.publish_review(**_publish_kwargs()) is False
+    assert calls == [] and lock.closed
