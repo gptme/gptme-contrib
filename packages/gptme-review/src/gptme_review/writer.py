@@ -2469,10 +2469,13 @@ def maintainer_commands() -> tuple[str, ...]:
         declared = _io.MAINTAINER_COMMANDS
     except AttributeError:
         return ("review",)
-    try:
-        commands = tuple(declared)
-    except TypeError:
-        raise ValueError(f"unsupported maintainer commands: {declared!r}") from None
+    if isinstance(declared, str):
+        commands = (declared,)
+    else:
+        try:
+            commands = tuple(declared)
+        except TypeError:
+            raise ValueError(f"unsupported maintainer commands: {declared!r}") from None
     unknown = [
         c
         for c in commands

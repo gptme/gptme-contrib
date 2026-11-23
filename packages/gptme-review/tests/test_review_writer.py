@@ -431,6 +431,13 @@ def test_explicit_two_command_host_keeps_bobs_footer_byte_for_byte():
     assert _BOB_COMMANDS_LINE in _render(w)
 
 
+def test_bare_string_declaration_is_one_command():
+    w = writer.bind_io(_bob_io(MAINTAINER_COMMANDS="fix"))
+    body = _render(w)
+    assert "`@TimeToBuildBob fix`" in body
+    assert "review` (own line)" not in body
+
+
 def test_namespace_without_the_setting_is_review_only():
     ns = vars(_bob_io()).copy()
     del ns["MAINTAINER_COMMANDS"]
@@ -447,7 +454,16 @@ def test_two_hosts_do_not_leak_command_sets_or_logins(alice_io):
 
 
 @pytest.mark.parametrize(
-    "commands", [(), ("review", "deploy"), None, 42, [["review"]], ("review", ["fix"])]
+    "commands",
+    [
+        (),
+        ("review", "deploy"),
+        "deploy",
+        None,
+        42,
+        [["review"]],
+        ("review", ["fix"]),
+    ],
 )
 def test_unsupported_command_sets_are_refused(commands):
     w = writer.bind_io(_bob_io(MAINTAINER_COMMANDS=commands))
