@@ -155,6 +155,7 @@ def default_io(
     return SimpleNamespace(
         REVIEWER_IDENTITY=identity,
         WRITER_HOST=host if host is not None else DefaultWriterHost(),
+        MAINTAINER_COMMANDS=("review",),
         review=review,
         fetch_file_contents=fetch_file_contents,
         _ORIGINAL_FETCH_FILE_CONTENTS=fetch_file_contents,
@@ -2448,6 +2449,37 @@ def consensus_note(consensus: dict | None) -> str:
     )
 
 
+#: Footer text per maintainer command. ``review`` is handled by the sweep's
+#: trigger on every host; any other command needs a host-side worker.
+_MAINTAINER_COMMAND_TEXT = {
+    "review": "`@{login} review` (own line) — fresh review",
+    "fix": "`@{login} fix` — a worker acts on the findings",
+}
+
+
+def maintainer_commands() -> tuple[str, ...]:
+    """The commands this host's footer may advertise.
+
+    Read from ``_io.MAINTAINER_COMMANDS``. A host that does not set it gets
+    review only: a footer must never promise a worker the host does not run.
+    """
+    try:
+        commands = tuple(_io.MAINTAINER_COMMANDS)
+    except AttributeError:
+        return ("review",)
+    unknown = [c for c in commands if c not in _MAINTAINER_COMMAND_TEXT]
+    if unknown or not commands:
+        raise ValueError(f"unsupported maintainer commands: {commands!r}")
+    return commands
+
+
+def maintainer_commands_line(login: str) -> str:
+    texts = [
+        _MAINTAINER_COMMAND_TEXT[c].format(login=login) for c in maintainer_commands()
+    ]
+    return f"<sub>{' · '.join(texts)}. Once per comment; 👀 = received.</sub>"
+
+
 def render(
     findings: list[dict],
     *,
@@ -2904,11 +2936,7 @@ def render(
         "",
         "<details><summary><sub>Maintainer commands</sub></summary>",
         "",
-        (
-            f"<sub>`@{_io.REVIEWER_IDENTITY.login} review` (own line) — fresh review · "
-            f"`@{_io.REVIEWER_IDENTITY.login} fix` — a worker acts on the findings. "
-            "Once per comment; 👀 = received.</sub>"
-        ),
+        maintainer_commands_line(_io.REVIEWER_IDENTITY.login),
         "",
         "</details>",
     ]

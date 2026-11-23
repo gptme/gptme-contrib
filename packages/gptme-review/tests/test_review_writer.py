@@ -390,7 +390,7 @@ def test_render_footer_uses_the_bound_identity(alice_io):
     w = writer.bind_io(alice_io)
     body = _render(w)
     assert "`@alice-agent review`" in body
-    assert "`@alice-agent fix`" in body
+    assert "`@alice-agent fix`" not in body  # no fix worker on a default host
     assert "@TimeToBuildBob" not in body
     assert "alice-ai-review" not in body or "<!--" not in body.split("Maintainer")[-1]
 
@@ -401,6 +401,56 @@ def test_two_hosts_render_independent_footers():
     wa, wb = writer.bind_io(a), writer.bind_io(b)
     assert "`@alice-agent review`" in _render(wa)
     assert "`@TimeToBuildBob review`" in _render(wb)
+
+
+#: Bob's footer before maintainer commands became host-supplied; his explicit
+#: two-command host must keep it byte-for-byte.
+_BOB_COMMANDS_LINE = (
+    "<sub>`@TimeToBuildBob review` (own line) — fresh review · "
+    "`@TimeToBuildBob fix` — a worker acts on the findings. "
+    "Once per comment; 👀 = received.</sub>"
+)
+
+
+def _bob_io(**overrides):
+    ns = writer.default_io(sweep_identity("TimeToBuildBob", "bob-ai-review"))
+    return SimpleNamespace(**{**vars(ns), **overrides})
+
+
+def test_default_peer_footer_advertises_review_only(alice_io):
+    body = _render(writer.bind_io(alice_io))
+    assert (
+        "<sub>`@alice-agent review` (own line) — fresh review. "
+        "Once per comment; 👀 = received.</sub>"
+    ) in body
+    assert " fix`" not in body
+
+
+def test_explicit_two_command_host_keeps_bobs_footer_byte_for_byte():
+    w = writer.bind_io(_bob_io(MAINTAINER_COMMANDS=("review", "fix")))
+    assert _BOB_COMMANDS_LINE in _render(w)
+
+
+def test_namespace_without_the_setting_is_review_only():
+    ns = vars(_bob_io()).copy()
+    del ns["MAINTAINER_COMMANDS"]
+    body = _render(writer.bind_io(SimpleNamespace(**ns)))
+    assert "`@TimeToBuildBob review`" in body and " fix`" not in body
+
+
+def test_two_hosts_do_not_leak_command_sets_or_logins(alice_io):
+    bob = writer.bind_io(_bob_io(MAINTAINER_COMMANDS=("review", "fix")))
+    alice = writer.bind_io(alice_io)
+    bob_body, alice_body = _render(bob), _render(alice)
+    assert _BOB_COMMANDS_LINE in bob_body and "alice-agent" not in bob_body
+    assert " fix`" not in alice_body and "TimeToBuildBob" not in alice_body
+
+
+@pytest.mark.parametrize("commands", [(), ("review", "deploy")])
+def test_unsupported_command_sets_are_refused(commands):
+    w = writer.bind_io(_bob_io(MAINTAINER_COMMANDS=commands))
+    with pytest.raises(ValueError, match="unsupported maintainer commands"):
+        _render(w)
 
 
 @pytest.mark.parametrize(
