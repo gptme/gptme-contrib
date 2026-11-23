@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import fnmatch
+import hashlib
 import json
 import os
 import re
@@ -789,11 +790,17 @@ def publish_review(
     head_sha = full_sha[:12]
     prior_publication_id = previous_state.get("publication_id")
     prior_publishing_sha = str(previous_state.get("publishing_sha") or "")
+    # A receipt proves only the payload from that publication, not a fresh
+    # analysis of the same commit. Bind retries to the exact inline payload.
+    inline_digest = hashlib.sha256(
+        json.dumps(list(inline), sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
     recovering = (
         isinstance(prior_publication_id, str)
         and bool(prior_publication_id)
         and bool(prior_publishing_sha)
         and head_sha.startswith(prior_publishing_sha)
+        and previous_state.get("publishing_inline_sha256") == inline_digest
     )
     publication_id = str(prior_publication_id) if recovering else secrets.token_hex(8)
     publishing_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
@@ -817,6 +824,7 @@ def publish_review(
         publication_id=publication_id,
         publishing_at=publishing_at,
     )
+    provisional_state["publishing_inline_sha256"] = inline_digest
     provisional_body = provisional_marker_body(
         render_provisional_body(head_sha), provisional_state
     )
@@ -1012,7 +1020,7 @@ def publish_review(
                 print(f"advisory ledger: appended {count} row(s)")
                 for diagnostic in diagnostics:
                     print(f"warning: advisory ledger: {diagnostic}", file=sys.stderr)
-            except (OSError, ValueError) as exc:
+            except Exception as exc:  # best-effort host hook, not merge authority
                 print(
                     f"warning: advisory ledger capture failed: {exc}; "
                     f"run ai-review-dispose.py {repo} {number} --reconcile",

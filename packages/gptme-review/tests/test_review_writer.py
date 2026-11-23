@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 from types import SimpleNamespace
@@ -1036,8 +1037,31 @@ def test_publish_review_failed_native_review_leaves_the_provisional_marker(alice
     assert host.rows == [] and lock.closed
 
 
+@pytest.mark.parametrize("error", [OSError, ValueError, RuntimeError, KeyError])
+def test_publish_review_advisory_audit_failure_does_not_fail_publication(
+    alice_io, error
+):
+    class BrokenAuditHost(writer.DefaultWriterHost):
+        def append_advisories(self, *args):
+            raise error("audit unavailable")
+
+    fake_run, calls = _scripted_run(
+        {
+            ("gh", "api", "repos/o/r/issues/7/comments"): (0, "123\n"),
+            ("gh", "api", "repos/o/r/pulls/7/reviews"): (0, ""),
+            ("gh", "api", "--method", "PATCH"): (0, "https://x/1\n"),
+        }
+    )
+    w, lock = _publish_io(alice_io, fake_run)
+    assert w.publish_review(**_publish_kwargs(), host=BrokenAuditHost()) is True
+    assert len(calls) == 3 and lock.closed
+
+
 @pytest.mark.parametrize("failure", ["final_patch", "review_response"])
-def test_publish_review_retry_does_not_duplicate_native_threads(alice_io, failure):
+@pytest.mark.parametrize("changed_inline", [False, True])
+def test_publish_review_retry_does_not_duplicate_native_threads(
+    alice_io, failure, changed_inline
+):
     w = writer.bind_io(alice_io)
     current = None
     reviews = []
@@ -1088,14 +1112,15 @@ def test_publish_review_retry_does_not_duplicate_native_threads(alice_io, failur
     previous = w.marker_state(current["body"])
     assert previous["publishing_sha"] == "a" * 12
     assert "sha" not in previous and host.rows == []
-    assert (
-        w.publish_review(
-            **_publish_kwargs(existing=current, previous_state=previous), host=host
-        )
-        is True
-    )
-    assert native_posts == 1
-    assert len(lookups) == 1 and "--slurp" in lookups[0]
+    retry_kwargs = _publish_kwargs(existing=current, previous_state=previous)
+    if changed_inline:
+        retry_kwargs["inline"] = [{"path": "y.py", "line": 2, "body": "new finding"}]
+    assert w.publish_review(**retry_kwargs, host=host) is True
+    assert native_posts == (2 if changed_inline else 1)
+    if changed_inline:
+        assert reviews[0]["body"] != reviews[1]["body"]
+    else:
+        assert len(lookups) == 1 and "--slurp" in lookups[0]
     assert w.marker_state(current["body"])["sha"] == "a" * 12
     assert len(host.rows) == 1
     assert all(lock.closed for lock in locks)
@@ -1113,7 +1138,15 @@ def test_publish_review_retry_does_not_duplicate_native_threads(alice_io, failur
 )
 def test_publish_review_retry_fails_closed_on_unreadable_receipt(alice_io, lookup):
     w = writer.bind_io(alice_io)
-    previous = {"publication_id": "retry-id", "publishing_sha": "a" * 12}
+    previous = {
+        "publication_id": "retry-id",
+        "publishing_sha": "a" * 12,
+        "publishing_inline_sha256": hashlib.sha256(
+            json.dumps(
+                _publish_kwargs()["inline"], sort_keys=True, separators=(",", ":")
+            ).encode()
+        ).hexdigest(),
+    }
     current = {"id": 123, "body": w.provisional_marker_body("pending", previous)}
     calls = []
 
@@ -1145,7 +1178,15 @@ def test_publish_review_retry_fails_closed_on_unreadable_receipt(alice_io, looku
 )
 def test_publish_review_retry_posts_when_no_matching_receipt(alice_io, receipt):
     w = writer.bind_io(alice_io)
-    previous = {"publication_id": "retry-id", "publishing_sha": "a" * 12}
+    previous = {
+        "publication_id": "retry-id",
+        "publishing_sha": "a" * 12,
+        "publishing_inline_sha256": hashlib.sha256(
+            json.dumps(
+                _publish_kwargs()["inline"], sort_keys=True, separators=(",", ":")
+            ).encode()
+        ).hexdigest(),
+    }
     current = {"id": 123, "body": w.provisional_marker_body("pending", previous)}
     review = {
         "body": w.render_review_event_body("retry-id"),
