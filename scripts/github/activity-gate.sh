@@ -445,7 +445,7 @@ gh_cache_get_or_fetch() {
 # only spends additional points on repos that actually exceed a page.
 PR_SEARCH_PAGE_SIZE=30
 PR_SEARCH_GRAPHQL_QUERY='
-fragment pr on PullRequest{number,title,updatedAt,comments(first: 100) {nodes {id,author{__typename,login,...on User{id,name}},authorAssociation,body,createdAt,includesCreatedEdit,isMinimized,minimizedReason,reactionGroups{content,users{totalCount}},url,viewerDidAuthor},pageInfo{hasNextPage,endCursor},totalCount},latestReviews(first: 100) {nodes {author{__typename,login},authorAssociation,submittedAt,body,state}},mergeable,mergeStateStatus,headRefOid,isDraft,statusCheckRollup{contexts(first:100){nodes{... on CheckRun{name,status,conclusion,startedAt,completedAt,detailsUrl,checkSuite{workflowRun{workflow{name}}}} ... on StatusContext{context,state,description,targetUrl,createdAt}}}}}
+fragment pr on PullRequest{number,title,updatedAt,comments(first: 100) {nodes {id,author{__typename,login,...on User{id,name}},authorAssociation,body,createdAt,includesCreatedEdit,isMinimized,minimizedReason,reactionGroups{content,users{totalCount}},url,viewerDidAuthor},pageInfo{hasNextPage,endCursor},totalCount},latestReviews(first: 100) {nodes {author{__typename,login},authorAssociation,submittedAt,body,state}},mergeable,mergeStateStatus,headRefOid,isDraft,statusCheckRollup{contexts(first:100){nodes{... on CheckRun{name,status,conclusion,startedAt,completedAt,detailsUrl,checkSuite{workflowRun{workflow{id,name}}}} ... on StatusContext{context,state,description,targetUrl,createdAt}}}}}
 query PullRequestSearch($q: String!, $type: SearchType!, $limit: Int!, $endCursor: String) {
   search(query: $q, type: $type, first: $limit, after: $endCursor) {
     issueCount
@@ -971,7 +971,40 @@ check_ci_failures() {
         # not-yet-started shape this function exists to catch.
         local ci_state
         ci_state=$(echo "$pr_data" | jq -r '
+            # Only comparable completion times establish a later result. Keep
+            # fractional seconds; lexical ISO ordering misorders .5Z versus Z.
+            def completed_epoch:
+                (try ((.completedAt
+                       | capture("^(?<whole>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?<fraction>\\.[0-9]+)?Z$"))
+                      | ((.whole + "Z" | fromdateiso8601)
+                         + (("0" + (.fraction // "")) | tonumber))) catch null) // null;
             select(.statusCheckRollup != null) | .statusCheckRollup
+            # Drop a CANCELLED check-run that the SAME workflow later replaced
+            # with a completed non-cancelled result for the SAME check name on
+            # this head. A close/reopen retrigger (or a manual rerun) leaves the
+            # abandoned attempt in the rollup forever, so without this a PR whose
+            # every selected check is green still classifies as `bad` and re-emits
+            # `ci_failure` on an unchanged head indefinitely —
+            # ActivityWatch/aw-server#206 looped for hours this way on 2026-11-22
+            # (macOS CANCELLED 11-18, macOS SUCCESS 11-22, same workflow "Build").
+            # Conservative on purpose: only CANCELLED is suppressed, only with
+            # same-workflow provenance, only against a *later* result, and only
+            # when that result is itself non-cancelled. A lone cancellation, a
+            # later cancellation, or a same-name result from a different
+            # workflow stays actionable (see tests/test_activity_gate_stuck_ci.py).
+            | ([ .[]
+                 | { e: ., n: (.name // .context // ""),
+                     w: (.checkSuite.workflowRun.workflow.id // ""),
+                     t: completed_epoch,
+                     c: ((.conclusion // .state // "") | ascii_upcase) } ]) as $tagged
+            | [ $tagged[]
+                | . as $x
+                | select(($x.c != "CANCELLED")
+                         or (any($tagged[];
+                                 .n == $x.n and .w == $x.w and .w != ""
+                                 and .t != null and $x.t != null and .t > $x.t
+                                 and .c != "" and .c != "CANCELLED") | not))
+                | .e ]
             | (any(.[]; ((.conclusion // .state // "") | ascii_upcase) == "FAILURE")) as $hard
             | (any(.[]; ((.status // "") | ascii_upcase) as $s
                    | $s == "QUEUED" or $s == "IN_PROGRESS" or $s == "WAITING"
