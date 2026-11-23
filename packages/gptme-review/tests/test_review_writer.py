@@ -446,7 +446,7 @@ def test_two_hosts_do_not_leak_command_sets_or_logins(alice_io):
     assert " fix`" not in alice_body and "TimeToBuildBob" not in alice_body
 
 
-@pytest.mark.parametrize("commands", [(), ("review", "deploy")])
+@pytest.mark.parametrize("commands", [(), ("review", "deploy"), None, 42])
 def test_unsupported_command_sets_are_refused(commands):
     w = writer.bind_io(_bob_io(MAINTAINER_COMMANDS=commands))
     with pytest.raises(ValueError, match="unsupported maintainer commands"):

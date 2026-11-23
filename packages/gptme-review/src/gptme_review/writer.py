@@ -2462,11 +2462,17 @@ def maintainer_commands() -> tuple[str, ...]:
 
     Read from ``_io.MAINTAINER_COMMANDS``. A host that does not set it gets
     review only: a footer must never promise a worker the host does not run.
+    Hosts explicitly declare the commands they handle; the writer does not
+    discover workers. Invalid declarations (including ``None``) raise ValueError.
     """
     try:
-        commands = tuple(_io.MAINTAINER_COMMANDS)
+        declared = _io.MAINTAINER_COMMANDS
     except AttributeError:
         return ("review",)
+    try:
+        commands = tuple(declared)
+    except TypeError:
+        raise ValueError(f"unsupported maintainer commands: {declared!r}") from None
     unknown = [c for c in commands if c not in _MAINTAINER_COMMAND_TEXT]
     if unknown or not commands:
         raise ValueError(f"unsupported maintainer commands: {commands!r}")
