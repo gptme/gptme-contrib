@@ -766,8 +766,14 @@ def test_auto_does_not_rereview_already_reviewed_draft(
     if quality_score == 3 and not dry_run:
         assert not reviewed_path.exists()
         assert (workflow_module.APPROVED_DIR / reviewed_path.name).exists()
-    else:
+        assert list(workflow_module.REVIEW_DIR.iterdir()) == []
+    elif dry_run:
         assert reviewed_path.exists()
+        assert list(workflow_module.APPROVED_DIR.iterdir()) == []
+        assert list(workflow_module.REVIEW_DIR.iterdir()) == []
+    else:
+        assert not reviewed_path.exists()
+        assert (workflow_module.REVIEW_DIR / reviewed_path.name).exists()
         assert list(workflow_module.APPROVED_DIR.iterdir()) == []
 
 
@@ -825,6 +831,129 @@ def test_auto_dry_run_does_not_prevent_later_auto_approval(
     assert workflow_module.TweetDraft.load(approved_path).quality_score == 3
 
 
+def _stub_auto_client(workflow_module: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        workflow_module,
+        "load_twitter_client",
+        lambda *a, **k: SimpleNamespace(
+            get_home_timeline=lambda *a, **k: SimpleNamespace(data=None)
+        ),
+    )
+    monkeypatch.setattr(
+        workflow_module,
+        "cached_get_me",
+        lambda *a, **k: SimpleNamespace(data=SimpleNamespace(id="me", username="bob")),
+    )
+
+
+def test_auto_does_not_auto_approve_saved_three_star_without_flag(
+    workflow_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _set_status_dirs(workflow_module, tmp_path)
+    reviewed_path = workflow_module.NEW_DIR / "three-star.yml"
+    workflow_module.TweetDraft(text="reviewed earlier", quality_score=3).save(
+        reviewed_path
+    )
+    reviews: list[Any] = []
+
+    def fail_if_called(*args: Any, **kwargs: Any) -> Any:
+        reviews.append(args)
+        raise AssertionError("verify_draft must not run on a reviewed draft")
+
+    monkeypatch.setattr(workflow_module, "verify_draft", fail_if_called)
+    _stub_auto_client(workflow_module, monkeypatch)
+
+    workflow_module.auto(
+        list_id=None,
+        auto_approve=False,
+        post_approved=False,
+        dry_run=False,
+        max_tweets=1,
+        max_drafts=1,
+        skip_mentions=True,
+        skip_timeline=False,
+    )
+
+    assert reviews == []
+    assert not reviewed_path.exists()
+    parked = workflow_module.REVIEW_DIR / reviewed_path.name
+    assert workflow_module.TweetDraft.load(parked).quality_score == 3
+    assert list(workflow_module.APPROVED_DIR.iterdir()) == []
+
+
+def test_auto_moves_freshly_scored_non_approved_draft_to_review(
+    workflow_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _set_status_dirs(workflow_module, tmp_path)
+    draft_path = workflow_module.NEW_DIR / "needs-human.yml"
+    workflow_module.TweetDraft(text="needs a human").save(draft_path)
+    reviews: list[Any] = []
+
+    def record_review(draft: Any) -> Any:
+        reviews.append(draft)
+        return False, SimpleNamespace(
+            criteria_results={
+                "clarity": SimpleNamespace(passed=False, notes="unclear"),
+            },
+            recommendation="revise",
+            improvements=["tighten the opening"],
+        )
+
+    monkeypatch.setattr(workflow_module, "verify_draft", record_review)
+    _stub_auto_client(workflow_module, monkeypatch)
+
+    workflow_module.auto(
+        list_id=None,
+        auto_approve=True,
+        post_approved=False,
+        dry_run=False,
+        max_tweets=1,
+        max_drafts=1,
+        skip_mentions=True,
+        skip_timeline=False,
+    )
+
+    assert len(reviews) == 1
+    assert not draft_path.exists()
+    parked = workflow_module.REVIEW_DIR / draft_path.name
+    assert parked.exists()
+    assert workflow_module.TweetDraft.load(parked).quality_score is not None
+    assert list(workflow_module.APPROVED_DIR.iterdir()) == []
+
+    reviews.clear()
+    workflow_module.auto(
+        list_id=None,
+        auto_approve=True,
+        post_approved=False,
+        dry_run=False,
+        max_tweets=1,
+        max_drafts=1,
+        skip_mentions=True,
+        skip_timeline=False,
+    )
+    assert reviews == []
+    assert parked.exists()
+
+
+def test_approve_and_reject_find_drafts_in_review(
+    workflow_module: Any, tmp_path: Path
+) -> None:
+    _set_status_dirs(workflow_module, tmp_path)
+    approve_path = workflow_module.REVIEW_DIR / "approve-me.yml"
+    reject_path = workflow_module.REVIEW_DIR / "reject-me.yml"
+    workflow_module.TweetDraft(text="approve me", quality_score=2).save(approve_path)
+    workflow_module.TweetDraft(text="reject me", quality_score=1).save(reject_path)
+
+    workflow_module.approve("approve-me")
+    workflow_module.reject("reject-me", reason="not a fit")
+
+    assert not approve_path.exists()
+    assert not reject_path.exists()
+    assert (workflow_module.APPROVED_DIR / approve_path.name).exists()
+    rejected = workflow_module.REJECTED_DIR / reject_path.name
+    assert workflow_module.TweetDraft.load(rejected).reject_reason == "not a fit"
+
+
 @pytest.mark.parametrize("auto_approve", [False, True])
 def test_review_dry_run_leaves_draft_unchanged(
     workflow_module: Any,
@@ -858,18 +987,252 @@ def test_review_dry_run_leaves_draft_unchanged(
     assert list(workflow_module.APPROVED_DIR.iterdir()) == []
 
 
-def test_edit_clears_quality_score_so_auto_reviews_again(
+def test_review_status_review_reuses_saved_score(
+    workflow_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """auto() parks scored drafts in review/; `review --status review` must still
+    present them, without paying for a second LLM review of unchanged text."""
+    _set_status_dirs(workflow_module, tmp_path)
+    parked = workflow_module.REVIEW_DIR / "needs-human.yml"
+    workflow_module.TweetDraft(text="needs a human", quality_score=2).save(parked)
+
+    def fail_if_called(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("verify_draft must not run on an already-scored draft")
+
+    monkeypatch.setattr(workflow_module, "verify_draft", fail_if_called)
+
+    workflow_module.review(
+        auto_approve=False, show_context=False, dry_run=False, status="review"
+    )
+
+    # The stubbed prompt answers "", which skips the draft.
+    assert parked.exists()
+    assert workflow_module.TweetDraft.load(parked).quality_score == 2
+
+
+def test_review_processes_every_draft_in_a_batch(
+    workflow_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Standalone drafts share one reply-target group; review() must act on
+    every draft in it, not just the last one."""
+    _set_status_dirs(workflow_module, tmp_path)
+    for name in ("first", "second"):
+        workflow_module.TweetDraft(text=f"draft {name}").save(
+            workflow_module.NEW_DIR / f"{name}.yml"
+        )
+
+    reviewed: list[str] = []
+
+    def record_review(draft: Any) -> Any:
+        reviewed.append(draft["text"])
+        return True, SimpleNamespace(
+            criteria_results={"clarity": SimpleNamespace(passed=True, notes="clear")},
+            recommendation="approve",
+            improvements=[],
+        )
+
+    monkeypatch.setattr(workflow_module, "verify_draft", record_review)
+    monkeypatch.setattr(
+        workflow_module,
+        "Prompt",
+        SimpleNamespace(ask=lambda *args, **kwargs: "skip"),
+    )
+
+    workflow_module.review(auto_approve=False, show_context=False, dry_run=True)
+
+    assert sorted(reviewed) == ["draft first", "draft second"]
+
+
+def test_review_status_new_still_reviews_a_saved_score(
+    workflow_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A score left on a new/ draft can be stale (skip after review), so new/
+    drafts are always reviewed afresh rather than reusing it."""
+    _set_status_dirs(workflow_module, tmp_path)
+    draft_path = workflow_module.NEW_DIR / "stale-score.yml"
+    workflow_module.TweetDraft(text="unreviewed text", quality_score=3).save(draft_path)
+
+    calls: list[Any] = []
+
+    def record_review(draft: Any) -> Any:
+        calls.append(draft)
+        return True, SimpleNamespace(
+            criteria_results={"clarity": SimpleNamespace(passed=True, notes="clear")},
+            recommendation="approve",
+            improvements=[],
+        )
+
+    monkeypatch.setattr(workflow_module, "verify_draft", record_review)
+
+    workflow_module.review(auto_approve=False, show_context=False, dry_run=True)
+
+    assert calls
+
+
+def test_review_status_review_auto_approves_three_star(
     workflow_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _set_status_dirs(workflow_module, tmp_path)
-    reviewed_path = workflow_module.NEW_DIR / "already-reviewed.yml"
+    parked = workflow_module.REVIEW_DIR / "three-star.yml"
+    workflow_module.TweetDraft(text="good enough", quality_score=3).save(parked)
+
+    monkeypatch.setattr(
+        workflow_module,
+        "verify_draft",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must reuse score")),
+    )
+
+    workflow_module.review(
+        auto_approve=True, show_context=False, dry_run=False, status="review"
+    )
+
+    assert not parked.exists()
+    assert (workflow_module.APPROVED_DIR / parked.name).exists()
+
+
+def test_review_status_review_reviews_a_hand_edited_draft(
+    workflow_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A draft edited outside the workflow keeps its quality_score but no longer
+    matches the scored digest, so the stale score must not auto-approve it."""
+    _set_status_dirs(workflow_module, tmp_path)
+    parked = workflow_module.REVIEW_DIR / "hand-edited.yml"
+    workflow_module.TweetDraft(text="original reviewed text", quality_score=3).save(
+        parked
+    )
+
+    # Simulate a direct file edit that leaves the saved score behind.
+    parked.write_text(
+        parked.read_text().replace(
+            "original reviewed text", "rewritten after the review"
+        )
+    )
+    reloaded = workflow_module.TweetDraft.load(parked)
+    assert reloaded.quality_score == 3
+    assert reloaded.text == "rewritten after the review"
+
+    calls: list[Any] = []
+
+    def record_review(draft: Any) -> Any:
+        calls.append(draft)
+        # The rewritten text is worse than what the stale 3/3 described.
+        return False, SimpleNamespace(
+            criteria_results={"clarity": SimpleNamespace(passed=False, notes="vague")},
+            recommendation="reject",
+            improvements=[],
+        )
+
+    monkeypatch.setattr(workflow_module, "verify_draft", record_review)
+    monkeypatch.setattr(
+        workflow_module,
+        "Prompt",
+        SimpleNamespace(ask=lambda *args, **kwargs: "skip"),
+    )
+
+    workflow_module.review(
+        auto_approve=True, show_context=False, dry_run=False, status="review"
+    )
+
+    assert calls, "hand-edited draft must be re-reviewed"
+    assert parked.exists(), "the stale 3/3 score must not auto-approve it"
+    assert workflow_module.TweetDraft.load(parked).quality_score == 0
+
+
+def test_list_command_lists_review_drafts_with_ids(
+    workflow_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _set_status_dirs(workflow_module, tmp_path)
+    workflow_module.TweetDraft(text="first draft", quality_score=2).save(
+        workflow_module.REVIEW_DIR / "first-draft.yml"
+    )
+    workflow_module.TweetDraft(text="second draft", quality_score=1).save(
+        workflow_module.REVIEW_DIR / "second-draft.yml"
+    )
+
+    printed: list[str] = []
+    monkeypatch.setattr(
+        workflow_module.console,
+        "print",
+        lambda *args, **kwargs: printed.append(" ".join(str(a) for a in args)),
+    )
+
+    workflow_module.list_command(status="review")
+
+    output = "\n".join(printed)
+    assert "first-draft" in output
+    assert "second-draft" in output
+    assert "2/3" in output
+
+
+def test_auto_reports_draft_id_when_parking_for_review(
+    workflow_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The summary tells the user to run `approve <id>`, so the id must be printed."""
+    _set_status_dirs(workflow_module, tmp_path)
+    draft_path = workflow_module.NEW_DIR / "needs-human.yml"
+    workflow_module.TweetDraft(text="needs a human").save(draft_path)
+    monkeypatch.setattr(
+        workflow_module,
+        "verify_draft",
+        lambda draft: (
+            False,
+            SimpleNamespace(
+                criteria_results={
+                    "clarity": SimpleNamespace(passed=False, notes="unclear"),
+                },
+                recommendation="revise",
+                improvements=[],
+            ),
+        ),
+    )
+    _stub_auto_client(workflow_module, monkeypatch)
+
+    printed: list[str] = []
+    monkeypatch.setattr(
+        workflow_module.console,
+        "print",
+        lambda *args, **kwargs: printed.append(" ".join(str(a) for a in args)),
+    )
+
+    workflow_module.auto(
+        list_id=None,
+        auto_approve=False,
+        post_approved=False,
+        dry_run=False,
+        max_tweets=1,
+        max_drafts=1,
+        skip_mentions=True,
+        skip_timeline=False,
+    )
+
+    assert (workflow_module.REVIEW_DIR / draft_path.name).exists()
+    output = "\n".join(printed)
+    assert "id: needs-human" in output
+    assert "list" in output
+
+
+@pytest.mark.parametrize("status", ["new", "review", "approved"])
+def test_edit_clears_quality_score_so_auto_reviews_again(
+    workflow_module: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+) -> None:
+    _set_status_dirs(workflow_module, tmp_path)
+    reviewed_path = workflow_module.TWEETS_DIR / status / "already-reviewed.yml"
     workflow_module.TweetDraft(text="rejected earlier", quality_score=2).save(
         reviewed_path
     )
 
     workflow_module.edit("already-reviewed", "revised text")
 
-    assert workflow_module.TweetDraft.load(reviewed_path).quality_score is None
+    queued_path = workflow_module.NEW_DIR / reviewed_path.name
+    assert queued_path.exists()
+    if status != "new":
+        assert not reviewed_path.exists()
+    edited = workflow_module.TweetDraft.load(queued_path)
+    assert edited.quality_score is None
+    assert edited.text == "revised text"
 
     reviews: list[Any] = []
 
@@ -910,6 +1273,77 @@ def test_edit_clears_quality_score_so_auto_reviews_again(
     )
 
     assert [draft["text"] for draft in reviews] == ["revised text"]
+
+
+@pytest.mark.parametrize("status", ["review", "approved"])
+def test_review_edit_moves_parked_draft_back_to_new(
+    workflow_module: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+) -> None:
+    """Editing inside `review --status <parked>` must requeue, not leave the
+    edited draft in a status directory that post() publishes without review."""
+    _set_status_dirs(workflow_module, tmp_path)
+    parked = workflow_module.TWEETS_DIR / status / "edited.yml"
+    workflow_module.TweetDraft(text="original", quality_score=4).save(parked)
+
+    answers = iter(["edit", "revised text"])
+    monkeypatch.setattr(
+        workflow_module,
+        "Prompt",
+        SimpleNamespace(ask=lambda *args, **kwargs: next(answers)),
+    )
+
+    workflow_module.review(
+        auto_approve=False, show_context=False, dry_run=False, status=status
+    )
+
+    queued = workflow_module.NEW_DIR / parked.name
+    assert queued.exists()
+    assert not parked.exists()
+    edited = workflow_module.TweetDraft.load(queued)
+    assert edited.text == "revised text"
+    assert edited.quality_score is None
+
+
+def test_review_status_approved_auto_approve_keeps_the_draft(
+    workflow_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _set_status_dirs(workflow_module, tmp_path)
+    parked = workflow_module.APPROVED_DIR / "already-approved.yml"
+    workflow_module.TweetDraft(text="fine", quality_score=3).save(parked)
+
+    monkeypatch.setattr(
+        workflow_module,
+        "verify_draft",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must reuse score")),
+    )
+
+    workflow_module.review(
+        auto_approve=True, show_context=False, dry_run=False, status="approved"
+    )
+
+    assert parked.exists()
+
+
+def test_move_draft_to_same_directory_keeps_the_draft(
+    workflow_module: Any, tmp_path: Path
+) -> None:
+    """Moving to the directory a draft is already in must not delete it.
+
+    `review --status approved` can approve a draft that already sits in
+    approved/; a self-move used to save over the source and then unlink it.
+    """
+    _set_status_dirs(workflow_module, tmp_path)
+    path = workflow_module.APPROVED_DIR / "already-approved.yml"
+    workflow_module.TweetDraft(text="keep me").save(path)
+
+    moved = workflow_module.move_draft(path, "approved")
+
+    assert moved == path
+    assert path.exists()
+    assert workflow_module.TweetDraft.load(path).text == "keep me"
 
 
 def test_outbound_gate_scans_thread_segments(

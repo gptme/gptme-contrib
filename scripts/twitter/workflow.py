@@ -36,6 +36,7 @@ sys.path.insert(0, str(_Path(__file__).parent))
 # Add parent directory so `from twitter.llm import ...` resolves to scripts/twitter/
 sys.path.insert(0, str(_Path(__file__).parent.parent))
 
+import hashlib
 import json
 import logging
 import os
@@ -256,6 +257,17 @@ def _parse_markdown_frontmatter(text: str) -> tuple[dict[str, Any], str] | None:
     return metadata, body
 
 
+def draft_content_digest(text: str, thread: List[str] | None = None) -> str:
+    """Digest of the content a quality score was computed for.
+
+    A saved ``quality_score`` only describes the text that was reviewed. Editing
+    the draft file outside the workflow (a hand edit, an external tool) leaves the
+    score behind, so reuse is gated on this digest matching the current content.
+    """
+    payload = text + "\x00" + "\x00".join(thread or [])
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
 class TweetDraft:
     """Represents a tweet draft with metadata"""
 
@@ -268,6 +280,7 @@ class TweetDraft:
         context: Dict | None = None,
         reject_reason: str | None = None,
         quality_score: int | None = None,
+        scored_digest: str | None = None,
         thread: List[str] | None = None,
         quote_tweet_id: str | None = None,
         posted_id: str | None = None,
@@ -281,6 +294,9 @@ class TweetDraft:
         self.created_at = datetime.now()
         self.reject_reason = reject_reason
         self.quality_score = quality_score  # 0-3 star rating (matches blog post system)
+        # Digest of the text/thread that quality_score describes. A score without
+        # a matching digest (hand-edited file, pre-digest draft) is not reusable.
+        self.scored_digest = scored_digest
         self.thread = thread or []  # List of follow-up tweet texts
         self.quote_tweet_id = quote_tweet_id  # id of the tweet this draft quotes
         self.posted_id = posted_id  # id returned by create_tweet, set on posting
@@ -301,9 +317,11 @@ class TweetDraft:
         # Only include reject_reason if it's set
         if self.reject_reason:
             result["reject_reason"] = self.reject_reason
-        # Only include quality_score if it's set
+        # Only include quality_score if it's set, always paired with the digest
+        # of the content it describes (derived here so it can never go stale).
         if self.quality_score is not None:
             result["quality_score"] = self.quality_score
+            result["scored_digest"] = draft_content_digest(self.text, self.thread)
         # Only include thread if it's set and non-empty
         if self.thread:
             result["thread"] = self.thread
@@ -359,6 +377,7 @@ class TweetDraft:
             context=data.get("context", {}),
             reject_reason=data.get("reject_reason"),  # Optional, backward compatible
             quality_score=data.get("quality_score"),  # Optional, backward compatible
+            scored_digest=data.get("scored_digest"),  # Optional, backward compatible
             thread=fixed_thread,
             quote_tweet_id=data.get("quote_tweet_id", data.get("quote")),
             posted_id=data.get("posted_id"),
@@ -736,7 +755,12 @@ def move_draft(path: Path, new_status: str) -> Path:
     # Preserve the filename when possible, but never overwrite an older draft.
     # Repeated failures can legitimately produce the same generated filename.
     new_path = status_dirs[new_status] / path.name
-    if new_path.exists() and new_path != path:
+    if new_path == path:
+        # Already in the target directory (e.g. `review --status approved`
+        # followed by approve). Falling through would save over the source and
+        # then unlink it, deleting the only copy of the draft.
+        return path
+    if new_path.exists():
         counter = 2
         while True:
             candidate = new_path.with_name(
@@ -1355,10 +1379,19 @@ def group_drafts_by_reply_target(drafts: list[Path]) -> dict[str | None, list[Pa
 @click.option(
     "--dry-run", is_flag=True, help="Don't actually approve/reject, just show analysis"
 )
-def review(auto_approve: bool, show_context: bool, dry_run: bool) -> None:
+@click.option(
+    "--status",
+    type=click.Choice(["new", "review", "approved"]),
+    default="new",
+    show_default=True,
+    help="Directory to review drafts from (auto() parks scored drafts in review/)",
+)
+def review(
+    auto_approve: bool, show_context: bool, dry_run: bool, status: str = "new"
+) -> None:
     """Review pending tweet drafts with LLM assistance"""
 
-    drafts = list_drafts("new")
+    drafts = list_drafts(status)
 
     if not drafts:
         console.print("[yellow]No drafts to review")
@@ -1380,7 +1413,7 @@ def review(auto_approve: bool, show_context: bool, dry_run: bool) -> None:
         for path in group_paths:
             draft = TweetDraft.load(path)
 
-            console.print("\n[bold]Reviewing draft:[/bold]")
+            console.print(f"\n[bold]Reviewing draft:[/bold] {path.stem}")
             console.print(f"[cyan]Type: {draft.type}")
             if draft.in_reply_to:
                 console.print(f"[cyan]Reply to: {draft.in_reply_to}")
@@ -1408,95 +1441,152 @@ def review(auto_approve: bool, show_context: bool, dry_run: bool) -> None:
                     console.print(
                         "[yellow]Consider rejecting this duplicate or editing to make it distinct\n"
                     )
-        if draft.scheduled_time:
-            console.print(f"[cyan]Scheduled: {draft.scheduled_time}")
-        console.print(f"[white]{draft.text}")
+            if draft.scheduled_time:
+                console.print(f"[cyan]Scheduled: {draft.scheduled_time}")
+            console.print(f"[white]{draft.text}")
 
-        # Show context if requested
-        if show_context and draft.context:
-            console.print("\n[bold]Context:[/bold]")
-            if "original_tweet" in draft.context:
-                orig = draft.context["original_tweet"]
-                console.print(f"[blue]Original tweet by @{orig['author']}:[/blue]")
-                console.print(f"[white]{orig['text']}[/white]")
-            if "evaluation" in draft.context:
-                eval_data = draft.context["evaluation"]
-                console.print("[blue]Evaluation:[/blue]")
-                console.print(f"Relevance: {eval_data['relevance']}/100")
-                console.print(f"Priority: {eval_data['priority']}/100")
-                console.print(f"Reasoning: {eval_data['reasoning']}")
+            # Show context if requested
+            if show_context and draft.context:
+                console.print("\n[bold]Context:[/bold]")
+                if "original_tweet" in draft.context:
+                    orig = draft.context["original_tweet"]
+                    console.print(f"[blue]Original tweet by @{orig['author']}:[/blue]")
+                    console.print(f"[white]{orig['text']}[/white]")
+                if "evaluation" in draft.context:
+                    eval_data = draft.context["evaluation"]
+                    console.print("[blue]Evaluation:[/blue]")
+                    console.print(f"Relevance: {eval_data['relevance']}/100")
+                    console.print(f"Priority: {eval_data['priority']}/100")
+                    console.print(f"Reasoning: {eval_data['reasoning']}")
 
-        # Get LLM review
-        approved, review_result = verify_draft(draft.to_dict())
-
-        # A preview must not mark the draft reviewed for later cycles.
-        quality_score = compute_quality_score(review_result)
-        if not dry_run:
-            draft.quality_score = quality_score
-            draft.save(path)  # Persist quality_score to file
-
-        # Display review results
-        stars = "★" * quality_score + "☆" * (3 - quality_score)
-        console.print(f"\n[bold]Quality Score: {stars} ({quality_score}/3)[/bold]")
-        console.print("\n[bold]Review Results:[/bold]")
-        for criterion, result in review_result.criteria_results.items():
-            status = "✅" if result.passed else "❌"
-            console.print(f"{status} {criterion}: {result.notes}")
-
-        if review_result.improvements:
-            console.print("\n[yellow]Suggested improvements:[/yellow]")
-            for improvement in review_result.improvements:
-                console.print(f"• {improvement}")
-
-        # Handle auto-approve or ask for action
-        if auto_approve and approved and not dry_run:
-            move_draft(path, "approved")
-            console.print("[green]Draft automatically approved")
-        elif dry_run:
-            # Just show review results, don't prompt for action
-            console.print("[yellow]Dry run - no action taken")
-            console.print(f"[blue]Draft ID: {path.stem}[/blue]")
-            console.print(
-                "[blue]Use 'workflow approve/reject/edit <id>' to process this draft[/blue]"
-            )
-        else:
-            action = Prompt.ask(
-                "Action", choices=["approve", "reject", "skip", "edit"], default="skip"
-            )
-
-            if action == "approve":
-                move_draft(path, "approved")
-                console.print("[green]Draft approved")
-            elif action == "reject":
-                # Prompt for rejection reason
-                reason = Prompt.ask(
-                    "Rejection reason (optional)",
-                    default="",
-                )
-                if reason:
-                    draft.reject_reason = reason
-                    draft.save(path)  # Save with reject_reason before moving
-                move_draft(path, "rejected")
-                console.print("[red]Draft rejected")
-            elif action == "edit":
-                # Allow editing the draft
-                new_text = Prompt.ask("Edit tweet", default=draft.text)
-                if new_text != draft.text:
-                    draft.text = new_text
-                    # The saved score describes the old text; clearing it is
-                    # what makes auto() review the edited draft again.
-                    draft.quality_score = None
-                    draft.save(path)
-                    console.print("[blue]Draft updated, will need another review")
+            # Reuse a saved review when the draft already carries its score (drafts
+            # auto() parked in review/ or approved/). Re-running the LLM would pay
+            # twice and can flip the verdict on unchanged text. Drafts in new/ keep
+            # the historical behaviour: their score can be stale (a skip after a
+            # review leaves it behind), so they are always reviewed afresh.
+            # The saved score is only reused when its digest still matches the
+            # current content, so a hand-edited file is re-reviewed rather than
+            # auto-approved on stale evidence.
+            review_result = None
+            if (
+                draft.quality_score is not None
+                and status != "new"
+                and draft.scored_digest
+                == draft_content_digest(draft.text, draft.thread)
+            ):
+                quality_score = draft.quality_score
+                approved = quality_score == 3
             else:
-                console.print("[yellow]Draft skipped")
+                approved, review_result = verify_draft(draft.to_dict())
+
+                # A preview must not mark the draft reviewed for later cycles.
+                quality_score = compute_quality_score(review_result)
+                if not dry_run:
+                    draft.quality_score = quality_score
+                    draft.save(path)  # Persist quality_score to file
+
+            # Display review results
+            stars = "★" * quality_score + "☆" * (3 - quality_score)
+            console.print(f"\n[bold]Quality Score: {stars} ({quality_score}/3)[/bold]")
+            if review_result is None:
+                console.print(
+                    "[blue]Using the saved review score (no new LLM call)[/blue]"
+                )
+            else:
+                console.print("\n[bold]Review Results:[/bold]")
+                for criterion, result in review_result.criteria_results.items():
+                    mark = "✅" if result.passed else "❌"
+                    console.print(f"{mark} {criterion}: {result.notes}")
+
+                if review_result.improvements:
+                    console.print("\n[yellow]Suggested improvements:[/yellow]")
+                    for improvement in review_result.improvements:
+                        console.print(f"• {improvement}")
+
+            # Handle auto-approve or ask for action
+            if auto_approve and approved and not dry_run:
+                move_draft(path, "approved")
+                console.print("[green]Draft automatically approved")
+            elif dry_run:
+                # Just show review results, don't prompt for action
+                console.print("[yellow]Dry run - no action taken")
+                console.print(f"[blue]Draft ID: {path.stem}[/blue]")
+                console.print(
+                    "[blue]Use 'workflow approve/reject/edit <id>' to process this draft[/blue]"
+                )
+            else:
+                action = Prompt.ask(
+                    "Action",
+                    choices=["approve", "reject", "skip", "edit"],
+                    default="skip",
+                )
+
+                if action == "approve":
+                    move_draft(path, "approved")
+                    console.print("[green]Draft approved")
+                elif action == "reject":
+                    # Prompt for rejection reason
+                    reason = Prompt.ask(
+                        "Rejection reason (optional)",
+                        default="",
+                    )
+                    if reason:
+                        draft.reject_reason = reason
+                        draft.save(path)  # Save with reject_reason before moving
+                    move_draft(path, "rejected")
+                    console.print("[red]Draft rejected")
+                elif action == "edit":
+                    # Allow editing the draft
+                    new_text = Prompt.ask("Edit tweet", default=draft.text)
+                    if new_text != draft.text:
+                        draft.text = new_text
+                        # The saved score describes the old text; clearing it is
+                        # what makes auto() review the edited draft again.
+                        draft.quality_score = None
+                        draft.save(path)
+                        # Mirror the standalone `edit` command: a draft parked in
+                        # review/ or approved/ goes back to new/, or post() would
+                        # publish the edited text with no fresh review.
+                        if path.parent in (REVIEW_DIR, APPROVED_DIR):
+                            path = move_draft(path, "new")
+                        console.print("[blue]Draft updated, will need another review")
+                else:
+                    console.print("[yellow]Draft skipped")
+
+
+@cli.command("list")
+@click.option(
+    "--status",
+    type=click.Choice(["new", "review", "approved", "posted", "rejected"]),
+    default="review",
+    show_default=True,
+    help="Directory to list drafts from",
+)
+def list_command(status: str) -> None:
+    """List drafts with the IDs that approve/reject/edit accept"""
+    drafts = list_drafts(status)
+
+    if not drafts:
+        console.print(f"[yellow]No drafts in {status}/")
+        return
+
+    console.print(f"[bold]{len(drafts)} draft(s) in {status}/:[/bold]")
+    for path in drafts:
+        draft = TweetDraft.load(path)
+        score = "—" if draft.quality_score is None else f"{draft.quality_score}/3"
+        preview = " ".join(draft.text.split())[:70]
+        console.print(f"  [cyan]{path.stem}[/cyan]  [{draft.type}] {score}  {preview}")
+
+    console.print(f"\n[blue]Act with: {sys.argv[0]} approve/reject/edit <id>[/blue]")
 
 
 @cli.command()
 @click.argument("draft_id")
 def approve(draft_id: str) -> None:
     """Approve a draft tweet by ID or path"""
-    draft_path = find_draft(draft_id, "new")
+    draft_path = find_draft(draft_id, "new", show_error=False) or find_draft(
+        draft_id, "review"
+    )
     if not draft_path:
         return
 
@@ -1508,10 +1598,11 @@ def approve(draft_id: str) -> None:
 @click.argument("draft_id")
 @click.option("--reason", "-r", help="Reason for rejection", default=None)
 def reject(draft_id: str, reason: str | None) -> None:
-    """Reject a draft tweet by ID (works on both new and approved drafts)"""
-    # Try to find draft in either new or approved directories
-    draft_path = find_draft(draft_id, "new", show_error=False) or find_draft(
-        draft_id, "approved"
+    """Reject a draft tweet by ID (works on new, review, and approved drafts)"""
+    draft_path = (
+        find_draft(draft_id, "new", show_error=False)
+        or find_draft(draft_id, "review", show_error=False)
+        or find_draft(draft_id, "approved")
     )
     if not draft_path:
         return
@@ -1532,10 +1623,11 @@ def reject(draft_id: str, reason: str | None) -> None:
 @click.argument("draft_id")
 @click.argument("new_text")
 def edit(draft_id: str, new_text: str) -> None:
-    """Edit a draft tweet by ID (works on both new and approved drafts)"""
-    # Try to find draft in either new or approved directories
-    draft_path = find_draft(draft_id, "new", show_error=False) or find_draft(
-        draft_id, "approved"
+    """Edit a draft tweet by ID (works on new, review, and approved drafts)"""
+    draft_path = (
+        find_draft(draft_id, "new", show_error=False)
+        or find_draft(draft_id, "review", show_error=False)
+        or find_draft(draft_id, "approved")
     )
     if not draft_path:
         return
@@ -1547,6 +1639,8 @@ def edit(draft_id: str, new_text: str) -> None:
     # auto() review the edited draft again.
     draft.quality_score = None
     draft.save(draft_path)
+    if draft_path.parent in (REVIEW_DIR, APPROVED_DIR):
+        draft_path = move_draft(draft_path, "new")
     console.print(f"[green]Draft updated: {draft_path.name}")
     console.print(f"[cyan]New text: {draft.text}")
 
@@ -2796,7 +2890,10 @@ def auto(
 
             # Reuse the completed review rather than paying for it every cycle.
             # Three stars requires all criteria passed and an approve recommendation.
-            if draft.quality_score is not None:
+            # Only when the score still describes the current content.
+            if draft.quality_score is not None and draft.scored_digest == (
+                draft_content_digest(draft.text, draft.thread)
+            ):
                 if auto_approve and draft.quality_score == 3:
                     if not dry_run:
                         move_draft(path, "approved")
@@ -2805,12 +2902,19 @@ def auto(
                         console.print("[yellow]Would approve draft (dry run)")
                     approved_count += 1
                     continue
-                console.print(
-                    "[yellow]Already reviewed (quality_score "
-                    f"{draft.quality_score}/3); awaiting human review"
-                )
+                if not dry_run:
+                    moved = move_draft(path, "review")
+                    console.print(
+                        "[yellow]Already reviewed (quality_score "
+                        f"{draft.quality_score}/3); moved to {moved.parent.name}/ "
+                        f"for human review (id: {moved.stem})"
+                    )
+                else:
+                    console.print(
+                        "[yellow]Already reviewed (quality_score "
+                        f"{draft.quality_score}/3); awaiting human review"
+                    )
                 already_reviewed_count += 1
-                needs_review_count += 1
                 continue
 
             reviewed_count += 1
@@ -2852,6 +2956,12 @@ def auto(
                     )
                 else:
                     console.print("[yellow]Draft needs improvements and human review")
+                if not dry_run:
+                    moved = move_draft(path, "review")
+                    console.print(
+                        f"[blue]Moved to {moved.parent.name}/ for human action "
+                        f"(id: {moved.stem})"
+                    )
                 needs_review_count += 1
 
     # Step 3: Post approved tweets if requested
@@ -2984,16 +3094,32 @@ def auto(
     console.print(f"Auto-approved: {approved_count}")
     console.print(f"Needs human review: {needs_review_count}")
     if already_reviewed_count:
-        console.print(
-            f"Already reviewed, awaiting human action: {already_reviewed_count} "
-            "(run 'workflow review' to act on them)"
-        )
+        if dry_run:
+            console.print(
+                f"Already reviewed, awaiting human action: {already_reviewed_count} "
+                "(dry run; would move to tweets/review/)"
+            )
+        else:
+            console.print(
+                f"Already reviewed, moved to review/: {already_reviewed_count} "
+                "(run 'workflow list' to list them, then 'workflow approve/reject "
+                "<id>' to act)"
+            )
 
     if needs_review_count > 0:
-        console.print(
-            "\n[yellow]Run the following command to review pending drafts:[/yellow]"
-        )
-        console.print(f"[blue]{sys.argv[0]} review[/blue]")
+        if dry_run:
+            console.print(
+                "\n[yellow]Run the following command to review pending drafts:[/yellow]"
+            )
+            console.print(f"[blue]{sys.argv[0]} review[/blue]")
+        else:
+            console.print(
+                "\n[yellow]Scored drafts are in tweets/review/. List and act with:[/yellow]"
+            )
+            console.print(f"[blue]{sys.argv[0]} list[/blue]")
+            console.print(f"[blue]{sys.argv[0]} approve <id>[/blue]")
+            console.print(f"[blue]{sys.argv[0]} reject <id>[/blue]")
+            console.print(f"[blue]{sys.argv[0]} review --status review[/blue]")
 
 
 if __name__ == "__main__":
