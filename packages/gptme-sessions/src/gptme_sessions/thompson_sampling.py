@@ -39,7 +39,7 @@ import random
 import sys
 import tempfile
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator, Protocol
 
@@ -208,6 +208,34 @@ def _context_fallback_chain(
 # Minimum observations before trusting a contextual arm over fallback
 CONTEXTUAL_MIN_OBSERVATIONS = 3
 
+# A contextual arm last updated this long before its global arm is stale. When
+# writers move from a partial context like ``(run_type,)`` to ``(run_type,
+# model)``, the old arm keeps its observations and would otherwise shadow the
+# continuously updated global arm forever. Comparing against the global arm's
+# timestamp, not wall time, keeps quiet but consistent snapshots usable.
+CONTEXTUAL_MAX_GLOBAL_LAG_DAYS = 30
+
+
+def _updated_at(arm: "BanditArm") -> datetime | None:
+    try:
+        updated = datetime.fromisoformat(arm.last_updated)
+    except (TypeError, ValueError):
+        return None
+    return updated if updated.tzinfo is not None else updated.replace(tzinfo=timezone.utc)
+
+
+def _lags_global(arm: "BanditArm", global_arm: "BanditArm | None") -> bool:
+    """True when ``arm`` is proven stale relative to live global evidence.
+
+    Missing or unparseable timestamps are accepted for backward compatibility.
+    """
+    if global_arm is None:
+        return False
+    contextual, latest = _updated_at(arm), _updated_at(global_arm)
+    if contextual is None or latest is None:
+        return False
+    return latest - contextual > timedelta(days=CONTEXTUAL_MAX_GLOBAL_LAG_DAYS)
+
 
 @dataclass
 class BanditState:
@@ -248,15 +276,19 @@ class BanditState:
         uninformative prior Beta(1, 1) for unknown arms — sampling from it gives
         an expected score of 0.5, the correct uninformative default.
         """
+        existing = self.arms.get(arm_id)
         if context is not None:
             for ctx in _context_fallback_chain(context):
                 key = _context_key(ctx)
                 if arm_id in self.contextual_arms and key in self.contextual_arms[arm_id]:
                     arm = self.contextual_arms[arm_id][key]
-                    if ctx is None or arm.total_selections >= CONTEXTUAL_MIN_OBSERVATIONS:
+                    if ctx is None:
+                        return arm
+                    if arm.total_selections >= CONTEXTUAL_MIN_OBSERVATIONS and not _lags_global(
+                        arm, existing
+                    ):
                         return arm
 
-        existing = self.arms.get(arm_id)
         if existing is not None:
             return existing
         # Return a temporary arm with uninformative prior — not stored in state
@@ -831,15 +863,9 @@ def _resolve_mean_readonly(
     Returns the posterior mean for arm_id under context, or 0.5 (uninformative
     prior mean) if no matching arm exists.
     """
-    if context is not None:
-        for ctx in _context_fallback_chain(context):
-            key = _context_key(ctx)
-            if arm_id in state.contextual_arms and key in state.contextual_arms[arm_id]:
-                arm = state.contextual_arms[arm_id][key]
-                if ctx is None or arm.total_selections >= CONTEXTUAL_MIN_OBSERVATIONS:
-                    return arm.mean
-    existing = state.arms.get(arm_id)
-    return existing.mean if existing else 0.5
+    # _resolve_arm_for_sampling never stores the Beta(1, 1) arm it returns for
+    # unknown ids, so its mean (0.5) is the uninformative default here too.
+    return state._resolve_arm_for_sampling(arm_id, context).mean
 
 
 def load_bandit_means(

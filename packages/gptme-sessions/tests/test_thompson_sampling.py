@@ -1080,3 +1080,52 @@ def test_bandit_update_without_hook_unchanged(tmp_path: Path):
     bandit = Bandit(state_dir=tmp_path)
     result = bandit.update(["code"], outcome=1.0)
     assert result == {"code": True}
+
+
+# --- contextual lag gate: stale partial-context arms must not shadow global ---
+
+
+def _lag_state(contextual_updated: str, global_updated: str = "2026-11-23T00:00:00+00:00"):
+    state = BanditState()
+    state.arms["x"] = BanditArm(
+        arm_id="x", alpha=2.0, beta=1.0, total_selections=20, last_updated=global_updated
+    )
+    state.contextual_arms["x"] = {
+        ts_module._context_key(("autonomous",)): BanditArm(
+            arm_id="x",
+            alpha=19.0,
+            beta=1.0,
+            total_selections=20,
+            last_updated=contextual_updated,
+        )
+    }
+    return state
+
+
+def test_stale_contextual_arm_falls_back_to_global():
+    # Last touched 60 days before the global arm: a legacy (run_type,) arm.
+    state = _lag_state("2026-09-24T00:00:00+00:00")
+    ctx = ("autonomous", "some-model")
+    assert state._resolve_arm_for_sampling("x", ctx).alpha == 2.0
+    assert ts_module._resolve_mean_readonly(state, "x", ctx) == pytest.approx(2 / 3)
+
+
+def test_recent_contextual_arm_still_wins():
+    state = _lag_state("2026-11-01T00:00:00+00:00")  # 22 days behind: within the gate
+    assert state._resolve_arm_for_sampling("x", ("autonomous",)).alpha == 19.0
+
+
+def test_missing_timestamps_keep_the_contextual_arm():
+    # Backward compatibility: only a proven lag is rejected.
+    state = _lag_state("", global_updated="")
+    assert state._resolve_arm_for_sampling("x", ("autonomous",)).alpha == 19.0
+    naive = _lag_state("2026-09-24T00:00:00")  # naive timestamps read as UTC
+    assert naive._resolve_arm_for_sampling("x", ("autonomous",)).alpha == 2.0
+
+
+def test_load_bandit_means_applies_the_lag_gate(tmp_path):
+    bandit = Bandit(state_dir=tmp_path)
+    bandit.state = _lag_state("2026-09-24T00:00:00+00:00")
+    bandit.save()
+    means = load_bandit_means(tmp_path, arm_ids=["x", "unknown"], context=("autonomous",))
+    assert means == {"x": pytest.approx(2 / 3), "unknown": 0.5}
