@@ -714,7 +714,10 @@ def test_unrelated_ci_claim_known_failure_survives_unknown_peer(
     assert len(findings) == 1
     assert "1 check(s)" in findings[0]["body"]
     assert "`Test`" in findings[0]["body"]
-    assert "`Other`" not in findings[0]["body"]
+    # The unknown state is not counted as a failing check, but it must not be
+    # silently dropped either — the finding names it as unclassifiable.
+    assert "Unrecognised check state(s)" in findings[0]["body"]
+    assert unknown_state in findings[0]["body"]
 
 
 @pytest.mark.parametrize("state", ["", None])
