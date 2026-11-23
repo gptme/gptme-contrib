@@ -1892,6 +1892,55 @@ def _terminal_at_head(path: Path) -> bool:
             timeout=10,
             check=False,
         )
+        if shown.returncode != 0:
+            # `archive` stages renames before committing them. Follow the index
+            # rename back to HEAD, not the index state (which may be uncommitted
+            # completion). Do not restrict the diff to this directory: the old
+            # path can be outside it, which would hide the rename.
+            prefix = subprocess.run(
+                ["git", "-C", str(path.parent), "rev-parse", "--show-prefix"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            renames = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(path.parent),
+                    "diff",
+                    "--cached",
+                    "--name-status",
+                    "-z",
+                    "--find-renames",
+                    "--no-relative",
+                    "HEAD",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            if prefix.returncode != 0 or renames.returncode != 0:
+                return False
+            destination = prefix.stdout.rstrip("\n") + path.name
+            fields = iter(renames.stdout.split("\0"))
+            for status in fields:
+                if not status:
+                    break
+                source = next(fields)
+                if status.startswith(("R", "C")):
+                    target = next(fields)
+                    if status.startswith("R") and target == destination:
+                        shown = subprocess.run(
+                            ["git", "-C", str(path.parent), "show", f"HEAD:{source}"],
+                            capture_output=True,
+                            text=True,
+                            timeout=10,
+                            check=False,
+                        )
+                        break
     except (OSError, subprocess.TimeoutExpired):
         return True
     if shown.returncode != 0:

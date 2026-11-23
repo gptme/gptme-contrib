@@ -102,6 +102,18 @@ def test_uncommitted_new_done_dependency_blocks(tmp_path):
     assert _ready(tasks_dir)
 
 
+@pytest.mark.parametrize("committed_state", ["active", "done", "cancelled"])
+def test_staged_archive_rename_checks_original_head_state(tmp_path, committed_state):
+    tasks_dir = _repo(tmp_path, committed_state)
+    archive = tasks_dir / "archive"
+    archive.mkdir()
+    _git(tmp_path, "mv", "tasks/prereq.md", "tasks/archive/prereq.md")
+    # Keep enough unchanged content for rename detection even when the state changes.
+    (archive / "prereq.md").write_text(_prereq("done"))
+    tasks = utils.build_dependency_universe({t.name: t for t in load_tasks(tasks_dir)}, tasks_dir)
+    assert is_task_ready(tasks["dependent"], tasks) is (committed_state in ("done", "cancelled"))
+
+
 def test_outside_git_keeps_disk_semantics(tmp_path):
     tasks_dir = tmp_path / "tasks"
     tasks_dir.mkdir()
