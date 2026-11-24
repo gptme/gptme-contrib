@@ -267,8 +267,8 @@ def test_missing_consensus_record_is_rejected(gh_comments: Any) -> None:
     assert "no consensus record" in (status["detail"] or "")
 
 
-def test_explicit_single_pass_consensus_is_rejected(gh_comments: Any) -> None:
-    """A serialized 1/1 record is still a single sample, not consensus."""
+def test_complete_single_pass_is_accepted(gh_comments: Any) -> None:
+    """A clean, fully answered single pass is merge evidence (Erik, 2026-11-24)."""
     consensus = dict(
         FULL_CONSENSUS,
         requested=1,
@@ -279,8 +279,13 @@ def test_explicit_single_pass_consensus_is_rejected(gh_comments: Any) -> None:
         min_agreement_requested=1,
     )
     status = _status(gh_comments, [_comment(_marker(consensus=consensus))])
+    assert status["accepted"] is True, status["detail"]
+
+    # A single pass that lost its job still reached its score on no evidence.
+    degraded = dict(consensus, jobs_requested=3, jobs_answered=1)
+    status = _status(gh_comments, [_comment(_marker(consensus=degraded))])
     assert status["accepted"] is False
-    assert "at least 2 requested passes" in (status["detail"] or "")
+    assert "degraded" in (status["detail"] or "")
 
 
 @pytest.mark.parametrize(
@@ -918,8 +923,8 @@ def test_unreadable_threads_block_even_with_ai_disabled(
     assert any("review thread state" in r for r in result.reasons)
 
 
-def test_greptile_substitution_accepts_a_one_pass_marker(evaluate: Any) -> None:
-    """A single-pass AI marker is a capacity failure, not a negative verdict."""
+def test_one_pass_marker_needs_no_greptile_substitution(evaluate: Any) -> None:
+    """A complete single-pass AI marker is itself accepted; nothing is substituted."""
     consensus = dict(
         FULL_CONSENSUS,
         requested=1,
@@ -935,7 +940,7 @@ def test_greptile_substitution_accepts_a_one_pass_marker(evaluate: Any) -> None:
         reviewed_sha=HEAD_SHA,
     )
     assert result.eligible is True
-    assert any("AI review substituted" in w for w in result.warnings)
+    assert not any("AI review substituted" in w for w in result.warnings)
 
 
 def test_greptile_substitution_accepts_a_stale_ai_marker(evaluate: Any) -> None:

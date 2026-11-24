@@ -55,7 +55,7 @@ falls back to requiring Greptile rather than approving:
 - the review is at the current head SHA (a review of an older push says nothing
   about the code about to merge)
 - consensus is present and undegraded — no lost passes, no lost fan-out jobs, no
-  clamped agreement threshold. A degraded run reached its score on less evidence
+  clamped agreement threshold. A complete single pass (1/1) qualifies. A degraded run reached its score on less evidence
   than it asked for, which is exactly the recall failure. A **missing** consensus
   record means no consensus stage ran at all (the hourly sweep's single-pass
   reviews, or the agent engine); the reviewer documents that as "unknown, never
@@ -1550,11 +1550,10 @@ def _consensus_shortfall(consensus: Any) -> str | None:
     if jobs_requested is None or jobs_answered is None:
         return "consensus record is missing job counts"
 
-    # One pass is the sweep's non-consensus mode even if a marker explicitly
-    # serializes 1/1 counts. Qualifying evidence must contain multiple independent
-    # passes, not merely a present consensus object.
-    if requested < 2:
-        return "consensus requires at least 2 requested passes"
+    # A complete single pass (1/1 passes and jobs, agreement 1/1) is evidence:
+    # Erik, 2026-11-24, a clean single Claude review counts wherever a DeepSeek
+    # review does. A second pass run only to satisfy a count is not evidence.
+    # What is still refused is a pass that did not fully answer, below.
     if answered < 1 or jobs_answered < 1:
         return "no consensus pass answered"
     if answered < requested:
