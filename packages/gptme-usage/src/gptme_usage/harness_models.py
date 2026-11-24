@@ -559,7 +559,7 @@ def estimate_session_cost(
         # Empirical validation: 1,104 CC sessions with full breakdowns
         # show 99.9%+ of billed tokens are cache reads, so token_count
         # ≈ cache_read_tokens for these sessions.
-        if token_count and token_count > 0 and key in SUBSCRIPTION_BACKED_MODELS:
+        if token_count and token_count > 0 and _is_subscription_backed(key):
             # A provider heuristic or an explicit configured rate both price the
             # cache-read-dominated token_count. A subscription model with neither
             # stays unknown rather than guessing at the full input price.
@@ -605,6 +605,22 @@ def estimate_session_cost(
 # Backends where quota pressure should be translated into effective cost. API
 # models already pay real marginal dollars, but subscription-backed models need
 # a synthetic pressure term once quota gets tight.
+def _is_subscription_backed(key: tuple[str, str]) -> bool:
+    """Whether a pricing key belongs to a subscription pool.
+
+    A configured versioned Claude Code row (``opus-5``) selects that version as
+    the pricing key; it is in the same pool as its family, even when the set
+    below does not list the version yet.
+    """
+    if key in SUBSCRIPTION_BACKED_MODELS:
+        return True
+    harness, model = key
+    return (
+        harness == "claude-code"
+        and (harness, _cc_family(model)) in SUBSCRIPTION_BACKED_MODELS
+    )
+
+
 SUBSCRIPTION_BACKED_MODELS: set[tuple[str, str]] = {
     ("claude-code", "opus"),
     ("claude-code", "opus-5-5"),  # 2026-09-22: same Claude Max pool as opus

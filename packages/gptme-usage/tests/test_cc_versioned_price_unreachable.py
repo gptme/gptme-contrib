@@ -57,3 +57,21 @@ def test_duration_estimate_falls_back_to_family_tps_row() -> None:
         estimate_tokens_from_duration("claude-code", "claude-opus-5-5", 10, config=cfg)
         == 1000
     )
+
+
+def test_total_only_estimate_survives_a_versioned_row_missing_from_subscription_set() -> (
+    None
+):
+    # ``opus`` resolves to ``opus-5``; a configured ``opus-5`` row must not turn
+    # a token_count-only estimate into None just because the subscription set
+    # lists only other versions.
+    cfg = HarnessQuotaConfig(
+        price_table={
+            ("claude-code", "opus"): (5.0, 25.0),
+            ("claude-code", "opus-5"): (4.0, 20.0),
+        }
+    )
+    cost = estimate_session_cost(
+        "claude-code", "opus", token_count=1_000_000, config=cfg
+    )
+    assert cost is not None and cost > 0
