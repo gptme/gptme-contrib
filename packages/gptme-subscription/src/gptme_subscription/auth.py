@@ -13,6 +13,7 @@ We expose the file-based check (fast, no network) and a probe variant
 from __future__ import annotations
 
 import json
+import math
 import os
 import subprocess
 import tempfile
@@ -77,7 +78,7 @@ def check_credential_file(path: Path, sub: str) -> CredentialInfo:
 
     try:
         raw = path.read_text()
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         return CredentialInfo(sub=sub, path=path, status="unreadable", error=str(exc))
 
     try:
@@ -102,6 +103,13 @@ def check_credential_file(path: Path, sub: str) -> CredentialInfo:
             status="malformed",
             error="missing or non-numeric expiresAt",
         )
+    if not math.isfinite(expires_at):
+        return CredentialInfo(
+            sub=sub,
+            path=path,
+            status="malformed",
+            error="non-finite expiresAt",
+        )
 
     now_ms = int(time.time() * 1000)
     delta_s = int((int(expires_at) - now_ms) / 1000)
@@ -122,6 +130,32 @@ def check_credential_file(path: Path, sub: str) -> CredentialInfo:
         subscription_type=sub_type,
         scopes=scopes,
     )
+
+
+def _persist_probe_refresh(live: Path, slot: Path) -> None:
+    """Copy tokens Claude Code refreshed during a probe back into the slot.
+
+    A refresh replaces the temporary symlink with a regular file holding a
+    rotated refresh token. The old one is already consumed, so dropping the
+    new file with the temp directory would leave the slot unusable.
+    """
+    if live.is_symlink() or not live.is_file():
+        return
+    try:
+        text = live.read_text(encoding="utf-8")
+        oauth = json.loads(text).get("claudeAiOauth")
+    except (OSError, UnicodeDecodeError, ValueError, AttributeError):
+        return
+    if not isinstance(oauth, dict) or not oauth.get("refreshToken"):
+        return
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{slot.name}.", dir=slot.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.chmod(tmp_name, 0o600)
+        os.replace(tmp_name, slot)
+    except OSError:
+        Path(tmp_name).unlink(missing_ok=True)
 
 
 def probe_credential(
@@ -166,6 +200,7 @@ def probe_credential(
                 timeout=timeout,
                 env=env,
             )
+            _persist_probe_refresh(live_credential, target_credential)
     except subprocess.TimeoutExpired:
         return info, False, f"probe timed out after {timeout}s"
     except OSError as exc:

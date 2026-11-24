@@ -35,6 +35,17 @@ from gptme_subscription.state import atomic_write_text, locked_state_file
 
 logger = logging.getLogger(__name__)
 
+# Slot names may contain '-' and be prefixes of each other ("slot-1" vs
+# "slot-10"), so capture the whole whitespace-delimited token.
+_SWITCHED_TO_RE = re.compile(r"switched to (\S+)")
+
+
+def _switch_log_target(line: str) -> str | None:
+    """Return the slot named by a ``switched to <slot>`` switch-log line."""
+    match = _SWITCHED_TO_RE.search(line)
+    return match.group(1) if match else None
+
+
 # ---- Public types ----
 
 
@@ -168,7 +179,7 @@ class SubscriptionManager:
             for line in reversed(lines):
                 if not line.strip():
                     continue
-                if f"switched to {sub}" not in line:
+                if _switch_log_target(line) != sub:
                     continue
                 ts_str = line.split(" ")[0]
                 ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
@@ -190,11 +201,10 @@ class SubscriptionManager:
                 if not line.strip():
                     continue
                 ts_str = line.split(" ")[0]
-                match = re.search(r"switched to (\w+)\b", line)
-                if match is None:
+                current_sub = _switch_log_target(line)
+                if current_sub is None:
                     continue
                 ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
-                current_sub = match.group(1)
                 if previous_sub == primary and current_sub != primary:
                     last_departure = ts
                 previous_sub = current_sub
@@ -215,9 +225,9 @@ class SubscriptionManager:
         except OSError:
             return None
         for line in reversed(text.rstrip().split("\n")):
-            m = re.search(r"switched to (\w+)\b", line)
-            if m and m.group(1) in self.config.subscriptions:
-                return m.group(1)
+            target = _switch_log_target(line)
+            if target is not None and target in self.config.subscriptions:
+                return target
         return None
 
     # ---- Slot introspection (delegate to credential-slots) ----
@@ -324,7 +334,21 @@ class SubscriptionManager:
                             "check_usage: live probe failed, returning stale cache (age %.0fs)",
                             age_s,
                         )
-                        return {**data, "_stale": True}
+                        # Countdowns were measured when the cache was written;
+                        # age them so they reflect the time remaining now.
+                        aged: dict[str, Any] = {}
+                        for key, value in data.items():
+                            if isinstance(value, dict) and isinstance(
+                                value.get("resets_in_seconds"), int | float
+                            ):
+                                value = {
+                                    **value,
+                                    "resets_in_seconds": max(
+                                        0, int(value["resets_in_seconds"] - age_s)
+                                    ),
+                                }
+                            aged[key] = value
+                        return {**aged, "_stale": True}
             except (json.JSONDecodeError, OSError):
                 pass
         return None
@@ -496,7 +520,14 @@ class SubscriptionManager:
             with locked_state_file(path):
                 data: dict[str, Any] = {}
                 if path.exists():
-                    data = json.loads(path.read_text())
+                    try:
+                        raw = path.read_text()
+                        if raw.strip():
+                            parsed = json.loads(raw)
+                            if isinstance(parsed, dict):
+                                data = parsed
+                    except json.JSONDecodeError:
+                        pass  # corrupt file — start fresh
                 entry: dict[str, Any] = {
                     "observed_at": datetime.now(timezone.utc).isoformat(),
                     "resets_in_seconds": int(resets_in_seconds),
@@ -763,6 +794,10 @@ class SubscriptionManager:
                     for _next_sub in cfg.fallback_order:
                         if _next_sub == active:
                             continue
+                        if self.slot_credential_is_stale(_next_sub, now=current_time)[
+                            0
+                        ]:
+                            continue  # skip stale slots in forward routing
                         _last_s = self.seconds_since_last_switch_to(_next_sub)
                         if _last_s is None or _last_s > _idle_threshold_s:
                             _hold_until = current_time + timedelta(
@@ -992,7 +1027,7 @@ class SubscriptionManager:
                     break
             if not last_line:
                 return
-            if f"switched to {active}" not in last_line:
+            if _switch_log_target(last_line) != active:
                 self._log_switch(
                     active, "external switch detected (symlink changed outside script)"
                 )
