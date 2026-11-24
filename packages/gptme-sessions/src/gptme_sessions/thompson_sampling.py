@@ -95,6 +95,26 @@ def removed_mature_arms(
     return removed
 
 
+def _has_mature_arm(document: object) -> bool:
+    """Whether a raw (possibly undecodable) state document holds a mature arm."""
+    if not isinstance(document, dict):
+        return False
+    arm_maps = [document.get("arms")]
+    contextual = document.get("contextual_arms")
+    if isinstance(contextual, dict):
+        arm_maps.extend(contextual.values())
+    for arms in arm_maps:
+        if not isinstance(arms, dict):
+            continue
+        for arm in arms.values():
+            if not isinstance(arm, dict):
+                continue
+            selections = arm.get("total_selections", 0)
+            if isinstance(selections, (int, float)) and selections > MATURE_ARM_MIN_SELECTIONS:
+                return True
+    return False
+
+
 @dataclass
 class BanditArm:
     """A single arm modeled as a Beta-Bernoulli bandit.
@@ -664,9 +684,15 @@ class Bandit:
         ``allow_arm_deletion=True`` only for deliberate removals such as
         :meth:`prune`.
 
+        Also refuses to overwrite mature history that cannot be decoded; that
+        check has no override.
+
         Raises:
-            ValueError: if mature arms would be removed without the override.
+            ValueError: if mature arms would be removed without the override, or
+                neither copy of the persisted state can be decoded and one of
+                them holds a mature arm.
         """
+        self._refuse_overwriting_undecodable_history()
         self.state_dir.mkdir(parents=True, exist_ok=True)
         data = self._serialize_state()
         if not allow_arm_deletion:
@@ -713,6 +739,39 @@ class Bandit:
             raise ValueError(
                 f"refusing to delete mature bandit arm(s): {details}; "
                 "pass allow_arm_deletion=True only for a deliberate removal"
+            )
+
+    def _refuse_overwriting_undecodable_history(self) -> None:
+        """Refuse to save when real evidence exists but no copy of it loads.
+
+        A writer with a richer ``arm_class`` (or a newer engine) makes both files
+        fail strict decoding. ``_load_state()`` then returns an empty state, and
+        saving that would erase the history, first from the state file and on
+        the next save from the backup. Files that are not valid JSON hold
+        nothing recoverable here and are still repaired by saving.
+        """
+        unreadable: list[str] = []
+        for path in (self.state_file, self.backup_file):
+            try:
+                text = path.read_text()
+            except (OSError, UnicodeDecodeError):
+                continue
+            try:
+                self._decode_state(text)
+                return
+            except (ValueError, TypeError, KeyError, AttributeError):
+                pass
+            try:
+                document = json.loads(text)
+            except ValueError:
+                continue
+            if _has_mature_arm(document):
+                unreadable.append(str(path))
+        if unreadable:
+            raise ValueError(
+                f"refusing to overwrite bandit state that cannot be decoded: "
+                f"{', '.join(unreadable)} holds mature arms. Load it with the arm "
+                "class that wrote it, or move the files aside to start over."
             )
 
     def _backup_current(self) -> None:

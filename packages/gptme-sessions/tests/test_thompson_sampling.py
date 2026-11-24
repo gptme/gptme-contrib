@@ -1301,3 +1301,31 @@ def test_unknown_arm_fields_recover_backup_without_overwriting_it(tmp_path, cont
     del recovered.state.arms["a"]
     with pytest.raises(ValueError, match="refusing to delete mature bandit arm"):
         recovered.save()
+
+
+@pytest.mark.parametrize("contextual", [False, True])
+def test_undecodable_mature_history_is_never_overwritten(tmp_path, contextual):
+    """A richer writer's state must survive a plain reader that cannot load it (#2321)."""
+    context = ("ctx",) if contextual else None
+    bandit = Bandit(state_dir=tmp_path)
+    for _ in range(13):
+        bandit.update(["a"], outcome=1.0, context=context)
+    for path in (bandit.state_file, bandit.backup_file):
+        data = json.loads(path.read_text())
+        arms = [*data["arms"].values()]
+        for contexts in data.get("contextual_arms", {}).values():
+            arms.extend(contexts.values())
+        for arm in arms:
+            arm["extra"] = "from a richer arm_class"
+        if contextual:
+            data["arms"] = {}  # the only mature evidence is contextual
+        path.write_text(json.dumps(data))
+    before = (bandit.state_file.read_text(), bandit.backup_file.read_text())
+
+    reader = Bandit(state_dir=tmp_path)
+    with pytest.raises(ValueError, match="cannot be decoded"):
+        reader.update(["a"], outcome=1.0, context=context)
+    with pytest.raises(ValueError, match="cannot be decoded"):
+        reader.prune()
+
+    assert (bandit.state_file.read_text(), bandit.backup_file.read_text()) == before
