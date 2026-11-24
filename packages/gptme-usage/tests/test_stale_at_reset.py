@@ -87,3 +87,16 @@ def test_windows_shorter_than_cluster_gap_stay_apart():
         (first_reset, 0.4),
         (second_reset, 0.7),
     ]
+
+
+def test_reading_exactly_at_reset_shares_the_window_in_any_input_order():
+    # A reading observed at the reset instant must not open a second window with
+    # the same reset time: that double-counts the reset, and because the
+    # reset-time sort preserves ties the outcome would depend on input order.
+    at = T0 + timedelta(hours=12)
+    early = reading("a", at - timedelta(minutes=5), 0.8, at)
+    boundary = reading("a", at, 0.9, at)
+    for rs in ([early, boundary], [boundary, early]):
+        ws = windows_at_reset(rs, now=at + timedelta(hours=1))
+        assert [w.reset_at for w in ws] == [at]
+        assert ws[0].final_utilization == 0.9

@@ -88,12 +88,17 @@ def windows_at_reset(
         for r in items:
             prev_reset = clusters[-1][-1].reset_at if clusters else None
             # Same window: the implied reset only drifted, and this reading was
-            # taken before that reset (one taken after it is in a later window,
-            # however short the window is).
+            # taken no later than that reset (one taken after it is in a later
+            # window, however short the window is). ``<=`` and not ``<``: a
+            # reading observed exactly at the reset shares the window with the
+            # previous one, otherwise two equal reset timestamps become two
+            # windows and the same reading on the boundary is double-counted —
+            # and the result would depend on input order, since the reset-time
+            # sort preserves ties.
             if (
                 prev_reset is not None
                 and r.reset_at - prev_reset <= cluster_gap
-                and r.observed_at < prev_reset
+                and r.observed_at <= prev_reset
             ):
                 clusters[-1].append(r)
             else:
