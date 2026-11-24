@@ -79,3 +79,20 @@ def test_cli_out_writes_redacted_file(tmp_path) -> None:
     out = tmp_path / "out.txt"
     assert main(["--no-env-secrets", "--out", str(out), str(src)]) == 0
     assert out.read_text(encoding="utf-8") == "plain text, nothing secret\n"
+
+
+def test_long_at_less_run_is_linear_time() -> None:
+    # The email pattern used to rescan an @-less run from every offset:
+    # 120k hex chars took ~7s, 240k ~30s (quadratic). Now ~0.02s.
+    import time
+
+    blob = "deadbeef" * 15000
+    start = time.perf_counter()
+    redact(blob, literals=[])
+    assert time.perf_counter() - start < 2.0
+
+
+def test_email_still_matched_after_long_local_part_run() -> None:
+    r = redact("contact " + "a" * 500 + "@example.org now", literals=[])
+    assert any(f.category == "email" for f in r.findings)
+    assert "a" * 500 not in r.redacted

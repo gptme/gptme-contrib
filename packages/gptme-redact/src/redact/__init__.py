@@ -519,7 +519,12 @@ _PATTERNS: list[Pattern] = [
     ),
     # MEDIUM — contextual info that shouldn't be public.
     Pattern(
-        re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"),
+        # The lookbehind anchors matches to the start of a local-part run.
+        # Without it every offset of a long @-less run (hex dump, id string)
+        # rescans the run to its end: quadratic time on a single blob.
+        re.compile(
+            r"(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
+        ),
         Severity.MEDIUM,
         "email",
     ),
