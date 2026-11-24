@@ -3016,28 +3016,31 @@ def test_transcript_pointer_is_not_counted_as_injected(hook, tmp_path):
     assert skill["path"] not in injected
 
 
-def test_budget_timeout_still_records_a_receipt(tmp_path: Path) -> None:
-    # A hook that runs out of budget must leave a measured-zero receipt;
-    # otherwise it is indistinguishable from a hook that never ran.
-    import os
-    import subprocess
+def test_budget_timeout_still_records_a_receipt(hook, tmp_path, monkeypatch):
+    """A hook that runs out of budget must leave a measured-zero receipt;
+    otherwise it is indistinguishable from a hook that never ran.
 
-    hook_input = {
-        "hook_event_name": "UserPromptSubmit",
-        "session_id": "budget-timeout",
-        "prompt": "fix the git commit pre-commit hook failure",
-        "cwd": str(tmp_path),
-    }
-    env = {**os.environ, "TMPDIR": str(tmp_path), "MATCH_LESSONS_HOOK_BUDGET": "0.001"}
-    result = subprocess.run(
-        [sys.executable, str(HOOK_PATH)],
-        input=json.dumps(hook_input),
-        capture_output=True,
-        text=True,
-        env=env,
-        timeout=60,
-    )
-    assert result.returncode == 0
+    ``main`` is replaced by one that cannot finish inside the budget. Running
+    the real hook with a tiny budget races: on a small corpus ``main`` can
+    finish (and receipt ``no_match``) before the alarm lands.
+    """
+    if not hasattr(signal, "setitimer"):
+        pytest.skip("no setitimer on this platform")
+
+    def slow_main():
+        time.sleep(5)
+
+    payload = {"hook_event_name": "UserPromptSubmit", "session_id": "budget-timeout"}
+    monkeypatch.setattr(hook, "main", slow_main)
+    monkeypatch.setattr(hook, "_STDIN_CACHE", json.dumps(payload))
+    monkeypatch.setattr(hook, "_GPTME_RAG_AVAILABLE", True)
+    previous = signal.getsignal(signal.SIGALRM)
+    try:
+        with pytest.raises(SystemExit) as exc_info:
+            hook._run_with_budget(0.05)
+    finally:
+        signal.signal(signal.SIGALRM, previous)
+    assert exc_info.value.code == 0
     receipts = tmp_path / "cc-session-budget-timeout-lessons-receipts.jsonl"
     rows = [json.loads(line) for line in receipts.read_text().splitlines()]
     assert rows[-1]["reason"] == "hook_budget_timeout"

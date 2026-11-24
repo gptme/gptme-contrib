@@ -2688,11 +2688,10 @@ def self_check() -> int:
     return 0
 
 
-if __name__ == "__main__":
-    if "--self-check" in sys.argv[1:]:
-        sys.exit(self_check())
+def _run_with_budget(budget_seconds: float) -> None:
+    """Run ``main()`` under the wall-clock budget; a timeout degrades to empty."""
     try:
-        _arm_hook_budget(HOOK_BUDGET_SECONDS)
+        _arm_hook_budget(budget_seconds)
         main()
     except TimeoutError:
         # Stop the re-firing alarm before any recovery work can be interrupted.
@@ -2717,3 +2716,9 @@ if __name__ == "__main__":
         sys.exit(0)
     finally:
         _disarm_hook_budget()
+
+
+if __name__ == "__main__":
+    if "--self-check" in sys.argv[1:]:
+        sys.exit(self_check())
+    _run_with_budget(HOOK_BUDGET_SECONDS)
