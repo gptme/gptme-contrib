@@ -440,4 +440,22 @@ def test_cli_work_list_agent_filter_without_claimed(tmp_path, capsys) -> None:
     capsys.readouterr()
     assert cli_main(["--db", db, "work-list", "--agent", "alice"]) == 0
     out = capsys.readouterr().out
+    assert "task-a" in out, out
+    assert "task-b" not in out, out
+
+
+def test_cli_work_list_agent_filter_with_available(tmp_path, capsys) -> None:
+    """`--agent` also narrows `--available` (expired claims keep their claimer)."""
+    from gptme_coordination.cli import main as cli_main
+
+    db = str(tmp_path / "c.db")
+    for agent, task in (("alice", "task-a"), ("bob", "task-b")):
+        assert cli_main(["--db", db, "work-claim", agent, task, "--ttl", "1"]) == 0
+    with CoordinationDB(db) as cdb:
+        cdb.conn.execute("UPDATE work SET expires_at = datetime('now', '-1 minute')")
+        cdb.conn.commit()
+    capsys.readouterr()
+    assert cli_main(["--db", db, "work-list", "--available", "--agent", "alice"]) == 0
+    out = capsys.readouterr().out
+    assert "task-a" in out, out
     assert "task-b" not in out, out
