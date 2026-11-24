@@ -93,11 +93,14 @@ def main(
     if context_file and persist_workspace is None:
         persist_workspace = str(Path.cwd())
 
-    call_sid = create_outbound_call(
-        to_number,
-        settings,
-        workspace=persist_workspace,
-        context_file=context_file,
-        call_type=call_type,
-    )
+    try:
+        call_sid = create_outbound_call(
+            to_number,
+            settings,
+            workspace=persist_workspace,
+            context_file=context_file,
+            call_type=call_type,
+        )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
     click.echo(f"Started call {call_sid} to {to_number} via {settings.stream_url}")

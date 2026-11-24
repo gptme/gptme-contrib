@@ -9,6 +9,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from html import escape as _html_escape
+from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 from gptme.config import get_config
@@ -249,7 +250,15 @@ def create_outbound_call(
     The note stores a workspace-relative ``context_file`` link; the inbound
     loader reads that file (falling back to an inlined snapshot if given).
     Twilio still has to confirm the outbound leg ended unanswered.
+
+    Raises ``ValueError`` before dialling if ``context_file`` is outside
+    ``workspace``: a rejected path must not leave a call placed with no note.
     """
+    if workspace is not None and context_file is not None:
+        from .missed_call_context import _workspace_relative_path
+
+        if _workspace_relative_path(Path(workspace), context_file) is None:
+            raise ValueError(f"context_file outside workspace: {context_file!r}")
     if client_cls is None:
         try:
             from twilio.rest import Client as _TwilioClient

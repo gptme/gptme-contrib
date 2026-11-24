@@ -1,7 +1,7 @@
 import json
-import logging
 from datetime import datetime, timezone
 
+import pytest
 from click.testing import CliRunner
 from gptme_voice.realtime.call import main as call_main
 from gptme_voice.realtime.twilio_integration import (
@@ -223,11 +223,16 @@ def test_create_outbound_call_writes_note_from_context_file_only(tmp_path):
     assert "context" not in note
 
 
-def test_create_outbound_call_warns_when_context_file_outside_workspace(
-    tmp_path, caplog
+@pytest.mark.parametrize("context_file", ["../outside.json", "/etc/passwd"])
+def test_create_outbound_call_rejects_outside_context_file_before_dialling(
+    tmp_path, context_file
 ):
+    placed = []
+
     class FakeCalls:
         def create(self, **kwargs):
+            placed.append(kwargs)
+
             class Response:
                 sid = "CA" + "c" * 32
 
@@ -243,19 +248,44 @@ def test_create_outbound_call_warns_when_context_file_outside_workspace(
         from_number="+15551234567",
         stream_url="wss://voice.example/twilio",
     )
-    with caplog.at_level(logging.WARNING):
-        sid = create_outbound_call(
+    with pytest.raises(ValueError, match="outside workspace"):
+        create_outbound_call(
             "+46701234567",
             settings,
             client_cls=FakeClient,
             workspace=str(tmp_path),
-            context_file="../outside.json",
+            context_file=context_file,
         )
 
-    assert sid == "CA" + "c" * 32
+    assert placed == []
     note_path = tmp_path / "state" / "voice-calls" / "missed-call-context.json"
     assert not note_path.exists()
-    assert "Failed to persist missed-call context" in caplog.text
+
+
+def test_call_cli_rejects_outside_context_file(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "gptme_voice.realtime.call.resolve_outbound_call_settings",
+        lambda **_: OutboundCallSettings(
+            account_sid="AC123",
+            auth_token="secret",
+            from_number="+15551234567",
+            stream_url="wss://voice.example/twilio",
+        ),
+    )
+
+    result = CliRunner().invoke(
+        call_main,
+        [
+            "+46701234567",
+            "--workspace",
+            str(tmp_path),
+            "--context-file",
+            "../../etc/passwd",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "outside workspace" in result.output
 
 
 def test_call_cli_passes_context_file_to_outbound_call(monkeypatch, tmp_path):
