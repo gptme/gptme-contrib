@@ -11,7 +11,7 @@ from typing import Protocol, runtime_checkable
 import cv2
 import numpy as np
 
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tiff"}
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tiff", ".tif"}
 
 
 @runtime_checkable
