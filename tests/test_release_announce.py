@@ -1112,6 +1112,30 @@ def test_discord_permanent_4xx_skips_channel_and_continues(tmp_path, monkeypatch
     assert "discord_111_pending_at" not in rec2
 
 
+def test_discord_429_clears_marker_so_a_later_run_retries(tmp_path, monkeypatch):
+    # A 429 means Discord created no message, so the run must not leave a
+    # pending marker that wedges the channel until --force (#1779).
+    monkeypatch.setattr(ra, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setenv("DISCORD_TOKEN", "test-token")
+    responses = iter([(False, None, 429), (True, "msg-111", None)])
+    sent = []
+
+    def fake_post(channel, text):
+        sent.append(channel)
+        return next(responses)
+
+    monkeypatch.setattr(ra, "_post_discord", fake_post)
+    rel = {"tagName": "v1.2.3", "body": NOTES, "url": "https://example/rel"}
+    args = _ns(discord_channel=["111"])
+    assert ra._main(args, rel) == 1  # rate limited: this run reports failure
+    rec = ra.load_state()["gptme/gptme#v1.2.3"]
+    assert "discord_111_pending_at" not in rec
+    assert "discord_111_id" not in rec  # not ledgered: still to be posted
+    assert ra._main(args, rel) == 0  # the next run retries and succeeds
+    assert sent == ["111", "111"]
+    assert ra.load_state()["gptme/gptme#v1.2.3"]["discord_111_id"] == "msg-111"
+
+
 def test_discord_all_channels_permanently_rejected_reports_failure(
     tmp_path, monkeypatch
 ):

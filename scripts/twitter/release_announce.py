@@ -371,9 +371,12 @@ MAX_DISCORD = 2000
 
 
 # 4xx codes that are permanent rejections: no message was created, and
-# retrying will fail identically forever. 429 (rate limit) and 5xx are
-# transient and keep the pending marker.
+# retrying will fail identically forever.
 _PERMANENT_DISCORD_CODES = {400, 401, 403, 404, 405}
+# Rate limited: no message was created, but a later run can succeed, so the
+# pending marker is cleared and the step stays open for retry. 5xx and
+# timeouts are ambiguous (the message may exist) and keep the marker.
+_DISCORD_RATE_LIMITED = 429
 
 
 def _post_discord(channel: str, text: str) -> tuple[bool, str | None, int | None]:
@@ -458,8 +461,18 @@ def _discord_step(
             # not a stalling loop.
             ok = False
             continue
+        if not posted and code == _DISCORD_RATE_LIMITED:
+            print(
+                f"{key}: discord channel {channel} rate limited (HTTP 429); "
+                "a later run will retry",
+                file=sys.stderr,
+            )
+            record.pop(_pending_key(step), None)
+            save_state(state)
+            ok = False
+            continue
         if not posted:
-            # Transient or ambiguous (timeout after send?) — keep the marker so a
+            # Ambiguous (5xx, or a timeout after send?) — keep the marker so a
             # later run refuses blind retry, but do not starve other channels.
             ok = False
             continue
