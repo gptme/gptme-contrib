@@ -2582,13 +2582,8 @@ def test_gptme_core_cache_fix_no_route_reasons() -> None:
     assert reasons == []
 
 
-def test_gptme_core_new_hook_module_and_config_routes() -> None:
-    """gptme#3695: new gptme/hooks/guardrails.py hook module + config surface.
-
-    A wholly new module two levels under gptme/, plus a new env-gated config
-    knob declared in gptme/config/ — must route to Erik on the new-module (and,
-    when the config field is present, config) reason.
-    """
+def test_gptme_core_new_module_with_defaulted_config_does_not_route() -> None:
+    """Erik's merge rules 2026-11-24: a new module and a new config key with a default no longer route (gptme#3695 shape)."""
     file_shapes = [
         {
             "path": "gptme/hooks/__init__.py",
@@ -2621,19 +2616,11 @@ def test_gptme_core_new_hook_module_and_config_routes() -> None:
         "Resolves the three design questions from RFC #3598 ... Closes #3598",
         file_shapes,
     )
-    assert any("New module under gptme/" in r and "guardrails.py" in r for r in reasons)
-    assert any("New config schema key" in r and "models.py" in r for r in reasons)
-    # This PR *does* link an issue (#3598), so the unlinked-feat reason must
-    # not also fire — only the new-module/config reasons should.
-    assert not any("no #issue reference" in r for r in reasons)
+    assert reasons == []
 
 
-def test_gptme_core_new_top_level_module_routes() -> None:
-    """gptme#3706: new top-level gptme/error_hintkit.py module.
-
-    A bare new top-level module (added file, one path segment under gptme/)
-    must route to Erik on the new-module reason.
-    """
+def test_gptme_core_new_top_level_module_does_not_route() -> None:
+    """Erik's merge rules 2026-11-24: a new top-level module and an unlinked feat: no longer route (gptme#3706 shape)."""
     file_shapes = [
         {
             "path": "gptme/cli/main.py",
@@ -2662,17 +2649,11 @@ def test_gptme_core_new_top_level_module_routes() -> None:
         "error-hintkit-m1-registry-and-cli-adapter.",
         file_shapes,
     )
-    assert any(
-        "New module under gptme/" in r and "error_hintkit.py" in r for r in reasons
-    )
-    # feat: title with genuinely no #issue reference anywhere — must ALSO fire.
-    assert any("no #issue reference" in r for r in reasons)
+    assert reasons == []
 
 
-def test_gptme_core_feat_title_without_issue_routes() -> None:
-    """A `feat:` PR touching only ordinary internal files but with no linked
-    issue anywhere in title or body must still route (auto-merge-analysis §3
-    cluster 5: unmotivated/low-value features are exactly what Erik closes)."""
+def test_gptme_core_feat_title_without_issue_does_not_route() -> None:
+    """Erik's merge rules 2026-11-24: an unlinked feat: title no longer routes on its own."""
     file_shapes = [
         {
             "path": "gptme/tools/browser.py",
@@ -2690,8 +2671,7 @@ def test_gptme_core_feat_title_without_issue_routes() -> None:
         "No design doc, just seemed useful.",
         file_shapes,
     )
-    assert len(reasons) == 1
-    assert "no #issue reference" in reasons[0]
+    assert reasons == []
 
 
 def test_gptme_core_new_click_option_routes() -> None:
@@ -2727,7 +2707,7 @@ def test_gptme_core_new_cli_subcommand_file_routes() -> None:
     assert any("New CLI surface" in r and "cmd_replay.py" in r for r in reasons)
 
 
-def test_gptme_core_new_docs_page_routes() -> None:
+def test_gptme_core_new_docs_page_does_not_route() -> None:
     file_shapes = [
         {
             "path": "docs/replay.rst",
@@ -2738,10 +2718,10 @@ def test_gptme_core_new_docs_page_routes() -> None:
     reasons = self_merge_check.gptme_core_route_to_erik_reasons(
         "fix(docs): document replay", "", file_shapes
     )
-    assert any("New docs page" in r and "replay.rst" in r for r in reasons)
+    assert reasons == []
 
 
-def test_gptme_core_llm_server_provider_paths_route() -> None:
+def test_gptme_core_plain_llm_fix_does_not_route() -> None:
     file_shapes = [
         {
             "path": "gptme/llm/llm_anthropic.py",
@@ -2752,9 +2732,7 @@ def test_gptme_core_llm_server_provider_paths_route() -> None:
     reasons = self_merge_check.gptme_core_route_to_erik_reasons(
         "fix(llm): retry on 529", "", file_shapes
     )
-    assert any(
-        "gptme/llm/, gptme/server/, auth, or provider routing" in r for r in reasons
-    )
+    assert reasons == []
 
 
 def test_gptme_core_modified_existing_module_is_not_new() -> None:
@@ -2854,9 +2832,8 @@ def test_evaluate_pr_gptme_core_cache_fix_is_eligible() -> None:
     assert result.category == "gptme-core-diff-shape-eligible"
 
 
-def test_evaluate_pr_gptme_core_new_hook_module_routes_to_erik() -> None:
-    """gptme#3695 end-to-end: new hook module + config surface → NOT eligible,
-    even with CI green and AI review clean."""
+def test_evaluate_pr_gptme_core_new_hook_module_is_eligible() -> None:
+    """Erik's merge rules 2026-11-24: this shape no longer routes to Erik end-to-end."""
     files = [
         {"path": "gptme/hooks/__init__.py"},
         {"path": "gptme/hooks/guardrails.py"},
@@ -2891,12 +2868,11 @@ def test_evaluate_pr_gptme_core_new_hook_module_routes_to_erik() -> None:
         title="feat(hooks): add guardrails policy hook",
         body="Resolves the three design questions from RFC #3598 ... Closes #3598",
     )
-    assert not result.eligible
-    assert any("New module under gptme/" in r for r in result.reasons)
+    assert result.eligible, result.reasons
 
 
-def test_evaluate_pr_gptme_core_new_top_level_module_routes_to_erik() -> None:
-    """gptme#3706 end-to-end: new top-level gptme/error_hintkit.py module."""
+def test_evaluate_pr_gptme_core_new_top_level_module_is_eligible() -> None:
+    """Erik's merge rules 2026-11-24: this shape no longer routes to Erik end-to-end."""
     files = [
         {"path": "gptme/cli/main.py"},
         {"path": "gptme/error_hintkit.py"},
@@ -2932,14 +2908,11 @@ def test_evaluate_pr_gptme_core_new_top_level_module_routes_to_erik() -> None:
         body="Part of Error-HintKit M1 from Bob's local task "
         "error-hintkit-m1-registry-and-cli-adapter.",
     )
-    assert not result.eligible
-    assert any("New module under gptme/" in r for r in result.reasons)
-    assert any("no #issue reference" in r for r in result.reasons)
+    assert result.eligible, result.reasons
 
 
-def test_evaluate_pr_gptme_core_feat_without_issue_routes_to_erik() -> None:
-    """A synthetic `feat:` PR with no linked issue must route, even when every
-    file it touches is otherwise an ordinary internal module."""
+def test_evaluate_pr_gptme_core_feat_without_issue_is_eligible() -> None:
+    """Erik's merge rules 2026-11-24: this shape no longer routes to Erik end-to-end."""
     files = [
         {"path": "gptme/tools/browser.py"},
         {"path": "tests/test_browser.py"},
@@ -2962,9 +2935,7 @@ def test_evaluate_pr_gptme_core_feat_without_issue_routes_to_erik() -> None:
         title="feat: add a configurable retry delay to the browser tool",
         body="No design doc, just seemed useful.",
     )
-    assert not result.eligible
-    assert any("no #issue reference" in r for r in result.reasons)
-    assert result.category is None
+    assert result.eligible, result.reasons
 
 
 def test_evaluate_pr_gptme_core_sensitive_path_still_blocks() -> None:
@@ -3491,3 +3462,55 @@ def test_evaluate_pr_other_repo_contrib_placement_rule_not_applied() -> None:
         "Files not in any allowed self-merge category" in r for r in result.reasons
     )
     mock_shapes.assert_not_called()
+
+
+def _shape(path: str, patch: str, status: str = "modified") -> dict[str, Any]:
+    return {"path": path, "status": status, "patch": patch}
+
+
+def test_gptme_core_llm_auth_change_routes() -> None:
+    reasons = self_merge_check.gptme_core_route_to_erik_reasons(
+        "fix(llm): read the key from the env",
+        "",
+        [
+            _shape(
+                "gptme/llm/llm_openai.py",
+                "@@ -1 +1 @@\n+    api_key = os.environ['K']\n",
+            )
+        ],
+    )
+    assert any("auth, billing or defaults" in r for r in reasons)
+
+
+def test_gptme_core_llm_changed_default_routes() -> None:
+    patch = "@@ -1 +1 @@\n-DEFAULT_MODEL = 'a'\n+DEFAULT_MODEL = 'b'\n"
+    reasons = self_merge_check.gptme_core_route_to_erik_reasons(
+        "fix(llm): newer model", "", [_shape("gptme/llm/models.py", patch)]
+    )
+    assert any("auth, billing or defaults" in r for r in reasons)
+
+
+def test_gptme_core_auth_file_always_routes() -> None:
+    reasons = self_merge_check.gptme_core_route_to_erik_reasons(
+        "fix: typo", "", [_shape("gptme/oauth/flow.py", "@@ -1 +1 @@\n+x = 1\n")]
+    )
+    assert any("gptme/oauth/flow.py" in r for r in reasons)
+
+
+def test_gptme_core_required_config_key_routes() -> None:
+    patch = "@@ -1 +1,2 @@\n+    workspace_id: str\n"
+    reasons = self_merge_check.gptme_core_route_to_erik_reasons(
+        "feat: x #1", "", [_shape("gptme/config/models.py", patch)]
+    )
+    assert any("New required config key" in r for r in reasons)
+
+
+def test_gptme_core_changed_config_default_routes() -> None:
+    patch = (
+        '@@ -1 +1 @@\n-    mode: str = field(default="shadow")\n'
+        '+    mode: str = field(default="enforce")\n'
+    )
+    reasons = self_merge_check.gptme_core_route_to_erik_reasons(
+        "fix: enforce", "", [_shape("gptme/config/models.py", patch)]
+    )
+    assert any("Changed or removed config field" in r for r in reasons)

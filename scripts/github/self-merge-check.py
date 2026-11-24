@@ -2659,29 +2659,21 @@ def classify_category(
 # bot-config/spec-like-doc hard stops that classify_category also enforces
 # still apply — those are the one thing Erik has said belongs to a human
 # every time (auto-merge-analysis §3 cluster 3). In their place, these
-# detectors flag the diff *shapes* Erik has repeatedly asked to see himself:
-# new public CLI surface, new config schema, a wholly new module, a new docs
-# page, an unmotivated `feat` with no linked issue, and anything touching
-# LLM/server/provider routing or auth. A PR triggering none of these — and
+# detectors flag the diff *shapes* Erik has asked to see himself: new public
+# CLI surface, new required config or a changed config default, auth files,
+# and auth/billing/default changes on LLM/server/provider routing (narrowed to
+# his merge rules on 2026-11-24). A PR triggering none of these — and
 # otherwise clean on CI, AI review, Greptile, and human threads — is eligible
 # regardless of which directory it touches. Every other repo's
 # classify_category call is untouched by this block.
 _GPTME_CORE_REPO = "gptme/gptme"
 
-# A newly *added* .py file at most one subdirectory below gptme/ — deep
-# enough to catch a new subpackage module (gptme/hooks/guardrails.py,
-# gptme#3695) as well as a bare top-level one (gptme/error_hintkit.py,
-# gptme#3706), shallow enough that it doesn't also match a test file three
-# levels down (gptme/hooks/tests/test_x.py — is_test_file already excludes
-# those, but the depth bound keeps this detector's own intent legible).
-_GPTME_CORE_NEW_MODULE_RE = re.compile(r"^gptme/(?:[^/]+/)?[^/]+\.py$")
 # A dataclass-style attribute declaration added inside gptme/config/ — how
 # gptme declares its config schema (gptme/config/models.py: `field_name: Type
 # = field(...)` at class scope, indented). Matched against the added line's
 # *own* indentation, so a top-level statement (import, function def) does not
 # false-positive.
 _GPTME_CORE_CONFIG_FIELD_RE = re.compile(r"^\s{4,}[A-Za-z_][A-Za-z0-9_]*\s*:\s*\S")
-_GPTME_CORE_ISSUE_REF_RE = re.compile(r"#\d+")
 # gptme/llm/ (model calls), gptme/server/ (HTTP surface + auth), gptme/oauth/
 # and gptme/credentials.py (auth), gptme/providers/ and gptme/cli/auth.py
 # (provider routing / auth). Generic auth/oauth keyword matching already
@@ -2691,9 +2683,18 @@ _GPTME_CORE_SENSITIVE_SURFACE_PREFIXES = (
     "gptme/llm/",
     "gptme/server/",
     "gptme/providers/",
+)
+# Always held: these files *are* auth.
+_GPTME_CORE_AUTH_SURFACE_PREFIXES = (
     "gptme/oauth/",
     "gptme/credentials.py",
     "gptme/cli/auth.py",
+)
+# On the llm/server/providers surface, only a change touching auth, billing or
+# a default holds (Erik 2026-11-24: not every fix there). Defaults are matched
+# on removed lines only, so adding a parameter with a default does not hold.
+_GPTME_CORE_AUTH_BILLING_RE = re.compile(
+    r"(?i)(auth|bearer|api[_-]?key|credential|secret|billing|credit|pricing|price)"
 )
 
 
@@ -2796,30 +2797,46 @@ def _gptme_core_added_lines(patch: str | None) -> list[str]:
     ]
 
 
+def _gptme_core_removed_lines(patch: str | None) -> list[str]:
+    """Removed (`-`-prefixed, non-header) lines of a unified diff patch."""
+    if not patch:
+        return []
+    return [
+        line[1:]
+        for line in patch.splitlines()
+        if line.startswith("-") and not line.startswith("---")
+    ]
+
+
 def gptme_core_route_to_erik_reasons(
     title: str, body: str, file_shapes: list[dict[str, Any]]
 ) -> list[str]:
     """Diff-shape checks that route a gptme/gptme PR to Erik.
 
-    Each reason quotes, in one clause, the cluster of Erik's block reasons it
-    encodes (workspace brain repo,
-    knowledge/strategic/2026-09-07-auto-merge-analysis.md §3). Returns an
-    empty list when none of the shapes are present — evaluate_pr then treats
-    the PR as eligible on diff shape, regardless of which directory it
-    touches (subject to CI/AI-review/Greptile/human-thread checks elsewhere).
+    Narrowed to Erik's merge rules (2026-11-24): features merge on a clean
+    review unless they add user-visible surface, *required* config or a
+    changed default, or touch auth, billing or defaults. New modules, new
+    docs pages and an unlinked `feat:` title no longer route on their own.
+    Returns an empty list when none of the shapes are present — evaluate_pr
+    then treats the PR as eligible on diff shape, regardless of which
+    directory it touches (subject to CI/AI-review/Greptile/human-thread checks
+    elsewhere).
     """
+    del title, body  # kept for callers; no title/body rule remains
     reasons: list[str] = []
 
     new_click_surface: set[str] = set()
     new_cli_files: set[str] = set()
-    new_config_keys: set[str] = set()
-    new_modules: set[str] = set()
-    new_docs_pages: set[str] = set()
+    required_config: set[str] = set()
+    changed_config: set[str] = set()
+    sensitive_surface: set[str] = set()
 
     for entry in file_shapes:
         path = str(entry.get("path", "")).replace("\\", "/").removeprefix("./")
         status = entry.get("status", "")
-        added_lines = _gptme_core_added_lines(cast("str | None", entry.get("patch")))
+        patch = cast("str | None", entry.get("patch"))
+        added_lines = _gptme_core_added_lines(patch)
+        removed_lines = _gptme_core_removed_lines(patch)
 
         if status == "added" and path.startswith("gptme/cli/"):
             new_cli_files.add(path)
@@ -2828,18 +2845,24 @@ def gptme_core_route_to_erik_reasons(
             for line in added_lines
         ):
             new_click_surface.add(path)
-        if path.startswith("gptme/config/") and any(
-            _GPTME_CORE_CONFIG_FIELD_RE.match(line) for line in added_lines
+        if path.startswith("gptme/config/"):
+            if any(
+                _GPTME_CORE_CONFIG_FIELD_RE.match(line) and "=" not in line
+                for line in added_lines
+            ):
+                required_config.add(path)
+            if any(_GPTME_CORE_CONFIG_FIELD_RE.match(line) for line in removed_lines):
+                changed_config.add(path)
+        if path.startswith(_GPTME_CORE_AUTH_SURFACE_PREFIXES):
+            sensitive_surface.add(path)
+        elif path.startswith(_GPTME_CORE_SENSITIVE_SURFACE_PREFIXES) and (
+            any(_GPTME_CORE_AUTH_BILLING_RE.search(line) for line in added_lines)
+            or any(
+                _GPTME_CORE_AUTH_BILLING_RE.search(line) or "default" in line.lower()
+                for line in removed_lines
+            )
         ):
-            new_config_keys.add(path)
-        if (
-            status == "added"
-            and not is_test_file(path)
-            and _GPTME_CORE_NEW_MODULE_RE.match(path)
-        ):
-            new_modules.add(path)
-        if status == "added" and path.startswith("docs/"):
-            new_docs_pages.add(path)
+            sensitive_surface.add(path)
 
     if new_click_surface or new_cli_files:
         reasons.append(
@@ -2849,55 +2872,25 @@ def gptme_core_route_to_erik_reasons(
             "the default gptme CLI\" / \"can't justify a whole 'nother CLI "
             'flag" (auto-merge-analysis §3 cluster 4, e.g. gptme#3209, #3296)'
         )
-    if new_config_keys:
+    if required_config:
         reasons.append(
-            "New config schema key ("
-            + ", ".join(sorted(new_config_keys))
-            + "): core config surface is Erik's call, same cluster as new CLI "
-            "flags (auto-merge-analysis §3 cluster 4)"
+            "New required config key ("
+            + ", ".join(sorted(required_config))
+            + "): a config field with no default is new required config, "
+            "Erik's call (merge rules 2026-11-24)"
         )
-    if new_modules:
+    if changed_config:
         reasons.append(
-            "New module under gptme/ ("
-            + ", ".join(sorted(new_modules))
-            + "): Erik — public-surface proliferation and naming/placement is "
-            "his taste to set (auto-merge-analysis §3 cluster 4, e.g. #3529 "
-            "\"'harness' is kinda vague\")"
+            "Changed or removed config field ("
+            + ", ".join(sorted(changed_config))
+            + "): a changed default is user-visible, Erik's call (merge rules "
+            "2026-11-24)"
         )
-    if new_docs_pages:
-        reasons.append(
-            "New docs page under docs/ ("
-            + ", ".join(sorted(new_docs_pages))
-            + "): Erik has flagged duplicate/misplaced doc pages before "
-            "(auto-merge-analysis §3 cluster 4, e.g. #3178)"
-        )
-
-    normalized_title = title.strip()
-    if re.match(r"(?i)^feat[:(]", normalized_title):
-        if not _GPTME_CORE_ISSUE_REF_RE.search(title) and not (
-            body and _GPTME_CORE_ISSUE_REF_RE.search(body)
-        ):
-            reasons.append(
-                "feat: title with no #issue reference in title or body: Erik — "
-                '"Idk if this is an actually useful feature" / "kinda low '
-                'value" (auto-merge-analysis §3 cluster 5, e.g. gptme#2836, '
-                "#2979)"
-            )
-
-    sensitive_surface = sorted(
-        {
-            str(entry.get("path", "")).replace("\\", "/").removeprefix("./")
-            for entry in file_shapes
-            if str(entry.get("path", ""))
-            .replace("\\", "/")
-            .removeprefix("./")
-            .startswith(_GPTME_CORE_SENSITIVE_SURFACE_PREFIXES)
-        }
-    )
     if sensitive_surface:
         reasons.append(
-            "Touches gptme/llm/, gptme/server/, auth, or provider routing ("
-            + ", ".join(sensitive_surface)
+            "Touches auth, billing or defaults on gptme/llm/, gptme/server/ or "
+            "provider routing ("
+            + ", ".join(sorted(sensitive_surface))
             + '): Erik — "avoid making too much auth cloud-specific"; silent '
             "auth/provider misrouting is exactly this class (auto-merge-"
             "analysis §3 cluster 3, e.g. gptme#2820, #2901)"
