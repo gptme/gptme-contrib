@@ -174,6 +174,21 @@ from gptodo.worktree import (
 # Keep console instance for CLI output
 console = Console()
 
+
+# Printed whenever a task is parked into waiting. A wait whose blocker is a step
+# the caller could take itself is a silent stall: ask before the park lands.
+PARK_SELF_CHECK = (
+    "Parked {name} as waiting. Can you do this yourself? If the blocker is a step "
+    "you could take (a check, a fix, a decision within your authority), take it and "
+    "set the task back to todo/active instead. Otherwise give it a wake that acts "
+    "(probe:, wait: or a delivered ask)."
+)
+
+
+def _print_park_self_check(name: str) -> None:
+    click.echo(PARK_SELF_CHECK.format(name=name), err=True)
+
+
 BROWSE_DEFAULT_STATES = [
     "backlog",
     "todo",
@@ -3162,6 +3177,12 @@ def edit(
                     console.print(
                         f"[cyan]↩ {task.name} recurring — reset to waiting, next wait: {result.post.metadata['wait']}[/]"
                     )
+                elif (
+                    result.requested_state == "waiting"
+                    and result.old_state != "waiting"
+                    and result.written
+                ):
+                    _print_park_self_check(task.name)
     finally:
         # Earlier writes remain committed even if a later read/replace fails.
         for path in completion_paths:
@@ -6262,6 +6283,8 @@ def add(
 
     console.print(f"[green]✓ Created task:[/] {filepath}")
     print(filepath.stem)
+    if state == "waiting":
+        _print_park_self_check(filepath.stem)
 
 
 def _frontmatter_block_keys(body: str) -> list[str] | None:
