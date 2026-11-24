@@ -515,6 +515,40 @@ def test_ack_stamps_when_subject_contains_replied(workspace: Path) -> None:
     assert name not in CliRunner().invoke(agent, ["pending"]).output
 
 
+def test_ack_stamps_when_quoted_subject_continues_with_replied(workspace: Path) -> None:
+    # A double-quoted scalar may continue on a line that looks like a key. The
+    # stamp must edit parsed YAML, not raw lines, or it rewrites the subject
+    # and never adds the real key.
+    inbox = workspace / "messages" / "inbox"
+    name = "20260613-000000-000000-bob-continued.md"
+    (inbox / name).write_text(
+        "---\nfrom: bob\nto: alice\ntimestamp: 2026-06-13T00:00:00Z\n"
+        'subject: "Status\nreplied: soon"\nread: false\n---\n\nfyi\n'
+    )
+    result = CliRunner().invoke(agent, ["ack", name])
+    assert result.exit_code == 0, result.output
+    fm = _frontmatter(inbox / name)
+    assert fm["subject"] == "Status replied: soon"
+    assert fm["replied"] is True
+    assert fm["read"] is True
+    assert (inbox / name).read_text().endswith("\n\nfyi\n")
+    assert name not in CliRunner().invoke(agent, ["pending"]).output
+
+
+def test_read_stamps_when_quoted_subject_continues_with_read(workspace: Path) -> None:
+    inbox = workspace / "messages" / "inbox"
+    name = "20260613-000000-000000-bob-continued-read.md"
+    (inbox / name).write_text(
+        "---\nfrom: bob\nto: alice\ntimestamp: 2026-06-13T00:00:00Z\n"
+        'subject: "Status\nread: true\nlater"\nread: false\n---\n\nfyi\n'
+    )
+    result = CliRunner().invoke(agent, ["read", name])
+    assert result.exit_code == 0, result.output
+    fm = _frontmatter(inbox / name)
+    assert fm["subject"] == "Status read: true later"
+    assert fm["read"] is True
+
+
 def test_ack_fails_when_stamp_cannot_land(workspace: Path) -> None:
     inbox = workspace / "messages" / "inbox"
     name = "20260613-000000-000000-bob-nofm.md"

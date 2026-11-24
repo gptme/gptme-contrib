@@ -60,6 +60,7 @@ from gptmail.transport.agent import (
     Deliver,
     local_delivery_time,
     meta_of,
+    stamp_frontmatter_flags,
     write_inbox_metadata,
 )
 from gptmail.transport.receive import (
@@ -666,47 +667,21 @@ def _pending_messages(
 
 def _mark_read(path: Path) -> None:
     """Stamp an inbox message ``read: true``. Idempotent. Handles missing key (pull-fetched msgs)."""
-    if not path.exists():
-        return
-    content = path.read_text()
-    if not content.startswith("---"):
-        return
-    parts = _FM_DELIM.split(content, maxsplit=2)
-    if len(parts) < 3:
-        return
-    fm = parts[1]
-    if re.search(r"^read: true$", fm, flags=re.MULTILINE):
-        return
-    if re.search(r"^read:", fm, flags=re.MULTILINE):
-        fm = re.sub(r"^read: false$", "read: true", fm, flags=re.MULTILINE)
-    else:
-        fm = fm.rstrip("\n") + "\nread: true\n"
-    write_inbox_metadata(path, "---".join([parts[0], fm, parts[2]]))
+    _stamp_inbox(path, {"read": True})
 
 
 def _mark_replied(path: Path) -> None:
     """Stamp an inbox message ``replied: true`` (and ``read: true``). Idempotent."""
+    _stamp_inbox(path, {"read": True, "replied": True})
+
+
+def _stamp_inbox(path: Path, flags: dict[str, bool]) -> None:
     if not path.exists():
         return
     content = path.read_text()
-    if not content.startswith("---"):
-        return
-    parts = _FM_DELIM.split(content, maxsplit=2)
-    if len(parts) < 3:
-        return
-    fm = parts[1]
-    # Mark read — handles "read: false" flip and missing-key insertion (pull-fetched msgs).
-    if not re.search(r"^read: true$", fm, flags=re.MULTILINE):
-        if re.search(r"^read:", fm, flags=re.MULTILINE):
-            fm = re.sub(r"^read: false$", "read: true", fm, flags=re.MULTILINE)
-        else:
-            fm = fm.rstrip("\n") + "\nread: true\n"
-    # Anchor on the key: a subject like "Auto-replied: x" must not suppress the stamp.
-    if re.search(r"^replied:", fm, flags=re.MULTILINE):
-        fm = re.sub(r"^replied:.*$", "replied: true", fm, flags=re.MULTILINE)
-    else:
-        fm = fm.rstrip("\n") + "\nreplied: true\n"
-    write_inbox_metadata(path, "---".join([parts[0], fm, parts[2]]))
+    stamped = stamp_frontmatter_flags(content, flags)
+    if stamped is not None and stamped != content:
+        write_inbox_metadata(path, stamped)
 
 
 def _resolve_message(

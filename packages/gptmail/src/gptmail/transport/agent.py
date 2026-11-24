@@ -125,6 +125,49 @@ def local_delivery_time(path: Path) -> float:
         return os.fstat(source.fileno()).st_mtime
 
 
+def stamp_frontmatter_flags(content: str, flags: dict[str, bool]) -> str | None:
+    """Return ``content`` with top-level frontmatter ``flags`` set.
+
+    Edits only the lines of the real top-level keys, located through the YAML
+    node tree, so the rest of the frontmatter stays byte-for-byte intact. A raw
+    line regex cannot tell a key from a quoted scalar's continuation line such
+    as ``replied: soon``: it rewrote the subject and never added the key.
+
+    Returns ``content`` unchanged when every flag already holds, and ``None``
+    when there is no parseable block-style frontmatter mapping.
+    """
+    if not content.startswith("---"):
+        return None
+    parts = _FM_DELIM.split(content, maxsplit=2)
+    if len(parts) < 3:
+        return None
+    fm = parts[1]
+    try:
+        node = yaml.compose(fm, Loader=yaml.SafeLoader)
+        meta = yaml.safe_load(fm)
+    except yaml.YAMLError:
+        return None
+    if not isinstance(node, yaml.MappingNode) or node.flow_style or not isinstance(meta, dict):
+        return None
+    pending = {key: value for key, value in flags.items() if meta.get(key) is not value}
+    if not pending:
+        return content
+    lines = fm.split("\n")
+    spans: list[tuple[int, int, str]] = []
+    for key_node, value_node in node.value:
+        if isinstance(key_node, yaml.ScalarNode) and key_node.value in pending:
+            end = value_node.end_mark.line + (1 if value_node.end_mark.column else 0)
+            spans.append((key_node.start_mark.line, end, key_node.value))
+    for start, end, key in sorted(spans, reverse=True):
+        lines[start:end] = [f"{key}: {'true' if pending[key] else 'false'}"]
+    fm = "\n".join(lines)
+    present = {key for _, _, key in spans}
+    for key, value in pending.items():
+        if key not in present:
+            fm = fm.rstrip("\n") + f"\n{key}: {'true' if value else 'false'}\n"
+    return "---".join([parts[0], fm, parts[2]])
+
+
 def write_inbox_metadata(path: Path, content: str) -> None:
     """Publish read/replied stamps without losing the original arrival time."""
     with path.open() as source:
@@ -386,18 +429,10 @@ class AgentTransport:
 
     def _mark_read(self, path: Path) -> str:
         content = path.read_text()
-        if content.startswith("---"):
-            parts = _FM_DELIM.split(content, maxsplit=2)
-            if len(parts) >= 3:
-                fm = parts[1]
-                if not re.search(r"^read: true$", fm, flags=re.MULTILINE):
-                    if re.search(r"^read:", fm, flags=re.MULTILINE):
-                        fm = re.sub(r"^read: false$", "read: true", fm, flags=re.MULTILINE)
-                    else:
-                        fm = fm.rstrip("\n") + "\nread: true\n"
-                    parts[1] = fm
-                    content = "---".join(parts)
-                    write_inbox_metadata(path, content)
+        stamped = stamp_frontmatter_flags(content, {"read": True})
+        if stamped is not None and stamped != content:
+            write_inbox_metadata(path, stamped)
+            return stamped
         return content
 
     def _lookup_path(self, message_id: str) -> Path | None:
