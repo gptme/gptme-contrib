@@ -159,6 +159,46 @@ def test_split_hunks_preserve_lf_lines_and_anchors(separator):
     assert rebuilt == additions
 
 
+def test_unterminated_last_section_is_not_glued_onto_a_later_header():
+    """Packing groups by directory can move the diff's final section ahead of
+    another group's; a missing final newline must not merge it into that
+    group's ``diff --git`` line (gptme/gptme-contrib#2331 section 3)."""
+    diff = (
+        "diff --git a/pkg/a/x.py b/pkg/a/x.py\n--- a/pkg/a/x.py\n+++ b/pkg/a/x.py\n"
+        "@@ -1 +1 @@\n-x\n+y\n"
+        "diff --git a/pkg/b/y.py b/pkg/b/y.py\n--- a/pkg/b/y.py\n+++ b/pkg/b/y.py\n"
+        "@@ -1 +1 @@\n-x\n+y\n"
+        "diff --git a/pkg/a/z.py b/pkg/a/z.py\n--- a/pkg/a/z.py\n+++ b/pkg/a/z.py\n"
+        "@@ -1 +1 @@\n-x\n+y"
+    )
+    assert all(s.text.endswith("\n") for s in shard.split_file_sections(diff))
+    plan = shard.plan_shards(diff, budget=10_000)
+    assert len(plan) == 1
+    text = plan[0].diff
+    assert [ln for ln in text.splitlines() if ln.startswith("diff --git")] == [
+        f"diff --git a/{p} b/{p}" for p in ("pkg/a/x.py", "pkg/a/z.py", "pkg/b/y.py")
+    ]
+    assert plan[0].paths == ["pkg/a/x.py", "pkg/a/z.py", "pkg/b/y.py"]
+
+
+def test_files_api_diff_shards_without_gluing_sections():
+    """The >300-file fallback is the diff that gets sharded."""
+    files = [
+        {"filename": name, "patch": "@@ -1 +1 @@\n-x\n+y"}
+        for name in ("pkg/a/x.py", "pkg/b/y.py", "pkg/a/z.py")
+    ]
+
+    def run(cmd, **kwargs):
+        stdout = "".join(json.dumps(f) + "\n" for f in files)
+        return subprocess.CompletedProcess(cmd, 0, stdout=stdout)
+
+    diff = lib.fetch_pr_diff_via_files_api("owner/repo", 1, run=run)
+    assert diff.endswith("\n")
+    text = "".join(s.diff for s in shard.plan_shards(diff, budget=10_000))
+    assert "+ydiff --git" not in text
+    assert text.count("diff --git") == 3
+
+
 def test_small_diff_does_not_need_sharding():
     small = _readme_pr(n_packages=2, n_lines=10)
     assert not shard.needs_sharding(small)
