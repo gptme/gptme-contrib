@@ -194,3 +194,39 @@ def test_probe_refresh_does_not_overwrite_legacy_slot_reauthenticated_mid_probe(
     assert ok, message
 
     assert json.loads(slot.read_text())["claudeAiOauth"]["refreshToken"] == "b-refresh"
+
+
+def test_probe_reports_a_refresh_it_could_not_save(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    slot = tmp_path / ".credentials.json.alice"
+    _write_slot(slot)
+    script = tmp_path / "usage.py"
+    script.write_text(
+        """#!/usr/bin/env python3
+import json, os
+from pathlib import Path
+live = Path.home() / ".claude" / ".credentials.json"
+data = json.loads(live.read_text())
+data["claudeAiOauth"].update(refreshToken="new-refresh")
+tmp = live.with_name(".credentials.json.tmp")
+tmp.write_text(json.dumps(data))
+os.replace(tmp, live)
+"""
+    )
+    script.chmod(0o755)
+    import gptme_subscription.auth as auth
+
+    def failing_replace(src: object, dst: object) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(auth.os, "replace", failing_replace)
+
+    _, ok, msg = probe_credential(slot, "alice", usage_script=script)
+
+    assert ok is False
+    assert "rotated credentials kept at" in msg
+    kept = Path(msg.rsplit(" ", 1)[-1])
+    assert (
+        json.loads(kept.read_text())["claudeAiOauth"]["refreshToken"] == "new-refresh"
+    )

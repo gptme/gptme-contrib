@@ -155,8 +155,12 @@ def _slot_account(content: bytes) -> str | None:
 
 def _persist_probe_refresh(
     live: Path, slot: Path, expected_account: str | None, original: bytes
-) -> None:
+) -> str | None:
     """Copy tokens Claude Code refreshed during a probe back into the slot.
+
+    Returns an error message when a rotated token could not be written to the
+    slot; the slot then holds a consumed token. The temp file holding the
+    rotated credentials is kept as a recovery copy and named in the message.
 
     A refresh replaces the temporary symlink with a regular file holding a
     rotated refresh token. The old one is already consumed, so dropping the
@@ -170,20 +174,20 @@ def _persist_probe_refresh(
     or not it names an account) is never overwritten.
     """
     if live.is_symlink() or not live.is_file():
-        return
+        return None
     try:
         text = live.read_text(encoding="utf-8")
         oauth = json.loads(text).get("claudeAiOauth")
     except (OSError, UnicodeDecodeError, ValueError, AttributeError):
-        return
+        return None
     if not isinstance(oauth, dict) or not oauth.get("refreshToken"):
-        return
+        return None
     if expected_account is not None and (oauth.get("accountUuid") != expected_account):
         logger.warning(
             "probe refresh for %s names a different account; slot left unchanged",
             slot.name,
         )
-        return
+        return None
     fd, tmp_name = tempfile.mkstemp(prefix=f".{slot.name}.", dir=slot.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
@@ -203,10 +207,26 @@ def _persist_probe_refresh(
                 "slot %s changed while it was probed; refresh not written", slot.name
             )
             Path(tmp_name).unlink(missing_ok=True)
-            return
+            return None
         os.replace(tmp_name, slot)
-    except OSError:
-        Path(tmp_name).unlink(missing_ok=True)
+    except OSError as exc:
+        if (
+            Path(tmp_name).is_file()
+            and Path(tmp_name).read_text(encoding="utf-8", errors="replace") == text
+        ):
+            message = (
+                f"probe refreshed {slot.name} but writing the slot failed ({exc}); "
+                f"rotated credentials kept at {tmp_name}"
+            )
+        else:
+            Path(tmp_name).unlink(missing_ok=True)
+            message = (
+                f"probe refreshed {slot.name} but saving the rotated token "
+                f"failed ({exc}); re-authenticate the slot"
+            )
+        logger.error("%s", message)
+        return message
+    return None
 
 
 def probe_lock_path(slot: Path) -> Path:
@@ -270,13 +290,16 @@ def probe_credential(
                 finally:
                     # Also on timeout: a refresh written before a hang would
                     # otherwise be deleted with the temporary directory.
-                    _persist_probe_refresh(
+                    persist_error = _persist_probe_refresh(
                         live_credential, target_credential, expected_account, original
                     )
     except subprocess.TimeoutExpired:
         return info, False, f"probe timed out after {timeout}s"
     except OSError as exc:
         return info, False, f"probe error: {exc}"
+
+    if persist_error is not None:
+        return info, False, persist_error
 
     if result.returncode != 0:
         stderr = (result.stderr or "").strip().splitlines()[-1:] or [""]
