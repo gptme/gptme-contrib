@@ -110,3 +110,32 @@ def test_nested_switch_in_same_process_does_not_collide(
     assert outer.ok
     assert os.readlink(mgr.live_path) == ".credentials.json.alice"
     assert not [p for p in mgr.creds_dir.iterdir() if ".tmp" in p.name]
+
+
+@pytest.mark.parametrize("force", [False, True])
+def test_switch_refuses_to_destroy_drifted_live_file(
+    mgr: SlotManager, force: bool
+) -> None:
+    mgr.slot_path("bob").write_text(_cred("rt-bob-old", _ms(3600)))
+    mgr.slot_path("alice").write_text(_cred("rt-alice", _ms(3600)))
+    fresh = _cred("rt-fresh-login", _ms(3600))
+    mgr.live_path.write_text(fresh)
+
+    result = mgr.switch_to("alice", "rebalance", force=force)
+
+    assert not result.ok
+    assert "matches no slot" in result.reason
+    assert not mgr.live_path.is_symlink()
+    assert mgr.live_path.read_text() == fresh
+
+
+def test_switch_from_regular_file_matching_a_slot_still_works(
+    mgr: SlotManager,
+) -> None:
+    bob = _cred("rt-bob", _ms(3600))
+    mgr.slot_path("bob").write_text(bob)
+    mgr.slot_path("alice").write_text(_cred("rt-alice", _ms(3600)))
+    mgr.live_path.write_text(bob)  # pre-symlink layout, identical to a slot
+
+    assert mgr.switch_to("alice", "rebalance").ok
+    assert os.readlink(mgr.live_path) == ".credentials.json.alice"

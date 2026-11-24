@@ -605,6 +605,10 @@ class SlotManager:
           one with nothing to refresh, is still refused. Every bypass and
           every ignored ``probe_ok`` is logged distinctly so a skipped safety
           check is never indistinguishable from an ordinary switch.
+        - If the live path is a regular file matching no slot (drift, e.g.
+          after ``/login``), the switch is refused **regardless of**
+          ``force``: that file may be the only copy of a rotated refresh
+          token. Resync it with :meth:`heal_drift_to` first.
         - On success, replaces the existing symlink atomically via a
           temp-symlink + ``os.replace`` (single rename syscall) so no
           concurrent reader sees a missing ``live_path``, then calls
@@ -685,6 +689,18 @@ class SlotManager:
                 return SwitchResult(ok=False, reason=msg)
 
         live = self.live_path
+        if live.is_file() and not live.is_symlink():
+            # A regular live file that matches no slot (e.g. a fresh /login)
+            # is the only on-disk copy of that refresh token; replacing it
+            # with a symlink would destroy it. ``force`` does not override.
+            drift = self.detect_live_slot_drift()
+            if drift is not None and drift["drift"]:
+                msg = (
+                    f"refusing to switch to {sub}: live credential matches no "
+                    "slot and would be lost; heal_drift_to() it into a slot first"
+                )
+                self._log(msg)
+                return SwitchResult(ok=False, reason=msg)
         tmp = _unique_tmp(self.creds_dir / self.live_name)
         try:
             tmp.symlink_to(self.slot_template.format(sub=sub))
