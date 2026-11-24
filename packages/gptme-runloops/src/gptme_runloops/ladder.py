@@ -72,13 +72,15 @@ class LadderResult(Generic[T]):
 
     ``rungs`` holds every rung that ran, zero counts included, in run order.
     Rungs after the one that closed the deficit do not run and are absent.
-    ``produced_by`` is the first rung that filed anything, or ``"none"``.
+    ``produced_by`` is the first rung that filed anything, or ``None``.
+    ``None`` rather than a ``"none"`` sentinel, because a rung may be named
+    ``none``: a sentinel is not distinguishable from such a rung's own name.
     """
 
     deficit: int
     rungs: dict[str, RungResult] = field(default_factory=dict)
     filed: list[T] = field(default_factory=list)
-    produced_by: str = "none"
+    produced_by: str | None = None
 
     @property
     def remaining(self) -> int:
@@ -92,7 +94,7 @@ class LadderResult(Generic[T]):
     def summary(self) -> str:
         """One log line: ``produced_by=X own-prs=1/3 miners=0/0 ...`` (filed/emitted)."""
         counts = " ".join(f"{k}={v.filed}/{v.emitted}" for k, v in self.rungs.items())
-        return f"produced_by={self.produced_by} {counts}".rstrip()
+        return f"produced_by={self.produced_by or 'none'} {counts}".rstrip()
 
 
 def run_ladder(
@@ -122,12 +124,14 @@ def run_ladder(
             raise ValueError(f"duplicate rung name: {rung.name!r}")
         try:
             out = rung.produce()
+            # A rung that returns the wrong shape is as broken as one that
+            # raises: keep the failure on that rung instead of failing the run.
+            items = list(out.items)
         except Exception as exc:  # one broken source must not starve the rest
             result.rungs[rung.name] = RungResult(
                 emitted=0, filed=0, error=f"{type(exc).__name__}: {exc}"
             )
             continue
-        items = list(out.items)
         take = items[: result.remaining]
         filed = file_items(rung.name, take) if take else 0
         if filed < 0 or filed > len(take):
@@ -135,10 +139,10 @@ def run_ladder(
                 f"file_items for {rung.name!r} returned {filed}, expected 0..{len(take)}"
             )
         result.rungs[rung.name] = RungResult(
-            emitted=len(items), filed=filed, note=out.note
+            emitted=len(items), filed=filed, note=getattr(out, "note", "")
         )
         if filed:
-            if result.produced_by == "none":
+            if result.produced_by is None:
                 result.produced_by = rung.name
             result.filed.extend(take[:filed])
     return result

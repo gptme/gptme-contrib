@@ -55,7 +55,7 @@ def test_all_empty_records_zero_per_rung_and_idles_on_purpose():
 
     res = run_ladder(rungs, deficit=2, file_items=file_items)
     assert res.idle_on_purpose
-    assert res.produced_by == "none"
+    assert res.produced_by is None
     assert list(res.rungs) == ["own-prs", "judgment-waits"]
     assert res.rungs["judgment-waits"].note.startswith("unavailable")
     assert filed_calls == []  # never called with an empty list
@@ -88,6 +88,34 @@ def test_broken_rung_is_recorded_and_ladder_continues():
     )
     assert res.rungs["own-prs"].error == "RuntimeError: manifest stale"
     assert res.produced_by == "miners"
+
+
+def test_broken_rung_shape_is_recorded_not_raised():
+    """A rung that returns the wrong object fails only that rung."""
+
+    class Wrong:
+        pass
+
+    res = run_ladder(
+        [Rung("own-prs", lambda: Wrong()), _rung("miners", ["x"])],
+        deficit=1,
+        file_items=_file_all,
+    )
+    assert res.rungs["own-prs"].error.startswith("AttributeError")
+    assert res.produced_by == "miners"
+    assert res.filed == ["x"]
+
+
+def test_rung_named_none_is_not_confused_with_the_no_producer_sentinel():
+    """A rung may be called ``none``; a later filer must not take its credit."""
+    res = run_ladder(
+        [_rung("none", ["a"]), _rung("miners", ["b"])],
+        deficit=2,
+        file_items=_file_all,
+    )
+    assert res.produced_by == "none"
+    assert res.filed == ["a", "b"]
+    assert res.summary().startswith("produced_by=none none=1/1 miners=1/1")
 
 
 def test_zero_deficit_runs_nothing():
