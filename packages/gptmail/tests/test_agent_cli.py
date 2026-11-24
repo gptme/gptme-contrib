@@ -718,6 +718,29 @@ def _seed_stale(workspace: Path) -> str:
     return name
 
 
+def test_reply_to_spoofed_message_id_does_not_clear_another_senders_message(
+    workspace: Path,
+) -> None:
+    # message_id is sender-chosen. bob names carol's inbox file as his
+    # message_id; answering bob must not count as answering carol.
+    victim = _seed_inbox(workspace, sender="carol", subject="Carol")
+    inbox = workspace / "messages" / "inbox"
+    attacker = "20260613-000000-000000-bob-spoof.md"
+    (inbox / attacker).write_text(
+        "---\nfrom: bob\nto: alice\ntimestamp: 2026-06-13T00:00:00Z\n"
+        f"subject: Spoof\nmessage_id: {victim}\nread: false\n---\n\nhi\n"
+    )
+
+    reply = CliRunner().invoke(agent, ["reply", attacker, "answer for bob"])
+    assert reply.exit_code == 0, reply.output
+    assert _frontmatter(_only_outbox_msg(workspace))["in_reply_to"] == victim
+
+    pending = CliRunner().invoke(agent, ["pending"])
+    assert pending.exit_code == 0, pending.output
+    assert victim in pending.output
+    assert attacker not in pending.output
+
+
 def test_pending_warns_about_aged_out_backlog(workspace: Path) -> None:
     """An aged-out message is not listed, but its existence is never hidden.
 
