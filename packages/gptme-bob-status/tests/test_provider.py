@@ -285,6 +285,7 @@ def test_active_tasks_strips_compact_recency_without_space_before_unit(monkeypat
 
     compact = (
         "📋 Tasks Status\n"
+        "🏃 ACTIVE (2):\n"
         "  my-task  Do the thing  (5m ago)\n"
         "  other-task  Second thing  (<1m ago)\n"
         "📋 Summary: 2 total\n"
@@ -305,6 +306,7 @@ def test_active_tasks_preserves_parenthetical_ago_in_title(monkeypatch):
 
     compact = (
         "📋 Tasks Status\n"
+        "🏃 ACTIVE (2):\n"
         "  review-pr  Review PR (approved 2 days ago)\n"
         "  normal-task  Do thing  (3m ago)\n"
         "📋 Summary: 2 total\n"
@@ -342,6 +344,7 @@ def test_blockers_return_compact_summaries_with_narrative_fields(monkeypatch):
 
     task = {
         **_TASK_JSON,
+        "state": "waiting",
         "name": None,
         "waiting_for": "\n  A blocker explanation that stays available\ninternal detail",
         "waiting_since": "2026-08-27T20:30:00+00:00",
@@ -365,7 +368,7 @@ def test_blockers_skip_whitespace_only_explanations(monkeypatch):
 
     import gptme_bob_status.provider as mod
 
-    task = {**_TASK_JSON, "waiting_for": " \n\t "}
+    task = {**_TASK_JSON, "state": "waiting", "waiting_for": " \n\t "}
     monkeypatch.setattr(mod, "_run", lambda cmd, **k: json.dumps(task))
 
     assert mod._blockers() == []
@@ -377,7 +380,8 @@ def test_blockers_skip_missing_waiting_for(monkeypatch):
 
     import gptme_bob_status.provider as mod
 
-    monkeypatch.setattr(mod, "_run", lambda cmd, **k: json.dumps(_TASK_JSON))
+    task = {**_TASK_JSON, "state": "waiting"}
+    monkeypatch.setattr(mod, "_run", lambda cmd, **k: json.dumps(task))
 
-    assert "waiting_for" not in _TASK_JSON
+    assert "waiting_for" not in task
     assert mod._blockers() == []
