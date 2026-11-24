@@ -14,7 +14,7 @@ def sync(monkeypatch):
     # sync.py imports `lessons.import` through the src/lessons symlink; stub it
     # so the tests do not depend on that layout.
     pkg = types.ModuleType("lessons")
-    pkg.__path__ = []  # type: ignore[attr-defined]
+    pkg.__path__ = []
     mod = types.ModuleType("lessons.import")
     mod.review_network_lesson = lambda *a, **k: None  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "lessons", pkg)
