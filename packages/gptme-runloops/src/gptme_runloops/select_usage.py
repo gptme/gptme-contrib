@@ -52,6 +52,8 @@ class PoolReading:
     age_s: float | None = None
     source: str = "unknown"
     note: str | None = None
+    #: Fraction of the weekly window elapsed (0..1), None when the reset is unknown.
+    elapsed: float | None = None
 
     @property
     def known(self) -> bool:
@@ -64,6 +66,7 @@ class PoolReading:
             "pace_gap": self.pace_gap,
             "age_s": None if self.age_s is None else int(self.age_s),
             "source": self.source,
+            "elapsed": self.elapsed,
         }
 
 
@@ -114,6 +117,19 @@ def parse_claude_usage(data: object) -> tuple[float | None, float | None]:
     return used, _pace_gap(used, resets, data.get("_pacing"))
 
 
+def week_elapsed(data: object) -> float | None:
+    """Elapsed fraction of the weekly window from check-claude-usage JSON, or None."""
+    seven_day = data.get("seven_day") if isinstance(data, dict) else None
+    resets = (
+        _number(seven_day.get("resets_in_seconds"))
+        if isinstance(seven_day, dict)
+        else None
+    )
+    if resets is None or resets <= 0:
+        return None
+    return round(max(0.0, min(1.0, 1.0 - resets / WEEK_SECONDS)), 4)
+
+
 def _file_age(path: Path) -> float | None:
     try:
         return max(0.0, time.time() - path.stat().st_mtime)
@@ -149,19 +165,25 @@ def read_claude_usage(options: Mapping[str, Any]) -> PoolReading:
                 source="claude-usage:command",
                 note=f"usage command exited {proc.returncode}",
             )
-        used, gap = parse_claude_usage(json.loads(proc.stdout))
+        data = json.loads(proc.stdout)
+        used, gap = parse_claude_usage(data)
         # The script serves its own cache when fresh; its mtime is the data's age.
         age = _file_age(cache)
         return PoolReading(
-            used, gap, 0.0 if age is None else age, "claude-usage:command"
+            used,
+            gap,
+            0.0 if age is None else age,
+            "claude-usage:command",
+            elapsed=week_elapsed(data),
         )
     age = _file_age(cache)
     if age is None:
         return PoolReading(
             source="claude-usage:cache", note=f"no usage cache at {cache}"
         )
-    used, gap = parse_claude_usage(json.loads(cache.read_text()))
-    return PoolReading(used, gap, age, "claude-usage:cache")
+    data = json.loads(cache.read_text())
+    used, gap = parse_claude_usage(data)
+    return PoolReading(used, gap, age, "claude-usage:cache", elapsed=week_elapsed(data))
 
 
 def _read_none(options: Mapping[str, Any]) -> PoolReading:

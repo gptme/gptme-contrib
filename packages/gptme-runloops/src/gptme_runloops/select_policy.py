@@ -36,6 +36,9 @@ _POOL_KEYS = (
             "effort_steps",
             "pace_guard",
             "usage_unknown",
+            "end_target",
+            "rank",
+            "max_width",
         }
     )
     | USAGE_OPTION_KEYS
@@ -100,6 +103,12 @@ class PoolPolicy:
     effort_steps: tuple[EffortStep, ...] = ()
     pace_guard: float | None = None
     usage_unknown: str = "base"
+    #: Weekly fraction to reach by reset on a linear target (default 0.98).
+    end_target: float | None = None
+    #: This consumer's rank on the account: 0 = owner, 1+ = overflow.
+    rank: int = 0
+    #: Sessions this consumer may run on the account at full pressure.
+    max_width: int | None = None
 
     @property
     def capacity_threshold(self) -> float | None:
@@ -204,6 +213,13 @@ def _fraction(value: object, w: _Where, sub: str) -> float | None:
     return float(value)
 
 
+def _count(value: object, w: _Where, sub: str, *, minimum: int) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        w.err(f"must be an integer >= {minimum}, got {value!r}", sub)
+        return None
+    return value
+
+
 def _parse_steps(raw: object, w: _Where) -> tuple[EffortStep, ...]:
     steps: list[EffortStep] = []
     for i, step in enumerate(raw if isinstance(raw, list) else [None]):
@@ -236,7 +252,7 @@ def _parse_pool(name: str, raw: object, issues: list[Issue]) -> PoolPolicy | Non
         w.err(f"unknown provider {provider!r} (known: {', '.join(sorted(PROVIDERS))})")
     frac = {
         key: _fraction(raw[key], w, f".{key}")
-        for key in ("owner_reserve", "no_capacity_at", "pace_guard")
+        for key in ("owner_reserve", "no_capacity_at", "pace_guard", "end_target")
         if key in raw
     }
     usage_unknown = raw.get("usage_unknown", "base")
@@ -255,6 +271,13 @@ def _parse_pool(name: str, raw: object, issues: list[Issue]) -> PoolPolicy | Non
         effort_steps=_parse_steps(raw.get("effort_steps", []), w),
         pace_guard=frac.get("pace_guard"),
         usage_unknown=usage_unknown,
+        end_target=frac.get("end_target"),
+        rank=_count(raw.get("rank", 0), w, ".rank", minimum=0) or 0,
+        max_width=(
+            _count(raw["max_width"], w, ".max_width", minimum=1)
+            if "max_width" in raw
+            else None
+        ),
     )
 
 

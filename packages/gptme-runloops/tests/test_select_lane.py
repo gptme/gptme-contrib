@@ -655,7 +655,9 @@ def test_cli_json_decision_and_log(tmp_path, reading, env):
         "pace_gap": 0.04,
         "age_s": 10,
         "source": "fake",
+        "elapsed": None,
     }
+    assert row["width"] is None and row["width_reason"] == "no width policy"
 
 
 def test_cli_log_path_override_appends(tmp_path, reading, env):

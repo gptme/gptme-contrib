@@ -261,7 +261,11 @@ def _emit_file_locked(
 ) -> int:
     now = now or datetime.now(timezone.utc)
     text = path.read_text(encoding="utf-8", errors="replace")
-    lines = text.splitlines()
+    # Split on "\n" only: splitlines() also breaks on U+2028/U+0085, which
+    # JSON.stringify leaves unescaped, and would drop the row.
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
     incomplete = False
     if lines and not text.endswith("\n"):
         try:

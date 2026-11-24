@@ -175,8 +175,9 @@ It auto-detects three formats:
   `Verification Checklist`, `Exceptions`, `Automation Hooks`, `Origin`, `Related`.
 - **Skill:** `SKILL.md` files, which must have `name` and `description` frontmatter.
 
-It also checks frontmatter (keywords, `status`) and that an optional `target_grade` is one of
-`trajectory_grade`, `productivity`, `alignment`, `harm`.
+It also checks frontmatter keywords and that an optional `target_grade` is one of
+`trajectory_grade`, `productivity`, `alignment`, `harm`. `status` values are not validated;
+`status: archived` only relaxes the required-section checks.
 
 Minimal two-file lesson:
 
@@ -210,8 +211,9 @@ What happens when you follow this pattern.
 
 ## Other tools
 
-Run from the root of an agent workspace (most default to `./lessons` and gptme's log directory
-`~/.local/share/gptme/logs`). Use `--help` on any click-based module for full options.
+Run inside an agent workspace checkout (most default to `./lessons` and gptme's log directory
+`~/.local/share/gptme/logs`; `analytics` resolves `lessons/` from the nearest enclosing `.git`
+root and reports "Lessons directory not found" outside a git repository). Use `--help` on any click-based module for full options.
 
 | Module | What it does |
 |--------|--------------|

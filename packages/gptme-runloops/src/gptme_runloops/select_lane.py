@@ -23,7 +23,7 @@ from typing import Any
 
 from . import select as _select
 from .select_policy import NO_CAPACITY_EXIT, TRIGGERS, PolicyError, parse_routing
-from .select_rules import choose_arm
+from .select_rules import choose_arm, compute_width
 from .select_usage import PoolReading, read_pool_usage
 
 FAIL_OPEN_NO_DEFAULT_EXIT = 2
@@ -99,6 +99,7 @@ def _new_decision(
         "work_item": work_item, "decision_id": str(uuid.uuid4()),
         "policy_version": None, "policy_expired": False, "shadow": shadow,
         "pool": None, "skipped": [], "trigger": None,
+        "width": None, "width_reason": None,
     }  # fmt: skip
 
 
@@ -132,6 +133,7 @@ def _decide(
         if blocked:
             unavailable[str(arm)] = ("blocked", blocked)
     choice = choose_arm(row, pool, reading, excluded, unavailable)
+    width, width_reason = compute_width(pool, reading)
     decision.update(
         backend=choice.arm.backend if choice.arm else None,
         model=choice.arm.model if choice.arm else None,
@@ -139,6 +141,7 @@ def _decide(
         reason=choice.reason, skipped=choice.skipped, trigger=choice.trigger,
         policy_expired=row.expired(today),
         pool=reading.to_dict(pool.name) if pool else None,
+        width=width, width_reason=width_reason if pool else None,
     )  # fmt: skip
 
 

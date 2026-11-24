@@ -350,6 +350,8 @@ def parse_frontmatter(path: Path) -> tuple[dict, str]:
         fm = yaml.safe_load(fm_text) or {}
     except yaml.YAMLError:
         fm = {}
+    if not isinstance(fm, dict):
+        fm = {}
 
     return fm, body.strip()
 
@@ -1175,8 +1177,12 @@ def scan_skills(workspace: Path, source: str = "") -> list[dict]:
     skills = []
     for skill_md in sorted(skills_dir.rglob("SKILL.md")):
         fm, body = parse_frontmatter(skill_md)
-        name = fm.get("name", skill_md.parent.name.replace("-", " ").title())
+        name = fm.get("name")
+        if not isinstance(name, str) or not name:
+            name = skill_md.parent.name.replace("-", " ").title()
         description = fm.get("description", "")
+        if not isinstance(description, str):
+            description = ""
         if description:
             # Normalize multiline descriptions to a single short summary line.
             # YAML block scalars (description: |) can span multiple lines and include

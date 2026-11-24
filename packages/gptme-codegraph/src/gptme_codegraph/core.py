@@ -31,7 +31,7 @@ from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import cast
+from typing import TypeVar, cast
 
 # ---------------------------------------------------------------------------
 # Language mapping
@@ -3432,12 +3432,107 @@ def build_cross_file_call_graph(
     return callees, callers
 
 
+def _split_symbol_ref(name: str) -> tuple[str | None, str | None, str]:
+    """Split a user-supplied symbol reference into its parts.
+
+    Returns ``(module_path, parent_class, bare_name)``:
+
+    - ``app::Server.start`` → ``("app", "Server", "start")``
+    - ``Server.start`` → ``(None, "Server", "start")``
+    - ``::helper`` → ``("", None, "helper")``
+    - ``helper`` → ``(None, None, "helper")``
+    """
+    module: str | None = None
+    local = name
+    if "::" in name:
+        module, _, local = name.rpartition("::")
+    parent, dot, bare = local.rpartition(".")
+    return module, (parent if dot and parent else None), bare
+
+
+def _module_matches(ref_module: str | None, item_module: str) -> bool:
+    """Return True when a reference's module part is compatible with an item's.
+
+    An absent/empty reference module or an unknown item module (single-file
+    parses leave ``module_path`` empty) matches anything; otherwise the module
+    must be equal or a dotted suffix (``app`` matches ``src.app``).
+    """
+    if not ref_module or not item_module:
+        return True
+    return item_module == ref_module or item_module.endswith("." + ref_module)
+
+
+_SymbolLike = TypeVar("_SymbolLike", Symbol, IndexEntry)
+
+
+def _filter_by_symbol_ref(items: list[_SymbolLike], name: str) -> list[_SymbolLike]:
+    """Return the items (Symbols or IndexEntries) a symbol reference denotes.
+
+    ``name`` may be a bare name (``start``), ``Class.method``, or a qualified
+    ID (``module::name`` / ``module::Class.method``). Bare names match on
+    name alone, so a bare method name resolves to the method; ``module::name``
+    is the qualified-ID form of a top-level symbol, so it does not match
+    methods.
+    """
+    module, parent, bare = _split_symbol_ref(name)
+    return [
+        item
+        for item in items
+        if item.name == bare
+        and (
+            item.parent_class == parent
+            if parent is not None or module is not None
+            else True
+        )
+        and _module_matches(module, item.module_path)
+    ]
+
+
+def find_symbols(symbols: list[Symbol], name: str) -> list[Symbol]:
+    """Return parsed symbols matching a bare name, ``Class.method``, or qualified ID.
+
+    Exact name matches win; otherwise qualified references are reduced to
+    their bare name and filtered by class and module.
+    """
+    exact = [s for s in symbols if s.name == name]
+    return exact or _filter_by_symbol_ref(symbols, name)
+
+
+def find_symbol(symbols: list[Symbol], name: str) -> Symbol | None:
+    """Find a parsed symbol by bare name, ``Class.method``, or qualified ID.
+
+    Keeps the historical last-definition-wins behaviour of the CLI's
+    ``{s.name: s}`` lookup.
+    """
+    matches = find_symbols(symbols, name)
+    return matches[-1] if matches else None
+
+
+def lookup_index_entries(index: SymbolIndex, name: str) -> list[IndexEntry]:
+    """Look up index entries by bare name, ``Class.method``, or qualified ID.
+
+    ``SymbolIndex`` is keyed by bare name, so ``index.lookup("app::Server.start")``
+    finds nothing; this strips the ``module::Class.`` prefix for the lookup and
+    filters the candidates by class and module.
+    """
+    if index.has(name):
+        return index.lookup(name)
+    _module, _parent, bare = _split_symbol_ref(name)
+    if bare == name:
+        return []
+    return _filter_by_symbol_ref(index.lookup(bare), name)
+
+
 def _resolve_graph_key(name: str, graph: dict[str, set[str]]) -> str | None:
-    """Resolve a user-provided bare name to a qualified graph key.
+    """Resolve a user-provided symbol reference to a qualified graph key.
 
     Tries exact match first, then ``::name`` (common for symbols from
     temp/single files with empty module_path), then scans all keys
-    for a ``::name`` suffix.
+    for a ``::name`` suffix (handles ``Class.method`` too). A bare name that
+    matches no top-level symbol falls back to a method key ending in
+    ``.name`` (``start`` → ``app::Server.start``). A qualified ID whose module
+    is a dotted suffix of the key's module (``app::f`` → ``src.app::f``) also
+    resolves.
     Returns the resolved key or None.
     """
     if name in graph:
@@ -3449,6 +3544,20 @@ def _resolve_graph_key(name: str, graph: dict[str, set[str]]) -> str | None:
     for key in graph:
         if key.endswith("::" + name):
             return key
+    module, parent, bare = _split_symbol_ref(name)
+    if module is None and parent is None:
+        # Bare method name: match the ``Class.method`` local part of a key.
+        for key in graph:
+            if key.rpartition("::")[2].endswith("." + bare):
+                return key
+    elif module is not None:
+        # Qualified ID relative to a different index root (or ``::name`` from
+        # a single-file graph looked up in a cross-file one).
+        local = f"{parent}.{bare}" if parent else bare
+        for key in graph:
+            key_module, _, key_local = key.rpartition("::")
+            if key_local == local and _module_matches(module, key_module):
+                return key
     return None
 
 
@@ -4033,8 +4142,6 @@ def main():
             print("No symbols found.")
         return
 
-    name_map = {s.name: s for s in symbols}
-
     # Cross-file index: build if --directory is given
     index: SymbolIndex | None = None
     if args.directory is not None:
@@ -4062,12 +4169,19 @@ def main():
         callees_graph, callers_graph = build_call_graph(symbols)
 
     # Helper: resolve a symbol locally or from the cross-file index
+    # Accepts bare names, ``Class.method`` and qualified IDs such as
+    # ``app::Server.start`` (the form graph keys and callers/callees use).
     def resolve(name: str) -> Symbol | None:
-        found = name_map.get(name)
-        if found is not None:
-            return found
-        if index is not None and index.has(name):
-            entry = index.lookup(name)[0]
+        entries = lookup_index_entries(index, name) if index is not None else []
+        # Local symbols carry no module path, so with an index present a
+        # module-qualified ID resolves only through the index (which honours
+        # its module part).
+        if index is None or "::" not in name:
+            found = find_symbol(symbols, name)
+            if found is not None:
+                return found
+        if entries:
+            entry = entries[0]
             return Symbol(
                 name=entry.name,
                 kind=entry.kind,
@@ -4077,6 +4191,12 @@ def main():
                 parent_class=entry.parent_class,
             )
         return None
+
+    # Cross-file definitions of the queried symbol (qualified names included).
+    query = getattr(args, "name", None)
+    def_entries = (
+        lookup_index_entries(index, query) if index is not None and query else []
+    )
 
     if args.command == "parse":
         if args.json:
@@ -4088,8 +4208,8 @@ def main():
         found = resolve(args.name)
         if not found:
             sys.exit(f"Symbol not found: {args.name}")
-        if index is not None and index.has(args.name):
-            entries = index.lookup(args.name)
+        if def_entries:
+            entries = def_entries
             cross_file_info = f"\n  Defined in {len(entries)} file(s):" + "".join(
                 f"\n    {e.file}:L{e.start_line}" for e in entries[:10]
             )
@@ -4099,10 +4219,9 @@ def main():
         callers = sorted(callers_graph.get(resolved_key, set())) if resolved_key else []
         if args.json:
             output: dict = {"symbol": args.name, "callers": callers}
-            if index and index.has(args.name):
+            if def_entries:
                 output["definitions"] = [
-                    {"file": e.file, "line": e.start_line}
-                    for e in index.lookup(args.name)
+                    {"file": e.file, "line": e.start_line} for e in def_entries
                 ]
             print(format_json(output))
         else:
@@ -4129,10 +4248,9 @@ def main():
         callees = sorted(callees_graph.get(resolved_key, set())) if resolved_key else []
         if args.json:
             output = {"symbol": args.name, "callees": callees}
-            if index and index.has(args.name):
+            if def_entries:
                 output["definitions"] = [
-                    {"file": e.file, "line": e.start_line}
-                    for e in index.lookup(args.name)
+                    {"file": e.file, "line": e.start_line} for e in def_entries
                 ]
             print(format_json(output))
         else:
@@ -4235,21 +4353,17 @@ def main():
         if not found:
             sys.exit(f"Symbol not found: {args.name}")
         if args.json:
-            if (
-                index
-                and index.has(args.name)
-                and (not found or found.file != str(filepath))
-            ):
+            if def_entries and (not found or found.file != str(filepath)):
                 all_defs = [
                     {
-                        "name": args.name,
+                        "name": e.name,
                         "kind": e.kind,
                         "file": e.file,
                         "start_line": e.start_line,
                         "end_line": e.end_line,
                         "parent_class": e.parent_class,
                     }
-                    for e in index.lookup(args.name)
+                    for e in def_entries
                 ]
                 print(format_json(all_defs if len(all_defs) > 1 else all_defs[0]))
             else:
@@ -4262,8 +4376,8 @@ def main():
             )
             if found.docstring:
                 print(f"  {found.docstring[:200]}")
-            if index and index.has(args.name):
-                entries = [e for e in index.lookup(args.name) if e.file != found.file]
+            if def_entries:
+                entries = [e for e in def_entries if e.file != found.file]
                 if entries:
                     print(f"\n  Also defined in {len(entries)} other file(s):")
                     for e in entries[:10]:
@@ -4273,8 +4387,8 @@ def main():
         found = resolve(args.name)
         if not found:
             sys.exit(f"Symbol not found: {args.name}")
-        if index is not None and index.has(args.name):
-            entries = index.lookup(args.name)
+        if def_entries:
+            entries = def_entries
             cross_file_info = f"\n  Defined in {len(entries)} file(s):" + "".join(
                 f"\n    {e.file}:L{e.start_line}" for e in entries[:10]
             )
@@ -4287,10 +4401,9 @@ def main():
                 "symbol": args.name,
                 "references": callers,
             }
-            if index and index.has(args.name):
+            if def_entries:
                 output["definitions"] = [
-                    {"file": e.file, "line": e.start_line}
-                    for e in index.lookup(args.name)
+                    {"file": e.file, "line": e.start_line} for e in def_entries
                 ]
             print(format_json(output))
         else:

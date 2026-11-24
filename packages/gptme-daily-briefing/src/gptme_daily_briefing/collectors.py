@@ -148,7 +148,7 @@ def collect_waiting_tasks(workspace_root: Path, limit: int = 8) -> list[dict[str
             fm = yaml.safe_load(m.group(1)) or {}
         except Exception:
             continue
-        if fm.get("state") != "waiting":
+        if not isinstance(fm, dict) or fm.get("state") != "waiting":
             continue
         wf = fm.get("waiting_for")
         if wf:
@@ -236,7 +236,7 @@ def collect_open_prs(
                 break
             try:
                 for pr in batch:
-                    if pr.get("user", {}).get("login") != username:
+                    if (pr.get("user") or {}).get("login") != username:
                         continue
                     repo_prs.append(
                         {

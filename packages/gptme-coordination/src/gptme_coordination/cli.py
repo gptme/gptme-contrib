@@ -102,6 +102,9 @@ def cmd_work_list(args: argparse.Namespace) -> int:
             claims = work.list_claimed(agent_id=args.agent)
         else:
             claims = work.list_all()
+        if args.agent:
+            # --available includes expired claims, which keep their claimer.
+            claims = [c for c in claims if c.claimer == args.agent]
 
         if not claims:
             print("(no work items)")

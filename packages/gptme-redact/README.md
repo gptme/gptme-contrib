@@ -37,7 +37,7 @@ redact my-file.md --report
 # Machine-readable report (for tooling)
 redact my-file.md --json
 
-# Add extra literals and run TruffleHog scan
+# Block if a known secret literal appears (critical), and run TruffleHog
 redact my-file.md --literal "my-secret-token" --trufflehog
 ```
 
@@ -57,7 +57,8 @@ options:
   --out OUT             write redacted text here
   --report              print findings report instead of redacted text
   --json                machine-readable report (implies --report)
-  --literal LITERAL     extra literal secret to redact (repeatable)
+  --literal LITERAL     extra literal secret; any occurrence is critical and blocks
+                        (repeatable)
   --allowlist ALLOWLIST
                         exempt exact literal from non-critical redaction
   --no-default-allowlist
@@ -68,13 +69,25 @@ options:
   --no-env-secrets      skip env-value redaction (deterministic mode)
 ```
 
+## Document sanitizer (`redact sanitize-doc`)
+
+Scans a Markdown document for formula, HTML and metadata injection rather than
+secrets. It prints nothing for a clean file (unless `--report`), exits 2 when the
+result is blocked, and with `--strict` exits 2 on any finding.
+
+```bash
+redact sanitize-doc report.md --report                 # human-readable findings
+redact sanitize-doc report.md --json                   # machine-readable (implies --report)
+redact sanitize-doc report.md --block-severity medium  # default: high (not critical)
+```
+
 ## Python API
 
 ```python
 from redact import redact, collect_secret_literals, Result, Severity
 
 result = redact(
-    text="my API key is sk-ant-api...",
+    text="my API key is sk-ant-api03-" + "x" * 80,  # key-shaped, so it blocks
     literals=collect_secret_literals(),  # auto-collects env vars
     allowlist=["https://example.com/public-endpoint"],
     block_severity=Severity.CRITICAL,
@@ -110,4 +123,3 @@ uv run python3 -m redact.cli path/to/file.md --report
 ## Related
 
 - [Idea backlog entry #362](https://github.com/ErikBjare/bob/issues/362) — original design
-- `knowledge/processes/fail-closed-redaction.md` — operational guide

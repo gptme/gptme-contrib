@@ -71,7 +71,9 @@ gptme-coordination work-complete alice task-123 --result "shipped"
 `CoordinationDB()` with no path (and the CLI without `--db`) resolves, in order:
 
 1. `$COORDINATION_DB`
-2. `$AGENT_WORKSPACE/state/coordination/coord.db` (absolute paths only)
+2. `$AGENT_WORKSPACE/state/coordination/coord.db`, or the same path under the legacy
+   aliases `$BOB_WORKSPACE` / `$BOB_BRAIN_ROOT` (absolute paths only; an inherited
+   variable redirects the DB, so clear it in sandboxes)
 3. `<git root of cwd>/state/coordination/coord.db`
 4. `<cwd>/state/coordination/coord.db`
 

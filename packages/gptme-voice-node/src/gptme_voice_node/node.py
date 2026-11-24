@@ -27,6 +27,7 @@ import os
 import re
 import signal
 import sys
+import threading
 import time
 from collections.abc import Callable
 from typing import Any, TypeVar
@@ -92,9 +93,44 @@ log = logging.getLogger("gptme_voice_node")
 T = TypeVar("T")
 
 
+# Blocking PortAudio calls currently executing in worker threads. Cancelling
+# the awaiting coroutine returns immediately but cannot interrupt the thread,
+# and PortAudio streams must not be stopped/closed while a read/write is live.
+_io_idle = threading.Condition()
+_io_inflight = 0
+
+# A mic chunk is ~43 ms; bound the teardown wait well above that.
+AUDIO_IO_DRAIN_TIMEOUT = 2.0
+
+
 async def _run_audio_io(function: Callable[..., T], *args: Any, **kwargs: Any) -> T:
     """Run blocking audio I/O without blocking cancellation of the caller."""
-    return await asyncio.to_thread(function, *args, **kwargs)
+
+    def call() -> T:
+        global _io_inflight
+        with _io_idle:
+            _io_inflight += 1
+        try:
+            return function(*args, **kwargs)
+        finally:
+            with _io_idle:
+                _io_inflight -= 1
+                _io_idle.notify_all()
+
+    return await asyncio.to_thread(call)
+
+
+async def _drain_audio_io(timeout: float = AUDIO_IO_DRAIN_TIMEOUT) -> None:
+    """Wait for in-flight audio I/O threads before closing their streams."""
+
+    def wait() -> bool:
+        with _io_idle:
+            return _io_idle.wait_for(lambda: _io_inflight == 0, timeout=timeout)
+
+    if not await asyncio.to_thread(wait):
+        log.warning(
+            "audio I/O still in flight after %.1fs; closing streams anyway", timeout
+        )
 
 
 def _close_stream(stream, started: bool) -> None:
@@ -203,7 +239,16 @@ class VoiceNode:
                 send_task = asyncio.create_task(self._send_loop(ws, mic))
                 recv_task = asyncio.create_task(self._recv_loop(ws, speaker))
                 try:
-                    await asyncio.gather(send_task, recv_task)
+                    # End the session as soon as either loop ends. When the
+                    # socket drops mid-playback the recv loop returns, but the
+                    # send loop (mic muted) never touches the dead socket, so
+                    # waiting for both would hang and never reconnect.
+                    done, _ = await asyncio.wait(
+                        {send_task, recv_task},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    for task in done:
+                        task.result()
                 finally:
                     for task in (send_task, recv_task):
                         if not task.done():
@@ -212,6 +257,7 @@ class VoiceNode:
                     if self.vision_bridge is not None:
                         await self.vision_bridge.stop()
             finally:
+                await _drain_audio_io()
                 _close_stream(speaker, speaker_started)
         finally:
             _close_stream(mic, mic_started)

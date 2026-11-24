@@ -168,7 +168,8 @@ each Codex run.
 | `tail-codex` | Emit per-tool activity from a Codex rollout transcript |
 | `tail-claude-code` | Emit session working blocks from Claude Code transcripts (no hooks) |
 
-Global flag: `--strict` (exit non-zero on errors). Run
+Global flag: `--strict` (exit non-zero on errors), placed before the command:
+`aw-watcher-agent --strict emit-end ...`. Run
 `aw-watcher-agent <command> --help` for all options.
 
 ## Related

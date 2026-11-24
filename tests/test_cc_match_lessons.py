@@ -3,7 +3,9 @@
 import builtins
 import importlib.util
 import json
+import signal
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -2875,3 +2877,65 @@ def test_session_state_writers_all_go_through_lock():
         "save_session_state(session_id, state)",
         "save_session_state(session_id, state, strict=True)",
     ]
+
+
+# --- Hook budget: the SIGALRM TimeoutError must not be swallowed ---
+
+
+@pytest.mark.parametrize(
+    "fn_name",
+    ["get_already_injected", "extract_recent_transcript_text", "extract_tool_sequence"],
+)
+def test_transcript_readers_propagate_budget_timeout(
+    hook, tmp_path, monkeypatch, fn_name
+):
+    """The budget alarm is one-shot: a reader that swallows it leaves the rest
+    of the hook unbounded, so it must re-raise TimeoutError."""
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text('{"type": "user"}\n')
+    real_open = builtins.open
+
+    def alarm_open(path, *args, **kwargs):
+        if str(path) == str(transcript):
+            raise TimeoutError("hook budget")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", alarm_open)
+    fn = getattr(hook, fn_name)
+    args = (
+        ("sid", str(transcript))
+        if fn_name == "get_already_injected"
+        else (str(transcript),)
+    )
+    with pytest.raises(TimeoutError):
+        fn(*args)
+
+
+def test_load_session_state_propagates_budget_timeout(hook, monkeypatch):
+    def alarm(_session_id):
+        raise TimeoutError("hook budget")
+
+    monkeypatch.setattr(hook, "_state_file", alarm)
+    with pytest.raises(TimeoutError):
+        hook.load_session_state("sid")
+
+
+def test_budget_alarm_refires_after_a_swallowed_timeout(hook):
+    """A broad handler that swallows the first alarm must not leave the rest
+    of the hook unbounded: the alarm fires again until it is disarmed."""
+    if not hasattr(signal, "setitimer"):
+        pytest.skip("no setitimer on this platform")
+    previous = signal.getsignal(signal.SIGALRM)
+    swallowed = False
+    try:
+        hook._arm_hook_budget(0.05)
+        with pytest.raises(TimeoutError):
+            try:
+                time.sleep(2)  # the first alarm lands here
+            except Exception:
+                swallowed = True  # ...and a broad handler eats it
+            time.sleep(2)  # the remainder must still be interrupted
+    finally:
+        hook._disarm_hook_budget()
+        signal.signal(signal.SIGALRM, previous)
+    assert swallowed
