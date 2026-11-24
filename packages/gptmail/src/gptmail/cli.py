@@ -8,6 +8,7 @@
 # ///
 """CLI interface for the email system."""
 
+import functools
 import os
 import subprocess
 import sys
@@ -90,6 +91,20 @@ def edit_content() -> str:
     with tempfile.NamedTemporaryFile(suffix=".md") as tf:
         os.system(f"{editor} {tf.name}")
         return Path(tf.name).read_text()
+
+
+def _value_errors_as_cli_errors(func):
+    """Report the library's ValueErrors (unknown id, already sent, refused
+    recipient) as CLI errors instead of tracebacks."""
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from exc
+
+    return wrapper
 
 
 @click.group()
@@ -215,6 +230,7 @@ def compose(
     is_flag=True,
     help="Send a reply even if the original is already marked replied/no-reply-needed.",
 )
+@_value_errors_as_cli_errors
 def send(message_id: str, force: bool) -> None:
     """Send draft email."""
     workspace_dir = get_workspace_dir()
@@ -298,6 +314,7 @@ def read(message_id: str, thread: bool = False, thread_only: bool = False) -> No
     "from_address",
     help="Custom sender address (uses AGENT_EMAIL env var if not specified)",
 )
+@_value_errors_as_cli_errors
 def reply(message_id: str, content: str | None = None, from_address: str | None = None) -> None:
     """Reply to message.
 

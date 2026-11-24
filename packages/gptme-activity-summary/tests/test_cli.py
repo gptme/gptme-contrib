@@ -2,6 +2,7 @@
 
 from typing import NoReturn
 
+import click
 import pytest
 from click.testing import CliRunner, Result
 
@@ -112,3 +113,31 @@ def test_smart_skipped_and_not_due_exits_zero(monkeypatch: pytest.MonkeyPatch) -
     assert "Monthly: Not due (not 1st of month)" in result.output
     assert "  daily: skipped" in result.output
     assert "FAILED" not in result.output
+
+
+@pytest.mark.parametrize(
+    ("command", "period", "message"),
+    [
+        ("weekly", ["--week", "2026-W43"], "No daily summaries found for 2026-W43"),
+        ("monthly", ["--month", "2026-10"], "No weekly summaries found for 2026-10"),
+    ],
+)
+def test_missing_inputs_are_a_clean_cli_error(tmp_path, monkeypatch, command, period, message):
+    import gptme_activity_summary.cli as cli_module
+
+    monkeypatch.setattr(cli_module, "SUMMARIES_DIR", tmp_path)
+    result = CliRunner().invoke(cli_module.cli, [command, *period])
+
+    assert result.exit_code == 1
+    assert message in result.output
+    assert isinstance(result.exception, SystemExit)
+
+
+def test_missing_claude_binary_is_a_clean_cli_error():
+    import gptme_activity_summary.cli as cli_module
+
+    def missing(*_args, **_kwargs):
+        raise FileNotFoundError(2, "No such file or directory", "claude")
+
+    with pytest.raises(click.ClickException, match="claude not found"):
+        cli_module._cli_errors(missing)
