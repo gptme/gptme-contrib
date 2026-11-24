@@ -20,11 +20,17 @@ from __future__ import annotations
 import json
 import urllib.error
 import urllib.request
+from urllib.parse import quote
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
 DEFAULT_SERVER = "http://127.0.0.1:5600"
+
+
+def _bucket_path(bucket_id: str) -> str:
+    """URL path of a bucket; the id embeds the hostname, so it must be escaped."""
+    return "/api/0/buckets/" + quote(bucket_id, safe="")
 
 
 def utc_now_iso() -> str:
@@ -113,7 +119,7 @@ class AWClient:
             "type": event_type,
             "hostname": hostname,
         }
-        status, body = self._request("POST", f"/api/0/buckets/{bucket_id}", payload)
+        status, body = self._request("POST", _bucket_path(bucket_id), payload)
         # 200/201 = created, 304 = already existed (race with a parallel start)
         if status in (200, 201, 304):
             return status != 304
@@ -124,7 +130,7 @@ class AWClient:
     def post_event(self, bucket_id: str, event: Event) -> int | None:
         """Insert a single event. Returns the server-assigned event id if present."""
         status, body = self._request(
-            "POST", f"/api/0/buckets/{bucket_id}/events", event.to_payload()
+            "POST", _bucket_path(bucket_id) + "/events", event.to_payload()
         )
         if status not in (200, 201):
             raise AWClientError(f"failed to post event to {bucket_id}: {status} {body!r}")
@@ -135,14 +141,14 @@ class AWClient:
         return None
 
     def delete_event(self, bucket_id: str, event_id: int) -> bool:
-        status, _ = self._request("DELETE", f"/api/0/buckets/{bucket_id}/events/{event_id}")
+        status, _ = self._request("DELETE", f"{_bucket_path(bucket_id)}/events/{event_id}")
         return status in (200, 204)
 
     def heartbeat(self, bucket_id: str, event: Event, pulsetime: float) -> int | None:
         """Merge-extend the latest event whose data matches, within ``pulsetime``."""
         status, body = self._request(
             "POST",
-            f"/api/0/buckets/{bucket_id}/heartbeat?pulsetime={pulsetime}",
+            f"{_bucket_path(bucket_id)}/heartbeat?pulsetime={pulsetime}",
             event.to_payload(),
         )
         if status not in (200, 201):

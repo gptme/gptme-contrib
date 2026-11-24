@@ -13,6 +13,7 @@ so a watcher problem never breaks the agent session it observes.
 from __future__ import annotations
 
 import argparse
+import http.client
 import socket
 import sqlite3
 import sys
@@ -20,6 +21,12 @@ from datetime import datetime, timedelta, timezone
 
 from .client import AWClient, AWClientError, Event, utc_now_iso
 from . import core
+
+
+# Errors a watcher run may hit that must not break the observed session.
+# ``http.client.HTTPException`` (BadStatusLine, InvalidURL, IncompleteRead) is
+# not wrapped by urllib, so it needs naming next to ``OSError``.
+_NON_FATAL = (AWClientError, OSError, ValueError, sqlite3.Error, http.client.HTTPException)
 
 
 def _hostname(explicit: str | None) -> str:
@@ -89,14 +96,6 @@ def cmd_emit_end(args: argparse.Namespace) -> int:
     if state and state.get("start"):
         start = state["start"]
         duration = (_parse_iso(end) - _parse_iso(start)).total_seconds()
-        # Drop the zero-duration placeholder so we end with one clean block.
-        if state.get("event_id") is not None:
-            if not client.delete_event(state.get("bucket_id", bid), state["event_id"]):
-                print(
-                    f"warning: failed to delete placeholder event {state['event_id']} "
-                    f"from {state.get('bucket_id', bid)} — timeline may contain duplicate block",
-                    file=sys.stderr,
-                )
     else:
         # No recorded start (crash / hook gap): fall back to provided duration.
         start = end
@@ -114,6 +113,18 @@ def cmd_emit_end(args: argparse.Namespace) -> int:
     # pulsetime=0 forces a fresh event (the outcome field differs from any prior
     # block anyway); heartbeat returns the id for logging where POST does not.
     event_id = client.heartbeat(bid, event, pulsetime=0.0)
+    # Drop the zero-duration placeholder only once the final event is stored, so
+    # a failed final post leaves the session marked. When the data is unchanged
+    # the heartbeat merges into the placeholder itself; keep that event.
+    placeholder = state.get("event_id") if state else None
+    if placeholder is not None and placeholder != event_id:
+        placeholder_bucket = state.get("bucket_id", bid) if state else bid
+        if not client.delete_event(placeholder_bucket, placeholder):
+            print(
+                f"warning: failed to delete placeholder event {placeholder} "
+                f"from {placeholder_bucket} — timeline may contain duplicate block",
+                file=sys.stderr,
+            )
     if sid:
         core.clear_state(sid)
     print(
@@ -138,10 +149,7 @@ def cmd_emit_activity(args: argparse.Namespace) -> int:
         data=core.activity_data(vars(args)),
     )
     event_id = client.heartbeat(bid, event, pulsetime=float(args.pulsetime))
-    print(
-        f"activity emitted: {bid} event_id={event_id} "
-        f"tool={args.tool} duration_ms={duration_ms}"
-    )
+    print(f"activity emitted: {bid} event_id={event_id} tool={args.tool} duration_ms={duration_ms}")
     return 0
 
 
@@ -184,7 +192,7 @@ def cmd_tail_claude_code(args: argparse.Namespace) -> int:
         owner = None if explicit else path.stem
         try:
             total += cc_tailer.emit_file(client, host, path, gap_s=args.gap, owner=owner)
-        except (AWClientError, OSError, ValueError, sqlite3.Error) as exc:
+        except _NON_FATAL as exc:
             failed = True
             print(f"aw-watcher-agent: {path}: {exc}", file=sys.stderr)
     print(
@@ -278,7 +286,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         return int(args.func(args))
-    except (AWClientError, OSError, ValueError, sqlite3.Error) as exc:
+    except _NON_FATAL as exc:
         msg = f"aw-watcher-agent: {exc}"
         if args.strict:
             print(msg, file=sys.stderr)

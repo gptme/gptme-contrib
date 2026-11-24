@@ -21,7 +21,7 @@ import json
 import os
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, cast
 
@@ -122,9 +122,11 @@ def _status_from_output(output: Any) -> str:
 def _parse_ts(ts: str) -> datetime | None:
     try:
         # Codex stamps RFC3339 with a trailing 'Z'; fromisoformat wants +00:00.
-        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
     except (ValueError, AttributeError):
         return None
+    # A naive stamp next to an aware one would make the duration raise.
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
 def _iter_records(lines: Iterable[str]) -> Iterable[dict[str, Any]]:
@@ -226,7 +228,9 @@ def emit_file(
     last_index = cursor.get("last_index", -1) if cursor else -1
 
     text = path.read_text(encoding="utf-8", errors="replace")
-    _, activities = parse_rollout(text.splitlines())
+    # Split on "\n" only: splitlines() also breaks on U+2028/U+0085, which JSON
+    # encoders leave unescaped inside strings, and would cut a row in two.
+    _, activities = parse_rollout(text.split("\n"))
 
     # Only emit calls that are new since the last cursor position.
     new = activities[last_index + 1 :]
@@ -246,11 +250,10 @@ def emit_file(
 
     bucket = core.activity_bucket_id(hostname)
     client.ensure_bucket(bucket, core.ACTIVITY_BUCKET_TYPE, core.CLIENT_NAME, hostname)
-    for activity in to_emit:
+    # Checkpoint after each accepted heartbeat: if a later one fails, a re-run
+    # must not resend calls the server already stored (older timestamps do not
+    # merge, so they would become duplicate events).
+    for offset, activity in enumerate(to_emit, start=1):
         client.heartbeat(bucket, activity.to_event(), pulsetime=pulsetime)
-
-    # Advance the cursor to the last emitted (paired) activity.
-    final_index = last_index + len(to_emit)
-    final_ts = to_emit[-1].timestamp
-    _write_cursor(path, final_index, final_ts)
+        _write_cursor(path, last_index + offset, activity.timestamp)
     return len(to_emit)
