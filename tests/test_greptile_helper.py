@@ -2360,3 +2360,30 @@ def test_trigger_minimize_opt_out(tmp_path):
     assert result.returncode == 0, f"stderr: {result.stderr}"
     assert "Re-triggered successfully" in result.stdout
     assert _minimized_ids(calls) == []
+
+
+def test_deleted_account_comment_does_not_hide_greptile_review():
+    """A `"user": null` comment (deleted account) must not erase the review.
+
+    `.user.login | test("greptile")` errored on null, the jq failure fell back
+    to `has_review: false`, and the helper reported an already-reviewed PR as
+    awaiting review (gptme/gptme-contrib#2384 follow-through).
+    """
+    reviewed_at = _iso_ago(minutes=30)
+    fixture = {
+        "pr_number": 123,
+        "raw_comments": [
+            {
+                "user": None,
+                "created_at": _iso_ago(minutes=60),
+                "updated_at": _iso_ago(minutes=60),
+                "body": "Comment by an account that was later deleted.",
+            },
+            _make_greptile_comment(5, reviewed_at=reviewed_at, updated_at=reviewed_at),
+        ],
+        "raw_pr": {"head": {"sha": "HEADSHA"}, "created_at": _iso_ago(minutes=120)},
+        "raw_commits": [_make_commit(_iso_ago(minutes=90))],
+        "bot_reaction_count": 1,
+    }
+    status = _run_helper("status", fixture)
+    assert status.stdout.strip() == "already-reviewed", f"stderr: {status.stderr}"

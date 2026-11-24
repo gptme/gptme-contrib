@@ -941,7 +941,7 @@ def fetch_greptile_status(
                 f"repos/{repo}/issues/{pr_number}/comments",
                 "--paginate",
                 "--jq",
-                '.[] | select(.user.login | test("greptile";"i")) | .id',
+                '.[] | select(.user.login // "" | test("greptile";"i")) | .id',
             ],
             timeout=30,
         )

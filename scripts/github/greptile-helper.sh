@@ -402,7 +402,7 @@ _greptile_activity_times() {
         return
     fi
     {
-        _issue_comments_json | jq -c '[.[][] | select(.user.login | test("greptile"; "i")) | .created_at]'
+        _issue_comments_json | jq -c '[.[][] | select(.user.login // "" | test("greptile"; "i")) | .created_at]'
         _pr_reviews_json \
             | jq -c '[.[] | select((.user.login // "") | test("greptile"; "i")) | .submitted_at]' 2>/dev/null
     } | jq -cs 'add // [] | map(select(. != null))' > "$_ACTIVITY_CACHE_FILE" 2>/dev/null \
@@ -497,7 +497,7 @@ _greptile_review_info() {
     # Paginate first, then apply jq filter (--paginate + --jq applies per-page,
     # producing multiple JSON objects that break downstream json.load).
     gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate 2>/dev/null \
-        | jq -s '[.[][] | select(.user.login | test("greptile"; "i"))] | sort_by(.updated_at) | last |
+        | jq -s '[.[][] | select(.user.login // "" | test("greptile"; "i"))] | sort_by(.updated_at) | last |
               if . == null then {"has_review": false, "score": null, "reviewed_at": null}
               else {
                 "has_review": true,
