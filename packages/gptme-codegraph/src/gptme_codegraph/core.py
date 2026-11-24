@@ -1361,11 +1361,37 @@ def _unwrap_python_definition(node):
     return None
 
 
+# Statements whose blocks can hold definitions at the enclosing scope, e.g. a
+# platform-dependent ``def`` under ``if`` or a fallback under ``except``.
+_PYTHON_COMPOUND_NODES = frozenset(
+    {
+        "if_statement",
+        "elif_clause",
+        "else_clause",
+        "try_statement",
+        "except_clause",
+        "except_group_clause",
+        "finally_clause",
+        "with_statement",
+        "for_statement",
+        "while_statement",
+        "match_statement",
+        "case_clause",
+        "block",
+    }
+)
+
+
 def _extract_symbols_python(root, filepath: str) -> list[Symbol]:
     """Extract functions, classes, and methods from a Python parse tree."""
     symbols: list[Symbol] = []
 
     def walk(node, parent_class: str | None = None):
+        if node.type in _PYTHON_COMPOUND_NODES:
+            for child in node.named_children:
+                walk(child, parent_class=parent_class)
+            return
+
         unwrapped = _unwrap_python_definition(node)
         if unwrapped is None:
             return
