@@ -14,6 +14,7 @@ dependencies = [
     "click>=8.0",
     "jinja2>=3.0",
     "markdown-it-py>=3.0",
+    "nh3>=0.2.18",
     "pygments>=2.0",
     "pyyaml>=6.0",
     "tomli>=1.2; python_version < '3.11'",

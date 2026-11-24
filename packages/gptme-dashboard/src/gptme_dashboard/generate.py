@@ -25,6 +25,7 @@ from itertools import groupby
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
+import nh3
 import yaml  # type: ignore[import-untyped]
 from bobutils.frontmatter import split_frontmatter
 from jinja2 import Environment, FileSystemLoader
@@ -46,6 +47,47 @@ def _highlight_code(code: str, lang: str, attrs: str) -> str:
 
 
 _md = MarkdownIt("commonmark", options_update={"highlight": _highlight_code}).enable("table")
+
+# Workspace markdown quotes outside content (issue text, PR comments, tweets),
+# so its raw HTML is untrusted: rendered bodies go through an allowlist
+# sanitizer. Formatting tags (details/summary, kbd, br, img, align, ...) are
+# kept; scripts, event handlers, iframes and javascript: URLs are dropped.
+# The extra attributes cover what the renderer itself emits: heading anchor
+# ids, pygments inline styles and classes, and table cell alignment.
+_SANITIZE_ATTRIBUTES: dict[str, set[str]] = {
+    tag: set(attrs) for tag, attrs in nh3.ALLOWED_ATTRIBUTES.items()
+}
+for _tag in ("h1", "h2", "h3", "h4", "h5", "h6"):
+    _SANITIZE_ATTRIBUTES.setdefault(_tag, set()).add("id")
+for _tag in ("div", "pre", "span", "code"):
+    _SANITIZE_ATTRIBUTES.setdefault(_tag, set()).update({"class", "style"})
+for _tag in ("p", "div", "td", "th"):
+    _SANITIZE_ATTRIBUTES.setdefault(_tag, set()).add("align")
+for _tag in ("td", "th"):
+    _SANITIZE_ATTRIBUTES[_tag].add("style")
+_SANITIZE_STYLE_PROPERTIES = {
+    "background",
+    "background-color",
+    "border",
+    "color",
+    "font-style",
+    "font-weight",
+    "line-height",
+    "padding",
+    "text-align",
+    "text-decoration",
+}
+
+
+def sanitize_html(html: str) -> str:
+    """Drop script-capable markup from rendered markdown, keep formatting."""
+    return nh3.clean(
+        html,
+        attributes=_SANITIZE_ATTRIBUTES,
+        filter_style_properties=_SANITIZE_STYLE_PROPERTIES,
+        link_rel=None,
+    )
+
 
 # State ordering for task display (active work first)
 _STATE_ORDER = {
@@ -246,7 +288,7 @@ def render_markdown_to_html(md_text: str) -> str:
     env: dict = {}
     tokens = _md.parse(md_text, env)
     _add_heading_anchors(tokens)
-    return _md.renderer.render(tokens, _md.options, env)  # type: ignore[no-any-return]
+    return sanitize_html(_md.renderer.render(tokens, _md.options, env))
 
 
 def render_body_html(
