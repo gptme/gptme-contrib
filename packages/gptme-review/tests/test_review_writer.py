@@ -93,6 +93,27 @@ def test_copied_marker_from_another_author_is_ignored_not_deleted(alice_io):
     assert calls == []
 
 
+def test_marker_namespace_is_not_matched_as_a_prefix():
+    # Same author runs namespace `rev` and `rev-ai`: `<!-- rev` is a substring
+    # of `<!-- rev-ai`, which made the newer rev-ai marker the keeper and
+    # deleted the real `rev` marker (contrib#2384 defect 12).
+    io = writer.default_io(sweep_identity("alice-agent", "rev"))
+    me = {"login": "alice-agent"}
+    own = {"id": 1, "body": "<!-- rev {} -->", "updated_at": "2026-01-01", "user": me}
+    other = {
+        "id": 2,
+        "body": "<!-- rev-ai {} -->",
+        "updated_at": "2026-02-01",
+        "user": me,
+    }
+    calls: list[list[str]] = []
+    io.gh_paginated_list = lambda args: [own, other]
+    io.run = lambda cmd, **kw: calls.append(cmd)
+    keeper = writer.bind_io(io).find_marker_comment("o/r", 7)
+    assert keeper is not None and keeper["id"] == 1
+    assert calls == []
+
+
 def test_two_hosts_resolve_independently_and_at_call_time():
     a = SimpleNamespace(MARKER_NAMESPACE="a", MARKER_PREFIX="<!-- a")  # no I/O needed
     b = SimpleNamespace(MARKER_NAMESPACE="b", MARKER_PREFIX="<!-- b")

@@ -200,7 +200,10 @@ def _find_all_marker_comments(repo: str, number: int) -> list[dict]:
         c
         for c in comments
         if isinstance(c, dict)
-        and _io.MARKER_PREFIX in (c.get("body") or "")
+        # The full marker pattern, not the bare prefix: `<!-- rev` is a
+        # substring of `<!-- rev-ai`, so a prefix test claims (and deletes)
+        # another namespace's marker.
+        and _marker_re().search(c.get("body") or "")
         # Marker namespaces are public: anyone can paste one. Only the
         # reviewer's own comments carry state, and only those may be deleted.
         and _is_reviewer_comment(c, _io.REVIEWER_IDENTITY)
