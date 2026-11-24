@@ -77,7 +77,7 @@ Other options: `--prompt-file`, `--timeout` (default 1800 s); `--backend` defaul
 | `monitoring [--org ORG]... [--repo OWNER/REPO]... [--author LOGIN] [--agent-name NAME]` | GitHub project monitoring: find PRs/issues needing action (CI failures, review comments, merge eligibility) and act on them. Defaults to the `claude-code` backend |
 | `run-item --workspace DIR [--work-file F] ...` | Execute a single project-monitoring work item (`--dry-run` prints the execution plan) |
 | `email` | Sync mail (`mbsync -a`), then answer unreplied messages using [gptmail](../gptmail/README.md) |
-| `team [--tools LIST]` | Coordinator agent with restricted tools that delegates work to subagents via gptodo |
+| `team [--tools LIST]` | Coordinator agent with restricted tools that delegates work to subagents via gptodo. The restriction is only enforced on the `gptme` backend: claude-code, codex and grok-build log a warning and run with their normal tools |
 | `review [--working-tree \| --base SHA --head SHA] [--output F] [--model M]` | LLM review of a local diff, emitted as `ReviewArtifact` JSON (no forge access needed) |
 | `review-pr OWNER/REPO#NUM [--shadow\|--publish] [--min-confidence X]` | Review a GitHub PR; `--publish` posts findings as inline comments (default is shadow mode) |
 
@@ -138,7 +138,7 @@ gptme-runloops select --lane autonomous [--class C] [--work-item ID] \
 | `routing.schema_version` | Required, must be `1` |
 | `pools.<p>.provider` | Usage reader: `claude-usage` (default) or `none` |
 | `pools.<p>.usage_cache` | `claude-usage`: cache file of `scripts/check-claude-usage.sh` (default `/tmp/claude-usage-cache.json`) |
-| `pools.<p>.usage_command` | `claude-usage`: run this instead (list or string), e.g. `["bash", "/path/check-claude-usage.sh", "--json"]`. It runs on the launch path (a fresh scrape can take ~25 s); reading the cache is the cheap route |
+| `pools.<p>.usage_command` | `claude-usage`: run this instead (list or string), e.g. `["bash", "/path/check-claude-usage.sh", "--json"]`. It runs on the launch path (a fresh scrape can take ~25 s); reading the cache is the cheap route. The reading's age is still the `usage_cache` file's mtime (missing cache = age 0), so point both keys at the same cache |
 | `pools.<p>.usage_max_age_s` / `usage_timeout_s` | Older readings count as unknown (default 1800) / command timeout (default 15; a timeout reads as unknown) |
 | `pools.<p>.no_capacity_at` | Weekly use at or above this: rule `no_capacity` unless a fallback applies |
 | `pools.<p>.owner_reserve` | Share kept for the owner; sets the ceiling to `1 - owner_reserve` when `no_capacity_at` is unset |
@@ -512,8 +512,17 @@ variable unset, the runner behaves as before.
 ## Development
 
 ```bash
-uv run pytest packages/gptme-runloops/tests/
+cd packages/gptme-runloops
+make test        # pytest with pytest-mock
+make typecheck
 ```
+
+Running `uv run pytest packages/gptme-runloops/tests/` from the repository root fails
+with `No module named gptme_runloops`, because the package is not installed into the
+root environment. Some tests (`test_worker_records.py`, `test_session_store_isolation.py`)
+also import `gptme_sessions`, which `pyproject.toml` does not declare; install
+`packages/gptme-sessions` alongside when running the full suite outside the
+workspace.
 
 ## License
 

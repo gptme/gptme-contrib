@@ -15,8 +15,11 @@ delivers the bundle.
   contract (`BriefingBundle`, `Bullets`, `WaitingTask`, `Analytics`,
   `SessionStats`, `Workstream`, `OpenPR`; all re-exported from the package
   root). Producers write it once; email/voice renderers read it without
-  re-querying upstream data. `analytics` and `workstream` accept agent-specific
-  extra keys.
+  re-querying upstream data. `analytics` and `workstream` are closed
+  `TypedDict`s, so a type checker rejects new top-level keys
+  (`typeddict-unknown-key`); put agent-specific data in the open
+  `dict[str, Any]` slots `analytics.kpi`, `analytics.bandits` and
+  `workstream.open_prs_guide`.
 - **`gptme_daily_briefing.collectors`** — agent-agnostic gatherers. Each one
   fails soft (returns an empty value) instead of raising:
 
@@ -92,7 +95,7 @@ out.write_text(json.dumps(bundle, indent=2))
 
 Agent-specific pieces — KPI snapshots, scheduling/bandit state, persona, and
 the delivery step — belong in each agent's own wrapper and go under the
-open-shape `analytics` / `workstream` keys. Nothing in this package imports
+open `dict` slots (`analytics.kpi`, `analytics.bandits`, `workstream.open_prs_guide`). Nothing in this package imports
 agent-local code.
 
 For narrative summaries of what an agent did (journals, GitHub activity,
