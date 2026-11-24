@@ -18,6 +18,7 @@ import os
 import re
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 
 from gptme_rag.cli import cli
@@ -597,3 +598,48 @@ def test_index_emptied_file_deletes_stale_chunks(tmp_path):
         metadata for metadata in (stored["metadatas"] or []) if metadata.get("source") == abs_source
     ]
     assert leftover == []
+
+
+@pytest.mark.parametrize("root_kind", ["absolute", "relative", "symlink"])
+def test_index_drops_chunks_of_deleted_files_under_indexed_path(tmp_path, monkeypatch, root_kind):
+    """A file deleted from an indexed directory loses its chunks on re-index.
+
+    Files indexed from a different path are not touched: the run only prunes
+    sources under the paths it was asked to index.
+    """
+    from gptme_rag.indexing.indexer import Indexer
+
+    runner = CliRunner()
+    index_dir = tmp_path / "index"
+    src = tmp_path / "src"
+    other = tmp_path / "other"
+    src.mkdir()
+    other.mkdir()
+    (src / "keep.txt").write_text("kept file about apples")
+    gone = src / "gone.txt"
+    gone.write_text("deleted file about zebras")
+    other_gone = other / "elsewhere.txt"
+    other_gone.write_text("file indexed from another path")
+
+    monkeypatch.chdir(tmp_path)
+    if root_kind == "relative":
+        requested_root = Path("src")
+    elif root_kind == "symlink":
+        requested_root = tmp_path / "linked-src"
+        requested_root.symlink_to(src, target_is_directory=True)
+    else:
+        requested_root = src
+
+    first = _run_index(runner, index_dir, [requested_root, other])
+    assert first.exit_code == 0, first.output
+    gone.unlink()
+    other_gone.unlink()
+
+    second = _run_index(runner, index_dir, [requested_root])
+    assert second.exit_code == 0, second.output
+
+    idx = Indexer(persist_directory=index_dir, enable_persist=True, embedding_function="default")
+    sources = {d.metadata.get("source") for d in idx.get_all_documents()}
+    assert str(gone) not in sources
+    assert str(src / "keep.txt") in sources
+    assert str(other_gone) in sources

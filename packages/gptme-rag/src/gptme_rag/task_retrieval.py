@@ -61,9 +61,10 @@ TASK_CLOSED_STATES: frozenset[str] = frozenset({"done", "cancelled", "archived"}
 # Data types
 # ---------------------------------------------------------------------------
 
-_FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
+_FRONTMATTER_RE = re.compile(r"^---[ \t]*\n(.*?)\n---[ \t]*(?:\n|\Z)", re.DOTALL)
 _TITLE_RE = re.compile(r"^#\s+(.+)$", re.MULTILINE)
-_YAML_KEY_RE = re.compile(r"^(\w+):\s*(.+)$", re.MULTILINE)
+# [ \t]*, not \s*: an empty-valued key must not take the next line as its value.
+_YAML_KEY_RE = re.compile(r"^(\w+):[ \t]*(.+)$", re.MULTILINE)
 
 
 @dataclass

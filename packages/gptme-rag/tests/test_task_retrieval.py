@@ -422,3 +422,22 @@ class TestLoadTaskDocuments:
             state=doc.metadata["task_state"],
         )
         assert hit.closed, "Task with state 'done' (from quoted YAML) must be closed"
+
+
+def _load_one(tmp_path, text):
+    (tmp_path / "t.md").write_text(text)
+    [doc] = load_task_documents(tmp_path)
+    return doc.metadata
+
+
+def test_empty_value_key_does_not_swallow_state(tmp_path):
+    # An empty-valued key (common: `assigned_to:` / `waiting_for:`) right before
+    # `state:` must not consume the next line as its value.
+    md = _load_one(tmp_path, "---\nassigned_to:\nstate: done\n---\n# My task\n")
+    assert md["task_state"] == "done"
+
+
+def test_frontmatter_only_file_without_trailing_newline(tmp_path):
+    md = _load_one(tmp_path, "---\nstate: done\ntitle: Ship it\n---")
+    assert md["task_state"] == "done"
+    assert md["title"] == "Ship it"

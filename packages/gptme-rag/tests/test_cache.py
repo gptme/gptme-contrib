@@ -476,3 +476,43 @@ class TestSmartRAGCache:
         result3 = cache.get(key)
         assert result3 is not None
         assert result3.access_count == 3
+
+
+def _ttl_entry(content: str = "x", age_s: float = 0.0) -> CacheEntry:
+    now = datetime.now() - timedelta(seconds=age_s)
+    return CacheEntry(
+        document_contents=[content],
+        document_metadatas=[{"source": "a.md"}],
+        document_ids=["id1"],
+        distances=[0.1],
+        created_at=now,
+        last_accessed=now,
+        access_count=0,
+        workspace_mtime=0.0,
+        index_mtime=0.0,
+        embedding_time_ms=0.0,
+        result_count=1,
+    )
+
+
+def test_ttl_expiry_releases_size_accounting():
+    cache = SmartRAGCache(ttl_seconds=60)
+    key = CacheKey.from_search("q")
+    cache.put(key, _ttl_entry(age_s=120))  # already stale
+    assert cache.get(key) is None  # TTL eviction
+    assert cache.get_stats()["entries"] == 0
+    assert cache.get_stats()["total_size_bytes"] == 0
+
+
+def test_ttl_expiry_does_not_shrink_effective_capacity():
+    size = _ttl_entry().size_bytes()
+    cache = SmartRAGCache(ttl_seconds=60, max_memory_bytes=3 * size)
+    for i in range(3):
+        k = CacheKey.from_search(f"old{i}")
+        cache.put(k, _ttl_entry(age_s=120))
+        assert cache.get(k) is None  # expired + removed
+    # Cache is empty; two fresh entries fit easily in a 3-entry budget.
+    k1, k2 = CacheKey.from_search("new1"), CacheKey.from_search("new2")
+    cache.put(k1, _ttl_entry())
+    cache.put(k2, _ttl_entry())
+    assert cache.get(k1) is not None, "fresh entry evicted by leaked size accounting"
