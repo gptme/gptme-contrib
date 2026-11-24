@@ -563,29 +563,21 @@ def test_thread_context_without_us_does_not_trigger(
     assert "(US — our prior message)" not in prompt
 
 
-def test_substring_handle_triggers_known_false_positive(
+def test_longer_handle_with_our_prefix_is_not_our_mention(
     llm_module: types.ModuleType,
     eval_config: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """@TimeToBuildBobby triggers the note for @TimeToBuildBob — documented false-positive.
+    """@TimeToBuildBobby is a different account: handle matching is boundary-aware.
 
-    The implementation uses `f'@{handle}'` as the needle, which means a
-    longer handle with the short one as a prefix would match. This is a
-    known limitation — document it here so future refactors don't regress
-    behavior silently.
+    The earlier substring needle documented this as a known false positive.
     """
     monkeypatch.setenv("TWITTER_HANDLE", "TimeToBuildBob")
-    # Tweet mentions a *different* user whose handle starts with ours
     tweet = _base_tweet("@TimeToBuildBobby nice work!")
 
     prompt = llm_module.create_tweet_eval_prompt(tweet, eval_config)
 
-    # Current behavior: substring match triggers the note.
-    # This is a known false-positive risk but a safer failure mode than the
-    # false-negative IGNOREs we're guarding against. If the implementation
-    # moves to word-boundary matching, update this assertion.
-    assert "IS our account" in prompt
+    assert "IS our account" not in prompt
 
 
 def test_prompt_contains_tweet_text_and_author(
@@ -602,3 +594,186 @@ def test_prompt_contains_tweet_text_and_author(
 
     assert "a very specific string 17d2g" in prompt
     assert "UniqueAuthor17d2g" in prompt
+
+
+# --- Inherited reply-prefix mentions (ErikBjare/bob#1519) ---
+
+_THREAD = [
+    {"author": "ErikBjare", "text": "We shipped a game"},
+    {"author": "TimeToBuildBob", "text": "The puzzle budget is the interesting part"},
+    {"author": "ErikBjare", "text": "Thanks everyone for playing"},
+]
+
+
+def test_reply_prefix_handle_is_inherited_not_typed(
+    llm_module: types.ModuleType,
+    eval_config: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """X prepends thread handles to a reply; that is not a mention typed to us."""
+    monkeypatch.setenv("TWITTER_HANDLE", "TimeToBuildBob")
+    tweet = {
+        "text": "@ErikBjare @TimeToBuildBob this is great, love it",
+        "author": "someone",
+        "context": {},
+        "thread_context": _THREAD,
+    }
+
+    prompt = llm_module.create_tweet_eval_prompt(tweet, eval_config)
+
+    assert "addressed TO us" not in prompt
+    assert "automatic reply prefix" in prompt
+    assert "IS our account" in prompt
+
+
+def test_handle_typed_in_reply_body_is_direct(
+    llm_module: types.ModuleType,
+    eval_config: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TWITTER_HANDLE", "TimeToBuildBob")
+    tweet = {
+        "text": "@ErikBjare @TimeToBuildBob what do you think, @timetobuildbob?",
+        "author": "someone",
+        "context": {},
+        "thread_context": _THREAD,
+    }
+
+    prompt = llm_module.create_tweet_eval_prompt(tweet, eval_config)
+
+    assert "addressed TO us" in prompt
+    assert "automatic reply prefix" not in prompt
+
+
+def test_leading_handle_without_thread_stays_direct(
+    llm_module: types.ModuleType,
+    eval_config: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without thread context a leading handle cannot be told apart; keep #663."""
+    monkeypatch.setenv("TWITTER_HANDLE", "TimeToBuildBob")
+    prompt = llm_module.create_tweet_eval_prompt(
+        _base_tweet("@TimeToBuildBob hello"), eval_config
+    )
+
+    assert "addressed TO us" in prompt
+
+
+@pytest.mark.parametrize("parent_id", [42, "42"])
+def test_reply_to_our_message_is_direct(
+    llm_module: types.ModuleType,
+    eval_config: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    parent_id: int | str,
+) -> None:
+    """Use the target's reply ID, even when a newer sibling follows the parent."""
+    monkeypatch.setenv("TWITTER_HANDLE", "TimeToBuildBob")
+    tweet = {
+        "id": "target",
+        "text": "@TimeToBuildBob not sure that's right",
+        "author": "ErikBjare",
+        "context": {},
+        "thread_context": [
+            {"id": 42, "author": "TimeToBuildBob", "text": "My claim"},
+            {
+                "id": "target",
+                "author": "ErikBjare",
+                "text": "not sure",
+                "replied_to_id": parent_id,
+            },
+            {"id": "sibling", "author": "someone", "text": "Hello"},
+        ],
+    }
+
+    prompt = llm_module.create_tweet_eval_prompt(tweet, eval_config)
+
+    assert "addressed TO us" in prompt
+    assert "automatic reply prefix" not in prompt
+
+
+@pytest.mark.parametrize(
+    ("text", "thread"),
+    [
+        ("@ErikBjare @TimeToBuildBob @TimeToBuildBob what do you think?", _THREAD),
+        ("@ErikBjare @TimeToBuildBob @timetobuildbob", _THREAD),
+        ("@ErikBjare @TimeToBuildBob what do you think?", _THREAD[:1]),
+        ("@ErikBjare @AnotherUser @TimeToBuildBob help?", _THREAD),
+    ],
+)
+def test_leading_typed_mention_survives_reply_prefix(
+    llm_module: types.ModuleType,
+    eval_config: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    text: str,
+    thread: list[dict[str, str]],
+) -> None:
+    """Repeated or non-thread handles are not part of an inherited prefix."""
+    monkeypatch.setenv("TWITTER_HANDLE", "TimeToBuildBob")
+    tweet = {
+        "text": text,
+        "author": "someone",
+        "context": {},
+        "thread_context": thread,
+    }
+
+    prompt = llm_module.create_tweet_eval_prompt(tweet, eval_config)
+
+    assert "addressed TO us" in prompt
+    assert "automatic reply prefix" not in prompt
+
+
+def test_latest_thread_entry_is_not_necessarily_reply_parent(
+    llm_module: types.ModuleType,
+    eval_config: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Conversation context includes siblings, not just the target's ancestors."""
+    monkeypatch.setenv("TWITTER_HANDLE", "TimeToBuildBob")
+    tweet = {
+        "id": "target",
+        "text": "@ErikBjare @TimeToBuildBob great game",
+        "author": "someone",
+        "thread_context": [
+            {"id": "root", "author": "ErikBjare", "text": "My game"},
+            {
+                "id": "target",
+                "author": "someone",
+                "text": "great game",
+                "replied_to_id": "root",
+            },
+            {"id": "sibling", "author": "TimeToBuildBob", "text": "My review"},
+        ],
+    }
+
+    prompt = llm_module.create_tweet_eval_prompt(tweet, eval_config)
+
+    assert "addressed TO us" not in prompt
+    assert "possible automatic reply prefix" in prompt
+
+
+def test_leading_mention_without_actual_parent_prefix_is_direct(
+    llm_module: types.ModuleType,
+    eval_config: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TWITTER_HANDLE", "TimeToBuildBob")
+    tweet = {
+        "id": "target",
+        "text": "@TimeToBuildBob should we ship?",
+        "author": "someone",
+        "thread_context": [
+            {"id": "root", "author": "ErikBjare", "text": "Release?"},
+            {"id": "earlier", "author": "TimeToBuildBob", "text": "My review"},
+            {
+                "id": "target",
+                "author": "someone",
+                "text": "@TimeToBuildBob should we ship?",
+                "replied_to_id": "root",
+            },
+        ],
+    }
+
+    prompt = llm_module.create_tweet_eval_prompt(tweet, eval_config)
+
+    assert "addressed TO us" in prompt
+    assert "automatic reply prefix" not in prompt

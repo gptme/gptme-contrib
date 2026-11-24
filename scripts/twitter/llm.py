@@ -21,6 +21,7 @@ This module handles:
 import json
 import logging
 import os
+import re
 from dataclasses import asdict, dataclass
 from enum import Enum
 from pathlib import Path
@@ -252,6 +253,10 @@ def load_config() -> Dict[Any, Any]:
         return cast(Dict[Any, Any], yaml.safe_load(f))
 
 
+# A possible inherited handle; punctuation ends the candidate prefix.
+_REPLY_HANDLE_RE = re.compile(r"\s*@([\w]+)(?=\s|$)")
+
+
 def create_tweet_eval_prompt(tweet: Dict, config: Dict) -> str:
     """Create prompt for tweet evaluation"""
     twitter_handle = os.environ.get("TWITTER_HANDLE")
@@ -276,19 +281,81 @@ def create_tweet_eval_prompt(tweet: Dict, config: Dict) -> str:
             marker = " (US — our prior message)" if is_us else ""
             thread_context += f"Tweet {i + 1} - @{author}{marker}: {t['text']}\n"
 
-    # Direct mention detection: handle appears in the tweet body itself.
+    # Reply text may start with inherited thread handles (ErikBjare/bob#1519).
+    # Without API body offsets this is only a heuristic: strip each known
+    # thread author at most once, stopping at an unknown or repeated handle so
+    # a typed mention immediately after the prefix stays in the body.
     tweet_text = tweet.get("text", "")
-    is_direct_mention = f"@{handle_lower}" in tweet_text.lower()
+    handle_re = re.compile(rf"(?<![\w@])@{re.escape(handle_lower)}(?!\w)", re.I)
+    is_reply = bool(tweet.get("thread_context"))
+    # Context contains the whole conversation, including siblings and the
+    # target itself. Only an identified parent proves this is a reply to us.
+    entries = tweet.get("thread_context") or []
+    target_id = tweet.get("id")
+    target: Dict = next(
+        (
+            t
+            for t in entries
+            if target_id is not None and str(t.get("id")) == str(target_id)
+        ),
+        {},
+    )
+    parent_id = target.get("replied_to_id")
+    parent_author = next(
+        (
+            str(t.get("author", "")).lower()
+            for t in entries
+            if parent_id is not None and str(t.get("id")) == str(parent_id)
+        ),
+        "",
+    )
+    prefix_end = 0
+    first_handle = _REPLY_HANDLE_RE.match(tweet_text)
+    # When the parent is known, an inherited prefix must start with its
+    # author. A different leading participant can be a freshly typed mention.
+    if is_reply and (
+        not parent_author
+        or (first_handle and first_handle.group(1).lower() == parent_author)
+    ):
+        remaining_authors = {str(t.get("author", "")).lower() for t in entries}
+        while match := _REPLY_HANDLE_RE.match(tweet_text, prefix_end):
+            author = match.group(1).lower()
+            if author not in remaining_authors:
+                break
+            remaining_authors.remove(author)
+            prefix_end = match.end()
+    body = tweet_text[prefix_end:]
+    replies_to_us = parent_id is not None and any(
+        str(t.get("id")) == str(parent_id)
+        and str(t.get("author", "")).lower() == handle_lower
+        for t in entries
+    )
+    is_direct_mention = bool(handle_re.search(body)) or replies_to_us
+    is_inherited_mention = bool(
+        prefix_end
+        and not is_direct_mention
+        and handle_re.search(tweet_text[:prefix_end])
+    )
 
     # Build identity context. Fire for direct mentions OR when we're in the
     # thread — both cases need explicit identity to prevent confusion.
     mention_note = ""
-    if is_direct_mention or in_thread:
+    if is_direct_mention or is_inherited_mention or in_thread:
         mention_note = (
             f"\nIMPORTANT: @{twitter_handle} IS our account — we are @{twitter_handle}."
         )
         if is_direct_mention:
             mention_note += " This tweet is addressed TO us. Evaluate it as relevant to us personally."
+        elif is_inherited_mention:
+            mention_note += (
+                f" @{twitter_handle} appears only in a possible automatic reply prefix"
+                " matching thread participants. Text alone cannot establish whether"
+                " it was inherited or typed; do not assume it addresses us."
+                " Respond only if the message asks us something, corrects us, or a"
+                " reply would add a new useful fact. Ignore praise or commentary"
+                " addressed to someone else, and do not repeat a point our earlier"
+                " reply in this thread already made."
+            )
         if in_thread:
             mention_note += (
                 f" Any prior @{twitter_handle} messages in the thread are OUR own replies;"

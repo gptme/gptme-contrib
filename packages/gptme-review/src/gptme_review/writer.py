@@ -23,9 +23,11 @@ from __future__ import annotations
 import argparse
 import fcntl
 import fnmatch
+import hashlib
 import json
 import os
 import re
+import secrets
 import subprocess
 import sys
 import time
@@ -705,6 +707,329 @@ class DefaultWriterHost:
     def route_override(self, args: argparse.Namespace) -> tuple[str, str] | None:
         """Return ``(route, why)`` to override an auto-resolved llm route, or None."""
         return None
+
+
+# ---------------------------------------------------------------------------
+# Two-phase publication (writer-port slice 3b)
+#
+# ``run``, ``find_marker_comment``, ``_publication_lock`` and
+# ``resolve_review_thread`` resolve through ``_io`` so a host's patches reach
+# the mutation calls; the advisory audit ledger is a ``host`` hook.
+# ---------------------------------------------------------------------------
+
+
+def _native_review_published(
+    repo: str, number: int, full_sha: str, review_body: str
+) -> bool:
+    """Read GitHub's durable POST receipt before retrying a publication.
+
+    Do not use ``gh_paginated_list`` here: it returns [] on errors, which would
+    turn an unreadable receipt into permission to duplicate inline threads.
+    """
+    result = _io.run(
+        [
+            "gh",
+            "api",
+            f"repos/{repo}/pulls/{number}/reviews",
+            "--paginate",
+            "--slurp",
+        ],
+        env={**os.environ, "GH_API_CACHE_TTL": "0"},
+    )
+    if result.returncode != 0:
+        raise ReviewError(f"cannot check prior native review: {result.stderr[-300:]}")
+    try:
+        pages = json.loads(result.stdout)
+    except (ValueError, TypeError) as exc:
+        raise ReviewError("cannot decode prior native reviews") from exc
+    if not isinstance(pages, list) or not all(isinstance(p, list) for p in pages):
+        raise ReviewError("unexpected prior native reviews response")
+    reviews = [review for page in pages for review in page]
+    if not all(isinstance(review, dict) for review in reviews):
+        raise ReviewError("unexpected prior native review entry")
+    return any(
+        str(review.get("body") or "").strip() == review_body
+        and review.get("commit_id") == full_sha
+        and review.get("state") in {"COMMENTED", "DISMISSED"}
+        and _is_reviewer_comment(review, _io.REVIEWER_IDENTITY)
+        for review in reviews
+    )
+
+
+def publish_review(
+    *,
+    repo: str,
+    number: int,
+    full_sha: str,
+    summary_body: str,
+    final_state: Mapping[str, object],
+    previous_state: Mapping[str, object],
+    inline: Sequence[Mapping[str, object]],
+    existing: Mapping[str, object] | None,
+    stale_threads: Sequence[str] = (),
+    dry_run: bool = False,
+    host: DefaultWriterHost | None = None,
+) -> bool:
+    """Publish one durable summary and one verdict-free native review.
+
+    Order is the contract:
+
+    1. POST/PATCH a provisional, fail-closed summary.
+    2. Resolve superseded machine threads and submit the native COMMENT review.
+    3. PATCH the same summary to its completed verdict.
+
+    A failure at either mutation boundary leaves a provisional marker with no
+    completed SHA/score, so the sweep retries and every merge consumer fails
+    closed. ``served_through`` advances only in the final state supplied by the
+    caller, never merely because the summary comment's ``updated_at`` moved.
+
+    ``host.append_advisories`` mirrors published advisories to an audit ledger;
+    ``None`` means :class:`DefaultWriterHost`, which records nothing.
+    """
+    if host is None:
+        host = DefaultWriterHost()
+    head_sha = full_sha[:12]
+    prior_publication_id = previous_state.get("publication_id")
+    prior_publishing_sha = str(previous_state.get("publishing_sha") or "")
+    # A receipt proves only the payload from that publication, not a fresh
+    # analysis of the same commit. Bind retries to the exact inline payload.
+    inline_digest = hashlib.sha256(
+        json.dumps(list(inline), sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    recovering = (
+        isinstance(prior_publication_id, str)
+        and bool(prior_publication_id)
+        and bool(prior_publishing_sha)
+        and head_sha.startswith(prior_publishing_sha)
+        and previous_state.get("publishing_inline_sha256") == inline_digest
+    )
+    publication_id = str(prior_publication_id) if recovering else secrets.token_hex(8)
+    publishing_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    previous_for_provisional = dict(previous_state)
+    # Preserve the derived watermark when upgrading a legacy completed marker.
+    # Otherwise the first failed two-phase publication would make every old
+    # trigger comment look unserved merely because the old marker predates the
+    # explicit ``served_through`` field.
+    legacy_updated_at = (existing or {}).get("updated_at")
+    if (
+        "served_through" not in previous_for_provisional
+        and previous_for_provisional.get("sha")
+        and isinstance(legacy_updated_at, str)
+        and legacy_updated_at
+    ):
+        previous_for_provisional["served_through"] = legacy_updated_at
+    provisional_state = provisional_marker_state(
+        previous_for_provisional,
+        final_state,
+        head_sha=head_sha,
+        publication_id=publication_id,
+        publishing_at=publishing_at,
+    )
+    provisional_state["publishing_inline_sha256"] = inline_digest
+    provisional_body = provisional_marker_body(
+        render_provisional_body(head_sha), provisional_state
+    )
+
+    completed_state = dict(final_state)
+    completed_state["publication_id"] = publication_id
+    completed_body = marker_body(summary_body, completed_state)
+    review_body = render_review_event_body(publication_id)
+
+    if dry_run:
+        print(completed_body)
+        print("\n--- publication order ---")
+        print("1. provisional summary comment")
+        if inline:
+            print("2. native COMMENT review and inline threads")
+        else:
+            print("2. no native review event (no inline comments)")
+        print("3. final PATCH of the same summary comment")
+        print("\n--- review event body ---")
+        print(review_body)
+        print(f"\n--- would post {len(inline)} inline comment(s) ---")
+        print(f"--- would resolve {len(stale_threads)} superseded thread(s) ---")
+        return True
+
+    lock = _io._publication_lock(repo, number)
+    try:
+        # Re-read after acquiring the lock. If another local publisher changed
+        # the comment while this run was analysing, its result wins; overwriting
+        # it would create duplicate native reviews or resurrect stale state.
+        current = _io.find_marker_comment(repo, number)
+        initial_body = str((existing or {}).get("body") or "")
+        required_served_through = final_state.get("served_through")
+        if existing is None and current is not None:
+            if completed_marker_serves(current, full_sha, required_served_through):
+                print("skip: another run completed this review while publishing")
+                return True
+            print(
+                "error: an incomplete or older review marker appeared while publishing",
+                file=sys.stderr,
+            )
+            return False
+        if existing is not None:
+            if current is None:
+                print(
+                    "error: review marker disappeared while publishing", file=sys.stderr
+                )
+                return False
+            if (
+                current.get("id") != existing.get("id")
+                or str(current.get("body") or "") != initial_body
+            ):
+                if completed_marker_serves(current, full_sha, required_served_through):
+                    print("skip: another run completed this review while publishing")
+                    return True
+                print(
+                    "error: review marker changed without completing this run",
+                    file=sys.stderr,
+                )
+                return False
+
+        summary_id: int | None = None
+        if current is not None:
+            raw_id = current.get("id")
+            summary_id = raw_id if isinstance(raw_id, int) else None
+            if summary_id is None:
+                print(
+                    "error: existing review marker has no numeric id", file=sys.stderr
+                )
+                return False
+            provisional = _io.run(
+                [
+                    "gh",
+                    "api",
+                    "--method",
+                    "PATCH",
+                    f"repos/{repo}/issues/comments/{summary_id}",
+                    "-f",
+                    f"body={provisional_body}",
+                ]
+            )
+        else:
+            provisional = _io.run(
+                [
+                    "gh",
+                    "api",
+                    f"repos/{repo}/issues/{number}/comments",
+                    "-f",
+                    f"body={provisional_body}",
+                    "--jq",
+                    ".id",
+                ]
+            )
+            if provisional.returncode == 0:
+                try:
+                    summary_id = int(provisional.stdout.strip())
+                except ValueError:
+                    summary_id = None
+        if provisional.returncode != 0 or summary_id is None:
+            print(
+                f"error posting provisional summary: {provisional.stderr[-300:]}",
+                file=sys.stderr,
+            )
+            return False
+
+        if stale_threads:
+            resolved = sum(
+                _io.resolve_review_thread(tid, repo) for tid in stale_threads
+            )
+            print(f"resolved {resolved} superseded inline finding thread(s)")
+
+        native_posted = False
+        if recovering and inline:
+            try:
+                native_posted = _native_review_published(
+                    repo, number, full_sha, review_body
+                )
+            except ReviewError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return False
+
+        if not inline:
+            # Nothing to attach. A marker-only COMMENT review renders in the PR
+            # timeline as a review event with no visible content and no threads
+            # — noise Erik flagged on gptme/gptme-contrib#1599 (2026-09-03).
+            # The durable summary comment is already the verdict surface, so
+            # skip the event rather than publishing an empty container. This is
+            # also the retry seam: a run whose final PATCH failed re-publishes
+            # nothing here, so no duplicate event can appear.
+            print("no inline comments; skipping empty native review event")
+        elif native_posted:
+            print("native review already published; skipping duplicate inline threads")
+        else:
+            payload = {
+                "commit_id": full_sha,
+                # Same-account publication must remain advisory. A distinct App
+                # identity may map rubric outcomes to formal review events later.
+                "event": "COMMENT",
+                "body": review_body,
+                "comments": list(inline),
+            }
+            review = _io.run(
+                [
+                    "gh",
+                    "api",
+                    f"repos/{repo}/pulls/{number}/reviews",
+                    "--input",
+                    "-",
+                ],
+                input=json.dumps(payload),
+            )
+            if review.returncode != 0:
+                print(
+                    f"error posting native review: {review.stderr[-300:]}",
+                    file=sys.stderr,
+                )
+                return False
+            print(f"posted native review with {len(inline)} inline comment(s)")
+
+        completed_state["completed_at"] = (
+            datetime.now(UTC).isoformat().replace("+00:00", "Z")
+        )
+        completed_body = marker_body(summary_body, completed_state)
+        final = _io.run(
+            [
+                "gh",
+                "api",
+                "--method",
+                "PATCH",
+                f"repos/{repo}/issues/comments/{summary_id}",
+                "-f",
+                f"body={completed_body}",
+                "--jq",
+                ".html_url",
+            ]
+        )
+        if final.returncode != 0:
+            print(
+                f"error finalizing review summary: {final.stderr[-300:]}",
+                file=sys.stderr,
+            )
+            return False
+        print(f"finalized: {final.stdout.strip()}")
+        # Both production and local-artifact reviews publish here. Capture the
+        # advisory evidence before a later review replaces the mutable summary.
+        # This audit mirror is not merge authority: its failure cannot undo an
+        # already published review or cause duplicate publication on retry.
+        advisories = completed_state.get("advisories")
+        if isinstance(advisories, list) and advisories:
+            try:
+                count, diagnostics = host.append_advisories(
+                    repo, number, full_sha, advisories
+                )
+                print(f"advisory ledger: appended {count} row(s)")
+                for diagnostic in diagnostics:
+                    print(f"warning: advisory ledger: {diagnostic}", file=sys.stderr)
+            except Exception as exc:  # best-effort host hook, not merge authority
+                print(
+                    f"warning: advisory ledger capture failed: {exc}; "
+                    f"run ai-review-dispose.py {repo} {number} --reconcile",
+                    file=sys.stderr,
+                )
+        return True
+    finally:
+        lock.close()
 
 
 # ---------------------------------------------------------------------------

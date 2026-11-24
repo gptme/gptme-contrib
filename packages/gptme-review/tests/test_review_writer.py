@@ -1,7 +1,9 @@
-"""Peer-host contract for gptme_review.writer (writer-port slices 2a–2d, 3a)."""
+"""Peer-host contract for gptme_review.writer (writer-port slices 2a–2d, 3a, 3b)."""
 
 from __future__ import annotations
 
+import hashlib
+import json
 import subprocess
 from types import SimpleNamespace
 
@@ -1078,3 +1080,279 @@ def test_run_shards_fails_closed_and_keeps_the_error_type(alice_io):
     assert w._run_shards([Shard(index=1)], lambda s: ([{"a": 1}], {})) == [
         ([{"a": 1}], {})
     ]
+
+
+# --- writer-port slice 3b: two-phase publication ------------------------------
+
+
+class _Lock:
+    def __init__(self) -> None:
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _AdvisoryHost(writer.DefaultWriterHost):
+    def __init__(self) -> None:
+        self.rows: list[tuple] = []
+
+    def append_advisories(self, repo, number, sha, advisories):
+        self.rows.append((repo, number, sha, list(advisories)))
+        return len(advisories), []
+
+
+def _publish_io(alice_io, fake_run, *, current=None):
+    lock = _Lock()
+    w = _bound_with(
+        alice_io,
+        run=fake_run,
+        find_marker_comment=lambda repo, number: current,
+        _publication_lock=lambda repo, number: lock,
+    )
+    return w, lock
+
+
+def _publish_kwargs(**over):
+    base = dict(
+        repo="o/r",
+        number=7,
+        full_sha="a" * 40,
+        summary_body="## review",
+        final_state={"sha": "a" * 12, "advisories": [{"title": "adv"}]},
+        previous_state={},
+        inline=[{"path": "x.py", "line": 1, "body": "finding"}],
+        existing=None,
+    )
+    return {**base, **over}
+
+
+def test_publish_review_orders_mutations_through_the_bound_io(alice_io):
+    fake_run, calls = _scripted_run(
+        {
+            ("gh", "api", "repos/o/r/issues/7/comments"): (0, "123\n"),
+            ("gh", "api", "repos/o/r/pulls/7/reviews"): (0, ""),
+            ("gh", "api", "--method", "PATCH"): (0, "https://x/1\n"),
+        }
+    )
+    w, lock = _publish_io(alice_io, fake_run)
+    host = _AdvisoryHost()
+    assert w.publish_review(**_publish_kwargs(), host=host) is True
+    assert [c[2] if c[2] != "--method" else c[4] for c in calls] == [
+        "repos/o/r/issues/7/comments",
+        "repos/o/r/pulls/7/reviews",
+        "repos/o/r/issues/comments/123",
+    ]
+    provisional, final = calls[0][4], calls[2][6]
+    assert "<!-- alice-ai-review-publishing " in provisional
+    assert "<!-- alice-ai-review " in final and "bob-ai-review" not in final
+    assert host.rows == [("o/r", 7, "a" * 40, [{"title": "adv"}])]
+    assert lock.closed
+
+
+def test_publish_review_default_host_records_no_advisories(alice_io):
+    fake_run, _ = _scripted_run(
+        {
+            ("gh", "api", "repos/o/r/issues/7/comments"): (0, "123\n"),
+            ("gh", "api", "repos/o/r/pulls/7/reviews"): (0, ""),
+            ("gh", "api", "--method", "PATCH"): (0, "https://x/1\n"),
+        }
+    )
+    w, _ = _publish_io(alice_io, fake_run)
+    assert w.publish_review(**_publish_kwargs()) is True
+
+
+def test_publish_review_failed_native_review_leaves_the_provisional_marker(alice_io):
+    fake_run, calls = _scripted_run(
+        {
+            ("gh", "api", "repos/o/r/issues/7/comments"): (0, "123\n"),
+            ("gh", "api", "repos/o/r/pulls/7/reviews"): (1, ""),
+        }
+    )
+    w, lock = _publish_io(alice_io, fake_run)
+    host = _AdvisoryHost()
+    assert w.publish_review(**_publish_kwargs(), host=host) is False
+    assert len(calls) == 2  # no final PATCH: the sweep retries, consumers fail closed
+    assert host.rows == [] and lock.closed
+
+
+@pytest.mark.parametrize("error", [OSError, ValueError, RuntimeError, KeyError])
+def test_publish_review_advisory_audit_failure_does_not_fail_publication(
+    alice_io, error
+):
+    class BrokenAuditHost(writer.DefaultWriterHost):
+        def append_advisories(self, *args):
+            raise error("audit unavailable")
+
+    fake_run, calls = _scripted_run(
+        {
+            ("gh", "api", "repos/o/r/issues/7/comments"): (0, "123\n"),
+            ("gh", "api", "repos/o/r/pulls/7/reviews"): (0, ""),
+            ("gh", "api", "--method", "PATCH"): (0, "https://x/1\n"),
+        }
+    )
+    w, lock = _publish_io(alice_io, fake_run)
+    assert w.publish_review(**_publish_kwargs(), host=BrokenAuditHost()) is True
+    assert len(calls) == 3 and lock.closed
+
+
+@pytest.mark.parametrize("failure", ["final_patch", "review_response"])
+@pytest.mark.parametrize("changed_inline", [False, True])
+def test_publish_review_retry_does_not_duplicate_native_threads(
+    alice_io, failure, changed_inline
+):
+    w = writer.bind_io(alice_io)
+    current = None
+    reviews = []
+    native_posts = 0
+    lookups = []
+    locks = []
+    fail_once = True
+
+    def fake_lock(repo, number):
+        lock = _Lock()
+        locks.append(lock)
+        return lock
+
+    def fake_run(cmd, **kw):
+        nonlocal current, native_posts, fail_once
+        if "--input" in cmd:
+            native_posts += 1
+            payload = json.loads(kw["input"])
+            reviews.append(
+                {
+                    "body": payload["body"],
+                    "commit_id": payload["commit_id"],
+                    "user": {"login": "Alice-Agent"},
+                    "state": "COMMENTED",
+                }
+            )
+            if failure == "review_response" and fail_once:
+                fail_once = False
+                return subprocess.CompletedProcess(cmd, 1, "", "response lost")
+        elif "--paginate" in cmd:
+            lookups.append(cmd)
+            # The matching review need not be on the first API page.
+            return subprocess.CompletedProcess(cmd, 0, json.dumps([[], reviews]), "")
+        else:
+            body = next(arg[5:] for arg in cmd if arg.startswith("body="))
+            if "--method" in cmd and "-publishing " not in body and fail_once:
+                fail_once = False
+                return subprocess.CompletedProcess(cmd, 1, "", "PATCH failed")
+            current = {"id": 123, "body": body}
+        return subprocess.CompletedProcess(cmd, 0, "123\n", "")
+
+    alice_io.run = fake_run
+    alice_io._publication_lock = fake_lock
+    alice_io.find_marker_comment = lambda repo, number: current
+    host = _AdvisoryHost()
+    assert w.publish_review(**_publish_kwargs(), host=host) is False
+    assert current is not None
+    previous = w.marker_state(current["body"])
+    assert previous["publishing_sha"] == "a" * 12
+    assert "sha" not in previous and host.rows == []
+    retry_kwargs = _publish_kwargs(existing=current, previous_state=previous)
+    if changed_inline:
+        retry_kwargs["inline"] = [{"path": "y.py", "line": 2, "body": "new finding"}]
+    assert w.publish_review(**retry_kwargs, host=host) is True
+    assert native_posts == (2 if changed_inline else 1)
+    if changed_inline:
+        assert reviews[0]["body"] != reviews[1]["body"]
+    else:
+        assert len(lookups) == 1 and "--slurp" in lookups[0]
+    assert w.marker_state(current["body"])["sha"] == "a" * 12
+    assert len(host.rows) == 1
+    assert all(lock.closed for lock in locks)
+
+
+@pytest.mark.parametrize(
+    "lookup",
+    [
+        (1, "", "network error"),
+        (0, "invalid json", ""),
+        (0, '{"message": "API error"}', ""),
+        (0, '[{"body": "not slurped"}]', ""),
+        (0, "[[null]]", ""),
+    ],
+)
+def test_publish_review_retry_fails_closed_on_unreadable_receipt(alice_io, lookup):
+    w = writer.bind_io(alice_io)
+    previous = {
+        "publication_id": "retry-id",
+        "publishing_sha": "a" * 12,
+        "publishing_inline_sha256": hashlib.sha256(
+            json.dumps(
+                _publish_kwargs()["inline"], sort_keys=True, separators=(",", ":")
+            ).encode()
+        ).hexdigest(),
+    }
+    current = {"id": 123, "body": w.provisional_marker_body("pending", previous)}
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        if "--paginate" in cmd:
+            assert kw["env"]["GH_API_CACHE_TTL"] == "0"
+            return subprocess.CompletedProcess(cmd, *lookup)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    w, lock = _publish_io(alice_io, fake_run, current=current)
+    assert not w.publish_review(
+        **_publish_kwargs(existing=current, previous_state=previous)
+    )
+    assert len(calls) == 2  # provisional PATCH and lookup only; no POST/final PATCH
+    assert "--input" not in calls[1] and lock.closed
+
+
+@pytest.mark.parametrize(
+    "receipt",
+    [
+        {},  # an interrupted publication that never reached the POST
+        {"body": None},  # unrelated reviews can have no body
+        {"user": {"login": "mallory"}},  # copied receipt is not ours
+        {"commit_id": "b" * 40},
+        {"body": "<!-- automated-ai-review-publication:other-id -->"},
+        {"state": "PENDING"},
+    ],
+)
+def test_publish_review_retry_posts_when_no_matching_receipt(alice_io, receipt):
+    w = writer.bind_io(alice_io)
+    previous = {
+        "publication_id": "retry-id",
+        "publishing_sha": "a" * 12,
+        "publishing_inline_sha256": hashlib.sha256(
+            json.dumps(
+                _publish_kwargs()["inline"], sort_keys=True, separators=(",", ":")
+            ).encode()
+        ).hexdigest(),
+    }
+    current = {"id": 123, "body": w.provisional_marker_body("pending", previous)}
+    review = {
+        "body": w.render_review_event_body("retry-id"),
+        "user": {"login": "alice-agent"},
+        "commit_id": "a" * 40,
+        "state": "COMMENTED",
+    }
+    review.update(receipt)
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(
+            cmd, 0, json.dumps([[review]] if receipt else [[]]), ""
+        )
+
+    w, lock = _publish_io(alice_io, fake_run, current=current)
+    assert w.publish_review(
+        **_publish_kwargs(existing=current, previous_state=previous)
+    )
+    assert sum("--input" in cmd for cmd in calls) == 1
+    assert len(calls) == 4 and lock.closed
+
+
+def test_publish_review_yields_to_a_marker_that_appeared_while_analysing(alice_io):
+    fake_run, calls = _scripted_run({})
+    current = {"id": 9, "body": "<!-- alice-ai-review-publishing {} -->"}
+    w, lock = _publish_io(alice_io, fake_run, current=current)
+    assert w.publish_review(**_publish_kwargs()) is False
+    assert calls == [] and lock.closed
