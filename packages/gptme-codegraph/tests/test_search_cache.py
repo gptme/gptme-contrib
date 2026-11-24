@@ -151,3 +151,26 @@ class TestSearchDocumentCacheSemantics:
         ).fetchone()[0]
 
         assert h1 != h2
+
+
+class TestSearchDocumentGeneration:
+    def test_matching_generation_loads(self):
+        conn = _conn()
+        save_search_documents(conn, "/proj", [_doc("pkg.mod.f")], generation="g1")
+        assert [d.qualified_id for d in load_search_documents(conn, "/proj", "g1")] == [
+            "pkg.mod.f"
+        ]
+
+    def test_other_generation_is_not_served(self):
+        conn = _conn()
+        save_search_documents(conn, "/proj", [_doc("pkg.mod.f")], generation="g1")
+        assert load_search_documents(conn, "/proj", generation="g2") == []
+
+    def test_unbound_documents_are_not_served_for_a_generation(self):
+        # Documents saved without a generation (older writers) cannot prove
+        # which index they came from.
+        conn = _conn()
+        save_search_documents(conn, "/proj", [_doc("pkg.mod.f")], generation="g1")
+        save_search_documents(conn, "/proj", [_doc("pkg.mod.f")])
+        assert load_search_documents(conn, "/proj", generation="g1") == []
+        assert len(load_search_documents(conn, "/proj")) == 1

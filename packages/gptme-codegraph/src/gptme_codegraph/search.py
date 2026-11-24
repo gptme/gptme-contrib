@@ -383,18 +383,42 @@ def _ensure_search_tables(conn: sqlite3.Connection) -> None:
             document TEXT NOT NULL,
             PRIMARY KEY (directory, qualified_id)
         );
+        CREATE TABLE IF NOT EXISTS search_documents_generation (
+            directory TEXT PRIMARY KEY,
+            generation TEXT NOT NULL
+        );
     """)
 
 
 def save_search_documents(
-    conn: sqlite3.Connection, directory: str, docs: list[SearchDocument]
+    conn: sqlite3.Connection,
+    directory: str,
+    docs: list[SearchDocument],
+    generation: str | None = None,
 ) -> None:
-    """Persist search documents to SQLite cache."""
+    """Persist search documents to SQLite cache.
+
+    ``generation`` names the symbol-index generation the documents were
+    extracted from (see ``SqliteIndexCache.generation``). Pass the same token
+    to ``load_search_documents`` so documents from a replaced index are not
+    served.
+    """
     import hashlib
     import json
 
     _ensure_search_tables(conn)
     conn.execute("DELETE FROM search_documents WHERE directory = ?", (directory,))
+    if generation is None:
+        conn.execute(
+            "DELETE FROM search_documents_generation WHERE directory = ?",
+            (directory,),
+        )
+    else:
+        conn.execute(
+            "INSERT OR REPLACE INTO search_documents_generation (directory, generation) "
+            "VALUES (?, ?)",
+            (directory, generation),
+        )
 
     for doc in docs:
         content_hash = hashlib.sha256(
@@ -448,12 +472,23 @@ def save_search_documents(
 
 
 def load_search_documents(
-    conn: sqlite3.Connection, directory: str
+    conn: sqlite3.Connection, directory: str, generation: str | None = None
 ) -> list[SearchDocument]:
-    """Load search documents from SQLite cache."""
+    """Load search documents from SQLite cache.
+
+    When ``generation`` is given, return ``[]`` unless the stored documents
+    were saved for that same index generation.
+    """
     import json
 
     _ensure_search_tables(conn)
+    if generation is not None:
+        row = conn.execute(
+            "SELECT generation FROM search_documents_generation WHERE directory = ?",
+            (directory,),
+        ).fetchone()
+        if row is None or row[0] != generation:
+            return []
     rows = conn.execute(
         "SELECT document FROM search_documents WHERE directory = ?",
         (directory,),

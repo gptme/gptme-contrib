@@ -71,27 +71,38 @@ mcp = FastMCP("codegraph", log_level="WARNING")
 # In-memory + SQLite index cache
 # ---------------------------------------------------------------------------
 
-_index_cache: dict[str, tuple[SymbolIndex, SqliteIndexCache | None]] = {}
+# directory -> (index, sqlite cache, generation of the SQLite index it came from)
+_index_cache: dict[str, tuple[SymbolIndex, SqliteIndexCache | None, str | None]] = {}
 
 
 def _get_or_build_index(directory: str) -> SymbolIndex:
     """Get a cached index (SQLite-backed, falling through to in-memory).
 
     When SQLite is available, freshness is re-checked on every call so file
-    edits between calls are detected automatically.  Without SQLite backing
+    edits between calls are detected automatically, and so is another
+    process saving a newer index for the same directory.  Without SQLite backing
     (i.e. the ``[treesitter]`` extra is not installed) the in-memory snapshot
     is returned unconditionally — restart the server to pick up changes.
     """
     dir_path = str(Path(directory).resolve())
 
     if dir_path in _index_cache:
-        cached_index, cached_sqlite = _index_cache[dir_path]
+        cached_index, cached_sqlite, cached_generation = _index_cache[dir_path]
         if cached_sqlite is None:
             # No freshness oracle available — return the snapshot as-is.
             return cached_index
+        # Read the generation before loading: if another process saves in
+        # between, the newer index is tagged with the older token and the
+        # next call reloads it, rather than the reverse.
+        generation = cached_sqlite.generation()
         # Re-check SQLite freshness; returns None when any indexed file changed.
-        if cached_sqlite.load() is not None:
-            return cached_index
+        loaded = cached_sqlite.load()
+        if loaded is not None:
+            if generation == cached_generation:
+                return cached_index
+            # Another process saved a newer index; adopt it.
+            _index_cache[dir_path] = (loaded, cached_sqlite, generation)
+            return loaded
         # Stale — drop and fall through to rebuild.
         del _index_cache[dir_path]
 
@@ -99,23 +110,25 @@ def _get_or_build_index(directory: str) -> SymbolIndex:
     sqlite_cache: SqliteIndexCache | None = None
     try:
         sqlite_cache = SqliteIndexCache(dir_path)
+        generation = sqlite_cache.generation()
         cached = sqlite_cache.load()
         if cached is not None:
-            _index_cache[dir_path] = (cached, sqlite_cache)
+            _index_cache[dir_path] = (cached, sqlite_cache, generation)
             return cached
     except Exception:
         pass
 
     # Build fresh and save to SQLite
     index = build_index(Path(dir_path))
+    generation = None
     if sqlite_cache is not None:
         try:
-            sqlite_cache.save(index)
+            generation = sqlite_cache.save(index)
             # Clear stale search-document cache so next search re-extracts from the new index
             _clear_search_docs_db(sqlite_cache.db_path, dir_path)
         except Exception:
             pass
-    _index_cache[dir_path] = (index, sqlite_cache)
+    _index_cache[dir_path] = (index, sqlite_cache, generation)
     return index
 
 
@@ -667,17 +680,22 @@ def codegraph_search(
 
     # Load search documents from SQLite cache if available; extract and save on miss.
     docs: list[SearchDocument] | None = None
+    # Documents are bound to the generation of the index they came from, so a
+    # cache written for an index another process has since replaced is skipped.
     cached_entry = _index_cache.get(dir_key)
-    sqlite_cache = cached_entry[1] if cached_entry else None
-    if sqlite_cache is not None:
+    sqlite_cache = None
+    generation = None
+    if cached_entry is not None and cached_entry[0] is index:
+        _, sqlite_cache, generation = cached_entry
+    if sqlite_cache is not None and generation is not None:
         try:
             with sqlite3.connect(sqlite_cache.db_path) as conn:
-                loaded = load_search_documents(conn, dir_key)
+                loaded = load_search_documents(conn, dir_key, generation=generation)
                 if loaded:
                     docs = loaded
                 else:
                     docs = extract_search_documents(index, dir_path)
-                    save_search_documents(conn, dir_key, docs)
+                    save_search_documents(conn, dir_key, docs, generation=generation)
         except Exception:
             docs = None
 

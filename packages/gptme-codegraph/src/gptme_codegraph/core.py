@@ -27,6 +27,7 @@ import json
 import sqlite3
 import subprocess
 import sys
+import uuid
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -520,8 +521,26 @@ class SqliteIndexCache:
 
         return True
 
-    def save(self, index: SymbolIndex) -> None:
-        """Persist a SymbolIndex to SQLite."""
+    def generation(self) -> str | None:
+        """Return the token of the last ``save()``, or None if never saved.
+
+        Every save writes a fresh token, so a reader can tell that another
+        process replaced the index even when the file mtimes it checks are
+        unchanged since then. Databases written before tokens existed fall
+        back to the ``last_updated`` timestamp each save also writes.
+        """
+        conn = self._connect()
+        self._init_schema()
+        for key in ("index_generation", "last_updated"):
+            row = conn.execute(
+                "SELECT value FROM metadata WHERE key = ?", (key,)
+            ).fetchone()
+            if row:
+                return str(row[0])
+        return None
+
+    def save(self, index: SymbolIndex) -> str:
+        """Persist a SymbolIndex to SQLite and return its generation token."""
         conn = self._connect()
         self._init_schema()
 
@@ -585,7 +604,13 @@ class SqliteIndexCache:
             "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
             ("last_updated", datetime.now(timezone.utc).isoformat()),
         )
+        generation = uuid.uuid4().hex
+        conn.execute(
+            "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+            ("index_generation", generation),
+        )
         conn.commit()
+        return generation
 
     def load(self) -> SymbolIndex | None:
         """Load a persisted SymbolIndex from SQLite, or None if empty or stale."""
