@@ -23,7 +23,7 @@ All modules live under `gptme_contrib_lib` (there is no top-level re-export).
 
 | Module | Contents |
 |--------|----------|
-| `merge_policy` | Deterministic self-merge policy: loads tiers from `merge_policy.toml`, classifies changed files and returns an eligibility decision. Stdlib only, so plain scripts (`scripts/github/merge-policy.py`, `self-merge-check.py`) can import it |
+| `merge_policy` | Deterministic self-merge policy: loads tiers from the trusted `origin/master` copy of `merge_policy.toml` (`load_policy()` raises `ValueError` outside a checkout with that ref; an explicit path is for offline calibration and tests), classifies changed files and returns an eligibility decision. Stdlib only, so plain scripts (`scripts/github/merge-policy.py`, `self-merge-check.py`) can import it |
 | `ai_review_policy` | `blocking_shortfall(rows)` — which AI code-review findings block a merge (P2+ never block; P0/P1 block until disposed, superseded, or both replied to and resolved; unreadable severity fails closed) |
 
 ## Backward compatibility
