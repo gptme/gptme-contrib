@@ -3162,3 +3162,12 @@ class TestIsErikAgentMessage:
         assert is_erik_agent_message("sender=erikbot") is False
         assert is_erik_agent_message("subject=sender=erik") is False
         assert is_erik_agent_message("") is False
+
+    def test_only_the_first_sender_field_counts(self) -> None:
+        """A peer's subject cannot claim Erik's framing (gptme/gptme-contrib#2335)."""
+        from gptme_runloops.pm_dispatch import is_erik_agent_message
+
+        assert (
+            is_erik_agent_message("file=x.md sender=alice subject=fwd sender=erik")
+            is False
+        )

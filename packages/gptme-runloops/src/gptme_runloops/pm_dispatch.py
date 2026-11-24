@@ -171,11 +171,12 @@ def is_erik_agent_message(detail: str) -> bool:
     Erik is a high-signal ask like a direct mention, so it gets the same
     timeout floor: a 900 s fast-lane session was cut while its commit was
     still running (2026-11-12, mail 20261112-112321).
+
+    Only the first ``sender=`` field counts: the detail ends with the
+    peer-written subject, which may itself contain ``sender=erik``.
     """
-    return (
-        re.search(r"(?:^|[\s;])sender=erik(?=$|[\s;])", detail, re.IGNORECASE)
-        is not None
-    )
+    match = re.search(r"(?:^|[\s;])sender=([^\s;]*)", detail, re.IGNORECASE)
+    return match is not None and match.group(1).lower() == "erik"
 
 
 # --- Data classes ---

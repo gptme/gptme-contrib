@@ -28,3 +28,6 @@ def test_format_pct():
     assert format_pct(0.256) == "26%"
     assert format_pct("x") == "?"
     assert format_pct(True) == "?"
+    # Non-finite values are not numbers to a reader (gptme/gptme-contrib#2335).
+    assert format_pct(float("nan")) == "?"
+    assert format_pct(float("inf")) == "?"

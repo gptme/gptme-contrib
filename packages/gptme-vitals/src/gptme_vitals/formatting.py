@@ -6,6 +6,8 @@ subscription-colour formatters encode Bob's own pages and stay in his repo.
 
 from __future__ import annotations
 
+import math
+
 
 def as_float(value: object) -> float | None:
     """Return ``value`` as a float, or ``None`` for bools and non-numbers."""
@@ -33,4 +35,6 @@ def as_int(value: object) -> int | None:
 def format_pct(value: object) -> str:
     """Format a 0..1 fraction as ``NN%``; ``?`` when it is not a number."""
     numeric = as_float(value)
-    return "?" if numeric is None else f"{numeric:.0%}"
+    if numeric is None or not math.isfinite(numeric):
+        return "?"
+    return f"{numeric:.0%}"
