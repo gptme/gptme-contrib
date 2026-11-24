@@ -153,15 +153,24 @@ def stamp_frontmatter_flags(content: str, flags: dict[str, bool]) -> str | None:
     if not pending:
         return content
     lines = fm.split("\n")
-    spans: list[tuple[int, int, str]] = []
-    for key_node, value_node in node.value:
-        if isinstance(key_node, yaml.ScalarNode) and key_node.value in pending:
-            end = value_node.end_mark.line + (1 if value_node.end_mark.column else 0)
-            spans.append((key_node.start_mark.line, end, key_node.value))
-    for start, end, key in sorted(spans, reverse=True):
-        lines[start:end] = [f"{key}: {'true' if pending[key] else 'false'}"]
+    targets = [
+        (key_node, value_node)
+        for key_node, value_node in node.value
+        if isinstance(key_node, yaml.ScalarNode) and key_node.value in pending
+    ]
+    for key_node, value_node in sorted(targets, key=lambda kv: kv[0].start_mark.line, reverse=True):
+        key = key_node.value
+        literal = "true" if pending[key] else "false"
+        start, end = value_node.start_mark, value_node.end_mark
+        if start.line == end.line and end.column > start.column:
+            # Single-line value: swap only its span, so a trailing comment stays.
+            line = lines[start.line]
+            lines[start.line] = line[: start.column] + literal + line[end.column :]
+        else:
+            stop = end.line + (1 if end.column else 0)
+            lines[key_node.start_mark.line : stop] = [f"{key}: {literal}"]
     fm = "\n".join(lines)
-    present = {key for _, _, key in spans}
+    present = {key_node.value for key_node, _ in targets}
     for key, value in pending.items():
         if key not in present:
             fm = fm.rstrip("\n") + f"\n{key}: {'true' if value else 'false'}\n"

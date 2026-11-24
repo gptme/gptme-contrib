@@ -24,7 +24,7 @@ from click.testing import CliRunner
 from gptmail import agent_cli
 from gptmail.agent_cli import agent
 from gptmail.communication_utils.state.tracking import ConversationTracker, MessageState
-from gptmail.transport.agent import meta_of
+from gptmail.transport.agent import meta_of, stamp_frontmatter_flags
 
 pytestmark = pytest.mark.usefixtures("clean_agent_scanner")
 
@@ -547,6 +547,13 @@ def test_read_stamps_when_quoted_subject_continues_with_read(workspace: Path) ->
     fm = _frontmatter(inbox / name)
     assert fm["subject"] == "Status read: true later"
     assert fm["read"] is True
+
+
+def test_stamp_keeps_trailing_comment_on_rewritten_key() -> None:
+    # The stamp rewrites only the value, so a comment after it survives.
+    content = "---\nfrom: bob\nread: false  # initial state\nreplied:\n---\n\nfyi\n"
+    stamped = stamp_frontmatter_flags(content, {"read": True, "replied": True})
+    assert stamped == "---\nfrom: bob\nread: true  # initial state\nreplied: true\n---\n\nfyi\n"
 
 
 def test_ack_fails_when_stamp_cannot_land(workspace: Path) -> None:
