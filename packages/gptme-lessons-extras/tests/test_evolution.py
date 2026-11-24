@@ -351,3 +351,51 @@ def test_get_contributor_stats_excludes_refinements(tmp_path):
     assert stats["bob"]["lessons_created"] == 1
     # Refinement files should not create phantom entries
     assert len(stats) == 1
+
+
+def test_initialize_refuses_to_wipe_existing_history(tmp_path):
+    # #2362 E3: re-running `init` on a tracked lesson replaced its history.
+    from gptme_lessons_extras.evolution import EvolutionTracker
+
+    t = EvolutionTracker(history_dir=tmp_path / "hist")
+    t.initialize_lesson("bob-tools-git", "bob", "v1 body")
+    t.track_change("bob-tools-git", "alice", "tighten rule", "v2 body")
+
+    with pytest.raises(FileExistsError):
+        t.initialize_lesson("bob-tools-git", "bob", "v2 body")
+
+    h = t.load_history("bob-tools-git")
+    assert h is not None
+    assert [v.version for v in h.versions] == [1, 2]
+
+
+@pytest.mark.parametrize("target", ["history", "refinements"])
+def test_failed_write_keeps_previous_file(tmp_path, monkeypatch, target):
+    # #2362 E4: files were rewritten in place, so a failed write left invalid
+    # JSON and every later load raised.
+    import json
+
+    from gptme_lessons_extras import evolution
+    from gptme_lessons_extras.evolution import EvolutionTracker
+
+    t = EvolutionTracker(history_dir=tmp_path / "hist")
+    t.initialize_lesson("bob-tools-git", "bob", "v1 body")
+    t.suggest_refinement("bob-tools-git", "alice", "clarity", "first")
+
+    def dump_then_enospc(obj, fp, **kw):
+        fp.write(json.dumps(obj, **kw)[:20])  # partial write, then disk full
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(evolution.json, "dump", dump_then_enospc)
+    with pytest.raises(OSError):
+        if target == "history":
+            t.track_change("bob-tools-git", "gordon", "add example", "v2 body")
+        else:
+            t.suggest_refinement("bob-tools-git", "gordon", "clarity", "second")
+    monkeypatch.undo()
+
+    h = t.load_history("bob-tools-git")
+    assert h is not None
+    assert [v.version for v in h.versions] == [1]
+    assert [r.suggestion for r in t.load_refinements("bob-tools-git")] == ["first"]
+    assert not list((tmp_path / "hist").rglob("*.tmp"))

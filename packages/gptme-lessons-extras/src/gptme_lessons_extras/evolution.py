@@ -11,6 +11,8 @@ Tracks:
 """
 
 import json
+import os
+import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -146,7 +148,15 @@ class EvolutionTracker:
         origin_agent: str,
         content: str,
     ) -> LessonHistory:
-        """Initialize tracking for a new lesson."""
+        """Initialize tracking for a new lesson.
+
+        Raises FileExistsError if the lesson is already tracked: re-initialising
+        would replace its version history with a single v1.
+        """
+        if self._history_path(lesson_id).exists():
+            raise FileExistsError(
+                f"Lesson {lesson_id} is already tracked; use track_change to add a version"
+            )
         history = LessonHistory(
             lesson_id=lesson_id,
             origin_agent=origin_agent,
@@ -210,10 +220,7 @@ class EvolutionTracker:
 
     def _save_history(self, history: LessonHistory) -> None:
         """Save lesson history to disk."""
-        path = self._history_path(history.lesson_id)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w") as f:
-            json.dump(history.to_dict(), f, indent=2)
+        _write_json_atomic(self._history_path(history.lesson_id), history.to_dict())
 
     def suggest_refinement(
         self,
@@ -239,10 +246,9 @@ class EvolutionTracker:
         refinements.append(refinement)
 
         # Save
-        path = self._refinements_path(lesson_id)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w") as f:
-            json.dump([r.to_dict() for r in refinements], f, indent=2)
+        _write_json_atomic(
+            self._refinements_path(lesson_id), [r.to_dict() for r in refinements]
+        )
 
         return refinement
 
@@ -269,10 +275,9 @@ class EvolutionTracker:
 
         refinements[suggestion_index].status = new_status
 
-        path = self._refinements_path(lesson_id)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w") as f:
-            json.dump([r.to_dict() for r in refinements], f, indent=2)
+        _write_json_atomic(
+            self._refinements_path(lesson_id), [r.to_dict() for r in refinements]
+        )
 
     def compare_versions(
         self,
@@ -342,6 +347,22 @@ class EvolutionTracker:
         return stats
 
 
+def _write_json_atomic(path: Path, data: object) -> None:
+    """Write JSON via a temp file and rename, so a failed write (disk full,
+    crash) leaves the previous file intact instead of truncated JSON."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
 def main():
     """CLI interface for evolution tracking."""
     import sys
@@ -366,7 +387,11 @@ def main():
         lesson_id, agent_id, content_file = sys.argv[2:5]
         with open(content_file) as f:
             content = f.read()
-        history = tracker.initialize_lesson(lesson_id, agent_id, content)
+        try:
+            history = tracker.initialize_lesson(lesson_id, agent_id, content)
+        except FileExistsError as e:
+            print(f"Error: {e}")
+            sys.exit(1)
         print(f"Initialized tracking for {lesson_id}")
         latest = history.latest_version()
         if latest:
