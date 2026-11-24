@@ -341,12 +341,17 @@ class SubscriptionManager:
                             if isinstance(value, dict) and isinstance(
                                 value.get("resets_in_seconds"), int | float
                             ):
+                                remaining = int(value["resets_in_seconds"] - age_s)
                                 value = {
                                     **value,
-                                    "resets_in_seconds": max(
-                                        0, int(value["resets_in_seconds"] - age_s)
-                                    ),
+                                    "resets_in_seconds": max(0, remaining),
                                 }
+                                # A window whose reset has passed no longer holds
+                                # the cached utilization; it restarted from zero.
+                                if remaining <= 0 and isinstance(
+                                    value.get("utilization"), int | float
+                                ):
+                                    value["utilization"] = 0.0
                             aged[key] = value
                         return {**aged, "_stale": True}
             except (json.JSONDecodeError, OSError):
