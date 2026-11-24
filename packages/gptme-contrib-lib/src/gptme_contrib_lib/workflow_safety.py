@@ -35,7 +35,13 @@ _JOB_KEYS = (
 )
 _FORBIDDEN_EVENTS = ("pull_request_target", "workflow_run")
 _PRIVILEGED_NAME_RE = re.compile(r"(?i)(release|publish|deploy|sign|pages)")
-_CONTEXT_REF_RE = re.compile(r"\b(?:secrets|vars)\.[A-Za-z_][A-Za-z0-9_]*")
+# `secrets.X`, `secrets['X']` / `secrets["X"]`, a computed `secrets[expr]`, or the
+# whole context (`toJSON(secrets)`). Literal indexes normalize to the dotted form.
+_CONTEXT_REF_RE = re.compile(
+    r"\b(secrets|vars)\b(?:\s*\.\s*([A-Za-z_][A-Za-z0-9_-]*)|\s*\[\s*([^\]]*?)\s*\])?"
+)
+_EXPRESSION_RE = re.compile(r"\$\{\{(.*?)\}\}", re.DOTALL)
+_QUOTED_NAME_RE = re.compile(r"""^(['"])([A-Za-z_][A-Za-z0-9_-]*)\1$""")
 
 
 def _load(text: str, side: str) -> tuple[dict[str, Any] | None, str | None]:
@@ -68,7 +74,38 @@ def _strings(node: Any) -> list[str]:
 
 
 def _context_refs(doc: dict[str, Any]) -> set[str]:
-    return {m for s in _strings(doc) for m in _CONTEXT_REF_RE.findall(s)}
+    refs: set[str] = set()
+    for text in _strings(doc):
+        # Dotted refs count anywhere (as before); other forms only inside ${{ }},
+        # so prose such as a step named "Check secrets" is not a reference.
+        expressions = _EXPRESSION_RE.findall(text)
+        for chunk, in_expression in [(text, False)] + [(e, True) for e in expressions]:
+            for context, dotted, index in _CONTEXT_REF_RE.findall(chunk):
+                if dotted:
+                    refs.add(f"{context}.{dotted}")
+                elif not in_expression:
+                    continue
+                elif index:
+                    quoted = _QUOTED_NAME_RE.match(index)
+                    refs.add(
+                        f"{context}.{quoted.group(2)}"
+                        if quoted
+                        else f"{context}[{index}]"
+                    )
+                else:
+                    refs.add(f"{context}.*")
+    return refs
+
+
+def _events(on: Any) -> set[str]:
+    """Event names directly under ``on``, not strings inside their filters."""
+    if isinstance(on, str):
+        return {on}
+    if isinstance(on, list):
+        return {e for e in on if isinstance(e, str)}
+    if isinstance(on, dict):
+        return {str(k) for k in on}
+    return set()
 
 
 def _action_repo(uses: Any) -> str | None:
@@ -114,7 +151,7 @@ def ci_repair_violations(path: str, base_text: str, head_text: str) -> list[str]
 
     violations: list[str] = []
     for side, doc in (("base", base), ("head", head)):
-        events = {s for s in _strings(doc.get("on"))}
+        events = _events(doc.get("on"))
         for event in _FORBIDDEN_EVENTS:
             if event in events:
                 violations.append(f"{side} workflow triggers on {event}")

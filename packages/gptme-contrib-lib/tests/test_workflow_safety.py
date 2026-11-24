@@ -95,6 +95,34 @@ def test_secret_added_through_step_env_is_caught() -> None:
     assert "secrets/vars references changed" in check(head)
 
 
+@pytest.mark.parametrize(
+    "added",
+    [
+        "${{ secrets['ADMIN_PAT'] }}",
+        '${{ vars["DEPLOY_HOST"] }}',
+        "${{ secrets[matrix.name] }}",
+        "${{ toJSON(secrets) }}",
+    ],
+)
+def test_secret_added_in_bracket_or_whole_context_form_is_caught(added: str) -> None:
+    head = BASE.replace(
+        "          TOKEN: ${{ secrets.CODECOV_TOKEN }}\n",
+        f"          TOKEN: ${{{{ secrets.CODECOV_TOKEN }}}}\n          PAT: {added}\n",
+    )
+    assert "secrets/vars references changed" in check(head)
+
+
+def test_bracket_form_matches_its_dotted_equivalent() -> None:
+    head = BASE.replace("secrets.CODECOV_TOKEN", "secrets['CODECOV_TOKEN']")
+    assert check(head) == []
+
+
+def test_forbidden_event_names_in_trigger_filters_are_not_events() -> None:
+    base = BASE.replace("branches: [master]", "branches: [workflow_run]")
+    head = base.replace("timeout-minutes: 10", "timeout-minutes: 20")
+    assert check(head, base=base) == []
+
+
 def test_runs_on_change_is_caught() -> None:
     head = BASE.replace("runs-on: ubuntu-24.04", "runs-on: self-hosted")
     assert "job `test`: `runs-on` changed" in check(head)
