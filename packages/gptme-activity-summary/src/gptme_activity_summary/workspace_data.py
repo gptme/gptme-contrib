@@ -56,10 +56,16 @@ def _parse_yaml_simple(text: str) -> dict:
     """
     try:
         import yaml  # type: ignore[import-untyped]
-
-        return yaml.safe_load(text) or {}
     except ImportError:
         pass
+    else:
+        try:
+            data = yaml.safe_load(text)
+        except yaml.YAMLError as e:
+            logger.debug("Failed to parse tweet YAML: %s", e)
+            return {}
+        # Non-mapping top level (list/scalar) has none of the keys we need.
+        return data if isinstance(data, dict) else {}
 
     # Minimal fallback: extract key: value pairs
     result: dict = {}
