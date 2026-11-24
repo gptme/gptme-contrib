@@ -141,10 +141,10 @@ def check_credential_file(path: Path, sub: str) -> CredentialInfo:
     )
 
 
-def _slot_account(path: Path) -> str | None:
-    """Return the ``accountUuid`` a credential file names, if any."""
+def _slot_account(content: bytes) -> str | None:
+    """Return the ``accountUuid`` a credential file's content names, if any."""
     try:
-        oauth = json.loads(path.read_text(encoding="utf-8")).get("claudeAiOauth")
+        oauth = json.loads(content.decode("utf-8")).get("claudeAiOauth")
     except (OSError, UnicodeDecodeError, ValueError, AttributeError):
         return None
     if not isinstance(oauth, dict):
@@ -243,8 +243,10 @@ def probe_credential(
         # would be dropped. Hidden name, so slot globs never see the lock.
         probe_lock = probe_lock_path(target_credential)
         with locked_state_file(probe_lock):
-            expected_account = _slot_account(target_credential)
+            # One read for both: separate reads could describe different
+            # credentials if the slot is replaced in between.
             original = target_credential.read_bytes()
+            expected_account = _slot_account(original)
             with tempfile.TemporaryDirectory(
                 prefix=f"gptme-subscription-probe-{sub}-"
             ) as tmp:

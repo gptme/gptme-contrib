@@ -182,7 +182,8 @@ def load_quota_config(path: Path | None = None) -> HarnessQuotaConfig:
     def _finite_nonneg(value: Any) -> float | None:
         try:
             number = float(value)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
+            # OverflowError: TOML accepts integers too large for a float.
             return None
         return number if math.isfinite(number) and number >= 0 else None
 
