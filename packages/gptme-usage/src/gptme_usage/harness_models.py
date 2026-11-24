@@ -21,7 +21,7 @@ import sys
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TypedDict
+from typing import Any, TypedDict
 
 # Approximate agent-session token mix used to blend input/output list prices into
 # a single $/1M-token-equivalent floor. Agent runs are usually prompt-heavy due
@@ -173,51 +173,59 @@ def load_quota_config(path: Path | None = None) -> HarnessQuotaConfig:
     except Exception:
         return HarnessQuotaConfig()
 
+    def _table(name: str) -> dict[str, Any]:
+        # A mistyped section (``prices = 5``) is ignored like an unparsable
+        # file, rather than crashing every caller of the loader.
+        value = raw.get(name)
+        return value if isinstance(value, dict) else {}
+
+    def _finite_nonneg(value: Any) -> float | None:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        return number if math.isfinite(number) and number >= 0 else None
+
     price_table: dict[tuple[str, str], tuple[float, float]] = {}
-    for backend, models in (raw.get("prices") or {}).items():
+    for backend, models in _table("prices").items():
         if not isinstance(models, dict):
             continue
         for model, pair in models.items():
             if isinstance(pair, list) and len(pair) == 2:
-                try:
-                    price_table[(backend, model)] = (float(pair[0]), float(pair[1]))
-                except (TypeError, ValueError):
-                    pass
+                inp, out = _finite_nonneg(pair[0]), _finite_nonneg(pair[1])
+                if inp is not None and out is not None:
+                    price_table[(backend, model)] = (inp, out)
 
     cache_read_price_table: dict[tuple[str, str], float] = {}
-    for backend, models in (raw.get("cache_read_prices") or {}).items():
+    for backend, models in _table("cache_read_prices").items():
         if not isinstance(models, dict):
             continue
         for model, value in models.items():
-            try:
-                rate = float(value)
-            except (TypeError, ValueError):
-                continue
-            if math.isfinite(rate) and rate >= 0:
+            rate = _finite_nonneg(value)
+            if rate is not None:
                 cache_read_price_table[(backend, model)] = rate
 
     tps_table: dict[tuple[str, str], float] = {}
-    for backend, models in (raw.get("tps") or {}).items():
+    for backend, models in _table("tps").items():
         if not isinstance(models, dict):
             continue
         for model, tps in models.items():
-            try:
-                tps_table[(backend, model)] = float(tps)
-            except (TypeError, ValueError):
-                pass
+            rate = _finite_nonneg(tps)
+            if rate is not None:
+                tps_table[(backend, model)] = rate
 
     quota_sources: dict[str, str] = {}
-    for model, src in (raw.get("quota_sources") or {}).items():
+    for model, src in _table("quota_sources").items():
         if isinstance(src, str):
             quota_sources[model] = src
 
     model_routes: dict[str, str] = {}
-    for model, route in (raw.get("model_routes") or {}).items():
+    for model, route in _table("model_routes").items():
         if isinstance(route, str):
             model_routes[model] = route
 
     openrouter_key_contexts: dict[str, str] = {}
-    for key, ctx in (raw.get("openrouter_key_contexts") or {}).items():
+    for key, ctx in _table("openrouter_key_contexts").items():
         if isinstance(ctx, str):
             openrouter_key_contexts[key] = ctx
 
