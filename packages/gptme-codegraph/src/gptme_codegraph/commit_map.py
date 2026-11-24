@@ -258,6 +258,9 @@ def generate_map(
                 return {
                     **{k: v for k, v in cached.items() if not k.startswith("_")},
                     "generated": datetime.now(timezone.utc).isoformat(),
+                    # A commit leaves source mtimes alone, so the fingerprint can
+                    # match after HEAD moved; report the current commit.
+                    "git_sha": _git_sha(directory),
                 }
 
     # Slow path: full content digest + tree-sitter build.

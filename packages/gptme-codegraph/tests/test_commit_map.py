@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -493,3 +495,52 @@ def test_stat_fingerprint_changes_on_mtime(tmp_path):
 
     assert fp3 != fp1  # mtime_ns or size changed
     assert count3 == 2
+
+
+_GIT_ENV = {
+    **os.environ,
+    "GIT_AUTHOR_NAME": "t",
+    "GIT_AUTHOR_EMAIL": "t@example.com",
+    "GIT_COMMITTER_NAME": "t",
+    "GIT_COMMITTER_EMAIL": "t@example.com",
+}
+
+
+def _git_run(repo: Path, *args: str) -> str:
+    return subprocess.run(
+        [
+            "git",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "commit.gpgsign=false",
+            "-C",
+            str(repo),
+            *args,
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=_GIT_ENV,
+    ).stdout.strip()
+
+
+def test_cache_hit_reports_current_head_sha(tmp_path):
+    """git_sha in the artifact must be the HEAD at generation time, not a stale one."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git_run(repo, "init", "-q")
+    (repo / "a.py").write_text("def alpha():\n    return 1\n")
+    _git_run(repo, "add", "a.py")
+    _git_run(repo, "commit", "-qm", "one")
+    first = commit_map.generate_map(repo)
+    assert first["git_sha"] == _git_run(repo, "rev-parse", "HEAD")
+
+    # Commit something that does not touch tracked source mtimes (README).
+    (repo / "README.md").write_text("hi\n")
+    _git_run(repo, "add", "README.md")
+    _git_run(repo, "commit", "-qm", "two")
+    head2 = _git_run(repo, "rev-parse", "HEAD")
+
+    second = commit_map.generate_map(repo)
+    assert second["git_sha"] == head2
