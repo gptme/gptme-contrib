@@ -298,3 +298,31 @@ def test_send_audit_does_not_recreate_archived_message(
     agent.send(draft_id)
     assert not sent_path.exists()
     assert "Subject: Archive race" in agent.read_message(draft_id)
+
+
+@pytest.mark.parametrize(
+    "recipient",
+    [
+        "evil@attacker.test, ok@example.com",
+        "evil@attacker.test,ok@example.com",
+        "Evil <evil@attacker.test>, OK <ok@example.com>",
+    ],
+)
+def test_recipient_list_requires_every_address_allowlisted(
+    agent: AgentEmail, monkeypatch: pytest.MonkeyPatch, recipient: str
+):
+    """A comma-separated list must not pass on the last address's domain.
+
+    msmtp splits its recipient argument on commas and delivers to every
+    address, so checking only one of them lets mail reach a non-allowlisted
+    recipient.
+    """
+    monkeypatch.setenv("EMAIL_SEND_ALLOWLIST", "example.com")
+    assert not agent._is_allowlisted_recipient(recipient)
+
+
+def test_recipient_list_allowed_when_every_address_allowlisted(
+    agent: AgentEmail, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("EMAIL_SEND_ALLOWLIST", "example.com")
+    assert agent._is_allowlisted_recipient("a@example.com, b@example.com")

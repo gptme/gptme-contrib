@@ -768,22 +768,25 @@ class AgentEmail:
         if not recipient:
             return False
 
-        _, recipient_email = parseaddr(recipient)
-        if not recipient_email:
-            recipient_email = recipient
+        # msmtp delivers to every comma-separated address in its recipient
+        # argument, so each address in a list must be allowlisted on its own.
+        # Unparseable input fails closed.
+        addresses = [addr for _, addr in getaddresses([recipient]) if addr]
+        if not addresses:
+            return False
 
-        clean = recipient_email.lower()
-        if "+" in clean and "@" in clean:
-            local, domain = clean.split("@", 1)
-            if "+" in local:
-                clean = f"{local.split('+')[0]}@{domain}"
+        allowed_lower = [allowed.lower() for allowed in allowlisted]
 
-        recipient_domain = clean.split("@")[-1] if "@" in clean else ""
-        for allowed in allowlisted:
-            allowed_lower = allowed.lower()
-            if clean == allowed_lower or recipient_domain == allowed_lower:
-                return True
-        return False
+        def _allowed(address: str) -> bool:
+            clean = address.lower()
+            if "+" in clean and "@" in clean:
+                local, domain = clean.split("@", 1)
+                if "+" in local:
+                    clean = f"{local.split('+')[0]}@{domain}"
+            recipient_domain = clean.split("@")[-1] if "@" in clean else ""
+            return any(clean == a or recipient_domain == a for a in allowed_lower)
+
+        return all(_allowed(address) for address in addresses)
 
     def _is_notification_email(self, subject: str, content: str) -> bool:
         """Check if email is a notification that doesn't need a reply.
