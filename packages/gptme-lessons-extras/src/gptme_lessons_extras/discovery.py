@@ -91,10 +91,13 @@ class LessonDiscovery:
     def extract_features(self, lesson_path: Path) -> LessonFeatures:
         """Extract features from a lesson file."""
         lesson_id = lesson_path.stem
+        # Cache by file, not stem: git/commit.md and workflow/commit.md share
+        # a stem but are different lessons.
+        cache_key = str(lesson_path.resolve())
 
         # Check cache first
-        if lesson_id in self.features_cache:
-            return self.features_cache[lesson_id]
+        if cache_key in self.features_cache:
+            return self.features_cache[cache_key]
 
         content = lesson_path.read_text()
 
@@ -164,7 +167,7 @@ class LessonDiscovery:
         )
 
         # Cache features
-        self.features_cache[lesson_id] = features
+        self.features_cache[cache_key] = features
         return features
 
     def load_metrics(self) -> Dict[str, Dict]:
