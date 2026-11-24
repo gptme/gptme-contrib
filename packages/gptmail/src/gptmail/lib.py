@@ -151,6 +151,7 @@ _ENVELOPE_RECIPIENT_HEADERS = (
 _SYNC_HEADERS = (
     "MIME-Version",
     "From",
+    "Reply-To",
     "To",
     "Cc",
     "Bcc",
