@@ -176,6 +176,7 @@ import os
 import stat
 import subprocess
 import sys
+import time
 
 
 def git(*args, **kwargs):
@@ -194,6 +195,51 @@ def tree(revision):
             mode, _, oid = metadata.split()
             entries[path] = (mode, oid)
     return entries
+
+
+def restore_root(after, root):
+    """git restore one root, waiting out sibling index.lock holders.
+
+    A sibling `git status`/`git add` holds .git/index.lock for short windows. One
+    unretried attempt used to abort the whole materialization and leave every
+    upstream-added file staged-deleted (2026-11-24 15:23Z, 7 task files).
+    """
+    deadline = time.monotonic() + float(
+        os.environ.get("GIT_SAFE_PUSH_MATERIALIZE_BUDGET_SECONDS", "60"))
+    while True:
+        proc = subprocess.run(
+            ["git", "restore", "--source", after, "--staged", "--worktree",
+             "--", b":(literal)" + root], capture_output=True)
+        if proc.returncode == 0:
+            return
+        if b"index.lock" not in proc.stderr or time.monotonic() >= deadline:
+            raise subprocess.CalledProcessError(
+                proc.returncode, proc.args, proc.stdout, proc.stderr)
+        time.sleep(0.1)
+
+
+def record_marker(entries, before, after):
+    """Append root TAB before TAB after lines to the durable marker file."""
+    marker = os.path.join(os.fsdecode(git("rev-parse", "--git-common-dir")[:-1]),
+                          "gsc-unreconciled.tsv")
+    try:
+        with open(marker, "ab") as handle:
+            for root in entries:
+                handle.write(root + b"\t" + before.encode() + b"\t" + after.encode() + b"\n")
+    except OSError as error:
+        print(f"warning: could not record unreconciled paths: {error}", file=sys.stderr)
+
+
+def phantom_deletions(old, new):
+    """Paths the ref move added that are in neither the index nor the worktree.
+
+    That is the `D ` signature: HEAD has the file, the shared index and disk do
+    not, so ready-tasks says "Task not found" and a whole-index commit deletes it.
+    """
+    indexed = {record.split(b"\t", 1)[1] for record in
+               git("ls-files", "--stage", "-z").split(b"\0") if record}
+    return sorted(path for path in new if path not in old
+                  and path not in indexed and not os.path.lexists(path))
 
 
 def main():
@@ -290,14 +336,17 @@ def main():
                 continue
             # Literal root includes all leaves of a type transition. Unlike
             # checkout, restore also handles paths deleted from the source tree.
-            subprocess.run(["git", "restore", "--source", after, "--staged",
-                            "--worktree", "--", b":(literal)" + root], check=True)
+            restore_root(after, root)
             materialized += 1
         except (OSError, subprocess.CalledProcessError) as error:
             failed += 1
+            detail = (getattr(error, "stderr", b"") or b"").decode(errors="replace").strip()
             print(f"warning: materialization failed/potentially partial for "
-                  f"{os.fsdecode(root)!r}: {error}; stopping further restores",
+                  f"{os.fsdecode(root)!r}: {error} {detail}; stopping further restores",
                   file=sys.stderr)
+            # Stderr dies with the calling session; leave a durable record of the
+            # failed root and every root left unattempted.
+            record_marker([root] + [r for r in sorted(roots) if r > root], before, after)
             break
     unattempted = len(roots) - materialized - skipped - failed
     if unreconciled:
@@ -305,14 +354,19 @@ def main():
         # editing session's next commit can read: committing that file would
         # publish a revert of what upstream just landed (the journal line alone
         # never reaches that session). Format: root TAB before TAB after.
-        marker = os.path.join(os.fsdecode(git("rev-parse", "--git-common-dir")[:-1]),
-                              "gsc-unreconciled.tsv")
-        try:
-            with open(marker, "ab") as handle:
-                for root in unreconciled:
-                    handle.write(root + b"\t" + before.encode() + b"\t" + after.encode() + b"\n")
-        except OSError as error:
-            print(f"warning: could not record unreconciled paths: {error}", file=sys.stderr)
+        record_marker(unreconciled, before, after)
+    phantoms = phantom_deletions(old, new)
+    if phantoms:
+        print(f"ERROR: {len(phantoms)} file(s) published to HEAD are missing from both the "
+              f"index and the worktree (staged-deletion state: dispatch reports "
+              f"'Task not found' and a whole-index commit would delete them):",
+              file=sys.stderr)
+        for path in phantoms[:20]:
+            print(f"  {os.fsdecode(path)}", file=sys.stderr)
+        print("  Repair: git restore --source=HEAD --staged --worktree -- <path>",
+              file=sys.stderr)
+        record_marker(phantoms, before, after)
+        failed += 1
     print(f"  Local materialization: {materialized} clean group(s) updated, "
           f"{skipped} locally changed/unsupported skipped, {failed} failed, "
           f"{unattempted} unattempted")

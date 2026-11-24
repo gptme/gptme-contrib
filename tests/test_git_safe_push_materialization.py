@@ -8,6 +8,7 @@ index. No mocks, installed hooks, user config, or network remotes are involved.
 import os
 import stat
 import subprocess
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -449,3 +450,51 @@ def test_squash_uses_literal_restore_pathspec(sandbox, name):
     sandbox.publish()
     assert (sandbox.local / name).read_bytes() == b"upstream\n"
     assert sandbox.git(sandbox.local, "status", "--porcelain=v1", "-z") == b""
+
+
+def test_squash_waits_out_a_transient_index_lock(sandbox):
+    """A sibling's short-lived .git/index.lock must not strand upstream files.
+
+    Regression: one unretried `git restore` failed on the lock, aborted the whole
+    materialization, and left every upstream-added file staged-deleted in the
+    shared index (gptme-contrib: 2026-11-24 15:23Z, 7 task files).
+    """
+    _prepare(sandbox, "subject", "absent", "updated")
+    lock = sandbox.local / ".git" / "index.lock"
+    lock.write_bytes(b"")
+    release = threading.Timer(1.0, lock.unlink)
+    release.start()
+    try:
+        sandbox.publish()
+    finally:
+        release.cancel()
+        lock.unlink(missing_ok=True)
+    assert (sandbox.local / "subject").read_bytes() == b"upstream\n"
+    assert sandbox.git(sandbox.local, "status", "--porcelain=v1", "-z") == b""
+
+
+def test_squash_reports_phantom_deletions_when_the_lock_never_clears(sandbox):
+    """When restore cannot win, say so loudly and durably instead of silently."""
+    _prepare(sandbox, "subject", "absent", "updated")
+    lock = sandbox.local / ".git" / "index.lock"
+    lock.write_bytes(b"")
+    env = {**sandbox.env, "GIT_SAFE_PUSH_MATERIALIZE_BUDGET_SECONDS": "1"}
+    try:
+        result = subprocess.run(
+            [str(SAFE_PUSH)],
+            cwd=sandbox.local,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    finally:
+        lock.unlink(missing_ok=True)
+    diagnostic = f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    assert result.returncode == 0, diagnostic  # publication itself succeeded
+    assert "missing from both the index and the worktree" in result.stderr, diagnostic
+    assert "  subject\n" in result.stderr, diagnostic
+    marker = (sandbox.local / ".git" / "gsc-unreconciled.tsv").read_text()
+    assert "subject\t" in marker, marker
+    # The path is in HEAD but absent from disk: exactly the "D " signature.
+    assert not (sandbox.local / "subject").exists()
