@@ -878,3 +878,54 @@ def test_explicit_style_decision_accepts_normal_criterion_key_formats(
     )
     assert approved
     assert set(response.criteria_results) == {"Natural writing style"}
+
+
+# --- parse_llm_response: reasoning-model output (ErikBjare/bob#1519) ---------
+
+_REVIEW_JSON = """{
+  "criteria_results": {"professional_tone": {"notes": "ok", "passed": true}},
+  "recommendation": "approve",
+  "improvements": [],
+  "reasoning": "fine"
+}"""
+
+
+def _parse_review(llm_module: types.ModuleType, content: str) -> Any:
+    return llm_module.parse_llm_response(
+        content, llm_module.ReviewResponse, llm_module.TaskType.REVIEW
+    )
+
+
+def test_parse_skips_json_inside_think_block(llm_module: types.ModuleType) -> None:
+    """A draft object in <think> must not be glued to the real answer.
+
+    Slicing first "{" to last "}" produced "Extra data" and a default reject,
+    which parked an approved blog promotion at 0/3.
+    """
+    content = (
+        '<think>\nShape: {"recommendation": "reject"}. Check criteria.\n</think>\n'
+        + _REVIEW_JSON
+    )
+    result = _parse_review(llm_module, content)
+    assert result.recommendation == "approve"
+    assert set(result.criteria_results) == {"professional_tone"}
+
+
+def test_parse_skips_stray_braces_in_prose(llm_module: types.ModuleType) -> None:
+    content = "Using the {review} format:\n" + _REVIEW_JSON + "\nDone {ok}."
+    assert _parse_review(llm_module, content).recommendation == "approve"
+
+
+def test_parse_prefers_last_matching_object(llm_module: types.ModuleType) -> None:
+    """A reasoning model may restate the answer; the final object wins."""
+    first = _REVIEW_JSON.replace('"approve"', '"reject"')
+    result = _parse_review(llm_module, first + "\nRevised:\n" + _REVIEW_JSON)
+    assert result.recommendation == "approve"
+
+
+def test_parse_falls_back_to_default_without_matching_object(
+    llm_module: types.ModuleType,
+) -> None:
+    result = _parse_review(llm_module, 'no answer here {"unrelated": 1}')
+    assert result.recommendation == "reject"
+    assert result.criteria_results == {}

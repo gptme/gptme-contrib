@@ -588,6 +588,8 @@ Any analysis or thinking should be included in the "reasoning" field of the JSON
 
 T = TypeVar("T", EvaluationResponse, TweetResponse, ReviewResponse)
 
+_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
+
 
 def parse_llm_response(content: str, response_type: Type[T], task: TaskType) -> T:
     """Parse LLM response into a typed response object.
@@ -597,20 +599,31 @@ def parse_llm_response(content: str, response_type: Type[T], task: TaskType) -> 
         response_type: The type to parse into (must implement ResponseProtocol)
         task: Task type for error messages
     """
-    try:
-        # Extract just the JSON part (between first { and last })
-        start = content.find("{")
-        end = content.rfind("}") + 1
-        if start >= 0 and end > start:
-            json_str = content[start:end]
-            data = json.loads(json_str)
-            return response_type.from_dict(data)
-        raise json.JSONDecodeError("No JSON found", content, 0)
-    except (json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
-        console.print(f"[red]Error: Could not parse LLM response for {task.value}: {e}")
-        console.print(content)
-        logging.exception(f"Error parsing LLM response for {task.value}")
-        return response_type.default()
+    # Reasoning models put draft objects in <think> and prose can carry stray
+    # braces, so slicing first "{" to last "}" glues unrelated text together.
+    # Decode each top-level object and keep the last one that fits the type.
+    text = _THINK_BLOCK_RE.sub("", content)
+    decoder = json.JSONDecoder()
+    parsed: T | None = None
+    pos = text.find("{")
+    while pos >= 0:
+        try:
+            data, end = decoder.raw_decode(text, pos)
+        except json.JSONDecodeError:
+            pos = text.find("{", pos + 1)
+            continue
+        if isinstance(data, dict):
+            try:
+                parsed = response_type.from_dict(data)
+            except (KeyError, ValueError, TypeError, AttributeError):
+                pass
+        pos = text.find("{", end)
+    if parsed is not None:
+        return parsed
+    console.print(f"[red]Error: Could not parse LLM response for {task.value}")
+    console.print(content)
+    logging.error(f"No {response_type.__name__} JSON object in LLM {task.value} reply")
+    return response_type.default()
 
 
 def _resolve_openrouter_api_key() -> str:
