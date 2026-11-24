@@ -54,6 +54,9 @@ falls back to requiring Greptile rather than approving:
   Deliberately not env-overridable, unlike the Greptile floor.
 - the review is at the current head SHA (a review of an older push says nothing
   about the code about to merge)
+- off a repository owner's relaxed hook, the score is a clean 5/5 at head
+  (Erik's merge rules, 2026-11-24); a coherent single-pass record is accepted
+  at 5/5, a single pass below 5 still needs consensus
 - consensus is present and undegraded — no lost passes, no lost fan-out jobs, no
   clamped agreement threshold. A degraded run reached its score on less evidence
   than it asked for, which is exactly the recall failure. A **missing** consensus
@@ -1714,6 +1717,47 @@ def _fetch_ai_review_marker(
     return result
 
 
+def ai_review_requires_clean_score(repo: str) -> bool:
+    """Whether a disposed sub-5 AI review is refused on *repo*.
+
+    Erik's merge rules (2026-11-24): off Bob's own repositories a self-merge
+    needs a clean 5/5 at the exact head. This returns True for every
+    repository; a wrapper that owns a repository (Bob's, for TimeToBuildBob/*)
+    replaces it to keep the disposition-based acceptance there.
+    """
+    del repo
+    return True
+
+
+def _single_pass_consensus_coherent(consensus: Any) -> bool:
+    """A one-pass consensus record that answered fully and was not clamped.
+
+    The sweep's single-pass reviews serialize ``requested=1``. That is not
+    consensus, but with a clean score it is the review Erik accepts. Anything
+    degraded, clamped or malformed is still refused by ``_consensus_shortfall``.
+    """
+    if not isinstance(consensus, dict):
+        return False
+
+    def _int(key: str) -> int | None:
+        value = consensus.get(key)
+        return value if type(value) is int else None
+
+    jobs_requested, jobs_answered = _int("jobs_requested"), _int("jobs_answered")
+    applied, asked = _int("min_agreement"), _int("min_agreement_requested")
+    return (
+        _int("requested") == 1
+        and _int("answered") == 1
+        and jobs_requested is not None
+        and jobs_requested >= 1
+        and jobs_answered == jobs_requested
+        and applied is not None
+        and asked is not None
+        and applied >= 1
+        and applied == asked
+    )
+
+
 def fetch_ai_review_status(
     repo: str,
     pr_number: int,
@@ -1827,9 +1871,9 @@ def fetch_ai_review_status(
     # two-sided on purpose: dropping the old equality check for the upper bound
     # alone would newly admit `0` and negatives, which read as "a very bad score
     # the disposition check can still clear" rather than as the impossible
-    # markers they are. Unlike the old score floor this does NOT reject a 4/5 —
-    # that is the sampling event the disposition check below is designed to
-    # tolerate.
+    # markers they are. This bound alone does not reject a 4/5: the disposition
+    # check below handles that, then ``ai_review_requires_clean_score`` decides
+    # whether a disposed sub-5 review may merge on this repository at all.
     if not AI_REVIEW_MIN_SCORE <= score <= AI_REVIEW_CLEAN_SCORE:
         return {
             "accepted": False,
@@ -1875,7 +1919,32 @@ def fetch_ai_review_status(
             "refusal": "disposition_shortfall",
         }
 
-    shortfall = _consensus_shortfall(marker.get("consensus"))
+    # Erik's merge rules (2026-11-24): off Bob's own repositories only a clean
+    # 5/5 at the exact head merges. A disposed 3-4/5 is still a refusal there;
+    # wrappers that own a repository may relax it via the hook below.
+    if score < AI_REVIEW_CLEAN_SCORE and ai_review_requires_clean_score(repo):
+        return {
+            "accepted": False,
+            "detail": (
+                f"AI review score {score}/5 at current head; this repository "
+                f"requires a clean {AI_REVIEW_CLEAN_SCORE}/5"
+            ),
+            "refusal": "below_clean_score",
+        }
+
+    consensus = marker.get("consensus")
+    shortfall = _consensus_shortfall(consensus)
+    single_pass = False
+    if (
+        shortfall
+        and score == AI_REVIEW_CLEAN_SCORE
+        and _single_pass_consensus_coherent(consensus)
+    ):
+        # Erik 2026-11-24: "single-pass is fine" for a clean review at head.
+        # Only a coherent one-pass record qualifies; degraded, clamped or
+        # malformed records keep their consensus refusal.
+        shortfall = None
+        single_pass = True
     if shortfall:
         return {
             "accepted": False,
@@ -1888,6 +1957,8 @@ def fetch_ai_review_status(
         f"AI review {score}/5 at current head {str(marker.get('sha'))[:12]}, "
         "findings disposed"
     )
+    if single_pass:
+        detail += " (single-pass review)"
     if advisory:
         # Surface the demotion where operators read the merge decision: an
         # advisory finding is still visible, it just is not a blocker.

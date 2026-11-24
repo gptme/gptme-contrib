@@ -267,20 +267,66 @@ def test_missing_consensus_record_is_rejected(gh_comments: Any) -> None:
     assert "no consensus record" in (status["detail"] or "")
 
 
-def test_explicit_single_pass_consensus_is_rejected(gh_comments: Any) -> None:
-    """A serialized 1/1 record is still a single sample, not consensus."""
-    consensus = dict(
-        FULL_CONSENSUS,
-        requested=1,
-        answered=1,
-        jobs_requested=1,
-        jobs_answered=1,
-        min_agreement=1,
-        min_agreement_requested=1,
+@pytest.fixture
+def relaxed_clean_score(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A repository owner's hook: disposed sub-5 reviews stay acceptable."""
+    monkeypatch.setattr(smc, "ai_review_requires_clean_score", lambda repo: False)
+
+
+SINGLE_PASS_CONSENSUS = dict(
+    FULL_CONSENSUS,
+    requested=1,
+    answered=1,
+    jobs_requested=1,
+    jobs_answered=1,
+    min_agreement=1,
+    min_agreement_requested=1,
+)
+
+
+def test_clean_single_pass_review_is_accepted(gh_comments: Any) -> None:
+    """Erik 2026-11-24: a clean 5/5 at head is enough; single-pass is fine."""
+    status = _status(gh_comments, [_comment(_marker(consensus=SINGLE_PASS_CONSENSUS))])
+    assert status["accepted"] is True
+    assert "single-pass review" in (status["detail"] or "")
+
+
+def test_explicit_single_pass_consensus_below_clean_is_rejected(
+    gh_comments: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Below 5/5, a serialized 1/1 record is still a single sample, not consensus."""
+    monkeypatch.setattr(smc, "ai_review_requires_clean_score", lambda repo: False)
+    status = _status(
+        gh_comments,
+        [_comment(_marker(score=4, consensus=SINGLE_PASS_CONSENSUS))],
     )
-    status = _status(gh_comments, [_comment(_marker(consensus=consensus))])
     assert status["accepted"] is False
     assert "at least 2 requested passes" in (status["detail"] or "")
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"min_agreement_requested": 2},  # clamped: the sweep's until-dry shape
+        {"jobs_answered": 0},
+        {"answered": 0},
+    ],
+)
+def test_incoherent_single_pass_is_rejected_even_at_clean(
+    gh_comments: Any, overrides: dict[str, int]
+) -> None:
+    consensus = dict(SINGLE_PASS_CONSENSUS, **overrides)
+    status = _status(gh_comments, [_comment(_marker(consensus=consensus))])
+    assert status["accepted"] is False
+    assert status["refusal"] == "consensus_shortfall"
+
+
+def test_disposed_sub_clean_score_is_refused_by_default(gh_comments: Any) -> None:
+    """Off a repository owner's relaxed hook, only a clean 5/5 merges."""
+    status = _status(gh_comments, [_comment(_marker(score=4))])
+    assert status["accepted"] is False
+    assert status["refusal"] == "below_clean_score"
+    assert "requires a clean 5/5" in (status["detail"] or "")
 
 
 @pytest.mark.parametrize(
@@ -337,6 +383,7 @@ def test_p0p1_scores_are_rejected_when_no_thread_proves_disposition(
     assert "disposed" in (status["detail"] or "")
 
 
+@pytest.mark.usefixtures("relaxed_clean_score")
 def test_p2_only_score_does_not_block(gh_comments: Any) -> None:
     """A 4/5 means only P2 findings survive. Those demonstrably regenerate on
     unchanged code (a frozen head scored 4,5,4,5,4 across six passes with zero
@@ -920,6 +967,7 @@ def test_unreadable_threads_block_even_with_ai_disabled(
 
 def test_greptile_substitution_accepts_a_one_pass_marker(evaluate: Any) -> None:
     """A single-pass AI marker is a capacity failure, not a negative verdict."""
+    # The sweep's clamped until-dry shape: not accepted on its own even at 5/5.
     consensus = dict(
         FULL_CONSENSUS,
         requested=1,
@@ -927,7 +975,7 @@ def test_greptile_substitution_accepts_a_one_pass_marker(evaluate: Any) -> None:
         jobs_requested=1,
         jobs_answered=1,
         min_agreement=1,
-        min_agreement_requested=1,
+        min_agreement_requested=2,
     )
     result, _ = evaluate(
         greptile=GREPTILE_CLEAN,
@@ -1214,6 +1262,7 @@ def test_open_p1_finding_blocks(gh_comments: Any) -> None:
     assert "not resolved" in (status["detail"] or "")
 
 
+@pytest.mark.usefixtures("relaxed_clean_score")
 def test_resolved_p1_with_reply_is_accepted(gh_comments: Any) -> None:
     """A P1 that was replied to AND resolved is disposed — that is the gate."""
     status = _status(
@@ -1236,6 +1285,7 @@ def test_resolved_without_reply_blocks(gh_comments: Any) -> None:
     assert "without a reply" in (status["detail"] or "")
 
 
+@pytest.mark.usefixtures("relaxed_clean_score")
 def test_resolved_without_reply_but_auto_resolved_is_accepted(
     gh_comments: Any,
 ) -> None:
@@ -1266,6 +1316,7 @@ def test_resolved_without_reply_but_auto_resolved_is_accepted(
     assert status["accepted"] is True
 
 
+@pytest.mark.usefixtures("relaxed_clean_score")
 def test_surviving_p2_never_blocks(gh_comments: Any) -> None:
     """Even an OPEN P2 finding thread must not block — P2s regenerate on
     unchanged code, so gating on them is the treadmill failure mode."""
@@ -1298,6 +1349,7 @@ def test_unreadable_thread_state_fails_closed(gh_comments: Any) -> None:
     assert "could not read" in (status["detail"] or "")
 
 
+@pytest.mark.usefixtures("relaxed_clean_score")
 def test_p0p1_score_with_all_disposed_passes(gh_comments: Any) -> None:
     """A score of 3 (one P1 reported) is acceptable when the P1 thread proves
     it was replied to and resolved — the disposition is the truth, not the
@@ -1374,6 +1426,7 @@ def test_finding_without_severity_text_can_still_be_disposed(
     assert status["accepted"] is True
 
 
+@pytest.mark.usefixtures("relaxed_clean_score")
 def test_severity_below_p1_still_never_blocks(gh_comments: Any) -> None:
     """A readable severity outside P0/P1 (P2 today, P3 if the rubric grows) is
     non-blocking. The fail-closed rule above applies only to severities we
@@ -1481,6 +1534,7 @@ def test_disposed_p1_does_not_vouch_for_an_unanchored_p0(gh_comments: Any) -> No
     )
 
 
+@pytest.mark.usefixtures("relaxed_clean_score")
 def test_two_p1_score_needs_two_disposed_p1_threads(gh_comments: Any) -> None:
     """A score of 2 means two or more P1s. One disposed P1 thread leaves the
     other unaccounted for, so the count has to match, not just the severity."""
@@ -1518,6 +1572,7 @@ def test_two_p1_score_needs_two_disposed_p1_threads(gh_comments: Any) -> None:
     assert both_disposed["accepted"] is True
 
 
+@pytest.mark.usefixtures("relaxed_clean_score")
 def test_disposed_p0_satisfies_a_p0_score(gh_comments: Any) -> None:
     """The guard is a correspondence check, not a ban on low scores: a score of
     1 with its P0 replied to and resolved is disposed, and passes."""
@@ -1605,6 +1660,7 @@ def test_forged_finding_thread_does_not_dispose_a_claimed_p0(
     assert "only 0 disposed P0" in (status["detail"] or "")
 
 
+@pytest.mark.usefixtures("relaxed_clean_score")
 def test_our_own_finding_thread_still_counts(gh_comments: Any) -> None:
     """Negative control for the author check: the same thread from the reviewer
     itself disposes the P0 exactly as before."""
@@ -1687,6 +1743,7 @@ def test_findings_must_account_for_the_score(gh_comments: Any) -> None:
     assert "publishes 1 P1 finding(s), not 2" in (status["detail"] or "")
 
 
+@pytest.mark.usefixtures("relaxed_clean_score")
 def test_missing_findings_key_still_uses_the_legacy_score_guard(
     gh_comments: Any,
 ) -> None:
@@ -1731,6 +1788,7 @@ def test_disposed_p1_thread_does_not_satisfy_a_p0_findings_entry(
     assert "1 P0" in (status["detail"] or "")
 
 
+@pytest.mark.usefixtures("relaxed_clean_score")
 def test_matching_severity_still_disposes(gh_comments: Any) -> None:
     """Negative control: the same fingerprint with the severity the marker
     actually claims disposes it, so the tightening costs nothing legitimate."""
