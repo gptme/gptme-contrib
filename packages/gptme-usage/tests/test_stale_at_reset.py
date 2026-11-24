@@ -68,3 +68,22 @@ def test_summary_counts_unobserved_against_coverage_not_target():
     s = summarize(windows_at_reset(rs, now=RESET + timedelta(hours=1)))
     assert (s.windows, s.observed, s.at_or_under_target) == (3, 2, 1)
     assert abs(s.coverage - 2 / 3) < 1e-9
+
+
+def test_windows_shorter_than_cluster_gap_stay_apart():
+    # Hourly resets: implied resets 1h apart are within the 3h cluster gap, but
+    # the 11:05 reading was taken after the 11:00 reset, so it is a new window.
+    t10 = T0 + timedelta(hours=10)
+    first_reset, second_reset = t10 + timedelta(hours=1), t10 + timedelta(hours=2)
+    rs = [
+        reading("a", t10, 0.4, first_reset),
+        reading("a", first_reset + timedelta(minutes=5), 0.7, second_reset),
+    ]
+    [w] = windows_at_reset(rs, now=first_reset + timedelta(minutes=30))
+    assert (w.reset_at, w.final_utilization) == (first_reset, 0.4)
+
+    ws = windows_at_reset(rs, now=second_reset + timedelta(minutes=30))
+    assert [(w.reset_at, w.final_utilization) for w in ws] == [
+        (first_reset, 0.4),
+        (second_reset, 0.7),
+    ]

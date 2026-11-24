@@ -8,7 +8,8 @@ measures the windows that already ended, from periodic usage readings:
   that account's window resets;
 - readings are grouped per account by their implied reset time
   (``observed_at + resets_in_seconds``), so a reset that drifts by a few
-  minutes between readings is still one reset;
+  minutes between readings is still one reset, while a reading taken after
+  that reset starts the next window;
 - the newest reading before a past reset gives the window's final
   utilization, and ``stale = 1 - utilization``.
 
@@ -85,7 +86,15 @@ def windows_at_reset(
         items.sort(key=lambda r: r.reset_at)
         clusters: list[list[QuotaReading]] = []
         for r in items:
-            if clusters and r.reset_at - clusters[-1][-1].reset_at <= cluster_gap:
+            prev_reset = clusters[-1][-1].reset_at if clusters else None
+            # Same window: the implied reset only drifted, and this reading was
+            # taken before that reset (one taken after it is in a later window,
+            # however short the window is).
+            if (
+                prev_reset is not None
+                and r.reset_at - prev_reset <= cluster_gap
+                and r.observed_at < prev_reset
+            ):
                 clusters[-1].append(r)
             else:
                 clusters.append([r])
