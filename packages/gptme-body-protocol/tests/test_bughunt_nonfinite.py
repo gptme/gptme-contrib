@@ -43,3 +43,10 @@ def test_r5_3_decode_message_rejects_nan_constants() -> None:
     )
     with pytest.raises(ValueError):
         decode_message(line)
+
+
+def test_decode_message_rejects_a_number_literal_that_overflows() -> None:
+    """``1e999`` is valid JSON and parses to ``inf`` without ``parse_constant``."""
+    line = b'{"type":"command_result","command_id":"r1","telemetry":{"x":1e999}}\n'
+    with pytest.raises(ValueError):
+        decode_message(line)

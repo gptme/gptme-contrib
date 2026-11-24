@@ -88,6 +88,13 @@ DEFAULT_THRESHOLD = 3
 DEFAULT_COOLDOWN = 300.0
 """Seconds a slot stays suppressed before a half-open probe is allowed."""
 
+DEFAULT_PROBE_TIMEOUT = 1800.0
+"""Seconds of silence after which a half-open probe is treated as lost.
+
+Re-granting on the (shorter) cooldown let a long-running probe overlap with its
+replacement, so two attempts ran on one slot. The timeout is well above any
+plausible item run, so an overlap needs a genuinely stalled worker."""
+
 
 # ---------------------------------------------------------------------------
 # Minimal stdlib circuit-breaker state machine (wall-clock, cross-process)
@@ -107,9 +114,15 @@ class _SlotBreaker:
     ``fcntl`` lock in :func:`_locked_state`.
     """
 
-    def __init__(self, failure_threshold: int, cooldown: float) -> None:
+    def __init__(
+        self,
+        failure_threshold: int,
+        cooldown: float,
+        probe_timeout: float = DEFAULT_PROBE_TIMEOUT,
+    ) -> None:
         self.failure_threshold = failure_threshold
         self.cooldown = cooldown
+        self.probe_timeout = probe_timeout
         self._state: CircuitState = CircuitState.CLOSED
         self._failure_count: int = 0
         self._opened_at: float | None = None
@@ -145,10 +158,14 @@ class _SlotBreaker:
         # HALF_OPEN: exactly one probe allowed — consume the slot on first call
         if self._probe_pending or (
             # The granted probe never reported (killed worker, finished item,
-            # dropped dispatch). Re-grant after a cooldown so the slot cannot
-            # stay dark forever; the lost probe's late verdict is then stale.
+            # dropped dispatch). Re-grant only once it is past probe_timeout so
+            # the slot cannot stay dark forever, without letting a slow probe
+            # overlap its replacement; a late verdict is then stale.
             self._probe_started_at is not None
-            and not now - self.cooldown < self._probe_started_at <= now
+            and (
+                self._probe_started_at > now
+                or now - self._probe_started_at >= self.probe_timeout
+            )
         ):
             self._probe_pending = False
             self._probe_started_at = now

@@ -345,3 +345,17 @@ def test_block_deadline_credits_4h_and_unknown_defaults_daily() -> None:
     now = datetime(2026, 9, 18, 13, 37, 12, tzinfo=UTC)
     assert block_deadline("credits", now) == now + timedelta(hours=4)
     assert block_deadline("nonsense", now) == datetime(2026, 9, 19, 0, 0, tzinfo=UTC)
+
+
+def test_arm_block_path_rejects_a_model_part_that_cannot_be_sanitised(
+    tmp_path: Path,
+) -> None:
+    """``model_safe`` only maps ``/`` and spaces; a backslash or NUL would escape."""
+    with pytest.raises(ValueError):
+        arm_block_path(tmp_path, "openrouter", "..\\..\\escaped", "quality")
+    with pytest.raises(ValueError):
+        arm_block_path(tmp_path, "openrouter", "bad\0model", "quality")
+    # Ordinary slash-bearing ids keep working through model_safe.
+    assert arm_block_path(tmp_path, "openrouter", "deepseek/v4.1", "quality").name == (
+        "openrouter-deepseek-v4.1-quality-blocked-until.txt"
+    )

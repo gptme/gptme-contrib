@@ -136,7 +136,8 @@ def arm_block_path(state_dir: Path, backend: str, model: str, kind: str) -> Path
         raise ValueError(
             f"unknown arm block kind {kind!r}; expected one of {sorted(ARM_BLOCK_KINDS)}"
         ) from None
-    return state_dir / f"{_name_part(backend, 'backend')}-{model_safe(model)}-{suffix}"
+    model_part = _name_part(model_safe(model), "model")
+    return state_dir / f"{_name_part(backend, 'backend')}-{model_part}-{suffix}"
 
 
 def backend_block_path(state_dir: Path, backend: str) -> Path:
