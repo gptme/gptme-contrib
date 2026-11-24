@@ -40,6 +40,19 @@ class TestSessionItems:
         )
         assert session_items(rec) == ["pr:org/repo#7", "pr:org/repo#8"]
 
+    def test_task_key_is_lowercased_like_pr_keys(self):
+        # The two namespaces join with the same rule, so a host that lowercases
+        # its outcome keys still matches a mixed-case dispatch task id.
+        rec = _rec("worker", [], task="T-123")
+        assert session_items(rec) == ["task:t-123"]
+        assert load_outcomes([{"item": "task:T-123", "outcome": "accepted"}]) == {
+            "task:t-123": "accepted"
+        }
+        assert (
+            compute_accepted_yield([rec], {"task:t-123": "accepted"})["worker"]["accepted_yield"]
+            == 1.0
+        )
+
     def test_unkeyed(self):
         assert session_items(_rec("fanout", ["abc1234"])) == []
         assert session_items({"dispatch_cause": None, "deliverables": None}) == []

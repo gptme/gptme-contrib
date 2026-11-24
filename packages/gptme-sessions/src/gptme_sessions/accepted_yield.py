@@ -45,6 +45,17 @@ def _field(record: Any, name: str) -> Any:
     return getattr(record, name, None)
 
 
+def _item_key(item: str) -> str:
+    """Item keys join case-insensitively.
+
+    ``pr:`` keys were lowercased while ``task:`` keys were passed through
+    verbatim, so a host that normalized all of its keys (mirroring the
+    documented PR behaviour) silently failed to join its task outcomes. Both
+    namespaces now use the same rule on both sides of the join.
+    """
+    return item.lower()
+
+
 def session_items(record: Any) -> list[str]:
     """Item keys one session worked on; empty if the session is unkeyed.
 
@@ -53,9 +64,9 @@ def session_items(record: Any) -> list[str]:
     cause = _field(record, "dispatch_cause")
     cause = cause if isinstance(cause, Mapping) else {}
     if cause.get("task"):
-        return [f"task:{cause['task']}"]
+        return [_item_key(f"task:{cause['task']}")]
     if cause.get("pr"):
-        return [f"pr:{str(cause['pr']).lower()}"]
+        return [_item_key(f"pr:{cause['pr']}")]
     refs = {
         f"{o}/{r}#{n}".lower()
         for value in _field(record, "deliverables") or []
@@ -83,7 +94,7 @@ def load_outcomes(rows: Iterable[Mapping[str, Any]]) -> dict[str, str]:
                 f"outcome row {n} ({item}): unknown outcome {outcome!r}; "
                 f"expected one of {', '.join(OUTCOMES)}"
             )
-        index[item] = outcome
+        index[_item_key(item)] = outcome
     return index
 
 
