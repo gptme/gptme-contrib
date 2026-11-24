@@ -60,6 +60,22 @@ def test_iter_source_files_handles_non_ascii_names(tmp_path):
     assert build_index(d).has("cafe")
 
 
+# A name that is not valid UTF-8 must not crash discovery (-z emits raw bytes).
+def test_iter_source_files_survives_undecodable_name(tmp_path):
+    d = _repo(tmp_path / "repo")
+    (d / "a.py").write_text("def a():\n    pass\n")
+    bad = os.fsdecode(b"bad\xff.py")
+    try:
+        (d / bad).write_text("def bad():\n    pass\n")
+    except (OSError, UnicodeEncodeError):
+        pytest.skip("filesystem rejects non-UTF-8 names")
+    _git(d, "add", ".")
+    files = core._iter_source_files(d)
+    assert d / "a.py" in files
+    assert d / bad in files
+    assert build_index(d).has("a")
+
+
 # --- Finding 3: untracked (not ignored) files are invisible, cache never invalidates ---
 def test_untracked_new_file_is_indexed(tmp_path):
     d = _repo(tmp_path / "repo")

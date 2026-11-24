@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import posixpath
 import sqlite3
 import subprocess
@@ -349,11 +350,14 @@ def _iter_source_files(directory: Path) -> list[Path]:
                 ],
                 cwd=directory,
                 capture_output=True,
-                text=True,
                 timeout=15,
             )
             if result.returncode == 0:
-                all_files.update(directory / p for p in result.stdout.split("\0") if p)
+                # Raw bytes: os.fsdecode maps names that are not valid in the
+                # filesystem encoding to the same str Path/os.listdir would.
+                all_files.update(
+                    directory / os.fsdecode(p) for p in result.stdout.split(b"\0") if p
+                )
             # The index can still list files deleted from the worktree.
             all_files = {fp for fp in all_files if fp.is_file()}
             if all_files:
