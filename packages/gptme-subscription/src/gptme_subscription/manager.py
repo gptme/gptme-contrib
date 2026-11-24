@@ -363,7 +363,9 @@ class SubscriptionManager:
                         ):
                             aged.pop("_pacing", None)
                         return {**aged, "_stale": True}
-            except (json.JSONDecodeError, OSError):
+            # ValueError/OverflowError: a non-finite countdown (json accepts
+            # NaN/Infinity) cannot be aged, so the cache is unusable.
+            except (json.JSONDecodeError, OSError, ValueError, OverflowError):
                 pass
         return None
 

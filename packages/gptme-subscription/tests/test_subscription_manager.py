@@ -141,6 +141,27 @@ def test_check_usage_stale_cache_skipped_when_not_ok(tmp_path: Path) -> None:
     assert sm.check_usage(stale_cache=stale_cache) is None
 
 
+@pytest.mark.parametrize("countdown", ["Infinity", "NaN"])
+def test_check_usage_stale_cache_with_non_finite_countdown_is_unavailable(
+    tmp_path: Path, countdown: str
+) -> None:
+    # json accepts Infinity/NaN; aging them raised OverflowError/ValueError,
+    # which escaped check_usage instead of treating the cache as unusable.
+    usage_script = tmp_path / "check-usage.sh"
+    usage_script.write_text("#!/bin/sh\nexit 1\n")
+    usage_script.chmod(0o755)
+    sm = _make_manager(tmp_path, usage_script=usage_script)
+
+    stale_cache = tmp_path / "stale.json"
+    stale_cache.write_text(
+        '{"_ok": true, "five_hour": {"utilization": 0.1, "resets_in_seconds": '
+        + countdown
+        + "}}"
+    )
+
+    assert sm.check_usage(stale_cache=stale_cache) is None
+
+
 def test_detect_external_switch_ignores_unreadable_log(tmp_path: Path) -> None:
     sm = _make_manager(tmp_path)
     sm.config.switch_log.mkdir()
