@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, cast
 
+from .session_identity import id_format
+
 if TYPE_CHECKING:
     from .record import SessionRecord
     from gptme_usage.harness_models import HarnessQuotaConfig
@@ -97,11 +99,32 @@ def estimate_record_cost(record: "SessionRecord") -> float | None:
     return float(result) if result is not None else None
 
 
+def _one_record_per_session(records: list["SessionRecord"]) -> list["SessionRecord"]:
+    """Drop ``dedup``-tagged duplicates and all but the last resumed snapshot.
+
+    Same rules as :func:`gptme_sessions.session_rows.load_session_rows`: rows
+    with a truthy ``duplicate_of`` are excluded, and a repeated UUID/8-hex id
+    keeps only its last snapshot (resumed sessions record cumulative usage).
+    Reusable 4-hex labels and other id formats are kept as-is.
+    """
+    records = [r for r in records if not r._legacy_fields.get("duplicate_of")]
+
+    def key(r: "SessionRecord") -> str | None:
+        if id_format(r.session_id) in ("uuid", "hex8"):
+            return str(r.session_id).strip().lower()
+        return None
+
+    last = {k: i for i, r in enumerate(records) if (k := key(r)) is not None}
+    return [r for i, r in enumerate(records) if (k := key(r)) is None or last[k] == i]
+
+
 def analyze_costs(
     records: list["SessionRecord"],
     days: int | None = None,
 ) -> CostSummary:
     """Analyze costs across a list of session records.
+
+    Each session is counted once: see :func:`_one_record_per_session`.
 
     Args:
         records: Session records to analyze.
@@ -110,6 +133,7 @@ def analyze_costs(
     Returns:
         CostSummary with total cost, by-model breakdown, and by-day breakdown.
     """
+    records = _one_record_per_session(records)
     if days is not None:
         cutoff = datetime.now(timezone.utc) - timedelta(days=days)
         filtered = []
