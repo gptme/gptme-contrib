@@ -1,6 +1,6 @@
-"""Per-PR review writer: marker, publish, thread, disposition, render, checkout and preflight helpers.
+"""Per-PR review writer: the review pipeline (``review_main``) plus marker, publish, thread, disposition, render, checkout and preflight helpers.
 
-Writer-port slices 2a–2d (Bob's knowledge/technical-designs/2026-11-20-ai-review-writer-port.md).
+Writer-port slices 2a–3c (Bob's knowledge/technical-designs/2026-11-20-ai-review-writer-port.md).
 Code moved as-is from Bob's ``scripts/github/ai-review.py``; review behaviour is
 unchanged.
 
@@ -37,31 +37,42 @@ from contextvars import copy_context
 from datetime import UTC, datetime
 from pathlib import Path
 from types import FunctionType, SimpleNamespace
-from typing import Protocol
+from typing import Protocol, cast
 from urllib.parse import quote
 
 from bobutils.shell import gh_json, gh_paginated_list
 
 from gptme_review import lifecycle
+from gptme_review import routing as _routing
 from gptme_review.core import (
+    CONSENSUS_MIN_AGREEMENT,
+    CONSENSUS_PASSES,
+    DEFAULT_MODEL,
+    MAX_SUPPRESSED,
     UNTIL_DRY_MAX_PASSES,
     ReviewConfig,
     ReviewDeadline,
+    ReviewDeadlineExceeded,
     ReviewError,
     ReviewRoute,
     ReviewTarget,
     agreement_dissent,
     blocking_shortfall,
+    build_agent_context,
+    commentable_lines,
     confidence_rationale,
     confidence_score,
     consensus_degraded,
     consensus_lost_jobs,
     consensus_lost_passes,
+    consensus_state,
     drop_unverified_absence_findings,
     fetch_file_contents,
     fetch_file_preload,
+    fetch_pr_diff_via_files_api,
     fetch_submodule_context,
     filter_suppressed,
+    finalize_review,
     is_summary_only_finding,
     matches_entry,
     merge_verdict,
@@ -69,21 +80,56 @@ from gptme_review.core import (
     normalize_severity,
     partition_posting_findings,
     rank_changed_paths_by_hunks,
+    reconcile_change_summary,
     repo_family,
     review,
+    review_api_key,
     select_aspects,
+    summary_disclaims_coverage,
     suppression_entry,
 )
 from gptme_review.shard import (
+    DEFERRED_SENTINEL,
+    EXIT_DEFERRED,
+    MAX_SHARDS,
     SHARD_CONCURRENCY,
     Shard,
+    describe_plan,
+    estimated_cost_usd,
     merge_shard_findings,
     merge_shard_usage,
+    needs_sharding,
+    plan_shards,
     shard_context_note,
+    shard_waves,
     sharding_note,
     split_file_sections,
 )
 from gptme_review.sweep import SweepIdentity, _is_reviewer_comment
+
+#: Imported for ``review_main``, which reaches them only through ``_io``: a peer
+#: bound with :func:`default_io` falls back to these module globals.
+_IO_FALLBACK_NAMES = (
+    CONSENSUS_MIN_AGREEMENT,
+    CONSENSUS_PASSES,
+    MAX_SUPPRESSED,
+    ReviewDeadlineExceeded,
+    build_agent_context,
+    commentable_lines,
+    consensus_state,
+    fetch_pr_diff_via_files_api,
+    finalize_review,
+    reconcile_change_summary,
+    summary_disclaims_coverage,
+    DEFERRED_SENTINEL,
+    EXIT_DEFERRED,
+    MAX_SHARDS,
+    describe_plan,
+    estimated_cost_usd,
+    needs_sharding,
+    plan_shards,
+    shard_waves,
+)
 
 
 def run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
@@ -141,7 +187,7 @@ def bind_io(namespace: object) -> SimpleNamespace:
             clone.__qualname__ = obj.__qualname__
             bound[name] = clone
     scope.update(bound)
-    scope["_io"] = _IO(namespace, bound)
+    scope["_io"] = _IO(namespace, {**globals(), **bound})
     return SimpleNamespace(**bound)
 
 
@@ -170,6 +216,8 @@ def default_io(
         MARKER_NAMESPACE=ns,
         MARKER_PREFIX=f"<!-- {ns}",
         PROVISIONAL_MARKER_PREFIX=f"<!-- {ns}-publishing",
+        INLINE_FINDING_MARKER=f"<!-- {ns}-finding -->",
+        INLINE_FP_PREFIX=f"<!-- {ns}-fp ",
         CHECKOUT_ROOT=Path(
             os.environ.get("GPTME_REVIEW_CHECKOUT_ROOT", "/tmp/worktrees")
         ),
@@ -807,7 +855,7 @@ def publish_review(
     ``None`` means :class:`DefaultWriterHost`, which records nothing.
     """
     if host is None:
-        host = DefaultWriterHost()
+        host = _bound_host()
     head_sha = full_sha[:12]
     prior_publication_id = previous_state.get("publication_id")
     prior_publishing_sha = str(previous_state.get("publishing_sha") or "")
@@ -4167,7 +4215,7 @@ def static_preflight_findings(
     rule 8); ``None`` means :class:`DefaultWriterHost`, which adds none.
     """
     if host is None:
-        host = DefaultWriterHost()
+        host = _bound_host()
     results: list[dict] = []
     results.extend(_check_cited_shas(pr_body, repo, touched_files, diff))
     results.extend(_check_unrelated_ci_claim(pr_body, repo, number, touched_files))
@@ -4534,3 +4582,1503 @@ def run_sharded_llm(
     findings = merge_shard_findings([r[0] for r in results])
     usage = merge_shard_usage([r[1] for r in results], plan)
     return findings, usage, contents, fully_preloaded, preload_coverage
+
+
+# ---------------------------------------------------------------------------
+# review_main (writer-port 3c) and the peer defaults it resolves through _io
+# ---------------------------------------------------------------------------
+#
+# ``review_main`` is Bob's ``_main_impl`` moved as-is. Every module-level name
+# it uses resolves through ``_io``, so a host's names (and its test patches)
+# win. A peer bound with :func:`default_io` falls back to the writer's own
+# names, including the defaults below: OpenRouter-only routing, the package
+# review key, and engine hooks that refuse instead of guessing.
+
+#: Diffs above this are recorded as unreviewable instead of being reviewed.
+_MAX_REVIEWABLE_DIFF_BYTES = 1_000_000  # ~1MB
+
+#: Printed beside verifier stats; a peer without a verifier hook has none.
+VERIFIER_PROMPT_VERSION = "none"
+
+
+def _bound_host() -> DefaultWriterHost:
+    """The bound namespace's ``WRITER_HOST``, or the no-op host when unbound."""
+    try:
+        host = _io.WRITER_HOST
+    except (AttributeError, RuntimeError):
+        return DefaultWriterHost()
+    return host if host is not None else DefaultWriterHost()
+
+
+class _PeerRouting:
+    """OpenRouter-only routing: no subscription panel, no outage breaker."""
+
+    def resolve_route(self, repo: str, **kwargs) -> _routing.ReviewRoute:
+        return _routing.resolve_route(
+            repo, backend=_routing.OpenRouterBackend(), **kwargs
+        )
+
+    def openrouter_unavailable(self) -> bool:
+        return _routing.OpenRouterBackend().openrouter_unavailable()
+
+
+routing = _PeerRouting()
+
+
+def pick_model(override: str | None, engine: str) -> tuple[str, str]:
+    if override:
+        return override, "explicit --model"
+    if engine == "agent":
+        raise ReviewError("--engine agent needs a host that implements it")
+    return DEFAULT_MODEL, "package default model"
+
+
+def review_key() -> str | None:
+    key = review_api_key()
+    return str(key) if key is not None else None
+
+
+def shard_review_key_remaining() -> float | None:
+    """Unknown REVIEW-key balance: the sharded-cost preflight fails open."""
+    return None
+
+
+def configure_subscription_plan(args: argparse.Namespace) -> dict[str, object]:
+    raise ReviewError("--engine subscription needs a host that implements it")
+
+
+def maybe_start_shadow(*args: object, **kwargs: object) -> None:
+    """No shadow panel without a host hook."""
+    return None
+
+
+def run_agent_engine(*args: object, **kwargs: object) -> list[dict]:
+    raise ReviewError("--engine agent needs a host that implements it")
+
+
+def run_sharded_agent(*args: object, **kwargs: object) -> tuple[list[dict], dict]:
+    raise ReviewError("--engine agent needs a host that implements it")
+
+
+def review_main(
+    argv: Sequence[str] | None = None, *, description: str | None = None
+) -> int:
+    ap = argparse.ArgumentParser(description=description)
+    ap.add_argument("repo", help="owner/name")
+    ap.add_argument("number", type=int)
+    ap.add_argument(
+        "--engine",
+        choices=("auto", "llm", "agent", "subscription"),
+        default="auto",
+        help=(
+            "auto = OpenRouter with outage subscription fallback (default); llm = explicit OpenRouter; agent = gptme-util tool loop; "
+            "subscription = one-shot panel over subscription capacity "
+            "(codex gpt-6.1-sol, CC sonnet, grok) — no tool loop, so it cannot "
+            "run out of turns before emitting findings"
+        ),
+    )
+    ap.add_argument("--model", default=None)
+    ap.add_argument(
+        "--outage-single-pass",
+        action="store_true",
+        help="label bounded subscription outage coverage as not merge evidence",
+    )
+    ap.add_argument("--timeout", type=float, default=900)
+    ap.add_argument(
+        "--run-timeout",
+        type=float,
+        default=float(os.environ.get("AI_REVIEW_RUN_TIMEOUT_S", "1800")),
+        help=(
+            "whole review-execution deadline shared by retries, shards, waves, "
+            "panel transports, and verifier calls (default: 1800s)"
+        ),
+    )
+    # The model's own ceiling (top_provider.max_completion_tokens for
+    # deepseek-v4-flash-0731). This budget covers reasoning AND the answer, and
+    # deepseek is a reasoning model — at the previous 32k default a large PR
+    # spent the entire allowance thinking and returned empty content with
+    # finish_reason='length', so the review silently produced nothing. Seen live
+    # on gptme/gptme#3482 during an automated sweep: reasoning_tokens=32028.
+    # Big PRs are exactly the ones most worth reviewing, so budget for them.
+    ap.add_argument("--max-tokens", type=int, default=65_536)
+    # max_tokens covers reasoning AND the answer, and 65536 is this model's
+    # ceiling — so when reasoning eats the whole budget there is nothing left to
+    # raise. Capping reasoning effort is the only remaining lever. 'medium'
+    # keeps analysis depth while leaving room to actually answer.
+    ap.add_argument(
+        "--reasoning-effort",
+        default="medium",
+        choices=("low", "medium", "high", "none"),
+        help="cap how much of the token budget reasoning may consume",
+    )
+    ap.add_argument(
+        "--fanout",
+        action="store_true",
+        help=(
+            "llm engine: run parallel correctness/security/test-coverage passes "
+            "and merge findings (slower, higher recall)"
+        ),
+    )
+    # Consensus. Defaults are on: the reviewer's measured failure was inventing
+    # different false findings each round at the identical SHA, and one sample
+    # cannot tell its own inventions from its own insights. Three passes cost
+    # ~$0.04 against Greptile's ~$1.01 and run concurrently, so the price of
+    # this is cents and no wall clock. See CONSENSUS_PASSES.
+    ap.add_argument(
+        "--passes",
+        type=int,
+        default=_io.CONSENSUS_PASSES,
+        help=(
+            "independent review passes; only findings seen by "
+            "--min-agreement of them are reported (1 disables consensus)"
+        ),
+    )
+    ap.add_argument(
+        "--min-agreement",
+        type=int,
+        default=None,
+        help="passes that must independently report a finding before it is shown",
+    )
+    ap.add_argument(
+        "--until-dry",
+        action="store_true",
+        help=(
+            "run fan-out in sequential waves and stop when a wave adds zero "
+            "new finding groups (marginal-yield stopping). Later waves are "
+            "seeded with already-found defects. Replaces multi-round PM "
+            "fix loops for deep pools; default remains one wave"
+        ),
+    )
+    ap.add_argument(
+        "--until-dry-max",
+        type=int,
+        default=_io.UNTIL_DRY_MAX_PASSES,
+        help=(
+            "cap on until-dry waves (default "
+            f"{_io.UNTIL_DRY_MAX_PASSES}); ignored unless --until-dry"
+        ),
+    )
+    ap.add_argument(
+        "--no-suppression",
+        action="store_true",
+        help=(
+            "re-raise findings that were explicitly dismissed "
+            "(ignores the suppression record; for debugging)"
+        ),
+    )
+    ap.add_argument(
+        "--verify",
+        action="store_true",
+        help=(
+            "Stage 2: adversarial verifier per finding group (REFUTE prompt: "
+            "real? / worth-fixing? / severity re-grade). Survivors post; "
+            "drops go to state/ai-review-suppressed.jsonl. Opt-in until the "
+            "recall-bench on-target kill-rate is ≤10%%"
+        ),
+    )
+    ap.add_argument(
+        "--verify-model",
+        default=None,
+        help=(
+            "OpenRouter model for --verify (default: same as --model). "
+            "A cheaper judge is fine; this is a verdict on structured input"
+        ),
+    )
+    ap.add_argument(
+        "--verify-severities",
+        default=None,
+        help=(
+            "Comma-separated severities to run --verify on (e.g. P0,P1); "
+            "findings outside this set post unverified. Requires --verify. "
+            "Default (unset): verify every finding."
+        ),
+    )
+    ap.add_argument(
+        "--no-structured",
+        action="store_true",
+        help="skip json_schema enforcement (some providers are slower with it)",
+    )
+    ap.add_argument(
+        "--no-preload", action="store_true", help="send only the diff, not whole files"
+    )
+    ap.add_argument(
+        "--max-turns", type=int, default=12, help="agent engine: max session steps"
+    )
+    ap.add_argument("--dry-run", action="store_true", help="review but do not post")
+    ap.add_argument(
+        "--plan-only",
+        action="store_true",
+        help=(
+            "fetch the diff, print the shard plan (or 'single prompt') and exit: "
+            "no model calls, no preload, nothing posted"
+        ),
+    )
+    ap.add_argument(
+        "--max-shard-waves",
+        type=int,
+        default=None,
+        help=(
+            "the sweep's wall-clock reservation: if the real shard plan needs "
+            f"more sequential waves, exit {_io.EXIT_DEFERRED} before spending anything"
+        ),
+    )
+    ap.add_argument(
+        "--no-inline",
+        action="store_true",
+        help="skip inline threads; still emit a verdict-free native COMMENT review",
+    )
+    ap.add_argument(
+        "--force", action="store_true", help="re-review even if this SHA was reviewed"
+    )
+    args = ap.parse_args(argv)
+    if args.min_agreement is None:
+        args.min_agreement = min(_io.CONSENSUS_MIN_AGREEMENT, args.passes)
+    if args.outage_single_pass and (
+        args.passes != 1 or args.min_agreement != 1 or args.until_dry
+    ):
+        ap.error(
+            "--outage-single-pass requires exactly one pass and agreement, without --until-dry"
+        )
+    request_run = lifecycle.current_run()
+    if request_run is not None:
+        request_run.configure(
+            {
+                "repo": args.repo,
+                "pr": args.number,
+                "requested_engine": args.engine,
+                "requested_model": args.model,
+                "passes": args.passes,
+                "min_agreement": args.min_agreement,
+                "request_timeout_s": args.timeout,
+                "run_timeout_s": args.run_timeout,
+                "dry_run": args.dry_run,
+                "fanout": args.fanout,
+                "until_dry": args.until_dry,
+                "max_waves": args.until_dry_max,
+                "max_tokens": args.max_tokens,
+                "structured": not args.no_structured,
+            },
+            timeout_s=None,
+        )
+    lifecycle.stage("planning")
+    if args.run_timeout <= 0:
+        ap.error("--run-timeout must be positive")
+
+    pr = _io.gh_json(
+        [
+            "pr",
+            "view",
+            str(args.number),
+            "--repo",
+            args.repo,
+            "--json",
+            "headRefOid,state,title,body",
+        ]
+    )
+    if not isinstance(pr, dict):
+        print(f"error: cannot read {args.repo}#{args.number}", file=sys.stderr)
+        return 2
+    if pr.get("state") != "OPEN":
+        print(f"skip: {args.repo}#{args.number} is {pr.get('state')}")
+        return 0
+    head_sha = str(pr.get("headRefOid") or "")[:12]
+
+    existing = _io.find_marker_comment(args.repo, args.number)
+    state = _io.marker_state(existing.get("body", "")) if existing else {}
+    history: list[dict] = state.get("history") or []
+    if not args.force and state.get("sha") == head_sha:
+        print(f"skip: {args.repo}#{args.number} already reviewed at {head_sha}")
+        return 0
+
+    # Admit transport, privacy and the complete evidence request before fetching
+    # a diff. Automatic outages are independent of the panel promotion flag.
+    requested_engine = args.engine
+    try:
+        resolved_route = _io.routing.resolve_route(
+            args.repo,
+            engine=args.engine,
+            model=args.model,
+            passes=args.passes,
+            min_agreement=args.min_agreement,
+        )
+    except _io.ReviewError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    args.engine = resolved_route.engine
+    if args.outage_single_pass and args.engine != "subscription":
+        ap.error("--outage-single-pass requires a subscription route")
+    args.panel_available = (
+        (resolved_route.reviewers, resolved_route.skipped)
+        if resolved_route.reviewers
+        else None
+    )
+    args.review_role = "fallback" if args.engine == "subscription" else "primary"
+    route_override = (
+        _io.WRITER_HOST.route_override(args)
+        if requested_engine == "auto" and args.engine == "llm" and not args.model
+        else None
+    )
+    if route_override is not None:
+        route, route_why = route_override
+        print(f"route: {route} ({route_why})")
+        if route == "subscription":
+            args.engine = "subscription"
+            args.review_role = "primary"
+            try:
+                admitted = _io.routing.resolve_route(
+                    args.repo,
+                    engine="subscription",
+                    passes=args.passes,
+                    min_agreement=args.min_agreement,
+                )
+            except _io.ReviewError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 2
+            args.panel_available = (admitted.reviewers, admitted.skipped)
+
+    if args.engine == "subscription":
+        try:
+            plan = _io.configure_subscription_plan(args)
+        except _io.ReviewError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        planned_reviewers = plan["reviewers"]
+        assert isinstance(planned_reviewers, list)
+        print(
+            "review plan: "
+            f"{plan['requested_min_agreement']}-of-{plan['requested_passes']} "
+            f"subscription consensus via "
+            f"{', '.join(str(r) for r in planned_reviewers)}"
+        )
+
+    diff_proc = _io.run(["gh", "pr", "diff", str(args.number), "--repo", args.repo])
+    diff = diff_proc.stdout if diff_proc.returncode == 0 else ""
+    if not diff.strip():
+        # gh pr diff refuses PRs above GitHub's 300-file cap (HTTP 406). The
+        # files API serves up to 3,000, so recover the diff here instead of
+        # recording the head unreviewable — an oversized-but-reviewable PR
+        # (a docs-only blog resync bundling required OG images) must still
+        # get a verdict (TimeToBuildBob.github.io#266).
+        diff = _io.fetch_pr_diff_via_files_api(args.repo, args.number, run=_io.run)
+    if not diff.strip():
+        stderr_text = diff_proc.stderr or ""
+        # A diff GitHub refuses to serve is a permanent property of THIS head,
+        # not a transient fault: `ErikBjare/bob#1145` (477 files) failed this
+        # way 11 times in 3 hours on 2026-08-11, once every sweep, and would
+        # have failed forever. Retrying it burned a review slot each time and —
+        # worse — inflated the failure ratio, so any ONE other failure made
+        # `failures == attempted` and tripped the systemic alarm that turned
+        # the unit red at 16:02.
+        #
+        # Record it against the head SHA so the sweep can decline to re-attempt
+        # it, and only until someone pushes: a new head may well be small
+        # enough to review, and that must not need a human to un-stick it.
+        if "too_large" in stderr_text.lower():
+            if args.dry_run:
+                print(
+                    f"would record {args.repo}#{args.number} as unreviewable at {head_sha}"
+                )
+            else:
+                _io.record_unreviewable(
+                    args.repo, args.number, head_sha, existing, state, stderr_text
+                )
+            print(
+                f"error: cannot fetch diff: {stderr_text[-300:]}",
+                file=sys.stderr,
+            )
+            return 2
+        print(f"error: cannot fetch diff: {stderr_text[-300:]}", file=sys.stderr)
+        return 2
+
+    # Size gate. Generated files (lockfiles, minified JS) are excluded from
+    # the size calculation and from review — #1416 had 98% of its diff in
+    # uv.lock and was marked unreviewable despite 31KB of code changes.
+    #
+    # Every prompt builder truncates the diff at 200K chars (ours in
+    # `build_review_prompt`, gptme's in `review pr`) — that, not argv, is what
+    # bounds one review: the agent engine never passed the diff through argv
+    # (gptme-util fetches it, or reads `--diff <file>`), and only its bounded
+    # preload context rides in `--instructions`. So a diff above that is
+    # SHARDED (see `ai_review_shard`): split by file, each shard reviewed by
+    # this same pipeline, findings merged into one review. Only above the
+    # sharded sanity cap is the head recorded unreviewable — a new commit
+    # clears that, and so does a plain re-run after a pipeline change (the
+    # record never claims `sha`, so this script does not skip it).
+    touched_files, reviewable_diff, reviewable_bytes, elided_files = (
+        _io.extract_touched_files_and_reviewable_diff(diff)
+    )
+
+    # Report what was excluded. This print is for the operator reading a sweep
+    # log; the PR itself is told by elision_note() inside render(), because a
+    # stdout line nobody reads is not a disclosure.
+    total_bytes = len(diff.encode("utf-8", errors="replace"))
+    excluded_bytes = total_bytes - reviewable_bytes
+    if elided_files:
+        excluded_pct = (excluded_bytes / total_bytes * 100) if total_bytes > 0 else 0
+        print(
+            f"excluded {len(elided_files)} generated file(s) "
+            f"({', '.join(r['path'] for r in elided_files)}): "
+            f"{excluded_bytes // 1024}KB, {excluded_pct:.1f}% of diff"
+        )
+
+    shard_plan: list[Shard] | None = None
+    oversize_detail = ""
+    if reviewable_bytes > _io._MAX_REVIEWABLE_DIFF_BYTES:
+        oversize_detail = (
+            f"reviewable diff is {reviewable_bytes // 1024}KB "
+            f"(gate: {_io._MAX_REVIEWABLE_DIFF_BYTES // 1024}KB, even sharded) — "
+            "too large to review via current pipeline"
+        )
+    elif _io.needs_sharding(reviewable_diff):
+        shard_plan = cast("list[Shard]", _io.plan_shards(reviewable_diff))
+        print(_io.describe_plan(shard_plan))
+        if len(shard_plan) > _io.MAX_SHARDS:
+            oversize_detail = (
+                f"reviewable diff is {reviewable_bytes // 1024}KB and needs "
+                f"{len(shard_plan)} shards (cap: {_io.MAX_SHARDS}) — too large to "
+                "review via current pipeline"
+            )
+    if oversize_detail:
+        if args.dry_run or args.plan_only:
+            print(
+                f"would record {args.repo}#{args.number} as unreviewable at {head_sha}"
+            )
+        else:
+            _io.record_unreviewable(
+                args.repo,
+                args.number,
+                head_sha,
+                existing,
+                state,
+                oversize_detail,
+                reason="diff_too_large",
+            )
+        print(f"error: {oversize_detail}", file=sys.stderr)
+        return 2
+    if shard_plan is None:
+        print(f"shard plan: single prompt ({reviewable_bytes // 1024}KB reviewable)")
+    if args.plan_only:
+        return 0
+    if shard_plan is not None:
+        waves = _io.shard_waves(len(shard_plan))
+        # The sweep reserved wall clock for `--max-shard-waves` waves from the
+        # PR's listing stats. The real plan is only known now; a plan that
+        # needs more is deferred BEFORE any spend rather than overrunning the
+        # sweep's unit timeout mid-review (which loses the marker and the
+        # rest of the queue). `shard_waves=N` lets the sweep reserve enough
+        # next time.
+        if args.max_shard_waves is not None and waves > args.max_shard_waves:
+            print(
+                f"{_io.DEFERRED_SENTINEL} sharded review needs {waves} wave(s) "
+                f"(shard_waves={waves}) but this run budgeted "
+                f"{args.max_shard_waves}",
+                file=sys.stderr,
+            )
+            return int(_io.EXIT_DEFERRED)
+        # Cost preflight: a sharded review costs up to one worst-case review
+        # per shard. The sweep only checked for one.
+        if args.engine == "llm":
+            needed = _io.estimated_cost_usd(len(shard_plan))
+            remaining = _io.shard_review_key_remaining()
+            print(
+                f"budget: {len(shard_plan)} shard(s) x worst case = ${needed:.2f}; "
+                + (
+                    f"REVIEW key has ${remaining:.2f}"
+                    if remaining is not None
+                    else "REVIEW key balance unknown (fail-open)"
+                )
+            )
+            if remaining is not None and remaining < needed:
+                print(
+                    f"{_io.DEFERRED_SENTINEL} sharded review needs up to ${needed:.2f} "
+                    f"({len(shard_plan)} shards) but the REVIEW key has "
+                    f"${remaining:.2f} left",
+                    file=sys.stderr,
+                )
+                return int(_io.EXIT_DEFERRED)
+
+    if args.engine == "subscription":
+        model = "panel: " + " + ".join(r.key for r in args.panel_reviewers)
+        why = "subscription capacity, one-shot (no tool loop)"
+    else:
+        model, why = _io.pick_model(args.model, args.engine)
+    print(f"engine: {args.engine} · model: {model} ({why})")
+    args.deadline = _io.ReviewDeadline(args.run_timeout)
+    if request_run is not None:
+        request_run.configure(
+            {
+                "engine": args.engine,
+                "model": model,
+                "passes": args.passes,
+                "min_agreement": args.min_agreement,
+                "shards": len(shard_plan) if shard_plan is not None else 1,
+                **(args.resolved_review_plan if args.engine == "subscription" else {}),
+            },
+            timeout_s=args.run_timeout,
+        )
+    lifecycle.stage("review")
+    print(f"execution deadline: {args.run_timeout:g}s shared across all stages")
+
+    # L0.5 — cheap existing-module overlap scan. Runs on the diff before the
+    # LLM so production (single unnarrowed pass, no fan-out) still sees it.
+    # Ledger-only: the hit still grounds the model prompt and is retained in
+    # marker evidence, but measured 2/2 noise means it costs no summary text.
+    overlap_hit = _io.WRITER_HOST.overlap(reviewable_diff, args.repo)
+    overlap_note = _io.WRITER_HOST.overlap_note(overlap_hit) if overlap_hit else ""
+    overlap_record = (
+        _io.WRITER_HOST.overlap_finding(overlap_hit) if overlap_hit else None
+    )
+    overlap_findings: list[dict] = [overlap_record] if overlap_record else []
+    if overlap_hit:
+        print(
+            f"overlap: {getattr(overlap_hit, 'new_path', '?')} ~ "
+            f"{getattr(overlap_hit, 'existing_repo', '?')}:"
+            f"{getattr(overlap_hit, 'existing_path', '?')}"
+        )
+
+    agent_checkout_lock = None
+    started = datetime.now(UTC)
+    # `usage` doubles as the metadata channel from the llm engine (it carries
+    # the change description). The agent engine produces neither, and an empty
+    # dict is the honest representation of that.
+    usage: dict = {}
+    contents: dict[str, str] = {}
+    fully_preloaded: set[str] = set()
+    preload_coverage: dict[str, int] | None = None
+    try:
+        if args.engine == "agent":
+            full_head_sha = str(pr.get("headRefOid") or "")
+            review_checkout = _io.review_checkout_for(args.repo)
+            agent_checkout_lock = _io.acquire_agent_checkout_lock(review_checkout)
+            _io.prepare_agent_checkout(args.repo, full_head_sha, review_checkout)
+            agent_paths = _io.rank_changed_paths_by_hunks(reviewable_diff)
+            contents = {
+                path: text
+                for path in agent_paths
+                if (text := _io.read_checkout_file(review_checkout, path)) is not None
+            }
+            fully_preloaded = set(contents)
+            preload_coverage = {
+                "files_in_diff": len(agent_paths),
+                "files_preloaded": len(fully_preloaded),
+                "files_truncated": len(agent_paths) - len(fully_preloaded),
+            }
+            sibling_note = _io.build_cross_repo_sibling_note(args.repo)
+            trusted_notes = "\n\n".join(n for n in (sibling_note, overlap_note) if n)
+            if shard_plan is not None:
+                findings, usage = _io.run_sharded_agent(
+                    args,
+                    pr,
+                    shard_plan,
+                    model=model,
+                    checkout=review_checkout,
+                    trusted_notes=trusted_notes,
+                    fully_preloaded=fully_preloaded,
+                )
+            else:
+                agent_ctx = _io.build_agent_context(
+                    args.repo, reviewable_diff, review_checkout
+                )
+                if trusted_notes:
+                    agent_ctx = agent_ctx + "\n\n" + trusted_notes
+                findings = _io.run_agent_engine(
+                    args.repo,
+                    args.number,
+                    full_head_sha,
+                    model,
+                    _io._stage_timeout(args, args.timeout, "agent review"),
+                    agent_ctx,
+                    max_turns=args.max_turns,
+                    checkout_prepared=True,
+                    checkout=review_checkout,
+                    dry_run=args.dry_run,
+                )
+        else:
+            key = _io.review_key() or ""
+            if not key and args.engine == "llm":
+                print("error: OPENROUTER_API_KEY_REVIEW not found", file=sys.stderr)
+                return 2
+            if shard_plan is not None:
+                findings, usage, contents, fully_preloaded, preload_coverage = (
+                    _io.run_sharded_llm(
+                        args,
+                        pr,
+                        shard_plan,
+                        reviewable_diff=reviewable_diff,
+                        model=model,
+                        key=key,
+                        base_note=overlap_note,
+                    )
+                )
+            else:
+                # Preload the full post-change files. Context is 1M tokens and
+                # input is ~$0.09/M, so buying accuracy and line-number
+                # fidelity with context is strictly cheaper than letting the
+                # model guess.
+                ranked_paths = _io.rank_changed_paths_by_hunks(reviewable_diff)
+                contents, fully_preloaded, preload_coverage = cast(
+                    "tuple[dict[str, str], set[str], dict[str, int]]",
+                    _io.preload_files(args, pr, ranked_paths),
+                )
+                print(
+                    f"preloaded {preload_coverage['files_preloaded']} of "
+                    f"{preload_coverage['files_in_diff']} file(s); "
+                    f"{preload_coverage['files_truncated']} not fully read"
+                )
+                # Resolve imports from changed files that cross into a
+                # submodule and fetch the referenced source files at the
+                # pinned gitlink SHA.
+                submodule_ctx = _io.fetch_submodule_context(
+                    contents,
+                    reviewable_diff,
+                    args.repo,
+                    head_sha=str(pr.get("headRefOid") or ""),
+                    mention_text=f"{pr.get('title') or ''}\n{pr.get('body') or ''}",
+                )
+                if submodule_ctx:
+                    print("submodule: fetched cross-submodule import context")
+                    overlap_note = (
+                        (overlap_note + "\n\n" + submodule_ctx).strip()
+                        if overlap_note
+                        else submodule_ctx
+                    )
+                _io.maybe_start_shadow(
+                    args,
+                    pr,
+                    head_sha=head_sha,
+                    diff=reviewable_diff,
+                    contents=contents,
+                    note=overlap_note,
+                )
+                findings, usage = _io.llm_review_call(
+                    args,
+                    pr,
+                    model=model,
+                    key=key,
+                    diff=reviewable_diff,
+                    contents=contents,
+                    preload_coverage=preload_coverage,
+                    note=overlap_note,
+                )
+            providers = usage.get("providers")
+            provider = (
+                ",".join(str(p) for p in providers)
+                if isinstance(providers, list) and providers
+                else usage.get("provider")
+            )
+            print(
+                f"usage: {usage.get('completion_tokens')} completion tokens "
+                f"(provider={provider}, model={model}, "
+                f"cost=${(usage.get('cost') or 0):.4f})"
+            )
+            if usage.get("until_dry"):
+                print(
+                    f"until-dry: {usage.get('until_dry_waves')} wave(s), "
+                    f"stopped={usage.get('until_dry_stopped')}, "
+                    f"new_groups={usage.get('until_dry_new_groups')}, "
+                    f"pool={usage.get('until_dry_pool')}"
+                )
+            # Which JSON guarantee actually applied. Printed because the answer
+            # is not inferable from the flags: `--no-structured` off only means
+            # one was *requested*, and a provider-side rejection downgrades to
+            # the prompt contract mid-call. Fan-out reports one entry per job so
+            # a partial downgrade is not averaged away into a healthy-looking run.
+            modes = usage.get("response_format_modes")
+            applied = (
+                modes
+                if isinstance(modes, list)
+                else [usage.get("response_format_mode")]
+            )
+            rendered = ", ".join(str(m or "prompt-contract") for m in applied)
+            print(f"json guarantee: {rendered}")
+            if usage.get("response_format_downgrades"):
+                print(
+                    f"  WARNING: {len(usage['response_format_downgrades'])} of "
+                    f"{len(applied)} job(s) lost the provider JSON guarantee "
+                    f"and fell back to the prompt contract"
+                )
+            if usage.get("consensus_passes"):
+                print(
+                    f"consensus: {usage['consensus_passes']} of "
+                    f"{usage.get('consensus_requested_passes')} pass(es) "
+                    f"answered, agreement threshold "
+                    f"{usage.get('consensus_min_agreement')} applied "
+                    f"(asked for {usage.get('consensus_min_agreement_requested')}), "
+                    f"{usage.get('consensus_rejected', 0)} finding(s) rejected "
+                    f"for appearing in too few; "
+                    f"{usage.get('consensus_answered_jobs')} of "
+                    f"{usage.get('consensus_requested_jobs')} fan-out job(s) "
+                    f"answered" + (" (weakest shard)" if usage.get("sharded") else "")
+                )
+            # WHY a job did not answer. These are also written into the marker
+            # (see `consensus_state`) — stderr alone destroyed them at the point
+            # of failure, since the sweep runs this as a subprocess with
+            # `capture_output=True` and prints stderr only on a non-zero exit.
+            # A degraded-but-successful run threw its own diagnosis away.
+            for reason in usage.get("pass_failures") or []:
+                print(f"  pass failed: {reason}", file=sys.stderr)
+    except _io.ReviewError as exc:
+        # Posting nothing is correct here. A wrong review is worse than none.
+        cause: BaseException | None = exc
+        timed_out = False
+        while cause is not None:
+            if isinstance(cause, _io.ReviewDeadlineExceeded | TimeoutError):
+                timed_out = True
+                break
+            cause = cause.__cause__
+        if request_run is not None:
+            request_run.set_outcome(
+                "timed_out" if timed_out else "failed", error_type=type(exc).__name__
+            )
+        print(f"review failed, posting nothing: {exc}", file=sys.stderr)
+        return 1
+    except subprocess.TimeoutExpired:
+        if request_run is not None:
+            request_run.set_outcome("timed_out", error_type="TimeoutExpired")
+        print("review timed out, posting nothing", file=sys.stderr)
+        return 1
+    finally:
+        if agent_checkout_lock is not None:
+            agent_checkout_lock.close()
+    # The footer and marker must name the models that actually answered, not the
+    # roster that was asked: a partial panel is a different review.
+    panel_info = usage.get("panel") if isinstance(usage.get("panel"), dict) else None
+    if panel_info and panel_info.get("answered"):
+        model = "panel: " + " + ".join(panel_info["answered"])
+    # Shared policy owns ordered soundness gates and scope partitioning. Keep
+    # forge-only existence checks, round caps, static preflight, suppression and
+    # live-thread reconciliation below; their output determines the final score.
+    # Summary non-coverage is handled by the existing unreviewable-marker path
+    # after reconciliation, so do not short-circuit its fail-closed bookkeeping.
+    finalized = _io.finalize_review(
+        findings,
+        change_summary={},
+        fully_preloaded_paths=fully_preloaded,
+        file_contents=contents or {},
+        touched_files=touched_files,
+        out_of_scope_policy="informational",
+    )
+    findings = [*finalized.findings, *finalized.summary_only_findings]
+    unverified_absence = finalized.dropped["unverified_absence"]
+    for finding in unverified_absence:
+        print(
+            "  dropped (unverified absence claim; incomplete files: "
+            f"{', '.join(finding.get('preload_missing_files') or [])}): "
+            f"{str(finding.get('title') or finding.get('file'))[:60]}",
+            file=sys.stderr,
+        )
+    if unverified_absence:
+        print(
+            f"dropped {len(unverified_absence)} unverified absence finding(s)",
+            file=sys.stderr,
+        )
+
+    # Discard findings whose own verbatim quote is not in the file they cite.
+    # A finding describing code that is not there is unsound no matter how well
+    # argued — see gptme/gptme#3486, where a P0-security finding rested on
+    # quoting a test as `' thinkinghidden response'` when the source read
+    # `'<think>hidden</think>'`. Conservative by design: no quote, or a file we
+    # did not preload, means we cannot check and therefore do not judge.
+    misquoted = finalized.dropped["misquoted"]
+    for f in misquoted:
+        print(
+            f"  dropped (quote not found in {f.get('file')}): "
+            f"{str(f.get('quote'))[:70]}",
+            file=sys.stderr,
+        )
+    if misquoted:
+        print(f"dropped {len(misquoted)} misquoted finding(s)", file=sys.stderr)
+
+    # A finding whose own body concludes there is no bug must never reach
+    # GitHub. Covers the agent engine and any single-pass path that does not go
+    # through the fan-out, which applies the same guard before voting.
+    disclaiming = finalized.dropped["self_disclaiming"]
+    for f in disclaiming:
+        print(
+            f"  dropped (retracts itself: {str(f.get('disclaim_phrase'))[:50]!r}): "
+            f"{str(f.get('title') or f.get('file'))[:60]}",
+            file=sys.stderr,
+        )
+    if disclaiming:
+        print(
+            f"dropped {len(disclaiming)} self-disclaiming finding(s)", file=sys.stderr
+        )
+
+    # P2 whose only remedy is adding a test of code this PR owns. The
+    # three-clause rule in the prompt already forbids these; the generator
+    # still files them. Same conservative shape as self-disclaim: opening
+    # claim only, P0/P1 always kept, defects *in* tests kept.
+    coverage_nits = finalized.dropped["coverage_nits"]
+    for f in coverage_nits:
+        print(
+            f"  dropped (coverage nit: {str(f.get('coverage_nit_phrase'))[:50]!r}): "
+            f"{str(f.get('title') or f.get('file'))[:60]}",
+            file=sys.stderr,
+        )
+    if coverage_nits:
+        print(f"dropped {len(coverage_nits)} coverage-nit finding(s)", file=sys.stderr)
+
+    # P2 whose own conclusion is "this is a minor X" / "only a bug for
+    # programmatic callers". Worth-fixing bar, not the coverage Never-file
+    # list. P0/P1 and "minor, but the real defect is…" stay.
+    self_nits = finalized.dropped["self_graded_nits"]
+    for f in self_nits:
+        why = str(f.get("self_graded_nit_phrase"))[:50]
+        print(
+            f"  dropped (self-graded nit: {why!r}): "
+            f"{str(f.get('title') or f.get('file'))[:60]}",
+            file=sys.stderr,
+        )
+    if self_nits:
+        print(f"dropped {len(self_nits)} self-graded-nit finding(s)", file=sys.stderr)
+
+    # P2 whose claim is that a test is under-isolated ("does not mock" /
+    # "the test is non-hermetic"). Hygiene, not a merge-round. P0/P1,
+    # production paths, and vacuous/wrong-stub test defects stay.
+    iso_nits = finalized.dropped["test_isolation_nits"]
+    for f in iso_nits:
+        why = str(f.get("test_isolation_nit_phrase"))[:50]
+        print(
+            f"  dropped (test-isolation nit: {why!r}): "
+            f"{str(f.get('title') or f.get('file'))[:60]}",
+            file=sys.stderr,
+        )
+    if iso_nits:
+        print(f"dropped {len(iso_nits)} test-isolation-nit finding(s)", file=sys.stderr)
+
+    # P2 whose claim is traceback-vs-friendly-CLI-error. Message quality,
+    # not a merge-round. P0/P1 and remaining-orphan / chat-loop KEEP.
+    friendly_nits = finalized.dropped["friendly_error_nits"]
+    for f in friendly_nits:
+        why = str(f.get("friendly_error_nit_phrase"))[:50]
+        print(
+            f"  dropped (friendly-error nit: {why!r}): "
+            f"{str(f.get('title') or f.get('file'))[:60]}",
+            file=sys.stderr,
+        )
+    if friendly_nits:
+        print(
+            f"dropped {len(friendly_nits)} friendly-error-nit finding(s)",
+            file=sys.stderr,
+        )
+
+    # Runtime-claim filtering is static and non-executing; never run model
+    # reproduction snippets in the review process.
+    unverified = finalized.dropped["unverified_runtime"]
+    for f in unverified:
+        print(
+            f"  dropped (unverified runtime claim): "
+            f"{str(f.get('title') or f.get('file'))[:60]}",
+            file=sys.stderr,
+        )
+    if unverified:
+        print(f"dropped {len(unverified)} unverified runtime claim(s)", file=sys.stderr)
+
+    # In-scope filtering: drop findings on files the PR did not touch.
+    # A finding describing a pre-existing code issue is valid but should not block
+    # this PR — it would force the PR author to fix unrelated issues (#1416 cascade).
+    # Out-of-scope findings are noted but do not contribute to the merge verdict.
+    #
+    # Every drop here is stamped and collected into `suppressed_findings`, which
+    # render() turns into a disclosure and confidence_score() reads to refuse a
+    # clean number. A policy drop that leaves no trace in the body is the same
+    # defect as excluding a file silently, except it fails OPEN.
+    suppressed_findings: list[dict] = []
+    informational_findings: list[dict] = []
+    out_of_scope = finalized.out_of_scope_findings
+    out_of_scope, nonexistent_paths = _io.drop_nonexistent_head_findings(
+        out_of_scope,
+        repo=args.repo,
+        ref=str(pr.get("headRefOid") or ""),
+        known_existing_paths=contents,
+    )
+    for f in nonexistent_paths:
+        print(
+            f"  dropped (path absent at head: {f.get('file')}): "
+            f"{str(f.get('title') or f.get('body') or '')[:70]}",
+            file=sys.stderr,
+        )
+    if nonexistent_paths:
+        print(
+            f"dropped {len(nonexistent_paths)} finding(s) citing paths absent at head",
+            file=sys.stderr,
+        )
+    for f in out_of_scope:
+        f["suppressed_reason"] = "out_of_scope"
+        informational_findings.append(f)
+        print(
+            f"  out-of-scope (informational: {f.get('file')}): {str(f.get('title'))[:70]}",
+            file=sys.stderr,
+        )
+    if out_of_scope:
+        print(
+            f"routed {len(out_of_scope)} out-of-scope finding(s) to informational section",
+            file=sys.stderr,
+        )
+
+    # Hard round cap: after N review rounds on one PR, stop escalating findings.
+    # A PR that has been reviewed 4+ times without converging indicates either
+    # the reviewer is too noisy (damping issue we already fixed) or the PR has
+    # genuine defects the author accepts. Either way, endless cycles help nobody.
+    _MAX_REVIEW_ROUNDS = 5
+    review_round_count = (
+        len(history) + 1
+    )  # +1 for the current round about to be recorded
+    downgraded = _io.apply_round_cap(findings, review_round_count, _MAX_REVIEW_ROUNDS)
+    if downgraded:
+        print(
+            f"warn: round cap reached ({review_round_count} reviews). "
+            f"Downgraded {downgraded} P2+ finding(s) to informational; "
+            "P0/P1 still block.",
+            file=sys.stderr,
+        )
+
+    # Static pre-flight checks (rules 1a, 1b, 1c, 7, 8 from the 90-day census).
+    # Injected AFTER the LLM filter chain and scope filter (these describe the
+    # PR body/shape, not a pre-existing code path) and AFTER the round cap
+    # (they are perpetually relevant regardless of review count).
+    # They enter suppression below so a dismissal can silence them like any
+    # other finding.
+    static_pre = _io.static_preflight_findings(
+        pr_title=str(pr.get("title") or ""),
+        pr_body=str(pr.get("body") or ""),
+        diff=reviewable_diff,
+        touched_files=touched_files,
+        repo=args.repo,
+        number=args.number,
+    )
+    if static_pre:
+        findings = list(static_pre) + list(findings)  # static first for visibility
+        print(f"static preflight: {len(static_pre)} finding(s) added")
+
+    # Suppression memory: drop only findings whose argument was already had and
+    # lost. Recorded on *dismissal*, never on emission — a finding that was
+    # raised and ignored must come back, or an unfixed bug would vanish from
+    # later reviews and the PR would score 5/5 with the defect still in it.
+    # Convergence comes from consensus precision above, not from forgetting.
+    #
+    # Two dismissal signals feed this: a rejecting reply, and an explicit thread
+    # resolution by anyone other than this reviewer. The second needs the
+    # `auto_resolved` ledger to tell our own bookkeeping resolutions apart from
+    # a real dismissal — see `resolution_dismissals`.
+    #
+    # Threads are fetched ONCE here and reused for reconciliation below: the two
+    # must see the same snapshot, or a thread could be counted as retired by one
+    # and live by the other. Read-only, so it is safe under --dry-run.
+    threads = _io.fetch_review_threads(args.repo, args.number)
+    ledger = state.get("auto_resolved")
+    if isinstance(ledger, list):
+        auto_resolved: list[str] = [s for s in ledger if isinstance(s, str)]
+    else:
+        # No ledger in the marker: it was written before this key existed (or
+        # hand-edited away), so every resolution already on this PR has unknown
+        # provenance — and this reviewer has been resolving its own superseded
+        # threads since 33fdbcfd29 without recording it. Adopt them all as ours,
+        # once — every resolved finding thread, not just the ones that would
+        # otherwise dismiss. A missed dismissal costs one repeated comment; a
+        # wrong dismissal buries a finding forever, so the backfill errs toward
+        # ours.
+        auto_resolved = [str(e["fp"]) for e in _io.resolved_finding_entries(threads)]
+        if auto_resolved:
+            print(
+                f"  adopting {len(auto_resolved)} pre-existing thread "
+                f"resolution(s) as our own (no provenance recorded)"
+            )
+    suppressed: list[dict] = [
+        e for e in (state.get("suppressed") or []) if isinstance(e, dict)
+    ]
+    known_fps = {e.get("fp") for e in suppressed}
+    review_comments = _io.fetch_review_comments(args.repo, args.number)
+    for entry in _io.dismissed_findings(
+        args.repo,
+        args.number,
+        threads=threads,
+        auto_resolved=auto_resolved,
+        comments=review_comments,
+    ):
+        if entry["fp"] not in known_fps:
+            suppressed.append(entry)
+            known_fps.add(entry["fp"])
+            print(
+                f"  suppressing {entry.get('why') or 'dismissed'} finding "
+                f"{entry['fp']} ({entry['file']})"
+            )
+    suppressed = suppressed[-_io.MAX_SUPPRESSED :]
+
+    if not args.no_suppression:
+        findings, muted = _io.guarded_filter_suppressed(
+            findings, suppressed, repo=args.repo, head_sha=head_sha
+        )
+        for f in muted:
+            print(
+                f"  suppressed (dismissed on an earlier round): "
+                f"{f.get('file')}:{f.get('line')} {str(f.get('body'))[:60]}",
+                file=sys.stderr,
+            )
+        if muted:
+            print(f"suppressed {len(muted)} previously-dismissed finding(s)")
+        informational_findings, muted_info = _io.guarded_filter_suppressed(
+            informational_findings, suppressed, repo=args.repo, head_sha=head_sha
+        )
+        if muted_info:
+            print(
+                f"suppressed {len(muted_info)} previously-dismissed out-of-scope finding(s)",
+                file=sys.stderr,
+            )
+
+    # Stage 2: optional adversarial worth-fixing verifier (the sweep enables
+    # it for P0/P1). Known outages use its conservative error path without spend.
+    # Runs after mechanical filters and human-dismissal suppression so we do
+    # not spend tokens on findings that would never post. Tool/parse failure
+    # is conservative: the finding stays.
+    if getattr(args, "verify", False) and findings:
+        lifecycle.stage("verifier")
+        verify_key = _io.review_key()
+        verifier_blocked = _io.routing.openrouter_unavailable()
+        if not verify_key and not verifier_blocked:
+            print("error: --verify needs OPENROUTER_API_KEY_REVIEW", file=sys.stderr)
+            return 2
+        verify_model = (
+            getattr(args, "verify_model", None)
+            or (_io.DEFAULT_MODEL if args.engine == "subscription" else model)
+        ).removeprefix("openrouter/")
+        # Static preflight findings are mechanical facts about the PR body or
+        # shape, not code claims, so the verifier's "is this a real code defect
+        # at this head" question does not apply. It judged rule 1c "a process
+        # nit, not a defect in the code" and dropped it every round: 57 drops
+        # across 29 PRs since 2026-09-30, including gptme/gptme#5016, which
+        # merged without the screenshot Erik then asked for.
+        static_kept = [f for f in findings if f.get("static")]
+        candidates = [f for f in findings if not f.get("static")]
+        verify_severities_raw = getattr(args, "verify_severities", None)
+        if verify_severities_raw:
+            verify_severities = {
+                _io.normalize_severity(s)
+                for s in verify_severities_raw.split(",")
+                if s.strip()
+            }
+            to_verify = [
+                f
+                for f in candidates
+                if _io.normalize_severity(f.get("severity")) in verify_severities
+            ]
+            skipped_verify = [
+                f
+                for f in candidates
+                if _io.normalize_severity(f.get("severity")) not in verify_severities
+            ]
+        else:
+            to_verify = list(candidates)
+            skipped_verify = []
+        print(
+            f"verifier: {len(to_verify)} finding group(s) via {verify_model} "
+            f"(prompt {_io.VERIFIER_PROMPT_VERSION})"
+            + (
+                f", {len(skipped_verify)} skipped (outside --verify-severities)"
+                if skipped_verify
+                else ""
+            )
+        )
+        verified, verifier_dropped, verifier_stats = _io.WRITER_HOST.verify(
+            to_verify,
+            reviewable_diff,
+            model=verify_model,
+            api_key=verify_key or "",
+            deadline=args.deadline,
+            blocked=verifier_blocked,
+            repo=args.repo,
+            pr=args.number,
+            head_sha=head_sha,
+            file_contents=contents,
+        )
+        findings = static_kept + verified + skipped_verify
+        usage["verifier"] = verifier_stats
+        if verifier_blocked:
+            usage["verifier"]["unavailable_reason"] = (
+                "OpenRouter account/REVIEW-key outage"
+            )
+        for rec in verifier_dropped:
+            print(
+                f"  verifier dropped ({rec.get('reason')}): "
+                f"{rec.get('file')}:{rec.get('line')} "
+                f"{str(rec.get('rationale') or rec.get('body') or '')[:70]}",
+                file=sys.stderr,
+            )
+        print(
+            f"verifier: {verifier_stats['confirmed']} kept, "
+            f"{verifier_stats['dropped']} dropped, "
+            f"{verifier_stats['errors']} error(s) kept conservatively"
+        )
+
+    # Posting policy is applied once, after every soundness/verifier filter and
+    # before thread reconciliation. Advisory-class P2s remain in the summary
+    # and marker evidence, but omitting them from this list also retires any
+    # inline thread created by an older reviewer pass.
+    findings, summary_only_findings = _io.partition_posting_findings(findings)
+    if summary_only_findings:
+        print(
+            f"routed {len(summary_only_findings)} P2 advisory finding(s) "
+            "to summary-only evidence"
+        )
+
+    # Same discipline as the misquote guard, applied to the change description:
+    # a row for a file that is not in this diff is the model describing
+    # something it was never shown, and the whole point of the description is
+    # that a human can trust it as a record of what the reviewer saw.
+    raw_summary = usage.get("change_summary")
+    change_summary, invented, undescribed = _io.reconcile_change_summary(
+        raw_summary if isinstance(raw_summary, dict) else None, reviewable_diff
+    )
+    for invented_path in invented:
+        print(f"  dropped file row (not in diff): {invented_path}", file=sys.stderr)
+    if change_summary["files"] or change_summary["summary"]:
+        print(
+            f"change description: {len(change_summary['files'])} file row(s), "
+            f"{len(undescribed)} undescribed, {len(invented)} invented"
+        )
+
+    # A summary that claims it could not read the input is a failed review, not
+    # a clean one. The diff is in the prompt by construction (we built it
+    # above), so "the diff is elided / excerpts are truncated / cannot be
+    # reviewed" is a hallucinated input limitation. Publishing it would render
+    # a "Safe to merge — Confidence 5/5" over zero findings while the summary
+    # disclaims coverage, and the self-merge gate reads that 5/5 as evidence —
+    # the gptme-cloud#978 false-green. Fail closed: record the head as
+    # unreviewable (score withheld, sha NOT claimed) so the gate keeps its
+    # AI-review blocker and the sweep reports the gap instead of merging.
+    summary_non_coverage = _io.summary_disclaims_coverage(
+        str(change_summary.get("summary") or "")
+    )
+    if summary_non_coverage:
+        detail = (
+            f"review summary claims it could not read the input "
+            f"({summary_non_coverage!r}); the diff was present in the prompt "
+            f"({len(reviewable_diff)} chars) — treating as unreviewable"
+        )
+        # Drop any stale verdict from the marker before recording. A prior
+        # marker at the SAME head carrying `score: 5` would otherwise survive
+        # the copy inside `record_unreviewable` and the gate would read it as
+        # accepted, defeating the whole guard on a `--force` re-review.
+        marker_state_without_verdict = {
+            k: v
+            for k, v in state.items()
+            if k not in ("sha", "score", "submodule_only")
+        }
+        if args.dry_run:
+            print(
+                f"would record {args.repo}#{args.number} as unreviewable at "
+                f"{head_sha} ({detail})"
+            )
+        else:
+            _io.record_unreviewable(
+                args.repo,
+                args.number,
+                head_sha,
+                existing,
+                marker_state_without_verdict,
+                detail,
+                reason="summary_non_coverage",
+            )
+        print(f"error: {detail}", file=sys.stderr)
+        return 2
+
+    elapsed = (datetime.now(UTC) - started).total_seconds()
+    print(f"{len(findings)} finding(s) in {elapsed:.0f}s")
+
+    # Which findings can be anchored to a real diff line? GitHub rejects the
+    # whole review if any comment targets a line outside the diff.
+    # Use reviewable_diff — the set of anchorable lines must match what the
+    # model was actually shown, so hallucinated findings on generated files
+    # cannot be posted even if the full diff contains those lines.
+    hunks = _io.commentable_lines(reviewable_diff)
+    inline: list[dict] = []
+    anchored: set[int] = set()
+    # Index -> the fingerprint the diff already carries for that finding. Empty
+    # when inline posting is off; the marker falls back to the fresh
+    # fingerprint, which is correct there because nothing was reconciled.
+    reopened = _io.retain_reopened_holds(
+        findings, threads, auto_resolved, review_comments
+    )
+    kept: dict[int, dict[str, str]] = dict(reopened)
+    stale_threads: list[str] = []
+    fp_by_thread: dict[str, str] = {}
+    if not args.no_inline:
+        # Reconcile against live threads BEFORE building the payload — the
+        # decision "this finding already has a thread" has to be available to
+        # the loop that decides what to post, or the two disagree and we
+        # re-post a finding whose thread we just chose to keep. (An earlier
+        # attempt put the reconciliation after this loop and could only delete,
+        # which is exactly the behaviour being removed.)
+        #
+        # Reading is safe under --dry-run; only the resolve call below is not.
+        kept, stale_threads = _io.reconcile_inline_threads(
+            findings,
+            threads,
+            held_fps={identity["fp"] for identity in reopened.values()},
+        )
+        kept.update(reopened)
+        # The fingerprint each of our live threads carries, so a thread we
+        # retire below can be recorded as resolved by US. Threads with no
+        # readable entry contribute nothing — they cannot be recognised as a
+        # dismissal later either, so there is nothing to defend against.
+        fp_by_thread = {
+            t["id"]: str(t["entry"]["fp"])
+            for t in _io.open_finding_threads(threads)
+            if t["entry"]
+        }
+        if kept:
+            print(f"{len(kept)} finding(s) already have a live thread — not re-posted")
+        for idx, f in enumerate(findings):
+            if idx in kept:
+                # Already on the diff, in a thread that carries its own history
+                # and any replies. `anchored` is how render() says "this one is
+                # posted inline", which stays true.
+                anchored.add(id(f))
+                continue
+            path, line = f.get("file"), f.get("line")
+            if path and isinstance(line, int) and line in hunks.get(path, set()):
+                sev = str(f.get("severity", "P2"))
+                agreement, total = f.get("agreement"), f.get("passes")
+                consensus = (
+                    f" _({agreement}/{total} passes{_io.agreement_dissent(f)})_"
+                    if isinstance(agreement, int)
+                    and isinstance(total, int)
+                    and total > 1
+                    else ""
+                )
+                inline.append(
+                    {
+                        "path": path,
+                        "line": line,
+                        "side": "RIGHT",
+                        # The marker is what lets the self-merge gate tell these
+                        # apart from human review threads. Inline findings post
+                        # through Bob's *user* account, not a GitHub App, so
+                        # `_is_bot_author` cannot see them and without this each
+                        # finding counts as unacknowledged human feedback —
+                        # i.e. posting a review makes the PR *less* mergeable
+                        # (observed on contrib#1383). Consumed by
+                        # gptme/gptme-contrib#1388. Keep the exact string.
+                        "body": (
+                            f"{_io.INLINE_FINDING_MARKER}\n"
+                            f"{_io.INLINE_FP_PREFIX}"
+                            f"{json.dumps(_io.suppression_entry(f))} -->\n"
+                            f"{_io.SEVERITY_ICON.get(sev, '•')} **{sev}** — "
+                            f"{f['body']}{consensus}"
+                        ),
+                    }
+                )
+                anchored.add(id(f))
+
+    # Publish the identity that is actually on the diff. `reconcile_inline_threads`
+    # deliberately keeps a live thread's rendered severity when a later pass
+    # regrades the same finding (P2 -> P1), so the marker names the thread, not
+    # the fresh verdict. The score has to be computed over that same set: left
+    # on the fresh severity it claims a P1 while `findings` publishes none, and
+    # the self-merge gate correctly refuses the self-contradictory marker
+    # ("scores 3/5 but publishes 0 P1 finding(s)") — observed on
+    # gptme-cloud#1167, where a kept P2 was regraded P1 and the PR sat
+    # merge-ready but permanently ineligible.
+    _io.apply_kept_identities(findings, kept)
+
+    display_engine = (
+        f"{args.engine} (fan-out)" if getattr(args, "fanout", False) else args.engine
+    )
+    consensus_record = _io.consensus_state(usage)
+    body = _io.render(
+        findings,
+        model=model,
+        engine=display_engine,
+        elapsed=elapsed,
+        head_sha=head_sha,
+        full_sha=str(pr.get("headRefOid") or ""),
+        repo_slug=args.repo,
+        anchored=anchored,
+        history=history,
+        submodule_only=_io.is_submodule_only_diff(diff),
+        change_summary=change_summary,
+        undescribed=undescribed,
+        consensus=consensus_record,
+        elided_files=elided_files,
+        preload_coverage=preload_coverage,
+        suppressed_findings=suppressed_findings,
+        informational_findings=informational_findings,
+        advisory_findings=summary_only_findings,
+        sharding=usage.get("sharded"),
+    )
+    if args.outage_single_pass:
+        body += (
+            "\n\n> **Outage coverage: 1-pass, not merge evidence.** "
+            "Subscription review supplied findings while full consensus capacity "
+            "was unavailable. The consensus merge gate remains unsatisfied.\n"
+        )
+    if (usage.get("verifier") or {}).get("unavailable_reason"):
+        body += "\n\n> The optional OpenRouter verifier was unavailable. Findings retain their original severity.\n"
+    # Same call render() makes, so the number in the marker and the number a
+    # human reads can never disagree. `None` (submodule pointer bump) is
+    # serialised as JSON `null`: the key is always present, and consumers must
+    # read null as "no verdict", never as a pass.
+    score = _io.confidence_score(
+        findings,
+        submodule_only=_io.is_submodule_only_diff(diff),
+        suppressed=len(suppressed_findings),
+        informational=len(informational_findings),
+    )
+    new_history = _io.append_review_history(
+        state,
+        {
+            "sha": head_sha,
+            "score": score,
+            "findings": len(findings),
+            "engine": args.engine,
+            "at": started.strftime("%Y-%m-%d %H:%M UTC"),
+            **({"shards": len(shard_plan)} if shard_plan is not None else {}),
+        },
+        consensus_record,
+    )
+    # `sha` stays first and keeps its exact meaning: ai-review-sweep.py skips a
+    # PR when marker sha == head, and the self-merge gate (contrib#1388) and PM
+    # dispatch (#1390) both read it. Adding a key is safe; moving or retyping
+    # one is not.
+    #
+    # `suppressed` is additive: findings whose threads were explicitly rejected,
+    # so a settled argument is not re-litigated next round. It holds *only*
+    # dismissals — never everything ever raised, which would hide unfixed bugs.
+    # It lives here rather than being re-derived from the threads each round
+    # because a dismissed finding's thread can stop being readable as evidence:
+    # it gets resolved, or goes outdated when the line moves, and GitHub hides
+    # both by default. The ledger is the durable copy.
+    #
+    # `consensus` is additive too, and it is what makes a score interpretable:
+    # requested vs answered passes AND jobs, the agreement threshold actually
+    # applied, and why each job that did not answer failed. Without it a 3/5
+    # filtered by one surviving pass and a 3/5 three passes agreed on are the
+    # same JSON, and every consumer that treats the score as a merge signal is
+    # reading them as equal. The failure reasons live here rather than only on
+    # stderr because stderr does not outlive the process: the sweep runs this
+    # with `capture_output=True` and prints it only on a non-zero exit, so a
+    # degraded-but-successful run destroyed its own diagnosis. Absent when no
+    # consensus stage ran (agent engine, plain single-pass) — read a MISSING
+    # key as "unknown", never as "full consensus".
+    marker_state_out = _io.build_marker_state(
+        head_sha=head_sha,
+        score=score,
+        engine=args.engine,
+        findings=findings,
+        kept=kept,
+        consensus=consensus_record,
+        history=new_history,
+        suppressed=suppressed,
+        advisories=[*summary_only_findings, *overlap_findings],
+        submodule_only=_io.is_submodule_only_diff(diff),
+        preload_coverage=preload_coverage,
+    )
+    # The explicit-review served watermark is the instant this review started,
+    # not the summary comment's mutable ``updated_at`` and not completion time.
+    # A request posted while the model is already running therefore remains
+    # pending for the next sweep instead of being swallowed by the final PATCH.
+    marker_state_out["served_through"] = started.isoformat().replace("+00:00", "Z")
+    if args.outage_single_pass:
+        marker_state_out["outage_single_pass"] = True
+    # Additive provenance so the precision ledger can stratify by model and
+    # route (tasks/ai-reviewer-on-subscription-capacity.md, measurement).
+    marker_state_out["review"] = {
+        "route": "subscription"
+        if args.engine in ("subscription", "agent")
+        else "openrouter",
+        "engine": args.engine,
+        "models": (
+            list(panel_info["answered"])
+            if panel_info
+            else [model.removeprefix("openrouter/")]
+        ),
+        "wall_s": round(elapsed),
+        **(
+            {
+                "requested": list(panel_info["requested"]),
+                "list_price_usd": panel_info["list_price_usd"],
+            }
+            if panel_info
+            else {}
+        ),
+    }
+    if isinstance(usage.get("verifier"), dict):
+        marker_state_out["verifier"] = usage["verifier"]
+    # Additive: how the diff was split when it did not fit one prompt. Absent
+    # on an ordinary review. Consensus in this marker is already the weakest
+    # shard's (see `merge_shard_usage`), so no consumer needs to read this to
+    # stay safe — it is provenance.
+    if isinstance(usage.get("sharded"), dict):
+        marker_state_out["sharded"] = usage["sharded"]
+
+    # `auto_resolved` is additive too, and it is what keeps `suppressed` honest.
+    # It lists the fingerprints THIS REVIEWER resolved as bookkeeping, so a
+    # resolution by anyone else is distinguishable and can be read as a
+    # dismissal. Without it, our own retirement of a fixed finding would suppress
+    # it forever — and a regression of that same defect would never be reported
+    # again. Read a MISSING key as "we have resolved nothing", which is exactly
+    # what it meant before this existed.
+    # Recorded on ATTEMPT, not on success: a mutation that reported failure
+    # may still have landed, and the two errors are not symmetric. Put this in
+    # the provisional marker before attempting the resolutions, so a later
+    # native-review failure cannot turn our bookkeeping into a human dismissal.
+    newly_auto_resolved = [fp_by_thread[t] for t in stale_threads if t in fp_by_thread]
+    marker_state_out["auto_resolved"] = _io.accumulate_auto_resolved(
+        auto_resolved, newly_auto_resolved
+    )
+
+    # `dispositions` is additive too, and a re-publish must not erase it. The
+    # PM event feed (`ai_review_verdict`) and the sweep
+    # (`marker_findings_non_blocking`) read this map to decide whether a
+    # finding is still outstanding; the self-merge gate reads thread replies
+    # instead. It is written by `rerender_after_disposition`. Without this carry-forward a
+    # same-head re-publish dropped the map, the disposed finding read as open
+    # again, and PM re-emitted `reviewer_needs_fix` every cooldown hour.
+    carried = _io.carried_dispositions(state)
+    if carried:
+        marker_state_out["dispositions"] = carried
+
+    if args.dry_run:
+        for c in inline:
+            print(f"  {c['path']}:{c['line']} — {c['body'][:100]}")
+
+    # The review above can run for tens of minutes (agent engine). Re-check the
+    # PR's head right before publishing: if a fixup landed while we were
+    # reviewing, this verdict describes a SHA that is no longer head and would
+    # mislead whoever reads it next (ActivityWatch/aw-webui#988 — a stale
+    # "Not safe to merge" comment quoting lines already fixed by the time it
+    # posted). Refuse to publish rather than risk a false verdict; the next
+    # sweep will review the new head and `state.sha` is untouched so nothing
+    # is falsely marked "already reviewed" either.
+    reviewed_full_sha = str(pr.get("headRefOid") or "")
+    fresh_pr = _io.gh_json(
+        ["pr", "view", str(args.number), "--repo", args.repo, "--json", "headRefOid"]
+    )
+    fresh_full_sha = (
+        str(fresh_pr.get("headRefOid") or "") if isinstance(fresh_pr, dict) else ""
+    )
+    if fresh_full_sha and fresh_full_sha != reviewed_full_sha:
+        detail = (
+            f"head moved from {head_sha} to {fresh_full_sha[:12]} while this "
+            "review was running — refusing to publish a verdict for a stale head"
+        )
+        if args.dry_run:
+            print(f"would skip publish: {detail}")
+        else:
+            print(f"error: {detail}", file=sys.stderr)
+        return 2
+
+    lifecycle.stage("publication")
+    published = _io.publish_review(
+        repo=args.repo,
+        number=args.number,
+        full_sha=reviewed_full_sha,
+        summary_body=body,
+        final_state=marker_state_out,
+        previous_state=state,
+        inline=inline,
+        existing=existing,
+        stale_threads=stale_threads,
+        dry_run=args.dry_run,
+    )
+    return 0 if published else 2
