@@ -182,20 +182,26 @@ def _persist_probe_refresh(
             slot.name,
         )
         return
-    try:
-        unchanged = slot.read_bytes() == original
-    except OSError:
-        unchanged = False
-    if not unchanged:
-        logger.warning(
-            "slot %s changed while it was probed; refresh not written", slot.name
-        )
-        return
     fd, tmp_name = tempfile.mkstemp(prefix=f".{slot.name}.", dir=slot.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(text)
         os.chmod(tmp_name, 0o600)
+        # Compare as late as possible: the check and the rename are separate
+        # syscalls and POSIX has no compare-and-swap rename, so a write that
+        # lands between them is still lost. Slot writers outside this package
+        # share no lock with it; the check covers the probe's seconds-long
+        # window, which is where a re-auth realistically lands.
+        try:
+            unchanged = slot.read_bytes() == original
+        except OSError:
+            unchanged = False
+        if not unchanged:
+            logger.warning(
+                "slot %s changed while it was probed; refresh not written", slot.name
+            )
+            Path(tmp_name).unlink(missing_ok=True)
+            return
         os.replace(tmp_name, slot)
     except OSError:
         Path(tmp_name).unlink(missing_ok=True)

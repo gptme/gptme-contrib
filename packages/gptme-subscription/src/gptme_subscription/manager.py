@@ -353,6 +353,15 @@ class SubscriptionManager:
                                 ):
                                     value["utilization"] = 0.0
                             aged[key] = value
+                        # _pacing describes the weekly window as it was when
+                        # cached; once that window has reset it would keep
+                        # reporting the old overuse, so drop it.
+                        weekly_window = aged.get("seven_day")
+                        if (
+                            isinstance(weekly_window, dict)
+                            and weekly_window.get("resets_in_seconds") == 0
+                        ):
+                            aged.pop("_pacing", None)
                         return {**aged, "_stale": True}
             except (json.JSONDecodeError, OSError):
                 pass

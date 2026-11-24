@@ -89,3 +89,40 @@ def test_stale_cache_weekly_window_that_already_reset_is_not_exhausted(
     assert usage["seven_day"]["utilization"] == 0.0
     # A window that has not reset keeps its utilization.
     assert usage["five_hour"]["utilization"] == 0.10
+
+
+def test_stale_cache_drops_pacing_of_a_weekly_window_that_already_reset(
+    tmp_path: Path, make_manager
+) -> None:
+    failing = tmp_path / "usage.sh"
+    failing.write_text("#!/bin/sh\nexit 1\n")
+    failing.chmod(0o755)
+    sm = make_manager(usage_script=failing)
+    for slot in ("alice", "erik"):
+        sm.config.slot_path(slot).write_text("{}")  # fresh fallback credentials
+    # Snapshot taken 3h ago: weekly at 98% and "overusing", resetting 1h after
+    # the scrape. The cached _pacing describes the expired window.
+    cache = tmp_path / "claude-usage-bob.json"
+    cache.write_text(
+        json.dumps(
+            {
+                "_ok": True,
+                "seven_day": {"utilization": 0.98, "resets_in_seconds": 3600},
+                "five_hour": {"utilization": 0.10, "resets_in_seconds": 3 * 3600 + 60},
+                "_pacing": {
+                    "actual_utilization": 0.98,
+                    "target_utilization": 0.50,
+                    "status": "overusing",
+                },
+            }
+        )
+    )
+    old = time.time() - 3 * 3600
+    os.utime(cache, (old, old))
+
+    usage = sm.check_usage(stale_cache=cache)
+    assert usage is not None and usage.get("_stale")
+    assert "_pacing" not in usage
+
+    decision = sm.evaluate(usage, "bob")
+    assert decision.mode != "rebalance", decision.reason
