@@ -54,7 +54,10 @@ _COMMIT_RE = re.compile(
 # through `| tail -3`), the "[branch hash] msg" line is gone and _COMMIT_RE
 # matches nothing, even though the commit landed.
 _COMMIT_CMD_RE = re.compile(r"\bgit(?:\s+-C\s+\S+)?\s+commit\b|\bgit-safe-commit\b")
-_COMMIT_SUBJECT_RE = re.compile(r"""-m\s+(?:"((?:[^"\\]|\\.)*)"|'([^']*)')""")
+# `-m` alone or as the last of combined short flags (`-am`, `-qm`, `-aqm`).
+# The lookbehind keeps `--amend`-style long options from matching.
+_COMMIT_M_FLAG = r"(?<![\w-])-[A-Za-z]*m"
+_COMMIT_SUBJECT_RE = re.compile(_COMMIT_M_FLAG + r"""\s+(?:"((?:[^"\\]|\\.)*)"|'([^']*)')""")
 _COMMIT_HEREDOC_SUBJECT_RE = re.compile(
     r"""-m\s+"\$\(cat\s+<<-?\s*'?(\w+)'?\s*\n(.*?)\n\1\b""", re.S
 )
@@ -145,7 +148,9 @@ def _commit_subject(cmd: str) -> str | None:
 # ("--message=...", "--message ..."), which the commit-command scan uses to
 # decide whether a widened match can be checked against a stated subject.
 _COMMIT_SUBJECT_LONG_RE = re.compile(
-    r"""(?:-m|--message)\s+(?:"((?:[^"\\]|\\.)*)"|'([^']*)')""" r"""|--message=("[^"]*"|'[^']*')"""
+    r"(?:" + _COMMIT_M_FLAG + r"|--message)"
+    r"""\s+(?:"((?:[^"\\]|\\.)*)"|'([^']*)')"""
+    r"""|--message=("[^"]*"|'[^']*')"""
 )
 
 
