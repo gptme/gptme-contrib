@@ -213,10 +213,18 @@ def split_file_sections(diff: str) -> list[FileSection]:
 
     Text before the first header (rare; never produced by ``gh pr diff``) is
     kept as a path-less section so nothing is dropped.
+
+    Every section ends with a newline. A diff without a final newline would
+    otherwise leave its last section unterminated, and :func:`plan_shards`
+    can pack that section ahead of another group's, gluing its last line onto
+    the next ``diff --git`` header.
     """
     sections: list[list[str]] = []
     current: list[str] = []
-    for line in _diff_lines(diff or ""):
+    lines = _diff_lines(diff or "")
+    if lines and not lines[-1].endswith("\n"):
+        lines[-1] += "\n"
+    for line in lines:
         if line.startswith("diff --git") and current:
             sections.append(current)
             current = []
