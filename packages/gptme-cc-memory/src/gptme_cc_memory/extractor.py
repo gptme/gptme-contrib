@@ -18,6 +18,7 @@ import json
 import os
 import re
 import secrets
+import stat
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -100,10 +101,18 @@ def atomic_write_text(path: Path, text: str) -> None:
     A failed write (e.g. ENOSPC) leaves the previous file content intact
     instead of a truncated file.
     """
+    try:
+        mode = stat.S_IMODE(path.stat().st_mode)
+    except FileNotFoundError:
+        mode = 0o600
     tmp = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+    # Exclusive creation with private permissions, independent of the umask.
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    os.close(fd)
     try:
         with tmp.open("w", encoding="utf-8") as f:
             f.write(text)
+        tmp.chmod(mode)
         os.replace(tmp, path)
     except BaseException:
         tmp.unlink(missing_ok=True)

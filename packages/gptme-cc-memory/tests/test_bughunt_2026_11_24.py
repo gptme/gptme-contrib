@@ -596,3 +596,36 @@ def test_cs7_failed_append_truncates_pending_updates(tmp_path: Path, monkeypatch
         extractor.main()
     monkeypatch.undo()
     assert "WEEKS-OF-ACCUMULATED-PENDING" in pending.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("existing_mode", [None, 0o600, 0o640])
+def test_atomic_write_does_not_expose_private_contents(tmp_path: Path, monkeypatch, existing_mode):
+    import os
+    import stat
+
+    target = tmp_path / "pending.md"
+    if existing_mode is not None:
+        target.write_text("old")
+        target.chmod(existing_mode)
+    real_replace = os.replace
+
+    def check_temp_mode(src, dst):
+        assert stat.S_IMODE(Path(src).stat().st_mode) == (existing_mode or 0o600)
+        real_replace(src, dst)
+
+    real_open = os.open
+
+    def check_create_mode(path, flags, mode=0o777):
+        assert flags & os.O_EXCL
+        assert mode == 0o600
+        return real_open(path, flags, mode)
+
+    monkeypatch.setattr(os, "open", check_create_mode)
+    monkeypatch.setattr(os, "replace", check_temp_mode)
+    old_umask = os.umask(0)
+    try:
+        extractor.atomic_write_text(target, "private session context")
+    finally:
+        os.umask(old_umask)
+    assert target.read_text() == "private session context"
+    assert stat.S_IMODE(target.stat().st_mode) == (existing_mode or 0o600)

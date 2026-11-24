@@ -62,8 +62,9 @@ def prune_stale_pending_updates(content: str, today: date) -> str:
     A block runs from its ``## Pending`` header up to the next level-1/2
     header (``# ``/``## ``), so its ``### Confirmations`` / ``### Guidance``
     subsections and any blank-line-separated paragraphs are pruned with it.
-    Free-form (undated) content and blocks with unparseable dates are always
-    kept (fail-open).
+    Free-form content outside a dated block and blocks with unparseable dates
+    are kept (fail-open). To append undated notes after a dated block, start
+    a new level-1/2 header; blank lines alone do not end that block.
     """
     lines = content.splitlines(keepends=True)
     kept: list[str] = []
