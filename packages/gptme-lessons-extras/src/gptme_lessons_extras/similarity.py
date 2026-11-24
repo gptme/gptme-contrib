@@ -98,7 +98,11 @@ def extract_keywords(lesson_path: Path) -> Set[str]:
             post = frontmatter.load(f)
             metadata = cast(dict[str, Any], post.metadata)
             if "match" in metadata and "keywords" in metadata["match"]:
-                return set(metadata["match"]["keywords"])
+                keywords = metadata["match"]["keywords"]
+                # A scalar is one keyword; set() of a str would yield characters.
+                if isinstance(keywords, str):
+                    return {keywords}
+                return {str(k) for k in keywords or []}
     except Exception:
         pass
     return set()

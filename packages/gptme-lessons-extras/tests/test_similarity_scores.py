@@ -398,3 +398,20 @@ class TestSelectBestLesson:
         cluster = [_info(fp)]
         chosen = select_best_lesson(cluster)
         assert chosen["title"] == "Solo"
+
+
+def test_scalar_keywords_value_is_one_keyword_not_characters(tmp_path):
+    # A plain-string keywords value used to become a set of characters, so two
+    # unrelated lessons overlapped on shared letters (#2362 LX11).
+    from gptme_lessons_extras.similarity import (
+        calculate_keyword_overlap,
+        extract_keywords,
+    )
+
+    a = tmp_path / "a.md"
+    b = tmp_path / "b.md"
+    a.write_text("---\nmatch:\n  keywords: git rebase\n---\n# A\n")
+    b.write_text("---\nmatch:\n  keywords: bisect regression\n---\n# B\n")
+    ka, kb = extract_keywords(a), extract_keywords(b)
+    assert ka == {"git rebase"}
+    assert calculate_keyword_overlap(ka, kb) == 0.0
