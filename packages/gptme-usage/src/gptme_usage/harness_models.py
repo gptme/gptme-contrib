@@ -330,6 +330,14 @@ def quota_pool_label(
     return "unknown"
 
 
+def _cc_family(resolved: str) -> str:
+    """Collapse a resolved Claude Code arm (``opus-5-5``) to its family row."""
+    for family in ("opus", "sonnet", "haiku"):
+        if resolved == family or resolved.startswith(f"{family}-"):
+            return family
+    return resolved
+
+
 def pricing_key_for_model(
     harness: str,
     model: str,
@@ -339,12 +347,16 @@ def pricing_key_for_model(
     normalized_model = model
     if harness == "claude-code":
         resolved = resolve_cc_version(model)
-        for family in ("opus", "sonnet", "haiku"):
-            if resolved == family or resolved.startswith(f"{family}-"):
-                normalized_model = family
-                break
-        else:
-            normalized_model = resolved
+        # A versioned row (e.g. ``opus-5-5``) prices its own version; only a
+        # version without a row of its own falls back to the family row.
+        price_table = (
+            config.price_table
+            if (config is not None and config.price_table)
+            else HARNESS_PRICE_USD_PER_1M
+        )
+        if (harness, resolved) in price_table:
+            return (harness, resolved)
+        normalized_model = _cc_family(resolved)
     elif harness == "gptme":
         # Config replaces the module-level routes entirely (consistent with
         # price_table and tps_table: all three use replace-not-merge) so a
@@ -518,6 +530,10 @@ def estimate_session_cost(
 
     input_price, output_price = prices
     provider = _CACHE_PRICING_PROVIDER.get(key)
+    if provider is None and harness == "claude-code":
+        # Claude Code only serves Anthropic models, so a version missing from
+        # the table above still gets Anthropic cache pricing.
+        provider = "anthropic"
     configured_cache_read_price = (
         config.cache_read_price_table.get(key) if config is not None else None
     )
@@ -585,7 +601,11 @@ SUBSCRIPTION_BACKED_MODELS: set[tuple[str, str]] = {
     ("claude-code", "opus"),
     ("claude-code", "opus-5-5"),  # 2026-09-22: same Claude Max pool as opus
     ("claude-code", "sonnet"),
+    ("claude-code", "sonnet-5-5"),
+    ("claude-code", "haiku"),
     ("claude-code", "fable-5"),
+    ("claude-code", "fable-5-1"),
+    ("claude-code", "fable-5-2"),
     ("grok-build", "grok-build"),
     ("codex", "gpt-5.4"),
     ("codex", "gpt-5.5"),
@@ -651,6 +671,9 @@ def estimate_tokens_from_duration(
     )
     key = pricing_key_for_model(harness, model, config)
     tps = tps_table.get(key)
+    if tps is None and harness == "claude-code":
+        # A versioned price row may exist without a versioned TPS row.
+        tps = tps_table.get((harness, _cc_family(resolve_cc_version(model))))
     if tps is None:
         tps = tps_table.get((harness, model))
     if tps is None:
