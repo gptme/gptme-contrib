@@ -62,6 +62,10 @@ def adopt_lesson(
 
         _, category, slug = parts
         local_path = lessons_dir / category / f"{slug}.md"
+        # lesson_id comes from untrusted network frontmatter: keep the write
+        # inside lessons_dir.
+        if not local_path.resolve().is_relative_to(lessons_dir.resolve()):
+            return False, f"Unsafe lesson_id (escapes lessons dir): {lesson_id}"
 
         # Check for conflicts
         if local_path.exists() and not force:
