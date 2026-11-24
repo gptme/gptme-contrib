@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from pathlib import Path
+from typing import BinaryIO
 
 from . import (
     DEFAULT_ALLOWLIST,
@@ -78,6 +78,36 @@ def _build_parser() -> argparse.ArgumentParser:
     return ap
 
 
+def _read_input(path: str) -> str:
+    """Read the input without newline translation.
+
+    Text-mode reads turn ``\r\n`` into ``\n``, which rewrites non-secret bytes
+    of the artifact. Read files with ``newline=""``, and decode real stdin from
+    its byte buffer for the same reason.
+    """
+    if path != "-":
+        with open(path, encoding="utf-8", newline="") as fh:
+            return fh.read()
+    buffer: BinaryIO | None = getattr(sys.stdin, "buffer", None)
+    if buffer is None:  # an in-memory replacement such as io.StringIO
+        return sys.stdin.read()
+    return buffer.read().decode("utf-8")
+
+
+def _refuse(result: Result, reason: str, args: argparse.Namespace) -> int:
+    """Refuse the artifact (exit 2) while keeping the ``--json`` contract.
+
+    ``--json`` callers parse stdout, so a refusal must still print a report
+    there; the human-readable error goes to stderr in every mode.
+    """
+    print(f"error: {reason}; refusing artifact", file=sys.stderr)
+    result.blocked = True
+    result.block_reasons.append(reason)
+    if args.json:
+        print(result.to_json())
+    return 2
+
+
 def _main_redact(argv: list[str] | None = None) -> int:
     """Original redact entry point (secrets + patterns)."""
     ap = _build_parser()
@@ -89,11 +119,7 @@ def _main_redact(argv: list[str] | None = None) -> int:
         print(f"error: unknown severity {args.block_severity!r}", file=sys.stderr)
         return 1
 
-    text = (
-        sys.stdin.read()
-        if args.file == "-"
-        else Path(args.file).read_text(encoding="utf-8")
-    )
+    text = _read_input(args.file)
     literals = (
         collect_secret_literals(args.literal)
         if not args.no_env_secrets
@@ -111,8 +137,7 @@ def _main_redact(argv: list[str] | None = None) -> int:
         try:
             th_findings = trufflehog_scan(text)
         except RuntimeError as exc:
-            print(f"error: {exc}; refusing artifact", file=sys.stderr)
-            return 2
+            return _refuse(result, str(exc), args)
         existing_cats = {f.category for f in result.findings}
         for f in th_findings:
             if f.category in existing_cats:
@@ -159,7 +184,7 @@ def _main_redact(argv: list[str] | None = None) -> int:
             return 2
         out = result.redacted
         if args.out:
-            with open(args.out, "w", encoding="utf-8") as fh:
+            with open(args.out, "w", encoding="utf-8", newline="") as fh:
                 fh.write(out)
         else:
             sys.stdout.write(out)
@@ -224,11 +249,7 @@ def _main_sanitize_doc(argv: list[str] | None = None) -> int:
         print(f"error: unknown severity {args.block_severity!r}", file=sys.stderr)
         return 1
 
-    text = (
-        sys.stdin.read()
-        if args.file == "-"
-        else Path(args.file).read_text(encoding="utf-8")
-    )
+    text = _read_input(args.file)
     result = scan_document(text, block_severity=block_sev)
 
     if args.json:

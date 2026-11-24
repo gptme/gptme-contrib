@@ -51,7 +51,7 @@ _DEFAULT_IGNORABLE_CHARS = {
     "᠋",  # Mongolian free variation selector 1
     "᠌",  # Mongolian free variation selector 2
     "᠍",  # Mongolian free variation selector 3
-    " ",  # Hair space (visible but minimal)
+    " ",  # Hair space: a separator in one view, deleted in the other
     "‪",  # Left-to-right embedding
     "‫",  # Right-to-left embedding
     "‬",  # Pop directional formatting
@@ -61,7 +61,14 @@ _DEFAULT_IGNORABLE_CHARS = {
     "⁧",  # Right-to-left isolate
     "⁨",  # First strong isolate
     "⁩",  # Pop directional isolate
+    "­",  # Soft hyphen (Default_Ignorable, invisible unless at a line break)
 }
+
+# Ignorable characters that can stand for a word break. In the separator scan
+# view they become a space; in the deletion view they are dropped like the rest.
+# The hair space is visible whitespace (``str.isspace()`` is true), so deleting
+# it in both views let "Ignore<U+200A>previous<U+200A>instructions" through.
+_SEPARATOR_CHARS = frozenset({"\u200b", "\u200c", "\u200d", "\u2060", "\u200a"})
 
 # Conservative mapping of Unicode confusables to ASCII equivalents.
 # Focused on high-severity injection patterns and common Latin/Cyrillic/Greek homoglyphs.
@@ -228,7 +235,7 @@ def remove_default_ignorable_chars(text: str) -> str:
     for c in text:
         if c in _DEFAULT_IGNORABLE_CHARS:
             # Replace zero-width characters with space to preserve word boundaries
-            if c in ("​", "‌", "‍", "⁠"):  # Zero-width spaces and joiners
+            if c in _SEPARATOR_CHARS:  # zero-width spaces/joiners, hair space
                 result.append(" ")
             # Directional marks, isolates: just remove (they don't represent content)
             # else: skip
@@ -268,8 +275,11 @@ def canonicalize_for_injection_scan(text: str) -> tuple[str, str]:
     This is detection-only; callers receive the original text unchanged.
     """
     canonical = remove_default_ignorable_chars(text)
+    # Compose before mapping: the confusable map keys are precomposed (NFC)
+    # characters, so NFD input ("e" + U+0304) would otherwise skip the map.
+    canonical = unicodedata.normalize("NFC", canonical)
     canonical = map_confusables(canonical)
-    # Normalize combining marks to NFC form to handle nested diacritics
+    # Mapping can expose new compositions; normalize the result too.
     canonical = unicodedata.normalize("NFC", canonical)
     # Patterns contain literal spaces. Collapse horizontal whitespace while
     # retaining line boundaries used by anchored system-role patterns.

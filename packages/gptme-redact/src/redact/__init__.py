@@ -61,6 +61,57 @@ class Pattern:
     value_only: bool = False
 
 
+# A secret-bearing assignment name: a secret keyword, optionally as the last
+# segment of a SNAKE_CASE name (``db_password``, ``OPENAI_API_KEY``).
+_SECRET_NAME = (
+    r"\b(?:[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)*_)?"
+    r"(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)\b"
+)
+
+
+def _escaped_json_assignment(level: int) -> Pattern:
+    r"""Secret-named assignment inside a JSON string that is itself JSON.
+
+    JSONL transcripts store tool output as a string, so a nested object reads
+    ``{\"password\": \"…\"}``: every quote of the inner document carries
+    ``2**level - 1`` backslashes. The plain patterns never match because their
+    separator does not allow a backslash before the quote.
+
+    The value is every byte up to the inner document's closing quote. A run of
+    backslashes followed by a quote closes the value only when its length is
+    ``bs (mod 2 * (bs + 1))``, where ``bs`` backslashes belong to the closing
+    quote and the rest are escaped backslashes inside the secret. Other runs
+    are escaped quotes inside the secret, so they stay in the value. With no closing quote
+    (a truncated snippet) the value stops at the outer string's end, a line
+    break, or EOF.
+    """
+    bs = 2**level - 1
+    period = 2 * (bs + 1)
+    end = rf"\\{{{bs}}}\""  # the closing quote's own backslashes
+    return Pattern(
+        re.compile(
+            _SECRET_NAME
+            + rf"(?P<sep>{end}[ \t]*:[ \t]*{end})"
+            # Tokens always consume a whole backslash run, so every boundary
+            # is a run start: plain bytes, a run not followed by a quote, a
+            # run+quote that does not close, or the escaped backslashes that
+            # lead a closing run (kept in the value: they are secret bytes).
+            + r"(?P<value>(?:[^\\\"\r\n]|\\++(?![\\\"])"
+            + rf"|(?!(?:\\{{{period}}})*{end})\\++\""
+            + rf"|(?:\\{{{period}}})+(?={end}))+)"
+            + rf"(?={end}|\"|[\r\n]|\Z)",
+            re.IGNORECASE,
+        ),
+        Severity.CRITICAL,
+        "secret_assignment",
+        value_only=True,
+    )
+
+
+# One and two levels of nesting: tool output in a transcript, and that
+# transcript quoted again in another JSON document.
+_ESCAPED_JSON_ASSIGNMENT_PATTERNS = [_escaped_json_assignment(n) for n in (1, 2)]
+
 # --- Layer 2 deny-list -------------------------------------------------------
 # Ordering matters: specific high-severity patterns run before generic
 # ones so a token is categorized by its strongest match. All patterns discover
@@ -192,10 +243,29 @@ _PATTERNS: list[Pattern] = [
         Severity.CRITICAL,
         "github_finegrained_pat",
     ),
+    # AKIA = long-term IAM user key id; ASIA = STS temporary key id
+    # (``aws sts assume-role`` / ``get-session-token`` output).
     Pattern(
-        re.compile(r"AKIA[0-9A-Z]{16}"),
+        re.compile(r"(?:AKIA|ASIA)[0-9A-Z]{16}"),
         Severity.CRITICAL,
         "aws_access_key",
+    ),
+    # The secret half of an AWS credential pair, under the PascalCase keys the
+    # AWS CLI/SDK print (``SecretAccessKey``, ``SessionToken``). The generic
+    # secret_assignment pattern needs a word boundary before KEY/TOKEN, so it
+    # never matches these camelCase names, and a generic camelCase rule would
+    # flag ordinary code like ``sortKey``. Name these keys explicitly instead.
+    # The separator tolerates escaped JSON (``\"SessionToken\": \"…\"``),
+    # because CLI output usually arrives inside a JSONL tool-output string.
+    Pattern(
+        re.compile(
+            r"(?<![A-Za-z0-9_])(?:SecretAccessKey|SessionToken)"
+            r"(?P<sep>\\*['\"]?[ \t\r\n]*[:=][ \t\r\n]*\\*['\"]?)"
+            r"(?P<value>(?:[A-Za-z0-9+=]|\\?/){16,})"
+        ),
+        Severity.CRITICAL,
+        "aws_secret_key",
+        value_only=True,
     ),
     Pattern(
         re.compile(r"xox[baprs]-[A-Za-z0-9-]{24,80}"),
@@ -444,8 +514,11 @@ _PATTERNS: list[Pattern] = [
         Severity.MEDIUM,
         "agent_home_path",
     ),
+    # The user segment is a POSIX-portable name. A broader ``[^/]`` class
+    # spanned spaces and ate following prose up to the next "/", e.g.
+    # "/home/carol and /srv" lost "and ".
     Pattern(
-        re.compile(r"/home/[^/]{2,32}(?:/|$)"),
+        re.compile(r"/home/[A-Za-z0-9._-]{2,32}(?:/|(?![A-Za-z0-9._-]))"),
         Severity.MEDIUM,
         "other_home_path",
     ),
@@ -454,8 +527,10 @@ _PATTERNS: list[Pattern] = [
         Severity.MEDIUM,
         "phone_number",
     ),
+    # Exactly 40 hex digits. Without boundaries a 64-hex value (tx hash,
+    # private-key shape) was half-masked and mislabelled as an address.
     Pattern(
-        re.compile(r"0x[a-fA-F0-9]{40}"),
+        re.compile(r"(?<![A-Za-z0-9])0x[a-fA-F0-9]{40}(?![A-Za-z0-9])"),
         Severity.MEDIUM,
         "ethereum_address",
     ),
@@ -474,6 +549,24 @@ _PATTERNS: list[Pattern] = [
             r"|'(?:\\[\s\S]|[^'\\])*'|\"(?:\\[\s\S]|[^\"\\])*\"){2,})"
             r"(?<![,;])(?=\s|\Z)",
             re.IGNORECASE,
+        ),
+        Severity.CRITICAL,
+        "secret_assignment",
+        value_only=True,
+    ),
+    *_ESCAPED_JSON_ASSIGNMENT_PATTERNS,
+    # YAML block scalar: ``password: |`` (or ``>``, ``|-``, ``>+2`` ...) puts the
+    # value on the following, more-indented lines. The fallback below would
+    # only see the ``|`` indicator. Mask every indented content line; the
+    # fallback skips block indicators so the ``|`` itself stays readable.
+    Pattern(
+        re.compile(
+            rf"^(?P<indent>[ \t]*)(?:-[ \t]+)*['\"]?{_SECRET_NAME}['\"]?"
+            r"[ \t]*:[ \t]*[|>](?:[1-9][+-]?|[+-][1-9]?)?[ \t]*(?:#[^\r\n]*)?"
+            r"(?:\r?\n[ \t]*)*?\r?\n(?P=indent)[ \t]+"
+            r"(?P<value>\S[^\r\n]*"
+            r"(?:(?:\r?\n[ \t]*)*?\r?\n(?P=indent)[ \t]+\S[^\r\n]*)*)",
+            re.IGNORECASE | re.MULTILINE,
         ),
         Severity.CRITICAL,
         "secret_assignment",
@@ -512,6 +605,8 @@ _PATTERNS: list[Pattern] = [
             # Unquoted values retain punctuation, including brackets: these can
             # be environment password bytes. Prefer masking to a leaked tail;
             # quoted JSON values already have their own delimiter handling.
+            # A bare YAML block indicator is handled by the block-scalar pattern.
+            r"(?![|>](?:[1-9][+-]?|[+-][1-9]?)?[ \t]*(?:#[^\r\n]*)?(?:\r?\n|\Z))"
             r"(?P<quote>(?P<triple>\"\"\"|''')|['\"])?"
             r"(?P<value>(?(quote)"
             r"(?:(?:\\[\s\S]|(?!(?P=quote))[^\\])+(?=(?P=quote))"
@@ -520,7 +615,11 @@ _PATTERNS: list[Pattern] = [
             r"|(?(triple)(?:(?!(?P=quote))[\s\S])+\Z"
             r"|(?:\\[^\r\n]|\\(?=[\r\n]|\Z)|(?!(?P=quote))[^\\\r\n])+))"
             r"|(?:\[REDACTED:[A-Za-z0-9_:.-]+\][^\s'\"]*"
-            r"|[^\s'\"]+)))"
+            # An unquoted value may carry embedded quotes (``ab"SECRET``):
+            # keep consuming when a quote is followed by more value bytes.
+            # A trailing quote (``"TOKEN=abc"``) or a quote before structural
+            # punctuation (``["TOKEN=abc", …]``) still closes the word.
+            r"|[^\s'\"]+(?:['\"]+(?![,;)\]}])[^\s'\"]+)*)))"
             r"(?(quote)(?:(?P=quote)|(?=[\r\n]|\Z)))",
             re.IGNORECASE,
         ),
