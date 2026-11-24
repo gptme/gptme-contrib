@@ -2865,6 +2865,9 @@ _GPTME_CONTRIB_REPO = "gptme/gptme-contrib"
 _CONTRIB_AGENT_LITERAL_RE = re.compile(
     r"(?<![A-Za-z0-9])(bob|alice|gordon|sven|erik)(?![A-Za-z0-9])", re.IGNORECASE
 )
+# Lines that open as a comment or docstring. Only the line START counts: code
+# with a trailing comment (``X = 1  # bob``) is still code.
+_CONTRIB_PROSE_LINE_PREFIXES = ("#", "//", "/*", "*", '"""', "'''")
 
 
 def _contrib_repo_root() -> Path:
@@ -3192,9 +3195,13 @@ def contrib_agent_literal_reasons(file_shapes: list[dict[str, Any]]) -> list[str
     hits: dict[str, set[str]] = {}
     for entry in file_shapes:
         path = _contrib_normalize(str(entry.get("path", "")))
-        if is_test_file(path):
+        # Docs are not code, and a name in an example or comment configures
+        # nothing (contrib#2375 README, contrib#2387 docstring examples).
+        if is_test_file(path) or is_doc_file(path):
             continue
         for line in _contrib_added_lines(cast("str | None", entry.get("patch"))):
+            if line.lstrip().startswith(_CONTRIB_PROSE_LINE_PREFIXES):
+                continue
             for match in _CONTRIB_AGENT_LITERAL_RE.finditer(line):
                 hits.setdefault(match.group(1).lower(), set()).add(path)
     if not hits:

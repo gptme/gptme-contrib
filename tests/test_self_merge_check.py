@@ -3341,6 +3341,34 @@ def test_contrib_agent_literal_word_boundary_no_false_positive() -> None:
     assert reasons == []
 
 
+def test_contrib_agent_literal_skips_docs_and_comment_lines() -> None:
+    """A name in a README, a comment or a docstring opener configures nothing
+    (contrib#2375, contrib#2387); code on the same file still routes."""
+    file_shapes = [
+        {
+            "path": "packages/gptme-coordination/README.md",
+            "status": "modified",
+            "patch": "@@ -1,1 +1,2 @@\n+uv run coordination work-claim bob task:x\n",
+        },
+        {
+            "path": "packages/gptme-forum/src/gptme_forum/forum.py",
+            "status": "modified",
+            "patch": (
+                "@@ -1,1 +1,5 @@\n"
+                "+    \"\"\"Extract @mentions (e.g. '@Alice' -> ['alice']).\n"
+                "+    # a value like team/bob must not escape the forum\n"
+                "+    // erik\n"
+                "+    * gordon\n"
+            ),
+        },
+    ]
+    assert self_merge_check.contrib_agent_literal_reasons(file_shapes) == []
+    file_shapes[1]["patch"] += '+DEFAULT_AUTHOR = "sven"  # example\n'
+    reasons = self_merge_check.contrib_agent_literal_reasons(file_shapes)
+    assert len(reasons) == 1 and '"sven"' in reasons[0]
+    assert "alice" not in reasons[0] and "README" not in reasons[0]
+
+
 def _evaluate_contrib(
     files: list[dict[str, Any]],
     file_shapes: list[dict[str, Any]],
