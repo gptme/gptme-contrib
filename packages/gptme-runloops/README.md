@@ -211,6 +211,24 @@ EFFORT="${ROUTE_EFFORT-high}"   # set but empty: the routed backend has no effor
 
 Run shadow calls as `gptme-runloops select --lane autonomous --shadow ... >/dev/null || true`.
 
+### Dispatcher tick coverage
+
+A dispatcher (fanout timer, worker sweep) can append one row per fire with
+`gptme_runloops.dispatch_ticks.append_tick(path, granted=..., bindable=..., pacing=...)`.
+`granted` is the slot width after the resource/quota gate, `bindable` the work
+items it could bind (`null` = not computed) and `pacing` the account's position
+against its usage target. Then:
+
+```bash
+gptme-runloops tick-coverage state/dispatch-ticks.jsonl --since-hours 168
+```
+
+prints the share of `behind` ticks where `bindable >= granted`, plus counts of
+the ticks it could not judge (unknown pacing, unknown bindable, no capacity).
+The target is `granted`, not the slots the dispatcher requested: covering a
+one-slot request while five granted slots sit idle is the starvation this
+measures.
+
 ## Review artifact output
 
 `review` and `review-pr` now write **canonical core v2 JSON**, both on stdout
