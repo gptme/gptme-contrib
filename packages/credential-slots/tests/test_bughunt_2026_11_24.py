@@ -67,7 +67,7 @@ def test_heal_installs_the_bytes_it_validated(
     mgr: SlotManager, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A writer rewriting live after heal's validation must not get its
-    partial bytes installed as the slot."""
+    partial bytes installed as the slot, and heal must leave live alone."""
     mgr.slot_path("bob").write_text(_cred("rt-old", _ms(-3600)))
     good = _cred("rt-new", _ms(3600))
     mgr.live_path.write_text(good)
@@ -82,8 +82,13 @@ def test_heal_installs_the_bytes_it_validated(
 
     monkeypatch.setattr(os, "open", racing_open)
     result = mgr.heal_drift_to("bob")
-    assert result.ok, result.reason
+    assert not result.ok
+    assert "changed during heal" in result.reason
+    # The slot holds the validated bytes; the partial rewrite is not installed
+    # and live is left for its writer to finish.
     assert mgr.slot_path("bob").read_text() == good
+    assert mgr.live_path.read_text() == good[:20]
+    assert not mgr.live_path.is_symlink()
 
 
 def test_nested_switch_in_same_process_does_not_collide(
@@ -139,3 +144,58 @@ def test_switch_from_regular_file_matching_a_slot_still_works(
 
     assert mgr.switch_to("alice", "rebalance").ok
     assert os.readlink(mgr.live_path) == ".credentials.json.alice"
+
+
+def test_switch_refuses_unreadable_live_file(
+    mgr: SlotManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unreadable regular live file may still be the only copy of a rotated
+    refresh token. ``detect_live_slot_drift`` returns None when it cannot hash
+    live, so the guard must refuse on None too instead of replacing it."""
+    import credential_slots.manager as manager_module
+
+    mgr.slot_path("bob").write_text(_cred("rt-bob", _ms(3600)))
+    mgr.slot_path("alice").write_text(_cred("rt-alice", _ms(3600)))
+    fresh = _cred("rt-fresh-login", _ms(3600))
+    mgr.live_path.write_text(fresh)
+    real_hash = manager_module._hash_file
+
+    def unreadable_live(path):
+        # What _hash_file returns when read_bytes() raises OSError.
+        return None if Path(path) == mgr.live_path else real_hash(path)
+
+    monkeypatch.setattr(manager_module, "_hash_file", unreadable_live)
+
+    result = mgr.switch_to("alice", "rebalance")
+
+    assert not result.ok
+    assert "matches no slot" in result.reason
+    assert not mgr.live_path.is_symlink()
+    assert mgr.live_path.read_text() == fresh
+
+
+def test_heal_refuses_when_live_is_rewritten_midway(
+    mgr: SlotManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A complete OAuth rotation landing after heal's read must win: heal may
+    not install its older snapshot and symlink over the newer token."""
+    mgr.slot_path("bob").write_text(_cred("rt-old", _ms(-3600)))
+    mgr.live_path.write_text(_cred("rt-read", _ms(3600)))
+    rotated = _cred("rt-rotated", _ms(7200))
+    real_replace = os.replace
+    fired: list[bool] = []
+
+    def racing_replace(src, dst, *a, **kw):
+        if not fired and Path(dst) == mgr.slot_path("bob"):
+            fired.append(True)
+            mgr.live_path.write_text(rotated)  # refresh completes mid-heal
+        return real_replace(src, dst, *a, **kw)
+
+    monkeypatch.setattr(os, "replace", racing_replace)
+    result = mgr.heal_drift_to("bob")
+
+    assert not result.ok
+    assert "changed during heal" in result.reason
+    assert not mgr.live_path.is_symlink()
+    assert mgr.live_path.read_text() == rotated
+    assert not [p for p in mgr.creds_dir.iterdir() if ".tmp" in p.name]

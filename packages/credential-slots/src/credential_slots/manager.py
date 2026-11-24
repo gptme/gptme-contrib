@@ -608,7 +608,9 @@ class SlotManager:
         - If the live path is a regular file matching no slot (drift, e.g.
           after ``/login``), the switch is refused **regardless of**
           ``force``: that file may be the only copy of a rotated refresh
-          token. Resync it with :meth:`heal_drift_to` first.
+          token. Resync it with :meth:`heal_drift_to` first. The same
+          applies when the live file cannot be read at all — the drift
+          check then cannot positively confirm a match.
         - On success, replaces the existing symlink atomically via a
           temp-symlink + ``os.replace`` (single rename syscall) so no
           concurrent reader sees a missing ``live_path``, then calls
@@ -693,8 +695,12 @@ class SlotManager:
             # A regular live file that matches no slot (e.g. a fresh /login)
             # is the only on-disk copy of that refresh token; replacing it
             # with a symlink would destroy it. ``force`` does not override.
+            # ``drift is None`` means the live file could not be read (see
+            # detect_live_slot_drift): the check cannot then positively
+            # confirm a matching slot, so this refuses too — an unreadable
+            # file may still be the only copy of a rotated refresh token.
             drift = self.detect_live_slot_drift()
-            if drift is not None and drift["drift"]:
+            if drift is None or drift["drift"]:
                 msg = (
                     f"refusing to switch to {sub}: live credential matches no "
                     "slot and would be lost; heal_drift_to() it into a slot first"
@@ -747,6 +753,9 @@ class SlotManager:
           refresh — ambiguous which slot to heal into)
         - Live file is missing, unreadable, or has no ``claudeAiOauth``
           payload
+        - Live file changed after its bytes were validated (a concurrent
+          OAuth refresh completed a write): the live file is the source of
+          truth, so the newer write wins and the caller retries
         - Live token is expired or within ``grace_seconds`` of expiry
         - ``force=False`` and :attr:`lock_guard` reports active locks
 
@@ -825,13 +834,41 @@ class SlotManager:
         # unlink each other's temp files.
         slot_tmp = _unique_tmp(target_slot)
         link_tmp = _unique_tmp(self.creds_dir / self.live_name)
+
+        def _abort(reason: str) -> SwitchResult:
+            slot_tmp.unlink(missing_ok=True)
+            link_tmp.unlink(missing_ok=True)
+            self._log(reason)
+            return SwitchResult(ok=False, reason=reason)
+
+        def _stale_live() -> bool:
+            """True when live no longer holds the bytes we validated."""
+            try:
+                return live.read_bytes() != live_bytes
+            except OSError:
+                return True
+
+        stale_reason = (
+            "live file changed during heal (concurrent OAuth refresh?); "
+            "left it in place — retry to sync the newer bytes"
+        )
         try:
+            # The live file is the source of truth, so an OAuth refresh that
+            # completed a write after our read must win: installing the
+            # snapshot we validated and then symlinking over live would
+            # destroy that rotation. Check before the slot write (so we do not
+            # churn the slot with a stale revision) and again as close to the
+            # destructive step as we can get.
+            if _stale_live():
+                return _abort(stale_reason)
             # Created 0o600 with O_EXCL: copy2-then-chmod left the credential
             # group/world-readable (umask 022) until the chmod ran.
             fd = os.open(str(slot_tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             with os.fdopen(fd, "wb") as fh:
                 fh.write(live_bytes)
             os.replace(slot_tmp, target_slot)
+            if _stale_live():
+                return _abort(stale_reason)
             link_tmp.symlink_to(self.slot_template.format(sub=sub))
             os.replace(link_tmp, live)
         except BaseException:
