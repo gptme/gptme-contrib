@@ -66,7 +66,7 @@ if argv[0] != "api":
 # Parse the api invocation
 endpoint = ""
 jq_expr = ""
-method = "GET"
+method = None
 fields = {}
 slurp = False
 i = 1
@@ -92,13 +92,24 @@ while i < len(argv):
         i += 1; continue
     endpoint = a; i += 1
 
+# Real gh: with no -X, any -f/-F field turns the request into a POST
+# (`gh api --help`: "POST if any parameters were added"). Model that, so a
+# read that passes `-F per_page=100` is caught here instead of in production.
+if method is None:
+    method = "POST" if fields else "GET"
+path = endpoint.split("?", 1)[0]
+
 if endpoint == "notifications":
     sys.exit(0)
 
-if endpoint.endswith("/reactions"):
+if path.endswith("/reactions"):
     if fixture.get("reactions_api_error"):
         sys.exit(1)
     if method == "POST":
+        if "content" not in fields:
+            # A POST without a reaction body is a misrouted read: GitHub
+            # rejects it (422), so fail the call like the real API does.
+            sys.exit(1)
         if fixture.get("reaction_post_error"):
             sys.exit(1)
         with open(os.environ["GH_LOG"], "a") as fh:
