@@ -196,6 +196,58 @@ def test_outage_reopens_issue_closed_mid_outage(tmp_path: Path, monkeypatch) -> 
     assert not any(a[:2] == ["issue", "create"] for a in calls), "must not duplicate"
 
 
+def test_failed_reopen_falls_back_to_create_and_does_not_claim_success(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    # gh issue reopen fails (permissions, network, rate limit). The outage must
+    # still be surfaced: fall back to a fresh issue, never print "Reopened".
+    calls: list[list[str]] = []
+    closed_at = (NOW - timedelta(hours=5)).isoformat()
+
+    def fake_gh(args: list[str]):
+        calls.append(args)
+
+        class R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        if args[:2] == ["issue", "list"]:
+            if "closed" in args:
+                R.stdout = json.dumps(
+                    [
+                        {
+                            "number": 97,
+                            "title": cfg_for(tmp_path).issue_title,
+                            "closedAt": closed_at,
+                        }
+                    ]
+                )
+            else:
+                R.stdout = "[]"
+        elif args[:2] == ["issue", "reopen"]:
+            R.returncode = 1
+            R.stderr = "HTTP 403: Resource not accessible"
+        return R()
+
+    monkeypatch.setattr(soc, "_gh", fake_gh)
+    monkeypatch.setattr(soc, "_supplementary_notify", lambda cfg, status: None)
+    cfg = cfg_for(tmp_path)
+    write_records(
+        tmp_path,
+        [rec(40, "productive")]
+        + [rec(h, "failed", "auth_failure") for h in (1, 2, 3, 4)],
+    )
+    status = assess(tmp_path)
+    soc.escalate(cfg, status, dry_run=False, now=NOW)
+
+    out = capsys.readouterr()
+    assert "Reopened" not in out.out
+    assert "reopen" in out.err.lower()
+    assert any(a[:2] == ["issue", "create"] for a in calls), "must still surface"
+    assert not any(a[:2] == ["issue", "comment"] for a in calls)
+
+
 def test_outage_creates_new_when_closed_issue_predates_last_productive(
     tmp_path: Path, monkeypatch
 ) -> None:

@@ -806,29 +806,53 @@ def escalate(cfg: Config, status: dict, dry_run: bool, now: datetime) -> None:
                 # #98 then minted). Reopen that thread instead of duplicating, so
                 # one continuous outage stays one issue.
                 reopen = find_recent_closed_issue(cfg)
+                reopened = False
                 if reopen is not None and _closed_during_outage(reopen, status, now):
                     if dry_run:
                         print(f"[dry-run] would REOPEN issue #{reopen['number']}")
                         return
-                    _gh(["issue", "reopen", str(reopen["number"]), "--repo", cfg.repo])
-                    _gh(
-                        [
-                            "issue",
-                            "comment",
-                            str(reopen["number"]),
-                            "--repo",
-                            cfg.repo,
-                            "--body",
-                            _reopen_body(cfg, status),
-                        ]
+                    res = _gh(
+                        ["issue", "reopen", str(reopen["number"]), "--repo", cfg.repo]
                     )
-                    print(f"Reopened issue #{reopen['number']} (outage still ongoing).")
-                    _supplementary_notify_pending = True
-                elif dry_run:
+                    if res.returncode != 0:
+                        # Don't report success, and don't let a failed reopen
+                        # swallow the alarm: fall through to a fresh issue.
+                        print(
+                            f"[self-outage-check] reopen of #{reopen['number']} "
+                            f"failed (rc={res.returncode}): "
+                            f"{(res.stderr or res.stdout).strip()}; "
+                            "filing a new issue instead.",
+                            file=sys.stderr,
+                        )
+                    else:
+                        reopened = True
+                        res = _gh(
+                            [
+                                "issue",
+                                "comment",
+                                str(reopen["number"]),
+                                "--repo",
+                                cfg.repo,
+                                "--body",
+                                _reopen_body(cfg, status),
+                            ]
+                        )
+                        if res.returncode != 0:
+                            print(
+                                f"[self-outage-check] reopened #{reopen['number']} "
+                                f"but the status comment failed (rc={res.returncode}): "
+                                f"{(res.stderr or res.stdout).strip()}",
+                                file=sys.stderr,
+                            )
+                        print(
+                            f"Reopened issue #{reopen['number']} (outage still ongoing)."
+                        )
+                        _supplementary_notify_pending = True
+                if not reopened and dry_run:
                     print("[dry-run] would CREATE issue:", cfg.issue_title)
                     print(_issue_body(cfg, status))
                     return
-                else:
+                elif not reopened:
                     res = _gh(
                         [
                             "issue",
