@@ -3,7 +3,9 @@
 import builtins
 import importlib.util
 import json
+import signal
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -2916,3 +2918,24 @@ def test_load_session_state_propagates_budget_timeout(hook, monkeypatch):
     monkeypatch.setattr(hook, "_state_file", alarm)
     with pytest.raises(TimeoutError):
         hook.load_session_state("sid")
+
+
+def test_budget_alarm_refires_after_a_swallowed_timeout(hook):
+    """A broad handler that swallows the first alarm must not leave the rest
+    of the hook unbounded: the alarm fires again until it is disarmed."""
+    if not hasattr(signal, "setitimer"):
+        pytest.skip("no setitimer on this platform")
+    previous = signal.getsignal(signal.SIGALRM)
+    swallowed = False
+    try:
+        hook._arm_hook_budget(0.05)
+        with pytest.raises(TimeoutError):
+            try:
+                time.sleep(2)  # the first alarm lands here
+            except Exception:
+                swallowed = True  # ...and a broad handler eats it
+            time.sleep(2)  # the remainder must still be interrupted
+    finally:
+        hook._disarm_hook_budget()
+        signal.signal(signal.SIGALRM, previous)
+    assert swallowed

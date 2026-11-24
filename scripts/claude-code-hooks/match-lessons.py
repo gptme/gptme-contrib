@@ -2058,6 +2058,13 @@ def _log_lesson_events(
         pass  # Never fail the hook for logging
 
 
+# After the budget expires the alarm keeps firing at this interval until it is
+# disarmed. A broad ``except Exception`` (or the selector's own TimeoutError
+# handler) that swallows one alarm therefore cannot leave the rest of the hook
+# unbounded: the next alarm interrupts it again and reaches the top level.
+_BUDGET_REFIRE_SECONDS = 0.05
+
+
 def _arm_hook_budget(seconds: float) -> None:
     """Hard wall-clock budget. A timed-out hook's stdout is discarded."""
     if not hasattr(signal, "SIGALRM") or not hasattr(signal, "setitimer"):
@@ -2067,7 +2074,7 @@ def _arm_hook_budget(seconds: float) -> None:
         raise TimeoutError("match-lessons hook budget exceeded")
 
     signal.signal(signal.SIGALRM, _handler)
-    signal.setitimer(signal.ITIMER_REAL, seconds)
+    signal.setitimer(signal.ITIMER_REAL, seconds, _BUDGET_REFIRE_SECONDS)
 
 
 def _disarm_hook_budget() -> None:
@@ -2660,6 +2667,8 @@ if __name__ == "__main__":
         _arm_hook_budget(HOOK_BUDGET_SECONDS)
         main()
     except TimeoutError:
+        # Stop the re-firing alarm before any recovery work can be interrupted.
+        _disarm_hook_budget()
         # Degrade to empty rather than letting the harness discard a partial
         # JSON payload. emit_empty is fail-open: no injection is better than
         # a hung hook. Recover the event type from the cached stdin read at
