@@ -38,8 +38,6 @@ def test_probe_refresh_is_persisted_to_slot(tmp_path: Path) -> None:
         """#!/usr/bin/env python3
 import json, os
 from pathlib import Path
-
-import pytest
 live = Path.home() / ".claude" / ".credentials.json"
 data = json.loads(live.read_text())
 data["claudeAiOauth"].update(accessToken="new-access", refreshToken="new-refresh",
@@ -83,8 +81,6 @@ def _refresh_script(tmp_path: Path, account_update: str) -> Path:
         f"""#!/usr/bin/env python3
 import json, os
 from pathlib import Path
-
-import pytest
 live = Path.home() / ".claude" / ".credentials.json"
 data = json.loads(live.read_text())
 oauth = data["claudeAiOauth"]
@@ -116,7 +112,8 @@ def test_probe_refresh_never_overwrites_slot_of_another_account(
     _write_account_slot(slot, "account-a")
     script = _refresh_script(tmp_path, account_update)
 
-    probe_credential(slot, "alice", usage_script=script)
+    _, ok, message = probe_credential(slot, "alice", usage_script=script)
+    assert ok, message  # the script ran and refreshed
 
     oauth = json.loads(slot.read_text())["claudeAiOauth"]
     assert oauth["accountUuid"] == "account-a"
@@ -128,8 +125,28 @@ def test_probe_refresh_for_same_account_is_persisted(tmp_path: Path) -> None:
     _write_account_slot(slot, "account-a")
     script = _refresh_script(tmp_path, "")
 
-    probe_credential(slot, "alice", usage_script=script)
+    _, ok, message = probe_credential(slot, "alice", usage_script=script)
+    assert ok, message  # the script ran and refreshed
 
     oauth = json.loads(slot.read_text())["claudeAiOauth"]
     assert oauth["accountUuid"] == "account-a"
     assert oauth["refreshToken"] == "new-refresh"
+
+
+def test_probe_refresh_is_persisted_when_probe_times_out(tmp_path: Path) -> None:
+    # The refresh lands before the usage fetch; a hang after it must not lose
+    # the rotated token with the temporary directory.
+    slot = tmp_path / ".credentials.json.alice"
+    _write_account_slot(slot, "account-a")
+    script = _refresh_script(tmp_path, "")
+    text = script.read_text().replace(
+        "print(json.dumps(", "import time; time.sleep(30)\nprint(json.dumps("
+    )
+    script.write_text(text)
+
+    _, ok, message = probe_credential(slot, "alice", usage_script=script, timeout=2)
+
+    assert ok is False and "timed out" in message
+    assert (
+        json.loads(slot.read_text())["claudeAiOauth"]["refreshToken"] == "new-refresh"
+    )

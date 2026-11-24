@@ -222,14 +222,20 @@ def probe_credential(
             live_credential.symlink_to(target_credential)
             env["HOME"] = tmp
             env["CLAUDE_HOME"] = str(claude_dir)
-            result = subprocess.run(
-                [str(usage_script), "--json", "--no-cache"],
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                env=env,
-            )
-            _persist_probe_refresh(live_credential, target_credential, expected_account)
+            try:
+                result = subprocess.run(
+                    [str(usage_script), "--json", "--no-cache"],
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                    env=env,
+                )
+            finally:
+                # Also on timeout: a refresh written before a hang would
+                # otherwise be deleted with the temporary directory.
+                _persist_probe_refresh(
+                    live_credential, target_credential, expected_account
+                )
     except subprocess.TimeoutExpired:
         return info, False, f"probe timed out after {timeout}s"
     except OSError as exc:
