@@ -428,7 +428,10 @@ def cmd_refresh(args: argparse.Namespace) -> int:
         output=args.output,
         stale_after_days=args.stale_after_days,
     )
-    if cmd_check(check_args) == 0 and not args.force:
+    if args.force:
+        print("Forced regeneration (--force), regenerating...")
+        return cmd_generate(args)
+    if cmd_check(check_args) == 0:
         print("Map is fresh, no refresh needed (use --force to override)")
         return 0
 
