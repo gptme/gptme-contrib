@@ -197,7 +197,7 @@ def tree(revision):
     return entries
 
 
-def restore_root(after, root):
+def restore_root(after, root, can_restore):
     """git restore one root, waiting out sibling index.lock holders.
 
     A sibling `git status`/`git add` holds .git/index.lock for short windows. One
@@ -207,11 +207,15 @@ def restore_root(after, root):
     deadline = time.monotonic() + float(
         os.environ.get("GIT_SAFE_PUSH_MATERIALIZE_BUDGET_SECONDS", "60"))
     while True:
+        # A sibling may edit/stage this root while holding index.lock. Never
+        # reuse the preservation decision from before the failed attempt.
+        if not can_restore():
+            return False
         proc = subprocess.run(
             ["git", "restore", "--source", after, "--staged", "--worktree",
              "--", b":(literal)" + root], capture_output=True)
         if proc.returncode == 0:
-            return
+            return True
         if b"index.lock" not in proc.stderr or time.monotonic() >= deadline:
             raise subprocess.CalledProcessError(
                 proc.returncode, proc.args, proc.stdout, proc.stderr)
@@ -246,16 +250,6 @@ def main():
     os.chdir(os.fsdecode(git("rev-parse", "--show-toplevel")[:-1]))
     before, after = sys.argv[1:]
     old, new = tree(before), tree(after)
-    index = {}
-    for record in git("ls-files", "--stage", "-z").split(b"\0"):
-        if record:
-            metadata, path = record.split(b"\t", 1)
-            mode, oid, stage = metadata.split()
-            index.setdefault(path, []).append((mode, oid, stage))
-    flagged = set()
-    for record in git("ls-files", "-v", "-z").split(b"\0"):
-        if record and record[:1] != b"H":
-            flagged.add(record[2:])
 
     changed = set(filter(None, git(
         "diff", "--no-renames", "--name-only", "-z", before, after
@@ -313,11 +307,21 @@ def main():
         expected = {path: entry for path, entry in old.items() if within(path, root)}
         expected_index = {path: [(mode, oid, b"0")]
                           for path, (mode, oid) in expected.items()}
-        actual_index = {path: entries for path, entries in index.items() if within(path, root)}
         unsupported = any(mode not in (b"100644", b"100755", b"120000")
                           for entries in (old, new) for path, (mode, _) in entries.items()
                           if within(path, root))
-        try:
+        def can_restore():
+            index = {}
+            for record in git("ls-files", "--stage", "-z").split(b"\0"):
+                if record:
+                    metadata, path = record.split(b"\t", 1)
+                    mode, oid, stage = metadata.split()
+                    index.setdefault(path, []).append((mode, oid, stage))
+            flagged = {record[2:] for record in
+                       git("ls-files", "-v", "-z").split(b"\0")
+                       if record and record[:1] != b"H"}
+            actual_index = {path: entries for path, entries in index.items()
+                            if within(path, root)}
             # An untracked symlink/file in an ancestor must not redirect checkout.
             parts = root.split(b"/")
             ancestors_clean = True
@@ -328,16 +332,18 @@ def main():
                             and not stat.S_ISDIR(os.lstat(ancestor).st_mode))):
                     ancestors_clean = False
                     break
-            if (unsupported or actual_index != expected_index
-                    or any(within(path, root) for path in flagged)
-                    or not ancestors_clean or not disk_matches(root, expected)):
-                skipped += 1
-                unreconciled.append(root)
-                continue
+            return not (unsupported or actual_index != expected_index
+                        or any(within(path, root) for path in flagged)
+                        or not ancestors_clean or not disk_matches(root, expected))
+
+        try:
             # Literal root includes all leaves of a type transition. Unlike
             # checkout, restore also handles paths deleted from the source tree.
-            restore_root(after, root)
-            materialized += 1
+            if restore_root(after, root, can_restore):
+                materialized += 1
+            else:
+                skipped += 1
+                unreconciled.append(root)
         except (OSError, subprocess.CalledProcessError) as error:
             failed += 1
             detail = (getattr(error, "stderr", b"") or b"").decode(errors="replace").strip()
