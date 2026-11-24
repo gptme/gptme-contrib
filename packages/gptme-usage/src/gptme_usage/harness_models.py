@@ -545,6 +545,11 @@ def estimate_session_cost(
     configured_cache_read_price = (
         config.cache_read_price_table.get(key) if config is not None else None
     )
+    if configured_cache_read_price is None and config is not None:
+        # A versioned row with its own price but no cache rate of its own
+        # keeps the family's configured cache rate (e.g. a free 0.0).
+        family_key = (key[0], _cc_family(key[1])) if harness == "claude-code" else key
+        configured_cache_read_price = config.cache_read_price_table.get(family_key)
     cache_read_price = configured_cache_read_price
     if cache_read_price is None:
         cache_read_price = input_price * CACHE_READ_MULTIPLIER.get(provider or "", 1.0)

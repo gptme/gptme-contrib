@@ -128,3 +128,19 @@ def test_unknown_model_stays_unknown() -> None:
         )
         is None
     )
+
+
+def test_versioned_cc_row_keeps_the_family_cache_rate() -> None:
+    cfg = HarnessQuotaConfig(
+        price_table={
+            ("claude-code", "opus"): (5.0, 25.0),
+            ("claude-code", "opus-5-5"): (4.0, 20.0),
+        },
+        cache_read_price_table={("claude-code", "opus"): 0.0},
+    )
+    assert (
+        estimate_session_cost(
+            "claude-code", "claude-opus-5-5", cache_read_tokens=1_000_000, config=cfg
+        )
+        == 0.0
+    )
