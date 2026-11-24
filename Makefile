@@ -1,4 +1,4 @@
-.PHONY: help test typecheck typecheck-coverage typecheck-scripts test-packages test-changed-packages typecheck-packages test-plugins test-integration test-unit check-names list-packages list-plugins
+.PHONY: help test typecheck typecheck-coverage typecheck-scripts test-packages test-changed-packages typecheck-packages test-plugin test-plugins test-integration test-unit check-names list-packages list-plugins
 
 # Plugins not yet CI-ready (tests exist but weren't validated before dynamic discovery)
 # TODO: Fix these tests and remove from exclude list - see GitHub issue tracking
@@ -121,23 +121,26 @@ test-packages:  ## Run tests for all packages
 	done; \
 	if [ -n "$$failed" ]; then exit 1; fi
 
-test-changed-packages:  ## Run tests only for packages changed since BASE (default: origin/master)
+test-changed-packages:  ## Run tests only for packages/plugins changed since BASE (default: origin/master)
 	@ALL=$$(git diff --name-only "$(BASE)"...HEAD 2>/dev/null); \
-	CHANGED=$$(echo "$$ALL" | grep '^packages/' | cut -d/ -f1-2 | sort -u \
+	CHANGED=$$(echo "$$ALL" | grep -E '^(packages|plugins)/' | cut -d/ -f1-2 | sort -u \
 		| while IFS= read -r p; do [ -d "$$p/tests" ] && echo "$$p"; done); \
 	if echo "$$ALL" | grep -qE '^(Makefile|pyproject\.toml|uv\.lock|\.github/workflows/test-packages\.yml)'; then \
 		echo "Shared workspace config changed vs $(BASE) — running all packages"; \
 		$(MAKE) test-packages; \
 	elif [ -z "$$CHANGED" ]; then \
-		echo "No changed packages detected vs $(BASE) — running all packages"; \
+		echo "No changed packages or plugins detected vs $(BASE) — running all packages"; \
 		$(MAKE) test-packages; \
 	else \
-		printf 'Changed packages:\n'; \
+		printf 'Changed packages/plugins:\n'; \
 		echo "$$CHANGED" | sed 's/^/  /'; \
 		failed=; \
-		for pkg in $$CHANGED; do \
-			printf '\n=== Testing %s (changed) ===\n' "$$(basename $$pkg)"; \
-			$(MAKE) test-package PKG=$$(basename $$pkg) || failed=1; \
+		for dir in $$CHANGED; do \
+			printf '\n=== Testing %s (changed) ===\n' "$$dir"; \
+			case "$$dir" in \
+				plugins/*) $(MAKE) test-plugin PLUGIN=$$(basename $$dir) || failed=1 ;; \
+				*) $(MAKE) test-package PKG=$$(basename $$dir) || failed=1 ;; \
+			esac; \
 		done; \
 		if [ -n "$$failed" ]; then exit 1; fi; \
 	fi
@@ -161,13 +164,17 @@ list-plugins:  ## List all discovered plugins
 	@echo "Discovered plugins:"
 	@for plugin in $(PLUGIN_DIRS); do echo "  - $$(basename $$plugin)"; done
 
+test-plugin:  ## Run tests for one plugin (PLUGIN=name)
+	@test -n "$(PLUGIN)" || { echo "usage: make test-plugin PLUGIN=name"; exit 2; }
+	uv run --with pytest --with pytest-timeout --with "./plugins/$(PLUGIN)[test]" pytest "plugins/$(PLUGIN)/tests" -v -m "not slow" --timeout=30
+
 test-plugins:  ## Run tests for all plugins with test directories
 	@echo "Running tests for all plugins..."
 	@failed=; \
 	for plugin in $(PLUGIN_DIRS); do \
 		if [ -d "$$plugin/tests" ]; then \
 			echo "\n=== Testing $$(basename $$plugin) ==="; \
-			uv run --with pytest --with pytest-timeout --with "./$$plugin[test]" pytest "$$plugin/tests" -v -m "not slow" --timeout=30 || failed=1; \
+			$(MAKE) test-plugin PLUGIN=$$(basename $$plugin) || failed=1; \
 		fi \
 	done; \
 	if [ -n "$$failed" ]; then exit 1; fi
