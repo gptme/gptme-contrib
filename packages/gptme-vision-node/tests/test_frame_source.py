@@ -100,3 +100,38 @@ def test_camera_returns_none_after_retry_budget(monkeypatch):
     source = OpenCVCameraSource(0, read_attempts=2)
 
     assert source.get_frame() is None
+
+
+def test_camera_reopens_after_stream_drop(monkeypatch):
+    """A dropped stream must be released and reopened, not read forever."""
+    expected = solid_frame((4, 5, 6))
+    captures = []
+
+    class DroppedCapture:
+        released = False
+
+        def isOpened(self):
+            return True
+
+        def read(self):
+            return False, None
+
+        def release(self):
+            self.released = True
+
+    class RecoveredCapture(DroppedCapture):
+        def read(self):
+            return True, expected
+
+    def open_capture(_source):
+        cap = DroppedCapture() if not captures else RecoveredCapture()
+        captures.append(cap)
+        return cap
+
+    monkeypatch.setattr(cv2, "VideoCapture", open_capture)
+    source = OpenCVCameraSource("rtsp://cam/stream", read_attempts=2)
+
+    assert source.get_frame() is None
+    assert captures[0].released
+    assert source.get_frame() is expected
+    assert len(captures) == 2

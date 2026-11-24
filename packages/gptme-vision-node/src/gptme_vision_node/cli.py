@@ -11,6 +11,7 @@ Subcommands:
 from __future__ import annotations
 
 import json
+import math
 import time
 from pathlib import Path
 
@@ -90,19 +91,42 @@ def main() -> None:
     """Vision pipeline for the BobBrain presence node."""
 
 
+def _finite_non_negative(
+    _ctx: click.Context, _param: click.Parameter, value: float
+) -> float:
+    if not math.isfinite(value) or value < 0:
+        raise click.BadParameter("must be a finite number >= 0")
+    return value
+
+
 @main.command()
 @source_option
 @click.option("--once", is_flag=True, help="single frame, then exit")
-@click.option("--interval", type=float, default=1.0, help="seconds between frames")
+@click.option(
+    "--interval",
+    type=float,
+    default=1.0,
+    callback=_finite_non_negative,
+    help="seconds between frames",
+)
 def detect(source_spec: str, once: bool, interval: float) -> None:
     """Run person/motion detection on a source."""
     source = make_source(source_spec)
     detectors: list[Detector] = [PersonDetector(), MotionDetector()]
+    # Live cameras/streams return None on a transient read failure; that is
+    # not end-of-stream, so keep polling instead of exiting successfully.
+    stop_on_empty = getattr(source, "stop_on_empty", True)
     try:
         while True:
             frame = _get_frame(source)
             if frame is None:
-                break
+                if once:
+                    raise click.ClickException("source produced no frame")
+                if stop_on_empty:
+                    break
+                click.echo("(no frame)", err=True)
+                time.sleep(interval)
+                continue
             try:
                 detections = [d for det in detectors for d in det.detect(frame)]
             except (cv2.error, RuntimeError, ValueError) as exc:

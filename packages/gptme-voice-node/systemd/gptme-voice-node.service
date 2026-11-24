@@ -9,8 +9,10 @@ StartLimitBurst=5
 [Service]
 Type=simple
 # Override these in /etc/systemd/system/gptme-voice-node.service.d/local.conf
-# Use wss:// whenever microphone audio crosses a network.
-Environment=GPTME_VOICE_NODE_SERVER=wss://bob-host.example.com/local
+# The server's /local endpoint is unauthenticated and loopback-only: reach a
+# remote voice host through an SSH tunnel (ssh -L 8080:127.0.0.1:8080 ...),
+# never a reverse proxy. See README "/local is loopback-only".
+Environment=GPTME_VOICE_NODE_SERVER=ws://localhost:8080/local
 Environment=GPTME_VOICE_NODE_NAME=bobbrain-puck
 
 # Adjust to the user that has audio access (e.g. pi on Raspberry Pi OS)

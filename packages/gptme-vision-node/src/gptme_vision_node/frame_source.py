@@ -66,7 +66,9 @@ class OpenCVCameraSource:
     """Webcam (V4L2 index), Pi camera, or network stream (RTSP/HTTP URL).
 
     The capture is opened lazily on first ``get_frame`` so constructing the
-    source is cheap and testable without hardware.
+    source is cheap and testable without hardware. After ``read_attempts``
+    consecutive failed reads the capture is released and reopened on the
+    next call, so a node recovers when a stream comes back.
     """
 
     stop_on_empty = False
@@ -93,6 +95,9 @@ class OpenCVCameraSource:
             ok, frame = cap.read()
             if ok and frame is not None:
                 return frame
+        # A dropped network stream (or unplugged webcam) never recovers on
+        # the same handle; release it so the next call reopens the source.
+        self.release()
         return None
 
     def release(self) -> None:

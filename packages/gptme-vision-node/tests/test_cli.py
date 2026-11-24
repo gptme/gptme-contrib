@@ -304,3 +304,51 @@ def test_cli_enroll_save_failure_is_clean_error(tmp_path, monkeypatch):
     assert "failed to save gallery" in result.output
     assert "gallery is read-only" in result.output
     assert "Traceback" not in result.output
+
+
+@pytest.mark.parametrize("interval", ["-1", "nan", "inf"])
+def test_cli_detect_rejects_bad_interval(tmp_path, interval):
+    img = _write_scene(tmp_path / "a.png", 2)
+    result = CliRunner().invoke(
+        cli.main, ["detect", "--source", str(img), "--interval", interval]
+    )
+    assert result.exit_code == 2
+    assert "Invalid value for '--interval'" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_cli_detect_live_camera_empty_read_keeps_polling(monkeypatch):
+    class FlakyCamera:
+        stop_on_empty = False
+
+        def __init__(self):
+            self.reads = [None, scene_frame(4)]
+
+        def get_frame(self):
+            if not self.reads:
+                raise KeyboardInterrupt
+            return self.reads.pop(0)
+
+    monkeypatch.setattr(cli, "make_source", lambda spec: FlakyCamera())
+    result = CliRunner().invoke(
+        cli.main, ["detect", "--source", "camera:0", "--interval", "0"]
+    )
+
+    assert result.exit_code == 0
+    assert "(no frame)" in result.output
+    # The frame after the transient empty read was still processed.
+    assert "(no detections)" in result.output or "\tbox=" in result.output
+
+
+def test_cli_detect_once_on_dead_camera_fails(monkeypatch):
+    class DeadCamera:
+        stop_on_empty = False
+
+        def get_frame(self):
+            return None
+
+    monkeypatch.setattr(cli, "make_source", lambda spec: DeadCamera())
+    result = CliRunner().invoke(cli.main, ["detect", "--source", "camera:0", "--once"])
+
+    assert result.exit_code == 1
+    assert "source produced no frame" in result.output

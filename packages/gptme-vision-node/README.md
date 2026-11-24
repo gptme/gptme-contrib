@@ -65,6 +65,12 @@ The place gallery defaults to `~/.config/gptme-vision-node/places.json`. When
 captured with each sample and fused with the visual score. Use `--no-wifi` to
 skip it.
 
+The visual embedding includes a brightness histogram (embedder id
+`histogram-h24-s8-val8-grid2-v2`). Galleries enrolled with the earlier
+hue/saturation-only `-v1` embedder fail to load with an "embedder mismatch"
+error; re-enroll your places. To keep using an old gallery from Python, pass
+`HistogramEmbedder(v_bins=0)`.
+
 ### Vision LLM settings (`look`)
 
 | Env var | Default |
@@ -76,6 +82,8 @@ skip it.
 ## Python API
 
 ```python
+import time
+
 from gptme_vision_node import VisionPipeline, ImageFileSource, PersonDetector, MotionDetector
 
 pipeline = VisionPipeline(
@@ -84,7 +92,14 @@ pipeline = VisionPipeline(
     interval_s=1.0,
     on_event=lambda e: print(e.kind, e.detections),
 )
-pipeline.start()
+pipeline.start()  # runs in a daemon thread; keep the main thread alive
+try:
+    while pipeline.is_running():
+        time.sleep(1)
+except KeyboardInterrupt:
+    pass
+finally:
+    pipeline.stop()
 ```
 
 | Module | Contents |

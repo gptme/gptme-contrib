@@ -195,10 +195,26 @@ class VisionBridge:
         return True
 
     def start(self, loop: asyncio.AbstractEventLoop, send_message: SendMessage) -> None:
-        """Attach a connected transport and start the capture pipeline."""
+        """Attach a connected transport and start the capture pipeline.
+
+        Raises ``RuntimeError`` when the previous session's capture thread is
+        still blocked in a read (``stop`` timed out). The transport is only
+        left attached when the pipeline actually started, so a failed start
+        never keeps a reference to the new socket.
+        """
+        if self.pipeline.is_running():
+            raise RuntimeError(
+                "previous vision capture thread is still stopping; "
+                "camera unavailable for this session"
+            )
         self._loop = loop
         self._send_message = send_message
-        self.pipeline.start()
+        try:
+            self.pipeline.start()
+        except BaseException:
+            self._send_message = None
+            self._loop = None
+            raise
 
     async def stop(self, *, timeout: float = 5.0) -> None:
         """Stop capture, release the source, and drain pending event sends.

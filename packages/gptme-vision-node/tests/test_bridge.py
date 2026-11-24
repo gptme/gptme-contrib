@@ -229,3 +229,47 @@ async def test_unrelated_server_message_is_not_consumed() -> None:
         raise AssertionError("must not send")
 
     assert not await bridge.handle_message({"type": "audio_end"}, send)
+
+
+@pytest.mark.asyncio
+async def test_start_after_stuck_stop_fails_without_attaching_transport() -> None:
+    """A capture thread still blocked from the last session must not leave the
+    bridge pointing at the new socket (gptme-contrib#2381)."""
+    unblock = threading.Event()
+    entered = threading.Event()
+
+    class BlockingSource(_Source):
+        def get_frame(self):
+            entered.set()
+            unblock.wait()
+            return None
+
+    bridge = VisionBridge(BlockingSource(), [])
+
+    async def send(_message: str) -> None:
+        return None
+
+    bridge.start(asyncio.get_running_loop(), send)
+    assert entered.wait(timeout=1)
+    try:
+        await bridge.stop(timeout=0.05)
+        assert bridge.pipeline.is_running()
+
+        async def new_send(_message: str) -> None:
+            return None
+
+        with pytest.raises(RuntimeError, match="still stopping"):
+            bridge.start(asyncio.get_running_loop(), new_send)
+        assert bridge._send_message is None
+        assert bridge._loop is None
+    finally:
+        unblock.set()
+        thread = bridge.pipeline._thread
+        if thread is not None:
+            thread.join(timeout=1)
+        await bridge.stop()
+
+    # Once the stuck read returns, the next session can start normally.
+    bridge.start(asyncio.get_running_loop(), send)
+    assert bridge._send_message is send
+    await bridge.stop()

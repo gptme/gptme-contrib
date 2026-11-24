@@ -39,7 +39,7 @@ def test_embedder_output_is_normalized():
 def test_embedder_handles_frames_smaller_than_grid():
     vec = HistogramEmbedder(grid=2).embed(np.zeros((1, 1, 3), dtype=np.uint8))
 
-    assert vec.shape == (24 * 8 * 5,)
+    assert vec.shape == ((24 * 8 + 8) * 5,)
     assert np.isfinite(vec).all()
 
 
@@ -265,3 +265,62 @@ def test_from_file_rejects_mismatched_embedder(tmp_path):
 
     loaded = PlaceRecognizer.from_file(gallery, CustomEmbedder())
     assert set(loaded.places) == {"kitchen"}
+
+
+# -- brightness (gptme-contrib#2381) -----------------------------------------
+
+
+def test_embedder_separates_black_gray_white():
+    emb = HistogramEmbedder()
+    black, gray, white = (
+        emb.embed(solid_frame(c)) for c in ((0, 0, 0), (128, 128, 128), (255,) * 3)
+    )
+    # Hue/saturation alone put all three into one bin (cosine exactly 1.0).
+    assert cosine_similarity(black, white) < 0.6
+    assert cosine_similarity(black, gray) < 0.6
+    assert cosine_similarity(gray, white) < 0.6
+
+
+def test_lens_capped_frame_does_not_match_bright_room_at_full_confidence():
+    rec = PlaceRecognizer()
+    rec.enroll("white-office", solid_frame((245, 245, 245)))
+    rec.enroll("dark-hallway", solid_frame((25, 25, 25)))
+    results = rec.recognize(solid_frame((0, 0, 0)))
+    assert results[0][0] == "dark-hallway"
+    scores = dict(results)
+    assert scores["white-office"] < 0.6
+
+
+def test_embedder_id_includes_brightness_and_legacy_v1_is_kept():
+    assert HistogramEmbedder().embedder_id == "histogram-h24-s8-val8-grid2-v2"
+    legacy = HistogramEmbedder(v_bins=0)
+    assert legacy.embedder_id == "histogram-h24-s8-grid2-v1"
+    assert legacy.embed(solid_frame((1, 2, 3))).shape == (24 * 8 * 5,)
+
+
+def test_embedder_rejects_negative_v_bins():
+    with pytest.raises(ValueError, match="v_bins"):
+        HistogramEmbedder(v_bins=-1)
+
+
+# -- atomic save (gptme-contrib#2381) ----------------------------------------
+
+
+def test_save_failure_keeps_existing_gallery(tmp_path, monkeypatch):
+    path = tmp_path / "places.json"
+    rec = PlaceRecognizer()
+    rec.enroll("kitchen", KITCHEN)
+    rec.save(path)
+    before = path.read_text()
+
+    rec.enroll("office", OFFICE)
+
+    def boom(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("gptme_vision_node.place.os.replace", boom)
+    with pytest.raises(OSError, match="disk full"):
+        rec.save(path)
+
+    assert path.read_text() == before
+    assert [p.name for p in tmp_path.iterdir()] == ["places.json"]

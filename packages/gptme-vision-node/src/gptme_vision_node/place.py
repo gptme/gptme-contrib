@@ -19,8 +19,11 @@ Two complementary signals, each optional:
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol, runtime_checkable
@@ -44,36 +47,68 @@ class HistogramEmbedder:
     """HSV color histogram + coarse spatial grid, L2-normalized.
 
     Global hue/saturation histogram concatenated with per-cell
-    hue histograms over a ``grid x grid`` layout, so both overall color
-    mood and rough spatial arrangement contribute. Cheap, deterministic,
-    dependency-free — a baseline that distinguishes visually distinct
-    rooms, not a general scene embedding.
+    hue/saturation histograms over a ``grid x grid`` layout, so both overall
+    color mood and rough spatial arrangement contribute. Each region also
+    gets a coarse brightness (V) histogram: hue and saturation alone put
+    black, gray and white into the same bin, so a dark hallway, a white
+    office and a lens-capped frame would otherwise match perfectly.
+    Cheap, deterministic, dependency-free — a baseline that distinguishes
+    visually distinct rooms, not a general scene embedding.
+
+    ``v_bins=0`` reproduces the legacy hue/saturation-only ``-v1`` embedding
+    so galleries enrolled before brightness was added can still be loaded.
     """
 
-    def __init__(self, *, h_bins: int = 24, s_bins: int = 8, grid: int = 2) -> None:
+    def __init__(
+        self, *, h_bins: int = 24, s_bins: int = 8, v_bins: int = 8, grid: int = 2
+    ) -> None:
         for name, value in (("h_bins", h_bins), ("s_bins", s_bins), ("grid", grid)):
             if value <= 0:
                 raise ValueError(f"{name} must be a positive integer")
+        if v_bins < 0:
+            raise ValueError("v_bins must be a non-negative integer")
         self.h_bins = h_bins
         self.s_bins = s_bins
+        self.v_bins = v_bins
         self.grid = grid
 
     @property
     def embedder_id(self) -> str:
         """Stable identifier for persisted embedding compatibility."""
-        return f"histogram-h{self.h_bins}-s{self.s_bins}-grid{self.grid}-v1"
+        if self.v_bins == 0:
+            return f"histogram-h{self.h_bins}-s{self.s_bins}-grid{self.grid}-v1"
+        return (
+            f"histogram-h{self.h_bins}-s{self.s_bins}-val{self.v_bins}"
+            f"-grid{self.grid}-v2"
+        )
+
+    def _region_hist(self, region: np.ndarray) -> list[np.ndarray]:
+        """H+S histogram (plus a V histogram when ``v_bins``) of one region."""
+        parts: list[np.ndarray]
+        if region.size == 0:
+            parts = [np.zeros(self.h_bins * self.s_bins)]
+            if self.v_bins:
+                parts.append(np.zeros(self.v_bins))
+            return parts
+        # H+S (not hue alone): hue is meaningless at zero saturation,
+        # so a hue-only histogram cannot tell e.g. black from red.
+        parts = [
+            cv2.calcHist(
+                [region], [0, 1], None, [self.h_bins, self.s_bins], [0, 180, 0, 256]
+            ).flatten()
+        ]
+        if self.v_bins:
+            # Same total mass as the H+S histogram, so brightness carries
+            # equal weight in the cosine similarity.
+            parts.append(
+                cv2.calcHist([region], [2], None, [self.v_bins], [0, 256]).flatten()
+            )
+        return parts
 
     def embed(self, frame: np.ndarray) -> np.ndarray:
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        parts: list[np.ndarray] = []
-
-        # Global H+S 2D histogram.
-        global_hist = cv2.calcHist(
-            [hsv], [0, 1], None, [self.h_bins, self.s_bins], [0, 180, 0, 256]
-        )
-        parts.append(global_hist.flatten())
-
-        # Per-cell H+S histograms (coarse spatial layout).
+        # Global histograms, then per-cell ones (coarse spatial layout).
+        parts: list[np.ndarray] = self._region_hist(hsv)
         h, w = hsv.shape[:2]
         for gy in range(self.grid):
             for gx in range(self.grid):
@@ -81,15 +116,7 @@ class HistogramEmbedder:
                     gy * h // self.grid : (gy + 1) * h // self.grid,
                     gx * w // self.grid : (gx + 1) * w // self.grid,
                 ]
-                # H+S (not hue alone): hue is meaningless at zero saturation,
-                # so a hue-only cell histogram cannot tell e.g. black from red.
-                if cell.size == 0:
-                    parts.append(np.zeros(self.h_bins * self.s_bins))
-                    continue
-                cell_hist = cv2.calcHist(
-                    [cell], [0, 1], None, [self.h_bins, self.s_bins], [0, 180, 0, 256]
-                )
-                parts.append(cell_hist.flatten())
+                parts.extend(self._region_hist(cell))
 
         vec = np.concatenate(parts).astype(np.float64)
         norm = np.linalg.norm(vec)
@@ -297,7 +324,21 @@ class PlaceRecognizer:
         }
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(payload))
+        # Write-then-rename so a crash or full disk never truncates the
+        # existing gallery (every enrolled sample would be lost).
+        fd, tmp_name = tempfile.mkstemp(
+            dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
+        )
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(json.dumps(payload))
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_name, path)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp_name)
+            raise
 
     def load(self, path: str | Path) -> None:
         """Load a gallery saved by :meth:`save` (replaces current places)."""
