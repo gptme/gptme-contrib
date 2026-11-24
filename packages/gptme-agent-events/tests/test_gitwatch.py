@@ -444,3 +444,48 @@ def test_only_exact_github_hosts_authorize_repository_details(
     commit(repo, "origin provenance", "s")
     commits = [e for e in watcher.poll() if e.kind == "commit"]
     assert commits[-1].detail.get("repo") == expected_repo
+
+
+def _two_commits_one_hashless_result(r: Path):
+    """A commit seen at t=100, then another plus a hashless shell result at t=103."""
+    from gptme_agent_events.event import AgentEvent
+
+    r.mkdir()
+    git("init", "-q", "-b", "main", cwd=r)
+    now = [100.0]
+    w = GitWatcher()
+    w.watch(str(r))
+    f = Follower([], git=w, clock=lambda: now[0])
+    commit(r, "one", None)
+    assert f._with_git([], False) == []
+    now[0] = 103.0
+    commit(r, "two", None)
+    shell = AgentEvent(
+        kind="commit",
+        ts="2099-01-01T00:00:00+00:00",
+        harness="codex",
+        session="second",
+        detail={"dir": str(r)},
+    )
+    assert f._with_git([shell], False) == []  # ambiguous while both are pending
+    return f, now
+
+
+def test_flush_pairs_what_a_later_poll_would_pair(tmp_path):
+    """flush() must not report a commit twice that the poll loop reports once.
+
+    Once the older commit ages out, the poll loop pairs the hashless result with
+    the newer one. flush() has to resolve them the same way, not emit the newer
+    commit and its shell result as two separate landings.
+    """
+    polling, now = _two_commits_one_hashless_result(tmp_path / "a")
+    polled = []
+    for t in (105.0, 106.0, 110.0):
+        now[0] = t
+        polled += polling._with_git([], False)
+    assert [e.session for e in polled] == ["", "second"]
+
+    flushing, _ = _two_commits_one_hashless_result(tmp_path / "b")
+    flushed = flushing.flush()
+    assert [e.session for e in flushed] == ["", "second"]
+    assert flushing.flush() == []

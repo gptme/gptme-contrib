@@ -32,6 +32,7 @@ on Linux and macOS. It copes with the ways harnesses write their logs:
 from __future__ import annotations
 
 import json
+import math
 import os
 import time
 from collections.abc import Callable, Iterator
@@ -357,13 +358,16 @@ class Follower:
         """Release commits/pushes still held back for reflog pairing.
 
         :meth:`poll` holds them for a later poll; a one-shot caller has none.
+        Replay those polls at each hold-back deadline so held events are paired
+        exactly as the poll loop would pair them, never reported twice.
         """
-        out = []
-        for _, _, e in self._git_pending:
-            e.harness = self._session_harness.get(e.session, e.harness)
-            out.append(e)
-        out += [e for _, _, e in self._git_shell]
-        self._git_pending, self._git_shell = [], []
+        out: list[AgentEvent] = []
+        while self._git_pending or self._git_shell:
+            oldest = min(seen for seen, _, _ in [*self._git_pending, *self._git_shell])
+            deadline = oldest + 5
+            while deadline - oldest < 5:  # rounding must not stall the oldest
+                deadline = math.nextafter(deadline, math.inf)
+            out += self._pair(deadline)
         return out
 
     def _with_git(self, events: list[AgentEvent], rediscover: bool) -> list[AgentEvent]:
@@ -385,6 +389,11 @@ class Follower:
                 kept.append(e)
         for e in self.git.poll(rediscover=rediscover):
             self._git_pending.append((now, Path(e.detail["dir"]), e))
+        return kept + self._pair(now)
+
+    def _pair(self, now: float) -> list[AgentEvent]:
+        """Pair held reflog events with shell results; release what has waited 5s."""
+        kept = []
         pending = []
         # Count from the original batch, not the shrinking list as matches are
         # consumed: proximity alone must be unique in both directions.
