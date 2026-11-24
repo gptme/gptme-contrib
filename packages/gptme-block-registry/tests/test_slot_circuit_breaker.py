@@ -152,8 +152,8 @@ class TestPersistence:
         # resets a non-dict top-level. But the outer try/except in _load_breaker
         # also covers any AttributeError / TypeError from a bad slot payload.
         b = _load_breaker({"opened_at": "not-a-float", "state": "OPEN"}, 3, 300.0)
-        # opened_at parse error is silently reset to None; state is preserved
-        assert b.state == CircuitState.OPEN
+        # OPEN without a usable opened_at could never cool down: reset the slot.
+        assert b.state == CircuitState.CLOSED
         assert b._opened_at is None
 
     @pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])

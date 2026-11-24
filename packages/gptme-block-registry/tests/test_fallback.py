@@ -218,7 +218,7 @@ class TestFallbackPipeline:
                 breaker_state=state,
                 config=CONFIG_WITH_FALLBACK,
             )
-            assert result is None, f"Fallback fired prematurely at auth-death #{i+1}"
+            assert result is None, f"Fallback fired prematurely at auth-death #{i + 1}"
 
 
 # ---------------------------------------------------------------------------
@@ -260,7 +260,7 @@ class TestLoadFallbackConfig:
     def test_missing_required_field_raises(self, tmp_path: Path) -> None:
         toml = tmp_path / "fallback.toml"
         toml.write_text(
-            "[on_auth_death]\n" 'backend = "gptme"\n',
+            '[on_auth_death]\nbackend = "gptme"\n',
             # model, scope, label missing
             encoding="utf-8",
         )

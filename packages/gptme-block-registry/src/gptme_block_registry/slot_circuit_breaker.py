@@ -116,6 +116,9 @@ class _SlotBreaker:
         self._probe_pending: bool = False
         self._probe_started_at: float | None = None
         self._probe_requires_timestamp: bool = False
+        # Grant time of the probe that last closed the breaker. Verdicts from
+        # attempts that started before it predate the recovery and are stale.
+        self._recovered_at: float | None = None
 
     @property
     def state(self) -> CircuitState:
@@ -130,13 +133,23 @@ class _SlotBreaker:
         if self._state == CircuitState.CLOSED:
             return False
         if self._state == CircuitState.OPEN:
-            if self._opened_at is not None and (now - self._opened_at) >= self.cooldown:
+            # A future opened_at means the wall clock stepped back; trusting it
+            # would stretch the cooldown without bound, so allow the probe.
+            if self._opened_at is not None and (
+                self._opened_at > now or (now - self._opened_at) >= self.cooldown
+            ):
                 self._state = CircuitState.HALF_OPEN
                 self._probe_pending = True
             else:
                 return True
         # HALF_OPEN: exactly one probe allowed — consume the slot on first call
-        if self._probe_pending:
+        if self._probe_pending or (
+            # The granted probe never reported (killed worker, finished item,
+            # dropped dispatch). Re-grant after a cooldown so the slot cannot
+            # stay dark forever; the lost probe's late verdict is then stale.
+            self._probe_started_at is not None
+            and not now - self.cooldown < self._probe_started_at <= now
+        ):
             self._probe_pending = False
             self._probe_started_at = now
             return False
@@ -156,6 +169,8 @@ class _SlotBreaker:
                 self._opened_at = now
 
     def record_success(self) -> None:
+        if self._state == CircuitState.HALF_OPEN and self._probe_started_at is not None:
+            self._recovered_at = self._probe_started_at
         self._state = CircuitState.CLOSED
         self._failure_count = 0
         self._opened_at = None
@@ -235,10 +250,12 @@ def _load_breaker(
             b._state in (CircuitState.OPEN, CircuitState.HALF_OPEN)
             and opened_at is not None
         ):
-            try:
-                b._opened_at = float(opened_at)
-            except (TypeError, ValueError):
-                b._opened_at = None
+            b._opened_at = float(opened_at)
+        if b._state == CircuitState.OPEN and (
+            b._opened_at is None or not math.isfinite(b._opened_at)
+        ):
+            # Without a usable opened_at the cooldown can never elapse.
+            raise ValueError(f"OPEN slot with unusable opened_at: {opened_at!r}")
         probe_pending = slot_state.get("probe_pending", False)
         if not isinstance(probe_pending, bool):
             raise ValueError(f"non-bool probe_pending: {probe_pending!r}")
@@ -253,6 +270,10 @@ def _load_breaker(
         if not isinstance(requires_timestamp, bool):
             raise ValueError("non-bool probe_requires_timestamp")
         b._probe_requires_timestamp = requires_timestamp
+        recovered_at = slot_state.get("recovered_at")
+        b._recovered_at = float(recovered_at) if recovered_at is not None else None
+        if b._recovered_at is not None and not math.isfinite(b._recovered_at):
+            b._recovered_at = None
     except Exception:
         b._state = CircuitState.CLOSED
         b._failure_count = 0
@@ -260,6 +281,7 @@ def _load_breaker(
         b._probe_pending = False
         b._probe_started_at = None
         b._probe_requires_timestamp = False
+        b._recovered_at = None
     return b
 
 
@@ -272,6 +294,7 @@ def _save_breaker(b: _SlotBreaker) -> dict[str, Any]:
         "probe_pending": b._probe_pending,
         "probe_started_at": b._probe_started_at,
         "probe_requires_timestamp": b._probe_requires_timestamp,
+        "recovered_at": b._recovered_at,
     }
     return out
 
@@ -359,6 +382,15 @@ def _apply_verdict(
 
     if verdict == NEUTRAL:
         # Check-only: advance the cooldown clock but record nothing.
+        return check_only()
+
+    if (
+        b.state == CircuitState.CLOSED
+        and verdict_started_at is not None
+        and b._recovered_at is not None
+        and verdict_started_at < b._recovered_at
+    ):
+        # The attempt started before the probe that proved the slot healthy.
         return check_only()
 
     if b.state == CircuitState.HALF_OPEN and (
