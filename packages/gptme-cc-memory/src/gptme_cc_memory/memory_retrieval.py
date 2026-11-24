@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from gptme_cc_memory.extractor import atomic_write_text
 from gptme_cc_memory.schema import MemoryFile, discover_memory_files
 
 # Stopwords for lexical scoring
@@ -83,6 +85,11 @@ def _normalize(text: str) -> str:
     text = re.sub(r"[^\w\s]", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text
+
+
+def _contains_phrase(normalized_text: str, normalized_phrase: str) -> bool:
+    """Whole-word phrase match on normalized (single-space separated) text."""
+    return f" {normalized_phrase} " in f" {normalized_text} "
 
 
 def _tokenize(text: str) -> list[str]:
@@ -169,7 +176,7 @@ def _lexical_score(
     for alias in entry.aliases:
         alias_norm = _normalize(alias)
         alias_tokens = [t for t in alias_norm.split() if t not in STOPWORDS]
-        if alias_norm and alias_norm in normalized_query and len(alias_tokens) >= 2:
+        if alias_norm and _contains_phrase(normalized_query, alias_norm) and len(alias_tokens) >= 2:
             score += 2.5
             overlap = sorted(set(overlap) | set(alias_tokens))
             break
@@ -182,21 +189,39 @@ def _lexical_score(
     return score, overlap[:5]
 
 
+def _parse_state(raw: bytes) -> dict[str, dict[str, Any]] | None:
+    """Parse metadata.json bytes; ``None`` means the content is corrupt."""
+    try:
+        data = json.loads(raw)
+    except ValueError:  # JSONDecodeError and UnicodeDecodeError
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def load_memory_state(state_file: Path) -> dict[str, dict[str, Any]]:
     """Load persistent memory retrieval state from JSON."""
     try:
-        data = json.loads(state_file.read_text(encoding="utf-8"))
-    except FileNotFoundError:
+        raw = state_file.read_bytes()
+    except OSError:
         return {}
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return data if isinstance(data, dict) else {}
+    return _parse_state(raw) or {}
 
 
 def save_memory_state(state: dict[str, dict[str, Any]], state_file: Path) -> None:
-    """Save persistent memory retrieval state to JSON."""
+    """Save persistent memory retrieval state to JSON (atomically).
+
+    If the existing file is corrupt, it is moved aside to
+    ``metadata.json.corrupt`` instead of being silently overwritten, so the
+    old bytes stay recoverable.
+    """
     state_file.parent.mkdir(parents=True, exist_ok=True)
-    state_file.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    try:
+        existing = state_file.read_bytes()
+    except FileNotFoundError:
+        existing = None
+    if existing is not None and existing.strip() and _parse_state(existing) is None:
+        os.replace(state_file, state_file.with_name(state_file.name + ".corrupt"))
+    atomic_write_text(state_file, json.dumps(state, indent=2, sort_keys=True) + "\n")
 
 
 def select_relevant_memories(
@@ -310,7 +335,7 @@ def _entry_referenced(
     for alias in entry.aliases:
         alias_norm = _normalize(alias)
         alias_tokens = [t for t in alias_norm.split() if t not in STOPWORDS]
-        if len(alias_tokens) >= 2 and alias_norm and alias_norm in normalized_text:
+        if len(alias_tokens) >= 2 and alias_norm and _contains_phrase(normalized_text, alias_norm):
             return True
         if len(alias_tokens) >= 3:
             overlap = len(set(alias_tokens) & text_tokens)

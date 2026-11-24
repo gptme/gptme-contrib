@@ -32,6 +32,8 @@ MAX_INJECT_CHARS = 4000
 PENDING_UPDATES_MAX_AGE_DAYS = 3
 
 _PENDING_BLOCK_HEADER_RE = re.compile(r"^## Pending — (\d{4}-\d{2}-\d{2})", re.MULTILINE)
+# Any level-1 or level-2 markdown header ends the current pending block.
+_BLOCK_BOUNDARY_RE = re.compile(r"^#{1,2}\s")
 
 
 def read_if_exists(path: Path) -> str:
@@ -57,6 +59,9 @@ def clear_file(path: Path) -> None:
 def prune_stale_pending_updates(content: str, today: date) -> str:
     """Drop dated ``## Pending — YYYY-MM-DD ...`` blocks older than the max age.
 
+    A block runs from its ``## Pending`` header up to the next level-1/2
+    header (``# ``/``## ``), so its ``### Confirmations`` / ``### Guidance``
+    subsections and any blank-line-separated paragraphs are pruned with it.
     Free-form (undated) content and blocks with unparseable dates are always
     kept (fail-open).
     """
@@ -69,15 +74,10 @@ def prune_stale_pending_updates(content: str, today: date) -> str:
         if match:
             try:
                 block_date = date.fromisoformat(match.group(1))
-                age = (today - block_date).days
-                skip_block = age > PENDING_UPDATES_MAX_AGE_DAYS
-                if skip_block:
-                    continue
+                skip_block = (today - block_date).days > PENDING_UPDATES_MAX_AGE_DAYS
             except (ValueError, TypeError):
                 skip_block = False
-        elif line.startswith("#"):
-            pass  # section headers don't toggle skip
-        elif skip_block and line.strip() == "":
+        elif _BLOCK_BOUNDARY_RE.match(line):
             skip_block = False
 
         if not skip_block:
@@ -101,62 +101,79 @@ def inject_memories(
     relevant / an error occurred).
     """
     try:
-        blocks: list[str] = []
-        one_shot_files_to_clear: list[Path] = []
-
-        # 1. Guidance (one-shot, cleared after delivery)
+        # Sections are rendered in display order (guidance, pending updates,
+        # session context, relevant memories) but admitted to the ``max_chars``
+        # budget in priority order. Sections with side effects (one-shot files
+        # cleared, memories recorded as injected) are included whole or not at
+        # all, and their side effects only run when they are delivered.
+        # Pending updates have no side effects, so they fill whatever budget
+        # remains (truncated at a line boundary).
+        guidance_block = ""
         if guidance_file:
             guidance = read_if_exists(guidance_file)
             if guidance:
-                blocks.append(f"## Guidance\n\n{guidance}\n\n")
-                one_shot_files_to_clear.append(guidance_file)
+                guidance_block = f"## Guidance\n\n{guidance}\n\n"
 
-        # 2. Pending updates (content with stale-date pruning)
+        pending_block = ""
         if pending_updates_file:
             updates = read_if_exists(pending_updates_file)
             if updates:
-                pruned = prune_stale_pending_updates(updates, date.today())
-                if pruned:
-                    blocks.append(f"{pruned}\n\n")
+                pending_block = prune_stale_pending_updates(updates, date.today())
 
-        # 3. Pending session context (one-shot)
+        context_block = ""
         if pending_session_context_file:
             ctx = read_if_exists(pending_session_context_file)
             if ctx:
-                blocks.append(f"## Previous Session Context\n\n{ctx}\n\n")
-                one_shot_files_to_clear.append(pending_session_context_file)
+                context_block = f"## Previous Session Context\n\n{ctx}\n\n"
 
-        # 4. Relevant memory entries (scored against prompt)
         relevant = select_relevant_memories(
             prompt,
             memory_dir=memory_dir,
             state_file=metadata_file,
             limit=2,
         )
-        if relevant:
-            rendered = render_relevant_memory_block(relevant)
-            blocks.append(rendered)
+        memory_block = render_relevant_memory_block(relevant) if relevant else ""
+
+        # Display slots: 0=guidance, 1=pending, 2=context, 3=memories
+        included: dict[int, str] = {}
+
+        def render(sections: dict[int, str]) -> str:
+            return "\n".join(sections[i] for i in sorted(sections)).strip()
+
+        def fits(slot: int, text: str) -> bool:
+            return len(render({**included, slot: text})) <= max_chars
+
+        for slot, text in ((0, guidance_block), (2, context_block), (3, memory_block)):
+            if text and fits(slot, text):
+                included[slot] = text
+
+        if pending_block:
+            if fits(1, f"{pending_block}\n\n"):
+                included[1] = f"{pending_block}\n\n"
+            else:
+                # Room left after the join separator and trailing blank line,
+                # then trim at a line boundary.
+                room = max_chars - len(render(included)) - 3
+                truncated = pending_block[: max(room, 0)]
+                cut = truncated.rfind("\n")
+                truncated = truncated[:cut].rstrip() if cut > 0 else ""
+                if truncated and fits(1, f"{truncated}\n\n"):
+                    included[1] = f"{truncated}\n\n"
+
+        if not included:
+            return None
+
+        result = render(included)
+
+        if 3 in included:
             record_memory_injections(
                 [e["key"] for e in relevant],
                 state_file=metadata_file,
             )
-
-        if not blocks:
-            return None
-
-        result = "\n".join(blocks).strip()
-        if len(result) > max_chars:
-            # Truncate at the last newline before the limit to avoid cutting
-            # mid-tag or mid-word
-            truncated = result[:max_chars]
-            last_newline = truncated.rfind("\n")
-            if last_newline > 0:
-                result = truncated[:last_newline]
-            else:
-                result = truncated
-
-        for one_shot_file in one_shot_files_to_clear:
-            clear_file(one_shot_file)
+        if 0 in included and guidance_file:
+            clear_file(guidance_file)
+        if 2 in included and pending_session_context_file:
+            clear_file(pending_session_context_file)
 
         return result
 

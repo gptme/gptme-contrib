@@ -127,6 +127,20 @@ def load_yaml_frontmatter(content: str) -> tuple[dict[str, Any], str]:
     return metadata, body
 
 
+def _type_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    """Return the nested ``metadata:`` mapping, or {} if absent / not a mapping."""
+    nested = metadata.get("metadata")
+    return nested if isinstance(nested, dict) else {}
+
+
+def _alias_candidates(raw: Any) -> list[str]:
+    """Coerce a frontmatter ``aliases`` value (list, scalar, or null) to strings."""
+    if raw is None:
+        return []
+    items = raw if isinstance(raw, list) else [raw]
+    return [str(item) for item in items if isinstance(item, (str, int, float))]
+
+
 def validate_memory_file(metadata: dict[str, Any], body: str) -> list[str]:
     """Validate a memory file's frontmatter and body.
 
@@ -144,8 +158,8 @@ def validate_memory_file(metadata: dict[str, Any], body: str) -> list[str]:
     if "description" not in metadata or not isinstance(metadata["description"], str):
         errors.append("Missing or non-string 'description' field in frontmatter")
 
-    mem_type = metadata.get("metadata", {}).get("type", "")
-    if not mem_type or mem_type not in MEMORY_TYPES:
+    mem_type = _type_metadata(metadata).get("type", "")
+    if not mem_type or not isinstance(mem_type, str) or mem_type not in MEMORY_TYPES:
         valid_types = ", ".join(sorted(MEMORY_TYPES))
         errors.append(
             f"Invalid or missing 'metadata.type': got {mem_type!r}, "
@@ -161,20 +175,22 @@ def validate_memory_file(metadata: dict[str, Any], body: str) -> list[str]:
 def parse_memory_file(path: Path) -> MemoryFile | None:
     """Parse and validate a single memory file."""
     try:
-        content = path.read_text(encoding="utf-8")
-    except OSError:
+        # utf-8-sig strips a leading BOM; invalid bytes make the file unparseable.
+        content = path.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeDecodeError):
         return None
 
     metadata, body = load_yaml_frontmatter(content)
     if not metadata:
         return None
 
-    mem_type = str(metadata.get("metadata", {}).get("type", "memory")).strip().lower()
+    type_metadata = _type_metadata(metadata)
+    mem_type = str(type_metadata.get("type", "memory")).strip().lower()
     if mem_type not in MEMORY_TYPES:
         mem_type = "memory"
 
-    name = str(metadata.get("name", path.stem)).strip()
-    description = str(metadata.get("description", "")).strip()
+    name = str(metadata.get("name") or path.stem).strip()
+    description = str(metadata.get("description") or "").strip()
 
     # Build excerpt
     text = re.sub(r"\s+", " ", body).strip()
@@ -183,7 +199,7 @@ def parse_memory_file(path: Path) -> MemoryFile | None:
     # Build aliases from name, filename, and explicit aliases field
     aliases: list[str] = []
     seen: set[str] = set()
-    for candidate in [name, path.stem] + metadata.get("aliases", []):
+    for candidate in [name, path.stem] + _alias_candidates(metadata.get("aliases")):
         normalized = candidate.strip().lower()
         if normalized and normalized not in seen:
             seen.add(normalized)
@@ -197,7 +213,7 @@ def parse_memory_file(path: Path) -> MemoryFile | None:
         body=body.strip(),
         excerpt=excerpt,
         aliases=aliases,
-        metadata=metadata.get("metadata", {}),
+        metadata=type_metadata,
     )
 
 
@@ -214,7 +230,10 @@ def discover_memory_files(memory_dir: Path) -> list[MemoryFile]:
     for path in sorted(memory_dir.glob("*.md")):
         if path.name in SPECIAL_MEMORY_FILES:
             continue
-        entry = parse_memory_file(path)
+        try:
+            entry = parse_memory_file(path)
+        except Exception:
+            entry = None  # one malformed file must never hide all the others
         if entry is not None:
             entries.append(entry)
 

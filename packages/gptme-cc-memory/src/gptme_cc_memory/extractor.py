@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -68,6 +69,14 @@ CONFIRMATION_PATTERNS: list[tuple[str, str]] = [
     (r"\b(approved?|accepted?|confirmed?)\b", "explicit_approval"),
 ]
 
+# A positive word directly negated ("not right", "isn't good", "not quite
+# correct") is negative feedback and must not be recorded as a confirmation.
+_NEGATED_CONFIRMATION_RE = re.compile(
+    r"\b(not|never|no|isn't|wasn't|aren't|doesn't|don't|didn't)\s+(\w+\s+)?"
+    r"(great|good|perfect|excellent|correct|right|working|works?|approved?|accepted?|confirmed?)\b",
+    re.IGNORECASE,
+)
+
 # Patterns for structured guidance in model responses
 GUIDANCE_PATTERNS: list[str] = [
     r"(reminder|rule|guideline|principle|convention|policy|standard|practice)s?:",
@@ -85,23 +94,113 @@ class ExtractionResult:
     session_context: dict[str, Any] = field(default_factory=dict)
 
 
+def atomic_write_text(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` atomically (temp file in same dir + ``os.replace``).
+
+    A failed write (e.g. ENOSPC) leaves the previous file content intact
+    instead of a truncated file.
+    """
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+    try:
+        with tmp.open("w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def _content_text(content: Any) -> str:
+    """Flatten message content to plain text.
+
+    Strings pass through; a list of content blocks contributes only its
+    ``{"type": "text"}`` blocks (tool_use / tool_result / thinking are
+    dropped). Anything else (missing, null, dict, ...) yields "".
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = [
+            b["text"]
+            for b in content
+            if isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str)
+        ]
+        return "\n".join(parts)
+    return ""
+
+
+def _normalize_message(record: dict[str, Any]) -> dict[str, Any] | None:
+    """Normalize one transcript record to the internal ``{role, content}`` shape.
+
+    Supports both the flat ``{"role": "human", "content": ...}`` format and the
+    real Claude Code transcript format
+    ``{"type": "user", "message": {"role": "user", "content": str | [blocks]}}``.
+    Returns ``None`` for records with no human/assistant text (summaries,
+    meta lines, tool_result-only user turns).
+    """
+    inner = record.get("message")
+    if isinstance(inner, dict) and "role" not in record:
+        if record.get("isMeta"):
+            return None
+        role = inner.get("role") or record.get("type")
+        raw_content = inner.get("content")
+    else:
+        role = record.get("role")
+        raw_content = record.get("content")
+
+    if role == "user":
+        role = "human"
+    if role not in ("human", "assistant"):
+        return None
+
+    content = _content_text(raw_content)
+    tool_uses = 0
+    if isinstance(raw_content, list):
+        tool_uses = sum(
+            1 for b in raw_content if isinstance(b, dict) and b.get("type") == "tool_use"
+        )
+    if not content.strip() and not tool_uses:
+        return None
+
+    msg: dict[str, Any] = {"role": role, "content": content}
+    if tool_uses:
+        msg["tool_use_count"] = tool_uses
+    return msg
+
+
 def read_trajectory(trajectory_path: Path) -> list[dict[str, Any]]:
-    """Read a Claude Code trajectory file (JSONL, one JSON object per line)."""
+    """Read a Claude Code trajectory file (JSONL, one JSON object per line).
+
+    Each line is normalized to ``{"role": "human"|"assistant", "content": str}``.
+    Undecodable bytes are replaced and unparseable lines are skipped, so one
+    bad line never aborts the whole extraction.
+    """
     messages: list[dict[str, Any]] = []
     try:
-        for line in trajectory_path.read_text(encoding="utf-8").strip().splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                msg = json.loads(line)
-                if isinstance(msg, dict):
-                    messages.append(msg)
-            except json.JSONDecodeError:
-                continue
+        text = trajectory_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        msg = _normalize_message(record)
+        if msg is not None:
+            messages.append(msg)
     return messages
+
+
+def _message_text(msg: dict[str, Any]) -> str:
+    """Return a message's text with typographic apostrophes normalized."""
+    content = msg.get("content")
+    text = content if isinstance(content, str) else _content_text(content)
+    return text.replace("\u2019", "'").replace("\u2018", "'")
 
 
 def detect_corrections(
@@ -117,7 +216,7 @@ def detect_corrections(
         if msg.get("role") != "human":
             continue
 
-        content = str(msg.get("content", ""))
+        content = _message_text(msg)
         if not content:
             continue
 
@@ -154,9 +253,11 @@ def detect_confirmations(
         if msg.get("role") != "human":
             continue
 
-        content = str(msg.get("content", "")).strip()
+        content = _message_text(msg).strip()
         if not content or len(content) > 200:
             continue  # Long messages are probably substantive, not confirmations
+        if _NEGATED_CONFIRMATION_RE.search(content):
+            continue  # "that's not right" is negative feedback, not a confirmation
 
         for pattern, label in CONFIRMATION_PATTERNS:
             if re.search(pattern, content, re.IGNORECASE):
@@ -182,7 +283,7 @@ def detect_guidance_blocks(
         if msg.get("role") != "assistant":
             continue
 
-        content = str(msg.get("content", ""))
+        content = _message_text(msg)
         if not content:
             continue
 
@@ -206,17 +307,21 @@ def extract_session_context(
     Captures: original goal (first user message), last assistant turn,
     tool call count, and session boundaries.
     """
-    human_messages = [m for m in messages if m.get("role") == "human"]
-    assistant_messages = [m for m in messages if m.get("role") == "assistant"]
+    human_texts = [t for m in messages if m.get("role") == "human" and (t := _message_text(m))]
+    assistant_texts = [
+        t for m in messages if m.get("role") == "assistant" and (t := _message_text(m))
+    ]
 
-    first_user_msg = human_messages[0]["content"][:200] if human_messages else None
-    last_assistant_msg = assistant_messages[-1]["content"][:300] if assistant_messages else None
+    first_user_msg = human_texts[0][:200] if human_texts else None
+    last_assistant_msg = assistant_texts[-1][:300] if assistant_texts else None
 
-    # Count tool calls across all messages
+    # Count tool calls across all messages: flat-format "Tool Use:" markers
+    # plus structured tool_use blocks counted during normalization.
     tool_call_count = 0
     for msg in messages:
-        content = str(msg.get("content", ""))
-        tool_call_count += content.count("Tool Use:")
+        tool_call_count += _message_text(msg).count("Tool Use:")
+        tool_uses = msg.get("tool_use_count", 0)
+        tool_call_count += tool_uses if isinstance(tool_uses, int) else 0
 
     return {
         "goal": first_user_msg,
@@ -245,28 +350,43 @@ def extract_memories(
     )
 
 
+def _one_line(text: Any) -> str:
+    """Collapse whitespace so user text cannot break the markdown block structure."""
+    return re.sub(r"\s+", " ", str(text)).strip()
+
+
 def format_pending_updates(result: ExtractionResult) -> str:
-    """Format extraction results as a pending-updates markdown block."""
+    """Format extraction results as a pending-updates markdown block.
+
+    Every non-empty block starts with a dated ``## Pending — YYYY-MM-DD HH:MM``
+    header so the injector can prune the whole block (including its
+    Confirmations/Guidance subsections) once it is stale.
+    """
+    if not (result.corrections or result.confirmations or result.guidance_blocks):
+        return ""
+
     lines: list[str] = []
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     if result.corrections:
         lines.append(f"## Pending — {now} (corrections)")
         for c in result.corrections:
-            lines.append(f"- **{c['type']}**: \"{c['matched']}\"")
-            lines.append(f"  > {c['context'][:200]}")
+            lines.append(f'- **{c["type"]}**: "{_one_line(c["matched"])}"')
+            lines.append(f"  > {_one_line(c['context'])[:200]}")
         lines.append("")
+    else:
+        lines.append(f"## Pending — {now}")
 
     if result.confirmations:
         lines.append("### Confirmations")
         for c in result.confirmations:
-            lines.append(f"- **{c['type']}**: \"{c['full_text'][:120]}\"")
+            lines.append(f'- **{c["type"]}**: "{_one_line(c["full_text"])[:120]}"')
         lines.append("")
 
     if result.guidance_blocks:
         lines.append("### Guidance")
         for g in result.guidance_blocks:
-            lines.append(f"- {g[:200]}")
+            lines.append(f"- {_one_line(g)[:200]}")
         lines.append("")
 
     return "\n".join(lines).strip()
@@ -324,11 +444,11 @@ def main() -> None:
             if updates_file.exists():
                 existing = updates_file.read_text(encoding="utf-8").strip()
             combined = f"{existing}\n\n{updates}" if existing else updates
-            updates_file.write_text(combined.strip() + "\n", encoding="utf-8")
+            atomic_write_text(updates_file, combined.strip() + "\n")
 
         ctx = format_session_context(result)
         if ctx:
-            (memory_dir / "pending-session-context.md").write_text(ctx + "\n", encoding="utf-8")
+            atomic_write_text(memory_dir / "pending-session-context.md", ctx + "\n")
 
     # Also print summary to stdout
     print(
