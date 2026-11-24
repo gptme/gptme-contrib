@@ -4481,6 +4481,53 @@ def test_static_safeurl_rejects_protocol_relative(workspace: Path, tmp_path: Pat
     assert result.returncode == 0, result.stderr or result.stdout
 
 
+def test_static_esc_escapes_attribute_quotes(workspace: Path, tmp_path: Path):
+    """esc() output is interpolated into attribute values, so it must escape quotes.
+
+    The search results build ``'<a href="' + esc(url) + '">'`` where ``url`` comes
+    from a workspace file path, and the services table builds
+    ``data-service="' + esc(s.name) + '"``. A ``"`` in either value previously
+    closed the attribute (``textContent``/``innerHTML`` escapes only ``& < >``),
+    letting a crafted filename inject an event handler.
+    """
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is required to run the client-side esc()")
+    output = tmp_path / "site"
+    generate(workspace, output)
+    html = (output / "index.html").read_text()
+    snippet = _extract_js_function(html, "esc")
+    cases = {
+        'x" onfocus="alert(1)" autofocus x="': "x&quot; onfocus=&quot;alert(1)&quot; autofocus x=&quot;",
+        "it's": "it&#39;s",
+        "<b>&amp;</b>": "&lt;b&gt;&amp;amp;&lt;/b&gt;",
+        "plain": "plain",
+    }
+    script = (
+        snippet
+        + "\nconst cases = "
+        + json.dumps(cases)
+        + (
+            ";\nfor (const [input, expected] of Object.entries(cases)) {\n"
+            "  const got = esc(input);\n"
+            "  if (got !== expected) {\n"
+            "    console.error(JSON.stringify({input, expected, got}));\n"
+            "    process.exit(1);\n"
+            "  }\n"
+            "}\n"
+            "for (const v of [null, undefined]) {\n"
+            "  if (esc(v) !== '') { console.error('esc(' + v + ') = ' + esc(v)); process.exit(1); }\n"
+            "}\n"
+            "if (esc(42) !== '42') { console.error('esc(42) = ' + esc(42)); process.exit(1); }\n"
+        )
+    )
+    result = subprocess.run([node, "-e", script], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
 def test_narrow_viewport_containment_css_present(workspace: Path, tmp_path: Path):
     """Generated pages must carry the narrow-viewport containment block.
 
