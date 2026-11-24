@@ -27,6 +27,7 @@ const { Client, LocalAuth } = pkg;
 import qrcode from 'qrcode-terminal';
 import { spawn } from 'child_process';
 import { existsSync } from 'fs';
+import { logLineCount, replySince } from './gptme-log.js';
 
 // Config from env
 const AGENT_NAME = process.env.GPTME_AGENT || 'sven';
@@ -129,7 +130,10 @@ async function callGptme(sender, message) {
         message,
     ];
 
-    return spawnAndCapture(GPTME_CMD, args, extractResponse);
+    // Read the reply from the conversation log, not stdout (which also carries
+    // the echoed prompt, tool calls and exit chrome). Only rows this run wrote.
+    const since = logLineCount(convName);
+    return spawnAndCapture(GPTME_CMD, args, () => truncate(replySince(convName, since)));
 }
 
 /**
@@ -211,41 +215,12 @@ function spawnAndCapture(cmd, args, responseExtractor) {
     });
 }
 
-/**
- * Extract the last assistant response from gptme stdout.
- * gptme --non-interactive prints tool outputs and responses.
- * We want just the final text response.
- */
-function extractResponse(output) {
-    const lines = output.split('\n');
-    const responseLines = [];
-    let inResponse = false;
-
-    for (const line of lines) {
-        // gptme formats: "assistant: <text>" or just the response text
-        if (line.startsWith('assistant:') || line.startsWith('assistant ')) {
-            inResponse = true;
-            responseLines.push(line.replace(/^assistant:\s*/, '').replace(/^assistant\s+\w+:\s*/, ''));
-        } else if (inResponse && !line.startsWith('user:') && !line.startsWith('system:')) {
-            responseLines.push(line);
-        } else if (line.startsWith('user:') || line.startsWith('system:')) {
-            inResponse = false;
-        }
-    }
-
-    const response = responseLines.join('\n').trim();
-
-    // Fallback: return last non-empty lines if parsing fails
-    if (!response) {
-        const nonEmpty = lines.filter(l => l.trim()).slice(-10).join('\n');
-        return nonEmpty || null;
-    }
-
-    // WhatsApp has a 4096 char limit per message
+/** Fit a reply in one WhatsApp message (4096 char limit). */
+function truncate(response) {
+    if (!response) return null;
     if (response.length > 4000) {
         return response.slice(0, 3990) + '\n... (truncated)';
     }
-
     return response;
 }
 
