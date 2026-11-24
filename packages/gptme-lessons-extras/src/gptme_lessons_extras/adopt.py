@@ -9,7 +9,9 @@ Provides tools to:
 """
 
 import json
+import os
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -107,17 +109,27 @@ def adopt_lesson(
 
                     content = f"---\n{new_frontmatter}---\n{content[end_idx + 5 :]}"
 
-        # Write to local path
+        # Write to local path, remembering what was there (--force)
+        previous = local_path.read_text() if local_path.exists() else None
         with open(local_path, "w") as f:
             f.write(content)
 
-        # Record adoption in metrics (for future tracking)
-        record_adoption(
-            lesson_id=lesson_id,
-            agent_origin=network_meta.get("agent_origin", "unknown"),
-            adopted_at=datetime.now(timezone.utc).isoformat(),
-            lessons_dir=lessons_dir,
-        )
+        # Record adoption in metrics (for future tracking). If that fails,
+        # undo the lesson write: an adoption reported as failed must leave
+        # nothing behind, or the retry is refused with "Local lesson exists".
+        try:
+            record_adoption(
+                lesson_id=lesson_id,
+                agent_origin=network_meta.get("agent_origin", "unknown"),
+                adopted_at=datetime.now(timezone.utc).isoformat(),
+                lessons_dir=lessons_dir,
+            )
+        except Exception:
+            if previous is None:
+                local_path.unlink(missing_ok=True)
+            else:
+                local_path.write_text(previous)
+            raise
 
         return True, f"Adopted to {local_path}"
 
@@ -152,9 +164,20 @@ def record_adoption(
         {"lesson_id": lesson_id, "agent_origin": agent_origin, "adopted_at": adopted_at}
     )
 
-    # Save metrics
-    with open(metrics_file, "w") as f:
-        json.dump(metrics, f, indent=2)
+    # Save metrics via temp file + rename, so a failed write keeps the
+    # previous ledger instead of truncating it.
+    fd, tmp = tempfile.mkstemp(
+        dir=metrics_file.parent, prefix=f".{metrics_file.name}.", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(metrics, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, metrics_file)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 def batch_adopt(
