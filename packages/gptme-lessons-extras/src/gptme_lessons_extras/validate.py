@@ -24,6 +24,7 @@ from typing import List, Tuple
 
 import click
 import yaml
+from bobutils.frontmatter import split_frontmatter
 
 # Configuration
 TARGET_LENGTH = 100  # lines (soft target for primary lessons)
@@ -134,8 +135,7 @@ class LessonValidator:
         if not self.content.startswith("---"):
             return None
         try:
-            end_idx = self.content.index("---", 3)
-            frontmatter = yaml.safe_load(self.content[3:end_idx])
+            frontmatter = yaml.safe_load(split_frontmatter(self.content)[0])
         except (ValueError, yaml.YAMLError):
             return None
         if not isinstance(frontmatter, dict):
@@ -217,8 +217,8 @@ class LessonValidator:
         # Check frontmatter has required fields
         if self.content.startswith("---"):
             try:
-                end_idx = self.content.index("---", 3)
-                frontmatter = yaml.safe_load(self.content[3:end_idx])
+                frontmatter_text, body_text = split_frontmatter(self.content)
+                frontmatter = yaml.safe_load(frontmatter_text)
                 if not isinstance(frontmatter, dict):
                     self.errors.append("Frontmatter must be a mapping")
                     return
@@ -244,7 +244,7 @@ class LessonValidator:
             return
 
         # Check body is non-empty
-        body = self.content[end_idx + 3 :].strip()
+        body = body_text.strip()
         if not body:
             self.errors.append("SKILL.md body is empty")
 
@@ -293,12 +293,15 @@ class LessonValidator:
 
         try:
             # Extract frontmatter
-            end_idx = self.content.index("---", 3)
-            frontmatter_text = self.content[3:end_idx]
+            frontmatter_text, _ = split_frontmatter(self.content)
             frontmatter = yaml.safe_load(frontmatter_text)
 
             if frontmatter is None:
                 self.errors.append("Empty frontmatter")
+                return
+            # LX3: a list or scalar is not frontmatter; report instead of crashing
+            if not isinstance(frontmatter, dict):
+                self.errors.append("Frontmatter must be a mapping")
                 return
 
             # Only stable, write-once fields are allowed — see docstring above.
@@ -523,7 +526,7 @@ class LessonValidator:
     def _check_detection_content(self):
         """Check Detection section has meaningful content."""
         detection_match = re.search(
-            r"^##\s+Detection\s*$(.+?)(?=^##|\Z)",
+            r"^##\s+Detection\s*$(.+?)(?=^##(?!#)|\Z)",
             self.content,
             re.MULTILINE | re.DOTALL | re.IGNORECASE,
         )
@@ -730,7 +733,7 @@ class LessonValidator:
         """Check for minimum number of failure signals (original format)."""
         # Find Failure Signals section
         signals_match = re.search(
-            r"^##\s+Failure Signals\s*$(.+?)(?=^##|\Z)",
+            r"^##\s+Failure Signals\s*$(.+?)(?=^##(?!#)|\Z)",
             self.content,
             re.MULTILINE | re.DOTALL | re.IGNORECASE,
         )
@@ -756,7 +759,7 @@ class LessonValidator:
         """Check for minimum number of verification items (original format)."""
         # Find Verification Checklist section
         checklist_match = re.search(
-            r"^##\s+Verification Checklist\s*$(.+?)(?=^##|\Z)",
+            r"^##\s+Verification Checklist\s*$(.+?)(?=^##(?!#)|\Z)",
             self.content,
             re.MULTILINE | re.DOTALL | re.IGNORECASE,
         )
@@ -768,7 +771,7 @@ class LessonValidator:
 
         # Count checkbox items (lines with - [ ])
         checklist_items = re.findall(
-            r"^\s*[-*]\s+\[[ x]\]\s+.+$", checklist_content, re.MULTILINE
+            r"^\s*[-*]\s+\[[ xX]\]\s+.+$", checklist_content, re.MULTILINE
         )
 
         if len(checklist_items) < self.MIN_VERIFICATION_ITEMS:
@@ -781,7 +784,7 @@ class LessonValidator:
         """Check for minimum number of automation hooks (original format)."""
         # Find Automation Hooks section
         hooks_match = re.search(
-            r"^##\s+Automation Hooks\s*$(.+?)(?=^##|\Z)",
+            r"^##\s+Automation Hooks\s*$(.+?)(?=^##(?!#)|\Z)",
             self.content,
             re.MULTILINE | re.DOTALL | re.IGNORECASE,
         )
@@ -881,7 +884,10 @@ def validate_directory(
         # Skip symlinks pointing to gptme-contrib (validated separately)
         and not (f.is_symlink() and "gptme-contrib" in str(f.resolve()))
         # Skip draft/history/template directories unless the caller opts in
-        and (include_all or not EXCLUDED_DIRS.intersection(f.parts))
+        and (
+            include_all
+            or not EXCLUDED_DIRS.intersection(f.relative_to(directory).parts)
+        )
     ]
 
     if not lesson_files:
