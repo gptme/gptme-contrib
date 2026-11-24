@@ -59,6 +59,44 @@ def _ensure_trailing_newline(path: Path) -> None:
         os.fsync(f.fileno())
 
 
+def _parse_row(line: str) -> SessionRecord:
+    """Parse one stripped JSONL row the same way on every read path.
+
+    A row without a ``session_id`` would otherwise get a random id from
+    ``SessionRecord.__post_init__``, so a caller's loaded copy and the row
+    ``rewrite()`` re-reads would never match and the row would be duplicated
+    on every rewrite (#2325). Give such a row an id derived from its content
+    instead, so every read of the same bytes agrees, and record the invented
+    values (id and, if absent, the "now" timestamp) so ``_row_json`` can keep
+    them out of the file.
+
+    Raises the same exceptions as ``SessionRecord.from_dict(json.loads(line))``.
+    """
+    data = json.loads(line)
+    invented_id: str | None = None
+    if isinstance(data, dict) and not data.get("session_id"):
+        digest = hashlib.sha256(line.encode("utf-8")).hexdigest()[:12]
+        invented_id = f"noid-{digest}"
+        data = {**data, "session_id": invented_id}
+    record = SessionRecord.from_dict(data)
+    if invented_id is not None:
+        record._store_invented["session_id"] = invented_id
+        if not data.get("timestamp"):
+            record._store_invented["timestamp"] = record.timestamp
+    return record
+
+
+def _row_json(record: SessionRecord) -> str:
+    """Serialize a record for the store, omitting values the store invented."""
+    if not record._store_invented:
+        return record.to_json()
+    d = record.to_dict()
+    for key, value in record._store_invented.items():
+        if d.get(key) == value:
+            d.pop(key, None)
+    return json.dumps(d, default=str)
+
+
 def _default_sessions_dir() -> Path:
     """Return the default sessions directory (XDG-compliant).
 
@@ -246,7 +284,7 @@ class SessionStore:
                         # lone surrogates; treat the row as malformed rather than
                         # let them crash a later print/encode.
                         line.encode("utf-8")
-                        records.append(SessionRecord.from_dict(json.loads(line)))
+                        records.append(_parse_row(line))
                     except (json.JSONDecodeError, UnicodeEncodeError, TypeError, AttributeError):
                         continue
         return records
@@ -333,7 +371,7 @@ class SessionStore:
                             continue
                         try:
                             line.encode("utf-8")  # lone surrogates = undecodable bytes
-                            rec = SessionRecord.from_dict(json.loads(line))
+                            rec = _parse_row(line)
                         except (
                             json.JSONDecodeError,
                             UnicodeEncodeError,
@@ -346,15 +384,15 @@ class SessionStore:
                             continue
                         replacements = by_id.get(rec.session_id)
                         if replacements is None:
-                            out_lines.append(rec.to_json() + "\n")
+                            out_lines.append(_row_json(rec) + "\n")
                         elif replacements:
                             index = replacements.popleft()
                             emitted_indices.add(index)
-                            out_lines.append(records[index].to_json() + "\n")
+                            out_lines.append(_row_json(records[index]) + "\n")
                         # Excess on-disk copies of an upserted id are superseded.
 
             out_lines.extend(
-                record.to_json() + "\n"
+                _row_json(record) + "\n"
                 for index, record in enumerate(records)
                 if index not in emitted_indices
             )

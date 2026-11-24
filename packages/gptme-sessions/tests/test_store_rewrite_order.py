@@ -116,3 +116,88 @@ def test_excess_input_rows_append_in_input_order(tmp_path: Path) -> None:
         ("dup", "second"),
         ("new", "new-second"),
     ]
+
+
+def test_rewrite_does_not_duplicate_id_less_rows(tmp_path: Path) -> None:
+    """An id-less legacy row survives load_all() -> rewrite() cycles unchanged (#2325)."""
+    store = SessionStore(sessions_dir=tmp_path)
+    legacy = {"harness": "claude-code", "model": "opus", "outcome": "productive"}
+    store.path.write_text(
+        json.dumps(legacy)
+        + "\n"
+        + json.dumps({"session_id": "keep01", "harness": "gptme", "outcome": "noop"})
+        + "\n",
+        encoding="utf-8",
+    )
+
+    snapshots = []
+    for _ in range(3):
+        records = store.load_all()
+        assert len(records) == 2
+        store.rewrite(records)
+        snapshots.append(store.path.read_text(encoding="utf-8"))
+
+    rows = [json.loads(line) for line in snapshots[-1].splitlines()]
+    assert len(rows) == 2
+    # Neither an invented id nor an invented "now" timestamp reaches the file.
+    assert "session_id" not in rows[0]
+    assert "timestamp" not in rows[0]
+    assert {k: rows[0][k] for k in legacy} == legacy
+    assert rows[1]["session_id"] == "keep01"
+    # Repeated cycles are a fixed point: no copies, no moving dates.
+    assert snapshots[0] == snapshots[1] == snapshots[2]
+
+
+def test_id_less_row_gets_stable_id_across_loads(tmp_path: Path) -> None:
+    store = SessionStore(sessions_dir=tmp_path)
+    store.path.write_text(json.dumps({"model": "opus"}) + "\n", encoding="utf-8")
+
+    first, second = store.load_all()[0], store.load_all()[0]
+
+    assert first.session_id == second.session_id
+    assert first.session_id.startswith("noid-")
+
+
+def test_update_to_id_less_row_replaces_it_in_place(tmp_path: Path) -> None:
+    store = SessionStore(sessions_dir=tmp_path)
+    store.path.write_text(
+        json.dumps({"model": "opus", "timestamp": "2026-01-02T03:04:05+00:00"})
+        + "\n"
+        + json.dumps({"session_id": "b"})
+        + "\n",
+        encoding="utf-8",
+    )
+
+    records = store.load_all()
+    records[0].outcome = "productive"
+    store.rewrite(records)
+
+    rows = [json.loads(line) for line in store.path.read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == 2
+    assert rows[0]["outcome"] == "productive"
+    # A timestamp that was on disk is real data and is kept; the id stays absent.
+    assert rows[0]["timestamp"] == "2026-01-02T03:04:05+00:00"
+    assert "session_id" not in rows[0]
+    assert rows[1]["session_id"] == "b"
+
+
+def test_caller_assigned_id_on_id_less_row_is_persisted(tmp_path: Path) -> None:
+    store = SessionStore(sessions_dir=tmp_path)
+    store.path.write_text(json.dumps({"model": "opus"}) + "\n", encoding="utf-8")
+
+    record = store.load_all()[0]
+    record.session_id = "assigned"
+    record.timestamp = "2026-01-02T03:04:05+00:00"
+    store.rewrite([record])
+
+    rows = [json.loads(line) for line in store.path.read_text(encoding="utf-8").splitlines()]
+    # The derived id no longer matches the re-read row, so the caller's copy is
+    # appended (upsert semantics); its explicitly set values are written.
+    assert rows[-1]["session_id"] == "assigned"
+    assert rows[-1]["timestamp"] == "2026-01-02T03:04:05+00:00"
+
+
+def test_store_invented_marker_is_never_serialized() -> None:
+    record = SessionRecord.from_dict({"session_id": "x", "_store_invented": {"a": 1}})
+    assert record._store_invented == {}
+    assert "_store_invented" not in record.to_dict()
