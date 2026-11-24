@@ -44,8 +44,9 @@ The only runtime dependency is `tomli` on Python 3.10.
 ## Configure
 
 Copy [`harness-quota.example.toml`](./harness-quota.example.toml) to
-`~/.config/gptme/harness-quota.toml` (or gptme's configured config dir) and
-replace the placeholder values:
+`~/.config/gptme/harness-quota.toml` and replace the placeholder values. The
+default path is fixed (`$XDG_CONFIG_HOME` and gptme's own config are not
+consulted); pass `load_quota_config(path=...)` to read another file.
 
 ```toml
 claude_plan_tier = "max-5x"      # optional
@@ -106,7 +107,7 @@ Exported from `gptme_usage`:
 | Name | Purpose |
 |---|---|
 | `load_quota_config(path=None)` | Load `HarnessQuotaConfig` from TOML (empty config on any failure) |
-| `HarnessQuotaConfig` | Dataclass: `price_table`, `tps_table`, `quota_sources`, `model_routes`, `openrouter_key_contexts`, `claude_plan_tier` |
+| `HarnessQuotaConfig` | Dataclass: `price_table`, `tps_table`, `quota_sources`, `model_routes`, `openrouter_key_contexts`, `claude_plan_tier`, `cache_read_price_table` |
 | `estimate_session_cost(harness, model, *, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, token_count, config)` | Cache-aware USD estimate |
 | `estimate_tokens_from_duration(harness, model, duration_seconds, *, config)` | Tokens from duration × configured TPS |
 | `pricing_key_for_model(harness, model, config=None)` | Normalize model names (versioned Claude IDs, provider-qualified gptme routes, `@provider` pins) to a pricing-table key |

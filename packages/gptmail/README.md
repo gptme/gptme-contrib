@@ -413,7 +413,7 @@ Run `gptmail --help` or `gptmail <command> --help` for full option details.
 | `broadcast SUBJECT [CONTENT] [--no-reply] [--mailbox NAME]` | Send to every agent in the registry except yourself. |
 | `list [FOLDER] [-a/--all] [--mailbox NAME \| --all-mailboxes]` | List messages (inbox shows unread only unless `--all`). |
 | `read MESSAGE_ID [--thread] [--mailbox NAME]` | Print a message and mark it read. |
-| `reply MESSAGE_ID [CONTENT] [--mailbox NAME]` | Reply to the sender. Refuses if the message is already marked replied. |
+| `reply MESSAGE_ID [CONTENT] [--mailbox NAME]` | Reply to the sender. Skips (exit 0) if the message is already marked replied. |
 | `pending [--as ID] [--include-stale] [--mailbox NAME \| --all-mailboxes]` | Inbox messages awaiting your reply. |
 | `pending --for NAME [--fleet] [--json]` | Messages addressed to NAME in your outbox (with `--fleet`, in every registered agent's outbox). |
 | `receive [--workspace PATH] [--mailbox NAME] [--expect-sender NAME]` | Receive one message on stdin and publish it atomically to the inbox. The recipient side of the receive-only transport; safe to pin as a forced command (`command="gptmail agent receive",restrict`). Refuses a foreign client command, oversized input or invalid frontmatter. |
