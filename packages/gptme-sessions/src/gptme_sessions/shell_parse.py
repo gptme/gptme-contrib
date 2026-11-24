@@ -341,26 +341,39 @@ def _first_group(m: re.Match[str]) -> str:
 
 
 def _subshell_spans(cmd: str) -> list[tuple[int, int]]:
-    """(open, close) offsets of each balanced ``( … )`` outside quotes."""
+    """(open, close) offsets of each balanced ``( … )`` the shell runs as a subshell.
+
+    Parens inside single quotes are literal; a ``$( … )`` inside double quotes
+    is still a command substitution, so it opens a span and resets quoting
+    until its ``)``, after which the enclosing double quote resumes.
+    """
     spans: list[tuple[int, int]] = []
-    stack: list[int] = []
+    stack: list[tuple[int, str | None]] = []  # (open offset, quote to restore)
     quote: str | None = None
     i = 0
     while i < len(cmd):
         ch = cmd[i]
-        if quote:
-            if ch == "\\" and quote == '"':
+        if quote == "'":
+            if ch == "'":
+                quote = None
+        elif quote == '"':
+            if ch == "\\":
                 i += 1
-            elif ch == quote:
+            elif ch == '"':
+                quote = None
+            elif ch == "$" and cmd.startswith("(", i + 1):
+                i += 1
+                stack.append((i, quote))
                 quote = None
         elif ch == "\\":
             i += 1
         elif ch in "'\"":
             quote = ch
         elif ch == "(":
-            stack.append(i)
+            stack.append((i, None))
         elif ch == ")" and stack:
-            spans.append((stack.pop(), i))
+            start, quote = stack.pop()
+            spans.append((start, i))
         i += 1
     return spans
 

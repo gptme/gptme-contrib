@@ -291,6 +291,10 @@ class TestQuotedAndSubshellForms:
             # cd inside a subshell does not move the parent shell.
             ("(cd /x && make) && git commit -m y", "/repo", "/repo"),
             ("echo $(cd /x; pwd) && git commit -m y", "/repo", "/repo"),
+            # A double-quoted $( … ) is still a subshell; single quotes are literal.
+            ('echo "$(cd /x; pwd)" && git commit -m y', "/repo", "/repo"),
+            ('echo "a $(cd /x; pwd) b" && cd /y && git commit -m y', "/repo", "/y"),
+            ("echo '$(' && cd /x && git commit -m y", "/repo", "/x"),
             # ...but a commit inside the same subshell does run there.
             ("(cd /x && git commit -m y)", "/repo", "/x"),
             ("(cd /x && make) && cd /y && git commit -m y", "/repo", "/y"),
