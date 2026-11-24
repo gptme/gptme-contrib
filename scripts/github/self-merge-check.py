@@ -3006,6 +3006,13 @@ def gptme_core_route_to_erik_reasons(
 # a new one / one colliding with a package that already implements this?
 _GPTME_CONTRIB_REPO = "gptme/gptme-contrib"
 
+# Categories a category waiver can assign to a gptme-contrib PR. Each one clears
+# a placement/category refusal, which is the precondition that otherwise routes
+# the PR through the agent-literal detector — so the hold is re-checked for them.
+_CONTRIB_WAIVED_CATEGORIES = frozenset(
+    {"epic-slice", "operator-approved", "merge-policy-tier-0"}
+)
+
 # Bare word literals, not substrings — "erik" must not fire on a variable
 # named "erikson_score" (custom, not \b: \w treats "_" as a word char, so a
 # plain \b boundary would MISS "BOB_SPECIFIC_WEIGHT" — snake_case identifiers
@@ -4831,6 +4838,25 @@ def evaluate_pr(
             result.warnings.append(epic_waiver)
             if not category_reasons:
                 result.category = "epic-slice"
+
+    # Every waiver above clears a placement/category refusal, and that refusal
+    # is what kept a contrib PR out of the agent-literal detector (computed
+    # above only when the cheap path checks left a category). Re-run it for a
+    # waived contrib PR so a declaration cannot smuggle agent-name literals
+    # past a hold that is deliberately retained.
+    if (
+        repo == _GPTME_CONTRIB_REPO
+        and result.category in _CONTRIB_WAIVED_CATEGORIES
+        # No point fetching patch text for a PR that is already refused: the
+        # hold can only add a reason, never make an ineligible PR eligible.
+        and not category_reasons
+        and not result.reasons
+    ):
+        file_shapes = _fetch_contrib_pr_file_shapes(repo, number)
+        agent_literal_reasons = contrib_agent_literal_reasons(file_shapes)
+        if agent_literal_reasons:
+            category_reasons = [*agent_literal_reasons]
+            result.category = None
     result.reasons.extend(category_reasons)
 
     review_decision = pr.get("reviewDecision")

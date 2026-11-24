@@ -174,7 +174,8 @@ def test_shipped_policy_lists_the_first_epic() -> None:
     assert not any(r.startswith("activitywatch/") for r in mp.epic_repos(policy))
 
 
-def test_evaluate_pr_passes_body_and_marks_epic_slice(monkeypatch) -> None:
+def _stub_clean_pr(monkeypatch, *, agent_literal_reasons=()) -> None:
+    """Stub evaluate_pr down to the category/waiver stage for a contrib PR."""
     monkeypatch.setattr(
         smc,
         "fetch_pr",
@@ -217,6 +218,14 @@ def test_evaluate_pr_passes_body_and_marks_epic_slice(monkeypatch) -> None:
     monkeypatch.setattr(
         smc, "operator_approval_category_waiver", lambda r, **k: (r, None)
     )
+    monkeypatch.setattr(smc, "_fetch_contrib_pr_file_shapes", lambda *a: [])
+    monkeypatch.setattr(
+        smc, "contrib_agent_literal_reasons", lambda *a: list(agent_literal_reasons)
+    )
+
+
+def test_evaluate_pr_passes_body_and_marks_epic_slice(monkeypatch) -> None:
+    _stub_clean_pr(monkeypatch)
     seen: dict = {}
 
     def fake_epic(reasons, *, repo, body):
@@ -229,3 +238,17 @@ def test_evaluate_pr_passes_body_and_marks_epic_slice(monkeypatch) -> None:
     assert result.category == "epic-slice"
     assert "epic slice" in result.warnings
     assert PLACEMENT not in result.reasons
+
+
+def test_epic_waiver_cannot_skip_the_agent_literal_hold(monkeypatch) -> None:
+    """The placement refusal that an epic clears is also what keeps a contrib
+    PR out of the agent-literal detector. Clearing it must not drop that hold."""
+    hold = "Agent-name literal ('bob_config') in non-test code routes to Erik"
+    _stub_clean_pr(monkeypatch, agent_literal_reasons=[hold])
+    monkeypatch.setattr(smc, "epic_category_waiver", lambda r, **k: ([], "epic slice"))
+
+    result = smc.evaluate_pr(REPO, 1, workspace_repos=[REPO])
+
+    assert hold in result.reasons
+    assert result.category is None
+    assert not result.eligible
