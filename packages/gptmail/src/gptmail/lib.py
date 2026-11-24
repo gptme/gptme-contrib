@@ -163,6 +163,20 @@ _SYNC_HEADERS = (
     "Content-Type",
 )
 
+_HEADER_LINE_BREAK_RE = re.compile(r"[\r\n]+")
+
+
+def _single_line_header(value: object) -> str:
+    """Collapse line breaks in a decoded header value to single spaces.
+
+    An RFC 2047 encoded-word can decode to CR or LF. Written verbatim into the
+    markdown header block, that line break would start a forged header (e.g. a
+    ``To:`` naming the agent) or end the block early, pushing Message-ID and
+    In-Reply-To into the body. Read-back uses universal newlines, so a lone CR
+    is a line break too.
+    """
+    return _HEADER_LINE_BREAK_RE.sub(" ", str(value))
+
 
 def _header_values_ci(headers: dict[str, str], names: tuple[str, ...]) -> list[str]:
     """Return header values matching ``names``, case-insensitively."""
@@ -2160,7 +2174,7 @@ class AgentEmail:
                     headers = []
                     for key in _SYNC_HEADERS:
                         if key in email_msg:
-                            headers.append(f"{key}: {email_msg[key]}")
+                            headers.append(f"{key}: {_single_line_header(email_msg[key])}")
 
                     # Handle multipart messages
                     if email_msg.is_multipart():
