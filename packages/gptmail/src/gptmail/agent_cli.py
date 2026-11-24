@@ -1599,7 +1599,10 @@ def _pulled_binding_error(path: Path, *, peer: str, recipient: str) -> str | Non
     peer, the same binding ``receive`` enforces on its per-sender key. ``to``
     is checked against the fetched file, not the peer-supplied listing row.
     """
-    meta = meta_of(path)
+    try:
+        meta = meta_of(path)
+    except ValueError:  # UnicodeDecodeError: undecodable bytes refuse this file only
+        return "not valid UTF-8 text"
     if meta is None:
         return "no parseable frontmatter"
     sender = str(meta.get("from") or "").strip().lower()

@@ -205,7 +205,8 @@ def test_pull_refuses_message_claiming_another_sender(pull_workspace: Path) -> N
 
     result = CliRunner().invoke(agent, ["pull"])
     assert result.exit_code == 0, result.output
-    assert "refusing" in result.output and "carol" in result.output
+    # The filename embeds "carol" too, so pin the refusal reason itself.
+    assert "'from' is 'carol', not the peer 'gordon'" in result.output
 
     local_inbox = pull_workspace / "erik" / "messages" / "inbox"
     assert not list(local_inbox.glob("*.md")), "forged message must not be imported"
@@ -226,10 +227,36 @@ def test_pull_refuses_message_addressed_to_someone_else(
 
     result = CliRunner().invoke(agent, ["pull"])
     assert result.exit_code == 0, result.output
-    assert "refusing" in result.output
+    assert "'to' does not name 'erik'" in result.output
 
     local_inbox = pull_workspace / "erik" / "messages" / "inbox"
     assert not list(local_inbox.glob("*.md"))
+
+
+def test_pull_refuses_undecodable_message_and_keeps_pulling(
+    pull_workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pulled file with invalid UTF-8 is refused alone; later messages still import."""
+    gordon_outbox = pull_workspace / "gordon" / "messages" / "outbox"
+    bad = "20260101-000000-000000-gordon-Bad_bytes.md"
+    (gordon_outbox / bad).write_bytes(b"---\nfrom: gordon\nto: erik\n---\n\n\xff\xfe\n")
+    good = _write_outbox_msg(gordon_outbox, sender="gordon", recipient="erik", subject="Fine")
+    monkeypatch.setattr(
+        agent_cli,
+        "_remote_pending_rows",
+        lambda *args, **kwargs: [
+            {"file": bad, "mailbox": "default", "subject": "Bad bytes"},
+            {"file": good, "mailbox": "default", "subject": "Fine"},
+        ],
+    )
+
+    result = CliRunner().invoke(agent, ["pull"])
+    assert result.exit_code == 0, result.output
+    assert f"refusing {bad} from gordon: not valid UTF-8 text" in result.output
+
+    local_inbox = pull_workspace / "erik" / "messages" / "inbox"
+    assert sorted(p.name for p in local_inbox.glob("*.md")) == [good]
+    assert not list(local_inbox.glob(".delivery-*")), "temp file must be cleaned up"
 
 
 def test_pull_deduplicates_on_repull(pull_workspace: Path) -> None:
