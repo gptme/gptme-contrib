@@ -17,7 +17,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import shutil
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -685,7 +685,7 @@ class SlotManager:
                 return SwitchResult(ok=False, reason=msg)
 
         live = self.live_path
-        tmp = self.creds_dir / (self.live_name + f".tmp{os.getpid()}")
+        tmp = _unique_tmp(self.creds_dir / self.live_name)
         try:
             tmp.symlink_to(self.slot_template.format(sub=sub))
             os.replace(tmp, live)  # atomic rename — no window where live_path is absent
@@ -757,8 +757,11 @@ class SlotManager:
             return SwitchResult(ok=False, reason="live file missing")
 
         try:
-            payload = json.loads(live.read_text())
-        except (OSError, json.JSONDecodeError) as e:
+            # Validate and install the SAME bytes: a second read could see a
+            # concurrent writer mid-rewrite and install a partial file.
+            live_bytes = live.read_bytes()
+            payload = json.loads(live_bytes)
+        except (OSError, ValueError) as e:  # ValueError: JSON or UTF-8 decode
             return SwitchResult(
                 ok=False,
                 reason=f"live file unreadable or malformed JSON: {e}",
@@ -802,11 +805,16 @@ class SlotManager:
                 )
 
         target_slot = self.slot_path(sub)
-        slot_tmp = target_slot.with_suffix(target_slot.suffix + f".tmp{os.getpid()}")
-        link_tmp = self.creds_dir / (self.live_name + f".tmp{os.getpid()}")
+        # Unique per call: a fixed per-pid name let two switches in one process
+        # unlink each other's temp files.
+        slot_tmp = _unique_tmp(target_slot)
+        link_tmp = _unique_tmp(self.creds_dir / self.live_name)
         try:
-            shutil.copy2(live, slot_tmp)
-            os.chmod(slot_tmp, 0o600)
+            # Created 0o600 with O_EXCL: copy2-then-chmod left the credential
+            # group/world-readable (umask 022) until the chmod ran.
+            fd = os.open(str(slot_tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(live_bytes)
             os.replace(slot_tmp, target_slot)
             link_tmp.symlink_to(self.slot_template.format(sub=sub))
             os.replace(link_tmp, live)
@@ -831,3 +839,8 @@ class SlotManager:
     def _log(self, msg: str) -> None:
         if self.logger is not None:
             self.logger(msg)
+
+
+def _unique_tmp(target: Path) -> Path:
+    """Sibling temp path unique per call (pid alone collides across threads)."""
+    return target.with_name(f"{target.name}.tmp{os.getpid()}.{uuid.uuid4().hex}")
