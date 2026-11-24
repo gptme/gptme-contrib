@@ -397,6 +397,32 @@ class TestCostCommand:
         assert result["priced_count"] == 2
         assert result["total_cost"] == pytest.approx(0.0123)
 
+    def test_counts_each_session_once(self, tmp_path: Path):
+        """``dedup`` duplicates and resumed snapshots are not summed (#2331)."""
+        resumed = "11111111-2222-3333-4444-555555555555"
+        rows = [
+            {"session_id": "aaaaaaaa", "cost_usd": 1.0},
+            {"session_id": "bbbbbbbb", "cost_usd": 1.0, "duplicate_of": "aaaaaaaa"},
+            # A resumed session records cumulative usage: the last snapshot wins.
+            {"session_id": resumed, "cost_usd": 1.0},
+            {"session_id": resumed.upper(), "cost_usd": 1.5},
+            # Recurring 4-hex labels are not unique, so both are kept.
+            {"session_id": "abcd", "cost_usd": 0.25},
+            {"session_id": "abcd", "cost_usd": 0.25},
+        ]
+        (tmp_path / "session-records.jsonl").write_text(
+            "".join(
+                json.dumps({"timestamp": "2026-11-24T08:00:00+00:00", **row}) + "\n" for row in rows
+            )
+        )
+
+        rc, out = _invoke(["cost", "--json"], tmp_path)
+
+        assert rc == 0, out
+        result = json.loads(out)
+        assert result["session_count"] == 4
+        assert result["total_cost"] == pytest.approx(3.0)
+
 
 # -- show --------------------------------------------------------------------
 
