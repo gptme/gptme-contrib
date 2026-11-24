@@ -3107,3 +3107,43 @@ def test_new_gitlink_with_unresolvable_default_branch_names_the_real_gap(
     stderr = result.stderr.lower()
     assert "no origin remote" not in stderr, f"misleading refusal: {result.stderr!r}"
     assert "default branch" in stderr, f"got: {result.stderr!r}"
+
+
+@pytest.mark.skipif(
+    subprocess.run(["sh", "-c", "command -v fuser"], capture_output=True).returncode
+    != 0,
+    reason="fuser not installed",
+)
+def test_lock_holder_diagnosis_skips_waiters_own_subshells(tmp_path: Path):
+    """#1771: subshells that inherit the waiter's lock fd are not holders."""
+    lockfile = tmp_path / "commit.lock"
+    lockfile.touch()
+    # A real holder outside the waiter's process tree.
+    other = subprocess.Popen(
+        ["sh", "-c", 'exec 8>"$1"; exec sleep 30', "sh", str(lockfile)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    harness = textwrap.dedent(
+        f"""
+        eval "$(sed -n '/^_pid_descends_from_self()/,/^}}/p;/^get_commit_lock_holder_pids()/,/^}}/p' {SAFE_COMMIT})"
+        exec 9>"{lockfile}"
+        sleep 30 >/dev/null 2>&1 &   # own child: inherits fd 9
+        own=$!
+        sleep 0.5
+        echo "own=$own"
+        echo "holders=$(get_commit_lock_holder_pids "{lockfile}")"
+        kill $own
+        """
+    )
+    try:
+        out = subprocess.run(
+            ["bash", "-c", harness], capture_output=True, text=True, timeout=30
+        ).stdout
+    finally:
+        other.kill()
+        other.wait()
+    own = out.split("own=", 1)[1].split()[0]
+    holders = out.split("holders=", 1)[1].split()
+    assert holders == [str(other.pid)]
+    assert own not in holders

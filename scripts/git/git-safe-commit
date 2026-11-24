@@ -1137,6 +1137,20 @@ resolve_pre_commit_hook() {
 # hunt while every other session in the shared worktree is also stuck on the same
 # flock. get_commit_lock_holder_pids/lslocks/lsof degrade gracefully when the
 # corresponding tool isn't installed, so this works on a minimal container too.
+# True when PID is this shell or one of its descendants. Subshells and children
+# inherit the lock fd, so fuser lists them beside the real holder (#1771).
+_pid_descends_from_self() {
+    local pid="$1" stat rest depth=0
+    while [ -n "$pid" ] && [ "$pid" -gt 1 ] && [ "$depth" -lt 64 ]; do
+        [ "$pid" = "$$" ] && return 0
+        stat="$(cat "/proc/$pid/stat" 2>/dev/null)" || return 1
+        rest="${stat##*) }"   # comm may contain spaces; ppid is field 2 after it
+        pid="$(printf '%s' "$rest" | cut -d' ' -f2)"
+        depth=$((depth + 1))
+    done
+    return 1
+}
+
 get_commit_lock_holder_pids() {
     local lockfile="$1"
     local raw pid
@@ -1156,7 +1170,12 @@ get_commit_lock_holder_pids() {
                 continue
                 ;;
         esac
-        if [ "$pid" != "$$" ]; then
+        # fuser also sees its own short-lived capture subshell; a PID that is
+        # already gone cannot be holding the lock.
+        if [ -d /proc/self ] && [ ! -d "/proc/$pid" ]; then
+            continue
+        fi
+        if ! _pid_descends_from_self "$pid"; then
             holder_pids+=("$pid")
         fi
     done
