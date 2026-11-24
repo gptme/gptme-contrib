@@ -9,6 +9,7 @@ Subcommand groups:
 
 from __future__ import annotations
 
+import hashlib
 import os
 import subprocess
 import sys
@@ -17,7 +18,83 @@ from pathlib import Path
 
 import click
 
-from .forum import Comment, Forum, Post, find_mentions, get_agent_name
+from .forum import (
+    Comment,
+    Forum,
+    Post,
+    find_mentions,
+    get_agent_name,
+    safe_component,
+    write_exclusive,
+)
+
+
+def _name(value: str, what: str) -> str:
+    """Validate a project/author/recipient name as a single path component."""
+    try:
+        return safe_component(value, what)
+    except ValueError as e:
+        raise click.BadParameter(str(e)) from None
+
+
+def _parse_since(since: str) -> datetime:
+    """Parse --since; date-only/naive values are UTC, bad values are usage errors."""
+    try:
+        dt = datetime.fromisoformat(since.replace("Z", "+00:00"))
+    except ValueError:
+        raise click.BadParameter(
+            f"not an ISO date/datetime: {since!r}", param_hint="--since"
+        ) from None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _first_line(text: str, width: int) -> str:
+    return (text.splitlines() or [""])[0][:width]
+
+
+def _edit_body(template: str) -> str:
+    """Open $EDITOR on ``template``; return the body, or "" if aborted/unchanged."""
+    import tempfile
+
+    editor = os.environ.get("EDITOR", "vi")
+    with tempfile.NamedTemporaryFile(suffix=".md", mode="w", delete=False) as f:
+        f.write(template)
+        tmp = f.name
+    try:
+        rc = subprocess.run([editor, tmp]).returncode
+        body = Path(tmp).read_text().strip()
+    finally:
+        Path(tmp).unlink(missing_ok=True)
+    if rc != 0 or body == template.strip():
+        return ""
+    return body
+
+
+def _get_post(forum: Forum, ref: str) -> Post | None:
+    try:
+        return forum.get_post(ref)
+    except ValueError as e:
+        raise click.UsageError(str(e)) from None
+
+
+def _default_state_file(ctx: click.Context, kind: str, agent_name: str) -> Path:
+    """Default unread-state path; keyed by forum when --forum-dir is given."""
+    suffix = agent_name
+    if ctx.obj and ctx.obj.get("forum_dir"):
+        root = _find_forum(ctx.obj).root.resolve()
+        suffix += "-" + hashlib.sha1(str(root).encode()).hexdigest()[:8]
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return Path(result.stdout.strip()) / f"state/forum-{kind}-{suffix}.txt"
+    except Exception:
+        return Path(f"/tmp/agentboard-{kind}-{suffix}.txt")
 
 
 def _find_forum(ctx_obj: dict | None = None) -> Forum:
@@ -103,23 +180,17 @@ def post_create(
     Example:\n
         agentboard post create gptme "Lazy timeout fix" -b "Fixed in #2148. @alice please verify." -t perf
     """
+    _name(project, "project")
+    agent = _name(author or get_agent_name(), "author")
     forum = _find_forum(ctx.obj)
     forum.ensure_exists()
     if not body:
         # Open editor for body
-        import tempfile
-
-        editor = os.environ.get("EDITOR", "vi")
-        with tempfile.NamedTemporaryFile(suffix=".md", mode="w", delete=False) as f:
-            f.write(f"# {title}\n\n")
-            tmp = f.name
-        subprocess.run([editor, tmp])
-        body = Path(tmp).read_text().strip()
-        Path(tmp).unlink(missing_ok=True)
+        body = _edit_body(f"# {title}\n\n")
+    body = body.strip()
     if not body:
         click.echo("Aborted: empty body.", err=True)
         sys.exit(1)
-    agent = author or get_agent_name()
     p = Post.create(
         project_dir=forum.project_dir(project),
         project=project,
@@ -171,7 +242,7 @@ def post_read(ctx: click.Context, ref: str) -> None:
         agentboard post read gptme/2026-04-15-lazy-fix
     """
     forum = _find_forum(ctx.obj)
-    p = forum.get_post(ref)
+    p = _get_post(forum, ref)
     if not p:
         click.echo(f"Post not found: {ref}", err=True)
         sys.exit(1)
@@ -201,25 +272,18 @@ def comment_add(
     Example:\n
         agentboard comment add gptme/2026-04-15-lazy-fix "Looks good @bob!"
     """
+    agent = _name(author or get_agent_name(), "author")
     forum = _find_forum(ctx.obj)
-    p = forum.get_post(ref)
+    p = _get_post(forum, ref)
     if not p:
         click.echo(f"Post not found: {ref}", err=True)
         sys.exit(1)
-    if not body:
-        import tempfile
-
-        editor = os.environ.get("EDITOR", "vi")
-        with tempfile.NamedTemporaryFile(suffix=".md", mode="w", delete=False) as f:
-            f.write("")
-            tmp = f.name
-        subprocess.run([editor, tmp])
-        body = Path(tmp).read_text().strip()
-        Path(tmp).unlink(missing_ok=True)
+    if body is None:
+        body = _edit_body("")
+    body = body.strip()
     if not body:
         click.echo("Aborted: empty body.", err=True)
         sys.exit(1)
-    agent = author or get_agent_name()
     idx = p.next_comment_index()
     c = Comment.create(post_dir=p.comment_dir, author=agent, body=body, index=idx)
     click.echo(f"Comment added: {c.path}")
@@ -263,24 +327,16 @@ def mentions(
     forum = _find_forum(ctx.obj)
     agent_name = agent or get_agent_name()
     if unread:
-        sf: Path | None = Path(state_file) if state_file else None
-        if sf is None:
-            try:
-                result = subprocess.run(
-                    ["git", "rev-parse", "--show-toplevel"],
-                    capture_output=True,
-                    text=True,
-                    check=True,
-                )
-                repo_root = Path(result.stdout.strip())
-                sf = repo_root / f"state/forum-mentions-{agent_name}.txt"
-            except Exception:
-                sf = Path(f"/tmp/agentboard-mentions-{agent_name}.txt")
+        sf = (
+            Path(state_file)
+            if state_file
+            else _default_state_file(ctx, "mentions", agent_name)
+        )
         items = forum.unread_mentions(agent_name, state_file=sf)
     else:
         since_dt: datetime | None = None
         if since:
-            since_dt = datetime.fromisoformat(since.replace("Z", "+00:00"))
+            since_dt = _parse_since(since)
         items = forum.mentions_for(agent_name, since=since_dt)
 
     if not items:
@@ -293,13 +349,13 @@ def mentions(
             click.echo(
                 f"  [post]    {item.ref}  by {item.author}  ({item.date.strftime('%Y-%m-%d %H:%M')})"
             )
-            click.echo(f"            {item.body[:120].splitlines()[0]}")
+            click.echo(f"            {_first_line(item.body, 120)}")
         else:
             assert isinstance(item, Comment)
             click.echo(
-                f"  [comment] {item.path.name}  by {item.author}  ({item.date.strftime('%Y-%m-%d %H:%M')})"
+                f"  [comment] {item.post_ref}  by {item.author}  ({item.date.strftime('%Y-%m-%d %H:%M')})"
             )
-            click.echo(f"            {item.body[:120].splitlines()[0]}")
+            click.echo(f"            {_first_line(item.body, 120)}")
 
 
 # ---------------------------------------------------------------------------
@@ -349,24 +405,16 @@ def digest(
     agent_name = agent or get_agent_name()
 
     if unread:
-        sf: Path | None = Path(state_file) if state_file else None
-        if sf is None:
-            try:
-                result = subprocess.run(
-                    ["git", "rev-parse", "--show-toplevel"],
-                    capture_output=True,
-                    text=True,
-                    check=True,
-                )
-                repo_root = Path(result.stdout.strip())
-                sf = repo_root / f"state/forum-digest-{agent_name}.txt"
-            except Exception:
-                sf = Path(f"/tmp/agentboard-digest-{agent_name}.txt")
+        sf = (
+            Path(state_file)
+            if state_file
+            else _default_state_file(ctx, "digest", agent_name)
+        )
         data = forum.unread_digest(agent=agent_name, state_file=sf)
     else:
         since_dt = None
         if since:
-            since_dt = datetime.fromisoformat(since.replace("Z", "+00:00"))
+            since_dt = _parse_since(since)
         data = forum.digest(agent=agent_name, since=since_dt)
 
     new_posts = data["new_posts"]
@@ -420,7 +468,7 @@ def digest(
             click.echo(
                 f"  {c.date.strftime('%Y-%m-%d %H:%M')}  {post.ref:<40}  by {c.author:<12}"
             )
-            click.echo(f"    {c.body[:80].splitlines()[0]}")
+            click.echo(f"    {_first_line(c.body, 80)}")
 
     if mentions:
         click.echo(f"\n### Mentions for @{agent_name} ({len(mentions)})")
@@ -430,7 +478,7 @@ def digest(
                 click.echo(f"  [post]    {item.ref}  by {item.author}")
             else:
                 assert isinstance(item, Comment)
-                click.echo(f"  [comment] {item.path.name}  by {item.author}")
+                click.echo(f"  [comment] {item.post_ref}  by {item.author}")
 
 
 # ---------------------------------------------------------------------------
@@ -473,35 +521,21 @@ def msg_send(
     Example:\n
         agentboard msg send alice "Quick update" "Fixed the CI, @alice you're unblocked."
     """
+    _name(to_agent, "recipient")
+    agent = _name(author or get_agent_name(), "author")
     forum = _find_forum(ctx.obj)
     msg_root = _msg_dir(forum)
-    agent = author or get_agent_name()
-    now = datetime.now(tz=timezone.utc)
-    date_dir = msg_root / now.strftime("%Y-%m-%d")
-    date_dir.mkdir(parents=True, exist_ok=True)
-    filename = f"from-{agent}-to-{to_agent}.md"
-    path = date_dir / filename
-    # Avoid collision
-    counter = 1
-    while path.exists():
-        filename = f"from-{agent}-to-{to_agent}-{counter}.md"
-        path = date_dir / filename
-        counter += 1
     if not body:
-        import tempfile
-
-        editor = os.environ.get("EDITOR", "vi")
-        with tempfile.NamedTemporaryFile(suffix=".md", mode="w", delete=False) as f:
-            f.write(f"# {subject}\n\n")
-            tmp = f.name
-        subprocess.run([editor, tmp])
-        body = Path(tmp).read_text().strip()
-        Path(tmp).unlink(missing_ok=True)
+        body = _edit_body(f"# {subject}\n\n")
+    body = body.strip()
     if not body:
         click.echo("Aborted: empty body.", err=True)
         sys.exit(1)
     import yaml
 
+    now = datetime.now(tz=timezone.utc)
+    date_dir = msg_root / now.strftime("%Y-%m-%d")
+    date_dir.mkdir(parents=True, exist_ok=True)
     meta = {
         "from": agent,
         "to": to_agent,
@@ -509,7 +543,17 @@ def msg_send(
         "subject": subject,
     }
     yaml_str = yaml.dump(meta, default_flow_style=False, allow_unicode=True).strip()
-    path.write_text(f"---\n{yaml_str}\n---\n\n{body}\n")
+
+    # Pick the filename only now (after the editor closed), exclusively, so a
+    # message sent meanwhile by another session is never overwritten.
+    def candidates():
+        yield date_dir / f"from-{agent}-to-{to_agent}.md"
+        counter = 1
+        while True:
+            yield date_dir / f"from-{agent}-to-{to_agent}-{counter}.md"
+            counter += 1
+
+    path = write_exclusive(candidates(), f"---\n{yaml_str}\n---\n\n{body}\n")
     click.echo(f"Message sent: {path}")
 
 
