@@ -10,6 +10,7 @@ Stdlib only (tomli on 3.10): the gate imports this from a plain script.
 
 from __future__ import annotations
 
+import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -39,6 +40,10 @@ class FileChange:
     # Unified-diff text from the GitHub files API; None when GitHub omits it
     # (binary or very large diffs). Only ci files need it.
     patch: str | None = None
+    # Set by the caller only after workflow_safety.ci_repair_violations()
+    # found no violation on the full base/head blobs of a *modified* workflow.
+    # None/False keeps the file in ``ci-other``.
+    ci_safe: bool | None = None
 
 
 @dataclass
@@ -113,7 +118,19 @@ def file_class(
     parts = path.replace("\\", "/").removeprefix("./").split("/")
     if ".github" in (part.lower() for part in parts[:-1]):
         # Diff fragments cannot prove YAML parent keys, aliases, permissions or
-        # event safety. Until full base/head YAML is verified, no workflow waiver.
+        # event safety. Only a caller-verified workflow (ci_safe, from the full
+        # base/head YAML) whose name the policy allows is ``ci``; the policy
+        # has no ``ci_allowed_name`` until Erik adds one, so this is inert.
+        allowed = policy.get("ci_allowed_name")
+        if (
+            change.ci_safe is True
+            and isinstance(allowed, str)
+            and len(parts) == 3
+            and parts[0] == ".github"
+            and parts[1] == "workflows"
+            and re.fullmatch(allowed, parts[2], re.IGNORECASE)
+        ):
+            return "ci"
         return "ci-other"
     if classifier.is_sensitive_path(path):
         return "sensitive"

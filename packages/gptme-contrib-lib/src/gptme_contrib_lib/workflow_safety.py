@@ -1,0 +1,145 @@
+"""Prove a GitHub Actions workflow edit is a CI repair, not a trust change.
+
+A merge-policy ``ci`` class needs more than a diff: permissions can move under
+an unchanged parent key, and YAML aliases or quoted keys get past token scans.
+So this compares the *parsed* base and head documents of one modified workflow
+and lists every invariant the edit breaks. An empty list means the edit only
+touches what a repair may touch (step bodies, timeouts, action ``@ref`` pins).
+
+What must stay equal: triggers, top-level ``permissions``/``env``/``defaults``/
+``concurrency``, the job set, each job's trust-bearing keys, every
+``secrets.*``/``vars.*`` reference, and the ``owner/repo`` of each ``uses:``.
+Release, publish, deploy, signing and pages workflows or jobs are always out.
+
+Everything fails closed: a missing YAML parser, unparseable YAML or a
+non-mapping document is a violation, never a pass. PyYAML is imported lazily so
+``gptme_contrib_lib`` keeps no hard dependency on it.
+"""
+
+from __future__ import annotations
+
+import re
+from typing import Any
+
+_TOP_LEVEL_KEYS = ("on", "permissions", "env", "defaults", "concurrency")
+_JOB_KEYS = (
+    "permissions",
+    "runs-on",
+    "environment",
+    "secrets",
+    "container",
+    "services",
+    "if",
+    "needs",
+    "uses",
+)
+_FORBIDDEN_EVENTS = ("pull_request_target", "workflow_run")
+_PRIVILEGED_NAME_RE = re.compile(r"(?i)(release|publish|deploy|sign|pages)")
+_CONTEXT_REF_RE = re.compile(r"\b(?:secrets|vars)\.[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _load(text: str, side: str) -> tuple[dict[str, Any] | None, str | None]:
+    try:
+        import yaml
+    except ImportError:
+        return None, "YAML parser unavailable"
+    try:
+        doc = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        return None, f"{side} workflow is not valid YAML ({type(exc).__name__})"
+    if not isinstance(doc, dict):
+        return None, f"{side} workflow is not a mapping"
+    # YAML 1.1 reads a bare ``on:`` key as boolean True.
+    if True in doc:
+        if "on" in doc:
+            return None, f"{side} workflow has both `on` and a boolean `on` key"
+        doc = {("on" if k is True else k): v for k, v in doc.items()}
+    return doc, None
+
+
+def _strings(node: Any) -> list[str]:
+    if isinstance(node, str):
+        return [node]
+    if isinstance(node, dict):
+        return [s for k, v in node.items() for s in _strings(k) + _strings(v)]
+    if isinstance(node, list):
+        return [s for item in node for s in _strings(item)]
+    return []
+
+
+def _context_refs(doc: dict[str, Any]) -> set[str]:
+    return {m for s in _strings(doc) for m in _CONTEXT_REF_RE.findall(s)}
+
+
+def _action_repo(uses: Any) -> str | None:
+    """``owner/repo[/path]`` of a step ``uses:``; the ``@ref`` may change."""
+    if not isinstance(uses, str):
+        return None
+    if uses.startswith(("./", "docker://")):
+        return uses  # local action or image: the whole value must stay equal
+    return uses.split("@", 1)[0]
+
+
+def _step_actions(job: Any) -> list[str | None]:
+    steps = job.get("steps") if isinstance(job, dict) else None
+    if not isinstance(steps, list):
+        return []
+    return sorted(
+        (
+            _action_repo(step.get("uses"))
+            for step in steps
+            if isinstance(step, dict) and "uses" in step
+        ),
+        key=str,
+    )
+
+
+def _jobs(doc: dict[str, Any]) -> dict[str, Any] | None:
+    jobs = doc.get("jobs")
+    return jobs if isinstance(jobs, dict) else None
+
+
+def ci_repair_violations(path: str, base_text: str, head_text: str) -> list[str]:
+    """Invariants a modified workflow at *path* breaks; empty means CI repair."""
+    name = path.rsplit("/", 1)[-1]
+    if _PRIVILEGED_NAME_RE.search(name):
+        return [f"{name}: release/publish/deploy/sign/pages workflow"]
+    base, err = _load(base_text, "base")
+    if err:
+        return [err]
+    head, err = _load(head_text, "head")
+    if err:
+        return [err]
+    assert base is not None and head is not None
+
+    violations: list[str] = []
+    for side, doc in (("base", base), ("head", head)):
+        events = {s for s in _strings(doc.get("on"))}
+        for event in _FORBIDDEN_EVENTS:
+            if event in events:
+                violations.append(f"{side} workflow triggers on {event}")
+    for key in _TOP_LEVEL_KEYS:
+        if base.get(key) != head.get(key):
+            violations.append(f"top-level `{key}` changed")
+    if _context_refs(base) != _context_refs(head):
+        violations.append("secrets/vars references changed")
+
+    base_jobs, head_jobs = _jobs(base), _jobs(head)
+    if base_jobs is None or head_jobs is None:
+        return violations + ["`jobs` is missing or not a mapping"]
+    if set(base_jobs) != set(head_jobs):
+        violations.append("job set changed")
+    for job_id in sorted(set(base_jobs) & set(head_jobs), key=str):
+        if _PRIVILEGED_NAME_RE.search(str(job_id)):
+            violations.append(f"job `{job_id}`: release/publish/deploy/sign/pages job")
+            continue
+        old, new = base_jobs[job_id], head_jobs[job_id]
+        if not isinstance(old, dict) or not isinstance(new, dict):
+            violations.append(f"job `{job_id}` is not a mapping")
+            continue
+        for key in _JOB_KEYS:
+            if old.get(key) != new.get(key):
+                violations.append(f"job `{job_id}`: `{key}` changed")
+        if _step_actions(old) != _step_actions(new):
+            violations.append(f"job `{job_id}`: action set changed (only @ref may)")
+    return violations
