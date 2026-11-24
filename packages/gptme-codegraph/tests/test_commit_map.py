@@ -544,3 +544,29 @@ def test_cache_hit_reports_current_head_sha(tmp_path):
 
     second = commit_map.generate_map(repo)
     assert second["git_sha"] == head2
+
+
+def test_stat_fingerprint_covers_the_builder_source_set(tmp_path):
+    """The cache fingerprint must cover what ``build_repo_map`` consumes.
+
+    ``core._iter_source_files`` includes untracked files (``--others``), so a
+    fingerprint built from tracked files alone stays identical when an
+    untracked source appears and the stale cached outline is served instead.
+    """
+    subprocess.run(
+        ["git", "init", "-q", str(tmp_path)], check=True, capture_output=True
+    )
+    (tmp_path / "a.py").write_text("def tracked():\n    return 1\n")
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "add", "a.py"], check=True, capture_output=True
+    )
+
+    before, count_before = commit_map._stat_fingerprint(tmp_path)
+    assert before is not None
+    assert count_before == 1
+
+    (tmp_path / "new.py").write_text("def brand_new():\n    return 2\n")
+
+    after, count_after = commit_map._stat_fingerprint(tmp_path)
+    assert after != before
+    assert count_after == 2

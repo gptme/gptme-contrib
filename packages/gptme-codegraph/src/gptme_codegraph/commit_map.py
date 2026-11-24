@@ -92,6 +92,14 @@ def _tracked_source_files(directory: Path) -> tuple[list[Path], Path] | None:
                 "ls-files",
                 "-z",
                 "--full-name",
+                # The builder (``core._iter_source_files``) consumes untracked
+                # files too, so the cache fingerprint must cover exactly the
+                # same set: otherwise adding an untracked source leaves the
+                # cached outline missing it, and editing one never invalidates
+                # the cache.
+                "--cached",
+                "--others",
+                "--exclude-standard",
                 "--",
                 *SOURCE_PATTERNS,
             ],
@@ -104,12 +112,18 @@ def _tracked_source_files(directory: Path) -> tuple[list[Path], Path] | None:
         return None
 
     files: list[Path] = []
-    for rel_path in result.stdout.decode("utf-8", errors="ignore").split("\0"):
-        if not rel_path:
+    seen: set[Path] = set()
+    for raw in result.stdout.split(b"\0"):
+        if not raw:
             continue
-        path = repo_root / rel_path
-        if path.is_file():
-            files.append(path)
+        # Raw bytes: os.fsdecode maps a name that is not valid in the
+        # filesystem encoding the way ``core._iter_source_files`` does, so the
+        # cache and the builder resolve the same path.
+        path = repo_root / os.fsdecode(raw)
+        if path in seen or not path.is_file():
+            continue
+        seen.add(path)
+        files.append(path)
     return files, repo_root
 
 
