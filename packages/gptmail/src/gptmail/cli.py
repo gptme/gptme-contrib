@@ -14,6 +14,7 @@ import sys
 import tempfile
 import time
 from datetime import timezone
+from email.utils import getaddresses
 from pathlib import Path
 
 import importlib.metadata
@@ -322,11 +323,24 @@ def reply(message_id: str, content: str | None = None, from_address: str | None 
         click.echo("Error: Could not parse original message headers", err=True)
         sys.exit(1)
 
-    # Reply goes to the original sender (To: in sent messages, From: in received)
-    # if "To" in headers:  # This is a sent message
-    #     to = headers["To"]
-    # else:  # This is a received message
+    # Reply goes to Reply-To when the sender set one (web forms, relays, lists),
+    # else to From. Reply-To is sender-chosen, so a forged From could redirect
+    # the reply to an arbitrary mailbox: only honour it when every address in
+    # it is allowed for outbound send.
     to = headers["From"]
+    reply_to_header = next(
+        (value for key, value in headers.items() if key.lower() == "reply-to"), ""
+    )
+    if reply_to_header.strip():
+        reply_to_addrs = [addr for _, addr in getaddresses([reply_to_header]) if addr]
+        if reply_to_addrs and all(email._is_allowlisted_recipient(addr) for addr in reply_to_addrs):
+            to = reply_to_header
+        else:
+            click.echo(
+                f"Warning: ignoring Reply-To ({reply_to_header}) outside the send "
+                f"allowlist; replying to From ({to})",
+                err=True,
+            )
 
     # Keep original subject, add Re: if needed
     subject = headers["Subject"]

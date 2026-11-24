@@ -370,3 +370,26 @@ class TestOrderedListCheckboxes:
     def test_ordered_inside_fence_ignored_when_checklist_only(self):
         content = "```markdown\n1. [ ] example\n```\n1. [x] real\n"
         assert count_subtasks(content, checklist_only=True) == SubtaskCount(1, 1, 0)
+
+
+class TestDoneGateBypasses:
+    """Checklist items the done gate used to miss (asterisk/plus bullets, inline code)."""
+
+    def test_asterisk_and_plus_bullets_count_when_checklist_only(self):
+        content = "- [x] a\n* [ ] p\n+ [ ] p\n"
+        assert count_subtasks(content, checklist_only=True) == SubtaskCount(1, 3, 0)
+
+    def test_asterisk_and_plus_bullets_count(self):
+        content = "- [x] a\n* [ ] p\n+ [x] p\n  * [-] q (deferred: x)\n"
+        assert count_subtasks(content) == SubtaskCount(2, 4, 1)
+
+    def test_asterisk_plus_in_prose_not_counted(self):
+        assert count_subtasks("a * [ ] b + [x] c\n").total == 0
+
+    def test_inline_triple_backtick_span_is_not_a_fence(self):
+        content = "```bash``` is the shell.\n- [x] first\n- [ ] NOT DONE item\n"
+        assert count_subtasks(content, checklist_only=True) == SubtaskCount(1, 2, 0)
+
+    def test_real_fence_still_ignored_when_checklist_only(self):
+        content = "```bash\n- [ ] example\n* [ ] example\n```\n- [x] real\n"
+        assert count_subtasks(content, checklist_only=True) == SubtaskCount(1, 1, 0)

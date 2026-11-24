@@ -304,3 +304,36 @@ def test_skip_reason_on_continuation_line(tmp_path, monkeypatch, body, accounted
     else:
         assert result.exit_code != 0, result.output
         assert "no follow-up link or 'declined:'" in result.output
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "- [x] complete\n* [ ] unfinished",
+        "- [x] complete\n+ [ ] unfinished",
+        "```bash``` is the shell.\n- [x] complete\n- [ ] unfinished",
+    ],
+)
+def test_hidden_pending_checkbox_blocks_completion(tmp_path, monkeypatch, body):
+    (path,) = make_tasks(tmp_path, monkeypatch, {"task": body})
+    before = path.read_bytes()
+    result = CliRunner().invoke(cli, ["edit", "task", "--set", "state", "done"])
+    assert result.exit_code != 0, result.output
+    assert "unresolved checkbox" in result.output
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "- [x] complete\n* [-] dropped (deferred: later)",
+        "```bash``` is the shell.\n- [x] complete\n- [-] dropped (deferred: later)",
+    ],
+)
+def test_hidden_unowned_skip_blocks_completion(tmp_path, monkeypatch, body):
+    (path,) = make_tasks(tmp_path, monkeypatch, {"task": body})
+    before = path.read_bytes()
+    result = CliRunner().invoke(cli, ["edit", "task", "--set", "state", "done"])
+    assert result.exit_code != 0, result.output
+    assert "dropped" in result.output
+    assert path.read_bytes() == before

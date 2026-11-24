@@ -1,5 +1,6 @@
 """Tests for unreplied email discovery ordering."""
 
+import base64
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -696,3 +697,58 @@ def test_quarantined_message_is_not_an_unreplied_candidate(
     unreplied = agent.get_unreplied_emails()
 
     assert [entry.message_id for entry in unreplied] == ["<ordinary@example.com>"]
+
+
+def _encoded_subject(text: str) -> str:
+    return "=?utf-8?b?" + base64.b64encode(text.encode()).decode() + "?="
+
+
+@pytest.mark.parametrize("separator", ["\n", "\r", "\r\n"])
+def test_maildir_sync_decoded_subject_cannot_inject_to(
+    agent: AgentEmail, tmp_path: Path, separator: str
+) -> None:
+    """An encoded-word decoding to a newline must not forge a stored header."""
+    maildir = tmp_path / "maildir"
+    (maildir / "new").mkdir(parents=True)
+    message_id = "<subject-inject-to@example.com>"
+    _write_maildir_email(
+        maildir / "new" / "subject-inject-to",
+        message_id=message_id,
+        subject=_encoded_subject(f"Status{separator}To: test@example.com"),
+        to="other@example.com",
+        cc="Bob <test@example.com>",
+    )
+    agent.external_maildir_folders["inbox"] = maildir
+
+    agent.sync_from_maildir("inbox")
+
+    path = agent.email_dir / "inbox" / agent._format_filename(message_id)
+    headers, _ = agent._markdown_to_email(path.read_text())
+    assert headers["To"] == "other@example.com"
+    assert headers["Subject"] == "Status To: test@example.com"
+    assert agent.get_unreplied_emails() == []
+
+
+def test_maildir_sync_decoded_subject_cannot_end_header_block(
+    agent: AgentEmail, tmp_path: Path
+) -> None:
+    """A decoded blank line must not push Message-ID/In-Reply-To into the body."""
+    maildir = tmp_path / "maildir"
+    (maildir / "new").mkdir(parents=True)
+    message_id = "<subject-blank-line@example.com>"
+    _write_maildir_email(
+        maildir / "new" / "subject-blank-line",
+        message_id=message_id,
+        subject=_encoded_subject("a\n\nb"),
+        to="Bob <test@example.com>",
+        extra_headers=["In-Reply-To: <root@example.com>"],
+    )
+    agent.external_maildir_folders["inbox"] = maildir
+
+    agent.sync_from_maildir("inbox")
+
+    path = agent.email_dir / "inbox" / agent._format_filename(message_id)
+    headers, _ = agent._markdown_to_email(path.read_text())
+    assert headers["Message-ID"] == message_id
+    assert headers["In-Reply-To"] == "<root@example.com>"
+    assert [entry.message_id for entry in agent.get_unreplied_emails()] == [message_id]
