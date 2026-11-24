@@ -3,6 +3,7 @@
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -855,3 +856,39 @@ def test_execute_gptme_timeout_kills_gptme_not_just_the_wrapper(tmp_path, monkey
     assert result.timed_out and result.exit_code == 124
     time.sleep(3.5)
     assert not marker.exists(), "gptme kept running after the timeout was reported"
+
+
+def test_kill_process_group_escalates_after_wrapper_exits(tmp_path):
+    """Reaping bash does not mean its SIGTERM-ignoring child has stopped."""
+    ready = tmp_path / "ready"
+    marker = tmp_path / "still-running"
+    child = tmp_path / "child.py"
+    child.write_text(
+        "import signal, time\n"
+        "from pathlib import Path\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        f"Path({str(ready)!r}).touch()\n"
+        "time.sleep(1)\n"
+        f"Path({str(marker)!r}).touch()\n"
+    )
+    proc = subprocess.Popen(
+        ["bash", "-c", '"$1" "$2" & wait', "bash", sys.executable, str(child)],
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 5
+        while not ready.exists():
+            assert time.monotonic() < deadline, "child did not become ready"
+            time.sleep(0.01)
+
+        execution_mod._kill_process_group(proc, grace=0.1)
+
+        assert proc.returncode is not None, "wrapper was not reaped"
+        time.sleep(1.1)
+        assert not marker.exists(), "SIGTERM-ignoring child survived cleanup"
+    finally:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.wait(timeout=5)

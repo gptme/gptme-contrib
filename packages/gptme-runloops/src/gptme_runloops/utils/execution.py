@@ -7,6 +7,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -51,16 +52,23 @@ class ExecutionResult:
 
 def _kill_process_group(proc: subprocess.Popen, grace: float = 5.0) -> None:
     """SIGTERM the process group led by ``proc``, then SIGKILL after ``grace``."""
-    for sig in (signal.SIGTERM, signal.SIGKILL):
-        try:
-            os.killpg(proc.pid, sig)
-        except ProcessLookupError:
-            break
-        try:
-            proc.wait(timeout=grace)
-            break
-        except subprocess.TimeoutExpired:
-            continue
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+        deadline = time.monotonic() + grace
+        while True:
+            # Reap the wrapper, but check the group separately: a child can
+            # ignore SIGTERM even when bash has already exited.
+            proc.poll()
+            os.killpg(proc.pid, 0)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                os.killpg(proc.pid, signal.SIGKILL)
+                break
+            time.sleep(min(0.05, remaining))
+    except ProcessLookupError:
+        pass
+    # Always reap the direct child, including when the group already vanished.
+    proc.wait()
 
 
 def execute_gptme(
