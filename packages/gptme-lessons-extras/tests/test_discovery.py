@@ -203,3 +203,37 @@ def test_recommend_uses_file_recency_when_metrics_are_missing(tmp_path: Path) ->
     assert recommendations[0].recency_score > recommendations[1].recency_score
     assert recommendations[0].recency_score > 0.0
     assert recommendations[1].recency_score == 0.0
+
+
+_KEYWORD_BODY = "\n# Title\n\n## Rule\nUse rebase.\n"
+
+
+def test_extract_features_reads_block_and_quoted_keyword_lists(tmp_path: Path) -> None:
+    # #2362 LX6: the regex only read inline lists and kept their quotes, so
+    # the template's block lists gave no keywords at all.
+    lessons = tmp_path / "lessons" / "git"
+    lessons.mkdir(parents=True)
+    frontmatters = {
+        "block": 'match:\n  keywords:\n    - "Rebase conflict"\n    - force push\n',
+        "quoted": 'match:\n  keywords: ["Rebase conflict", "force push"]\n',
+        "plain": "match:\n  keywords: [Rebase conflict, force push]\n",
+    }
+    discovery = LessonDiscovery(lessons_dir=tmp_path / "lessons")
+    for name, fm in frontmatters.items():
+        lesson = lessons / f"{name}.md"
+        lesson.write_text("---\n" + fm + "---\n" + _KEYWORD_BODY)
+        assert discovery.extract_features(lesson).keywords == {
+            "rebase conflict",
+            "force push",
+        }, name
+
+
+def test_recommend_scores_block_list_keyword_match(tmp_path: Path) -> None:
+    lesson = tmp_path / "lessons" / "git" / "rebase.md"
+    lesson.parent.mkdir(parents=True)
+    lesson.write_text('---\nmatch:\n  keywords:\n    - "rebase"\n---\n' + _KEYWORD_BODY)
+    discovery = LessonDiscovery(
+        lessons_dir=tmp_path / "lessons", history_dir=tmp_path / "history"
+    )
+    [rec] = discovery.recommend(keywords=["rebase"], top_k=1)
+    assert rec.keyword_score > 0.0

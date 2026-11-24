@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Set, Tuple
 
-from gptme_lessons_extras.similarity import NON_LESSON_FILES
+from gptme_lessons_extras.similarity import NON_LESSON_FILES, extract_keywords
 
 # Try importing sklearn, but provide fallback
 try:
@@ -93,16 +93,11 @@ class LessonDiscovery:
 
         content = lesson_path.read_text()
 
-        # Extract frontmatter keywords
-        keywords: Set[str] = set()
-        frontmatter_match = re.search(r"---\n(.*?)\n---", content, re.DOTALL)
-        if frontmatter_match:
-            frontmatter = frontmatter_match.group(1)
-            # Look for keywords: [keyword1, keyword2] format
-            keywords_match = re.search(r"keywords:\s*\[(.*?)\]", frontmatter)
-            if keywords_match:
-                keyword_list = keywords_match.group(1)
-                keywords.update(k.strip().lower() for k in keyword_list.split(","))
+        # Extract frontmatter keywords. Parse the YAML rather than regex-match
+        # it: block lists (the template's format) and quoted items must work.
+        keywords: Set[str] = {
+            k.strip().lower() for k in extract_keywords(lesson_path) if k.strip()
+        }
 
         # Extract category from path
         category = lesson_path.parent.name
