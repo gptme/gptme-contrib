@@ -3395,6 +3395,10 @@ def test_execute_plan_runner_base_environment(
             "PLAN_METADATA": "intended",
             "BOB_AUTONOMOUS_AGENT_ID": "stale-plan-holder",
             "BOB_SESSION_PID": "stale-plan-pid",
+            # Neutral spellings win over BOB_* in worktree_guard, so a stale
+            # inherited value must not shadow the executor identity.
+            "AGENT_ID": "stale-plan-neutral-holder",
+            "AGENT_SESSION_PID": "stale-plan-neutral-pid",
         }
     )
     ambient = {
@@ -3409,6 +3413,8 @@ def test_execute_plan_runner_base_environment(
             "AGENT_SESSION_ID": "base-session",
             "BOB_AUTONOMOUS_AGENT_ID": "base-holder",
             "BOB_SESSION_PID": "base-pid",
+            "AGENT_ID": "base-neutral-holder",
+            "AGENT_SESSION_PID": "base-neutral-pid",
         }
         if base_mode == "mapping"
         else {}
@@ -3437,6 +3443,8 @@ def test_execute_plan_runner_base_environment(
     expected.update(plan.runner_env)
     expected["BOB_AUTONOMOUS_AGENT_ID"] = f"project-monitoring-{os.getpid()}"
     expected["BOB_SESSION_PID"] = str(os.getpid())
+    expected["AGENT_ID"] = f"project-monitoring-{os.getpid()}"
+    expected["AGENT_SESSION_PID"] = str(os.getpid())
     assert runner_env == expected
     assert runner_env["AGENT_SESSION_ID"] == plan.session_id
     assert runner_env["BOB_SESSION_ID"] == plan.session_id
@@ -3540,6 +3548,8 @@ def test_execute_plan_pr_before_snapshot_only_for_pr_items(tmp_path) -> None:
         == f"project-monitoring-{os.getpid()}"
     )
     assert runner_call["env"]["BOB_SESSION_PID"] == str(os.getpid())
+    assert runner_call["env"]["AGENT_ID"] == f"project-monitoring-{os.getpid()}"
+    assert runner_call["env"]["AGENT_SESSION_PID"] == str(os.getpid())
 
 
 @pytest.mark.parametrize(

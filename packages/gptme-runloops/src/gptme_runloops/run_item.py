@@ -2034,9 +2034,12 @@ def execute_plan(
     # one executor-scoped identity while preserving the per-item session id
     # (AGENT_SESSION_ID / BOB_SESSION_ID) used by trajectories and receipts.
     # Sequential items therefore refresh the same marker holder instead of
-    # seeing a live foreign holder.
-    env["BOB_AUTONOMOUS_AGENT_ID"] = f"project-monitoring-{os.getpid()}"
-    env["BOB_SESSION_PID"] = str(os.getpid())
+    # seeing a live foreign holder. Set the neutral spellings too: readers such
+    # as gptme_coordination.worktree_guard prefer AGENT_ID / AGENT_SESSION_PID,
+    # so an inherited neutral value would otherwise shadow this identity.
+    agent_id = f"project-monitoring-{os.getpid()}"
+    env["AGENT_ID"] = env["BOB_AUTONOMOUS_AGENT_ID"] = agent_id
+    env["AGENT_SESSION_PID"] = env["BOB_SESSION_PID"] = str(os.getpid())
     exit_code = 0
     try:
         proc = hooks.run_cmd(
