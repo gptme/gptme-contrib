@@ -618,13 +618,10 @@ class AgentEmail:
                     if role in (None, "cc"):
                         continue
 
-                    # Extract email from "Name <email>" format
-                    sender = from_line
-                    if "<" in from_line and ">" in from_line:
-                        start = from_line.find("<")
-                        end = from_line.find(">", start)
-                        if start != -1 and end != -1:
-                            sender = from_line[start + 1 : end].strip()
+                    # Trust the RFC 5322 addr-spec, never text inside the display
+                    # name: '"Erik <erik@x.com>" <mallory@evil.com>' is mallory.
+                    # Unparseable input stays as-is and fails the allowlist.
+                    sender = parseaddr(from_line)[1] or from_line
 
                     # Skip if already completed (replied or marked as no reply needed)
                     if self._is_completed(message_id):

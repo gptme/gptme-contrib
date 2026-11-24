@@ -752,3 +752,38 @@ def test_maildir_sync_decoded_subject_cannot_end_header_block(
     assert headers["Message-ID"] == message_id
     assert headers["In-Reply-To"] == "<root@example.com>"
     assert [entry.message_id for entry in agent.get_unreplied_emails()] == [message_id]
+
+
+@pytest.mark.parametrize(
+    ("from_header", "expected"),
+    [
+        # The display name carries an allowlisted address; the real addr-spec is not.
+        ('"Friend <friend@example.com>" <mallory@attacker.example>', False),
+        ("Friend <friend@example.com> <mallory@attacker.example>", False),
+        # Genuine allowlisted senders keep working in every common shape.
+        ("Friend <friend@example.com>", True),
+        ('"Friend, The" <friend@example.com>', True),
+        ("friend@example.com", True),
+    ],
+)
+def test_sender_allowlist_uses_the_real_address_not_the_display_name(
+    agent: AgentEmail, from_header: str, expected: bool
+) -> None:
+    _write_email(
+        agent.email_dir / "inbox" / "m.md",
+        message_id="<m@example.com>",
+        subject="Deploy",
+        sender="friend@example.com",
+        recipient="test@example.com",
+        date=datetime(2026, 5, 16, 9, 0, tzinfo=timezone.utc),
+    )
+    path = agent.email_dir / "inbox" / "m.md"
+    path.write_text(
+        path.read_text().replace("From: Friend <friend@example.com>", f"From: {from_header}")
+    )
+
+    senders = [email.sender for email in agent.get_unreplied_emails()]
+
+    assert bool(senders) is expected
+    if expected:
+        assert senders == ["friend@example.com"]
