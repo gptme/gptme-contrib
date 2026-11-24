@@ -1801,3 +1801,20 @@ def test_resolve_cc_session_model_falls_back_to_archive_root(tmp_path: Path) -> 
     assert (
         resolve_cc_session_model("dddd", project_dir=live, tmp_dir=empty_tmp, extra_dirs=[]) is None
     )
+
+
+def test_discover_cc_sessions_dangling_symlink_hides_nothing_else(tmp_path: Path) -> None:
+    """One broken link must not drop its siblings or later projects (#2323)."""
+    broken_project = tmp_path / "a-proj"
+    later_project = tmp_path / "b-proj"
+    broken_project.mkdir()
+    later_project.mkdir()
+    (broken_project / "a-dangling.jsonl").symlink_to(tmp_path / "pruned.jsonl")
+    sibling = _make_cc_session(broken_project, "z-sibling", "2026-03-05T10:00:00Z")
+    later = _make_cc_session(later_project, "later", "2026-03-06T10:00:00Z")
+
+    found = discover_cc_sessions(
+        date(2026, 3, 1), date(2026, 3, 31), cc_dir=tmp_path, min_size=1, extra_dirs=[]
+    )
+
+    assert found == [sibling, later]
