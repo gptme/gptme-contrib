@@ -552,11 +552,11 @@ def create_app(
     ) -> list[dict[str, Any]]:
         """Apply model/harness/outcome filters to session dicts."""
         if model:
-            records = [r for r in records if r.get("model", "").lower() == model.lower()]
+            records = [r for r in records if (r.get("model") or "").lower() == model.lower()]
         if harness:
-            records = [r for r in records if r.get("harness", "").lower() == harness.lower()]
+            records = [r for r in records if (r.get("harness") or "").lower() == harness.lower()]
         if outcome:
-            records = [r for r in records if r.get("outcome", "").lower() == outcome.lower()]
+            records = [r for r in records if (r.get("outcome") or "").lower() == outcome.lower()]
         return records
 
     @app.route("/api/sessions")
