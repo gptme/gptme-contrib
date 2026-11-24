@@ -10,6 +10,7 @@ import json
 import time
 from pathlib import Path
 
+import pytest
 from gptme_subscription.auth import probe_credential
 
 
@@ -37,6 +38,8 @@ def test_probe_refresh_is_persisted_to_slot(tmp_path: Path) -> None:
         """#!/usr/bin/env python3
 import json, os
 from pathlib import Path
+
+import pytest
 live = Path.home() / ".claude" / ".credentials.json"
 data = json.loads(live.read_text())
 data["claudeAiOauth"].update(accessToken="new-access", refreshToken="new-refresh",
@@ -57,3 +60,76 @@ print(json.dumps({"seven_day": {"utilization": 0.1}}))
         "rotated refresh token from the probe was discarded; slot still holds "
         f"{oauth['refreshToken']!r}"
     )
+
+
+def _write_account_slot(path: Path, account: str) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "claudeAiOauth": {
+                    "accessToken": "old-access",
+                    "refreshToken": "old-refresh",
+                    "expiresAt": int((time.time() - 3600) * 1000),
+                    "accountUuid": account,
+                }
+            }
+        )
+    )
+
+
+def _refresh_script(tmp_path: Path, account_update: str) -> Path:
+    script = tmp_path / "usage.py"
+    script.write_text(
+        f"""#!/usr/bin/env python3
+import json, os
+from pathlib import Path
+
+import pytest
+live = Path.home() / ".claude" / ".credentials.json"
+data = json.loads(live.read_text())
+oauth = data["claudeAiOauth"]
+oauth.update(accessToken="new-access", refreshToken="new-refresh",
+             expiresAt=99999999999999)
+{account_update}
+tmp = live.with_name(".credentials.json.tmp")
+tmp.write_text(json.dumps(data))
+os.replace(tmp, live)
+print(json.dumps({{"seven_day": {{"utilization": 0.1}}}}))
+"""
+    )
+    script.chmod(0o755)
+    return script
+
+
+@pytest.mark.parametrize(
+    "account_update",
+    [
+        'oauth["accountUuid"] = "account-b"',
+        'oauth.pop("accountUuid")',
+    ],
+    ids=["other-account", "no-account"],
+)
+def test_probe_refresh_never_overwrites_slot_of_another_account(
+    tmp_path: Path, account_update: str
+) -> None:
+    slot = tmp_path / ".credentials.json.alice"
+    _write_account_slot(slot, "account-a")
+    script = _refresh_script(tmp_path, account_update)
+
+    probe_credential(slot, "alice", usage_script=script)
+
+    oauth = json.loads(slot.read_text())["claudeAiOauth"]
+    assert oauth["accountUuid"] == "account-a"
+    assert oauth["refreshToken"] == "old-refresh"
+
+
+def test_probe_refresh_for_same_account_is_persisted(tmp_path: Path) -> None:
+    slot = tmp_path / ".credentials.json.alice"
+    _write_account_slot(slot, "account-a")
+    script = _refresh_script(tmp_path, "")
+
+    probe_credential(slot, "alice", usage_script=script)
+
+    oauth = json.loads(slot.read_text())["claudeAiOauth"]
+    assert oauth["accountUuid"] == "account-a"
+    assert oauth["refreshToken"] == "new-refresh"

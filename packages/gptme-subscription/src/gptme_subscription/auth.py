@@ -13,6 +13,7 @@ We expose the file-based check (fast, no network) and a probe variant
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import subprocess
@@ -21,6 +22,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
+
+logger = logging.getLogger(__name__)
 
 CredentialStatus = Literal[
     "valid",  # access token present and not yet expired
@@ -132,12 +135,31 @@ def check_credential_file(path: Path, sub: str) -> CredentialInfo:
     )
 
 
-def _persist_probe_refresh(live: Path, slot: Path) -> None:
+def _slot_account(path: Path) -> str | None:
+    """Return the ``accountUuid`` a credential file names, if any."""
+    try:
+        oauth = json.loads(path.read_text(encoding="utf-8")).get("claudeAiOauth")
+    except (OSError, UnicodeDecodeError, ValueError, AttributeError):
+        return None
+    if not isinstance(oauth, dict):
+        return None
+    account = oauth.get("accountUuid")
+    return account if isinstance(account, str) and account else None
+
+
+def _persist_probe_refresh(
+    live: Path, slot: Path, expected_account: str | None
+) -> None:
     """Copy tokens Claude Code refreshed during a probe back into the slot.
 
     A refresh replaces the temporary symlink with a regular file holding a
     rotated refresh token. The old one is already consumed, so dropping the
     new file with the temp directory would leave the slot unusable.
+
+    ``expected_account`` is the slot's ``accountUuid`` read before the probe.
+    When the slot names an account, a file that names a different account (or
+    none) is never written: one slot must not end up holding another
+    account's tokens.
     """
     if live.is_symlink() or not live.is_file():
         return
@@ -147,6 +169,12 @@ def _persist_probe_refresh(live: Path, slot: Path) -> None:
     except (OSError, UnicodeDecodeError, ValueError, AttributeError):
         return
     if not isinstance(oauth, dict) or not oauth.get("refreshToken"):
+        return
+    if expected_account is not None and oauth.get("accountUuid") != expected_account:
+        logger.warning(
+            "probe refresh for %s names a different account; slot left unchanged",
+            slot.name,
+        )
         return
     fd, tmp_name = tempfile.mkstemp(prefix=f".{slot.name}.", dir=slot.parent)
     try:
@@ -181,6 +209,7 @@ def probe_credential(
     env = os.environ.copy()
     try:
         target_credential = path.expanduser().resolve()
+        expected_account = _slot_account(target_credential)
         with tempfile.TemporaryDirectory(
             prefix=f"gptme-subscription-probe-{sub}-"
         ) as tmp:
@@ -200,7 +229,7 @@ def probe_credential(
                 timeout=timeout,
                 env=env,
             )
-            _persist_probe_refresh(live_credential, target_credential)
+            _persist_probe_refresh(live_credential, target_credential, expected_account)
     except subprocess.TimeoutExpired:
         return info, False, f"probe timed out after {timeout}s"
     except OSError as exc:
