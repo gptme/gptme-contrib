@@ -196,3 +196,55 @@ def test_codex_unusable_exit_code_keeps_the_block_text():
     code, _, text = _codex_output([block])
     assert code == 1
     assert "exited with code 1" in text
+
+
+# Review findings on gptme/gptme-contrib#2370 ------------------------------------
+def test_codex_mixed_workdir_exec_keeps_session_cwd(two_repos):
+    """One exec_command without ``workdir`` runs in the session cwd: another call's
+    workdir must not re-attribute the whole cell's commit to that worktree."""
+    ex = CodexExtractor("r")
+    ex.feed(codex("turn_context", {"cwd": str(two_repos["brain"])}))
+    commit_args = json.dumps({"cmd": "git commit -m 'fix: x'"})
+    ls_args = json.dumps({"cmd": "ls", "workdir": str(two_repos["wt"])})
+    src = (
+        f"const a = await tools.exec_command({commit_args});\n"
+        f"const b = await tools.exec_command({ls_args});\n"
+        "text(JSON.stringify(a));\n"
+    )
+    ex.feed(
+        codex(
+            "response_item",
+            {"type": "custom_tool_call", "name": "exec", "call_id": "c1", "input": src},
+        )
+    )
+    (commit,) = ex.feed(exec_output("c1", 0, "[master 6528ea53] fix: x\n 1 file changed\n"))
+    assert commit.kind == "commit"
+    assert commit.detail.get("dir") != str(two_repos["wt"])
+    assert commit.detail.get("repo") != "gptme/gptme-contrib"
+
+
+def test_codex_inner_exec_command_yield_is_not_reported_as_landed():
+    """The JS cell finished but exec_command hit its yield_time_ms: the structured
+    result carries ``session_id`` and no ``exit_code``, so the outcome is unknown."""
+    ex = CodexExtractor("r")
+    ex.feed(exec_call("c1", "git commit -m 'fix: x'"))
+    inner = json.dumps(
+        {"chunk_id": "a1", "wall_time_seconds": 30.0, "session_id": 7, "output": "running hooks\n"}
+    )
+    out = ex.feed(
+        codex(
+            "response_item",
+            {
+                "type": "custom_tool_call_output",
+                "call_id": "c1",
+                "output": [
+                    {
+                        "type": "input_text",
+                        "text": "Script completed\nWall time 30.0 seconds\nOutput:\n",
+                    },
+                    {"type": "input_text", "text": inner},
+                ],
+            },
+        )
+    )
+    assert landings(out) == []

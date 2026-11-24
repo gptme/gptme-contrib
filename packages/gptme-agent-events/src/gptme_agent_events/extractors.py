@@ -345,6 +345,7 @@ def _codex_output(out: Any) -> tuple[int | None, bool, str]:
     else:
         blocks = [json.dumps(out)]
     code: int | None = None
+    inner_running = False
     texts = []
     for block in blocks:
         try:
@@ -355,6 +356,10 @@ def _codex_output(out: Any) -> tuple[int | None, bool, str]:
             raw_code = data.get("exit_code")
             if isinstance(raw_code, bool):
                 raw_code = None
+            if raw_code is None and data.get("session_id") is not None:
+                # exec_command hit its yield_time_ms with the process still
+                # going (slow hooks) even though the outer cell completed.
+                inner_running = True
             if isinstance(raw_code, int):
                 code = raw_code
             elif isinstance(raw_code, str) and re.fullmatch(r"-?\d+", raw_code.strip()):
@@ -374,7 +379,7 @@ def _codex_output(out: Any) -> tuple[int | None, bool, str]:
     if code is None:
         m = _CODEX_EXIT_RE.search(text)
         code = int(m.group(1)) if m else None
-    running = code is None and text.lstrip().startswith("Script running")
+    running = code is None and (inner_running or text.lstrip().startswith("Script running"))
     return code, running, text
 
 
@@ -467,11 +472,17 @@ class CodexExtractor(Extractor):
             wd = args.get("workdir")
             return wd if isinstance(wd, str) and wd else None
         found = set()
+        named = 0
         for m in _CODEX_WORKDIR_RE.finditer(text):
             try:
                 found.add(json.loads(m.group(1)))
             except ValueError:
                 return None
+            named += 1
+        # A command without its own workdir runs in the session cwd, so one
+        # workdir only applies when every command in the cell names it.
+        if named < len(_CODEX_CMD_RE.findall(text)):
+            return None
         return found.pop() if len(found) == 1 else None
 
 
