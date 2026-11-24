@@ -39,8 +39,9 @@ _BOOK_HEADER_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*#*$")
 # Numbered section headers like "2.1.3 Foo" (chapter-style "1 Foo" excluded —
 # too easily confused with ordinary numbered prose).
 _BOOK_NUMBERED_RE = re.compile(r"^(\d+(?:\.\d+)+)\s+\S.*$")
-# Prose chapter markers ("Chapter 2: ...", "Part I ...").
-_BOOK_CHAPTER_RE = re.compile(r"^(chapter|part)\b", re.IGNORECASE)
+# Prose chapter markers ("Chapter 2: ...", "Part I ..."). The number is
+# required so prose like "Part of the problem ..." is not a chapter.
+_BOOK_CHAPTER_RE = re.compile(r"^(chapter|part)\s+(\d+|[IVXLC]+)\b", re.IGNORECASE)
 
 
 def estimate_tokens(text: str) -> int:
@@ -106,7 +107,9 @@ def parse_book_text(
 
         header_text: str | None = None
         is_chapter = False
-        hm = _BOOK_HEADER_RE.match(line)
+        # Markdown headers must start the line: an indented "# ..." is a
+        # comment inside a code listing, not a heading.
+        hm = _BOOK_HEADER_RE.match(line) if raw_line[:1] == "#" else None
         if hm:
             header_text = hm.group(2).strip()
             is_chapter = len(hm.group(1)) <= 2

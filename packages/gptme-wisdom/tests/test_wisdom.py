@@ -433,3 +433,26 @@ def test_punctuation_does_not_turn_query_into_a_phrase(tmp_path: Path, query: st
 def test_query_without_terms_returns_nothing(tmp_path: Path) -> None:
     with BookIndex(tmp_path / "w.db") as idx:
         assert idx.search("?!, -") == []
+
+
+def test_indented_code_comments_and_prose_are_not_chapters():
+    """An indented ``# comment`` in a code listing and prose starting with
+    "Part of" must not become chapter labels; real headers still do."""
+    body = " ".join(["word"] * 80)
+    text = "\n".join(
+        [
+            "# Chapter 1 Variables",
+            body,
+            "    # compute the percentage of the hour that has elapsed",
+            body,
+            "Part of the problem with lists is aliasing.",
+            body,
+            "Part II Advanced",
+            body,
+        ]
+    )
+    docs = parse_book_text(
+        text, source="t", title="T", url="u", target_tokens=5000, min_chunk_tokens=10
+    )
+    chapters = {d.chapter for d in docs}
+    assert chapters == {"Chapter 1 Variables", "Part II Advanced"}
