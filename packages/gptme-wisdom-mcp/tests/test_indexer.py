@@ -179,3 +179,26 @@ def test_mcp_server_importable():
     assert callable(search_wisdom)
     assert callable(search_sessions)
     assert callable(list_wisdom_sources)
+
+
+def test_session_search_ignores_punctuation_and_splits_hyphens(tmp_path: Path):
+    """A trailing '?' or a hyphen must not turn the query into a phrase (#2362 W2)."""
+    from gptme_wisdom_mcp.indexer import SessionIndex
+    from gptme_wisdom_mcp.parsers import SessionDocument
+
+    with SessionIndex(db_path=tmp_path / "s.db") as idx:
+        idx.add(
+            SessionDocument(
+                source="journal",
+                path="/j/2026-01-01.md",
+                date=datetime(2026, 1, 1),
+                title="ci",
+                content="Fixed the flaky websocket reconnect test in CI for SWE-bench",
+                summary="s",
+            )
+        )
+        assert idx.search("flaky test")
+        assert idx.search("flaky test?")
+        assert idx.search("websocket, flaky test")
+        assert idx.search("swe-bench flaky")
+        assert idx.search("?!") == []

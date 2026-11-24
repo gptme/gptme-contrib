@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 
 from gptme_wisdom import BookDocument, BookIndex, parse_book_text
@@ -390,3 +391,45 @@ def test_normalize_fts_query_strips_keyword_operators() -> None:
     # Special chars still stripped (including FTS5 column-filter colon)
     assert "(" not in _normalize_fts_query("search (term)")
     assert ":" not in _normalize_fts_query("Explain: virtual memory")
+
+
+def test_hyphenated_query_matches_hyphenated_text(tmp_path: Path) -> None:
+    # unicode61 indexes "Copy-on-write" as copy/on/write; the query must too (#2362 W1).
+    with BookIndex(tmp_path / "w.db") as idx:
+        idx.add(
+            BookDocument(
+                source="ostep",
+                title="OSTEP",
+                chapter="VM",
+                section="",
+                content="Copy-on-write lets fork share pages until a write happens.",
+                url="",
+            )
+        )
+        assert idx.search("copy on write")
+        assert idx.search("copy-on-write")
+
+
+@pytest.mark.parametrize(
+    "query",
+    ["virtual memory, page tables", "virtual memory page tables?", "'memory tables'"],
+)
+def test_punctuation_does_not_turn_query_into_a_phrase(tmp_path: Path, query: str) -> None:
+    # , ? ' used to fail the bare MATCH and fall back to one exact phrase (#2362 W2).
+    with BookIndex(tmp_path / "w.db") as idx:
+        idx.add(
+            BookDocument(
+                source="ostep",
+                title="OSTEP",
+                chapter="VM",
+                section="",
+                content="Virtual memory is implemented with page tables.",
+                url="",
+            )
+        )
+        assert idx.search(query)
+
+
+def test_query_without_terms_returns_nothing(tmp_path: Path) -> None:
+    with BookIndex(tmp_path / "w.db") as idx:
+        assert idx.search("?!, -") == []

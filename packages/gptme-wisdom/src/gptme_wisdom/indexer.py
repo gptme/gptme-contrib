@@ -15,21 +15,21 @@ __all__ = ["BookIndex", "DEFAULT_DB_PATH"]
 DEFAULT_DB_PATH = Path.home() / ".local" / "share" / "gptme" / "wisdom.db"
 
 
-def _normalize_fts_query(query: str) -> str:
-    """Escape FTS5 special characters for safe querying.
+# FTS5 keyword operators; SQLite only treats them as syntax in uppercase.
+_FTS_OPERATORS = frozenset({"AND", "OR", "NOT", "NEAR"})
 
-    Removes FTS5 operator tokens (both keyword operators and punctuation)
-    so that untrusted prompt text is never misinterpreted as FTS5 syntax.
-    The search fallback wraps the stripped query in double quotes for a
-    literal phrase match if the unquoted version still fails.
+
+def _normalize_fts_query(query: str) -> str:
+    """Turn free text into an FTS5 query of quoted terms, ANDed implicitly.
+
+    Split the way the ``unicode61`` tokenizer splits (on anything that is not
+    a letter or digit), so ``copy-on-write`` queries ``copy``/``on``/``write``
+    like the indexed text, and punctuation such as ``,`` ``?`` ``'`` can never
+    make the query a syntax error. Each term is double-quoted, so prompt text
+    is never read as FTS5 syntax; uppercase keyword operators are dropped.
     """
-    result = query.replace('"', '""')
-    for ch in ("(", ")", "*", "^", "+", "-", "~", ":"):
-        result = result.replace(ch, "")
-    # Strip FTS5 keyword operators so prompt text like "X AND Y" is not
-    # misread as a boolean expression — they stay uppercase in SQLite FTS5.
-    result = re.sub(r"\b(AND|OR|NOT|NEAR)\b", " ", result)
-    return result.strip()
+    tokens = re.findall(r"[^\W_]+", query)
+    return " ".join(f'"{t}"' for t in tokens if t not in _FTS_OPERATORS)
 
 
 class BookIndex:
@@ -170,16 +170,9 @@ class BookIndex:
             LIMIT ?
         """
         normalized = _normalize_fts_query(query)
-        # First attempt: bare MATCH (supports FTS5 syntax if query is clean)
-        # Fallback: wrap in double quotes for literal phrase match
-        for args in ([normalized, *params, limit], [f'"{normalized}"', *params, limit]):
-            try:
-                rows = self.conn.execute(sql, args).fetchall()
-                break
-            except sqlite3.OperationalError:
-                continue
-        else:
-            rows = []
+        if not normalized:
+            return []
+        rows = self.conn.execute(sql, [normalized, *params, limit]).fetchall()
 
         results = []
         for row in rows:
