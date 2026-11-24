@@ -60,6 +60,27 @@ def test_cli_refuses_bomless_utf16_input(tmp_path, capsys) -> None:
     assert "NUL" in capsys.readouterr().err
 
 
+def test_cli_refuses_utf16_input_with_bom(tmp_path, capsys) -> None:
+    src = tmp_path / "utf16.txt"
+    src.write_bytes(f"token {GH}\n".encode("utf-16"))  # starts with a BOM
+    assert main(["--no-env-secrets", str(src)]) == 2
+    assert "not valid UTF-8" in capsys.readouterr().err
+
+
+def test_cli_out_writes_through_a_symlink_and_keeps_the_mode(tmp_path) -> None:
+    src = tmp_path / "in.txt"
+    src.write_text("plain text\n", encoding="utf-8")
+    target = tmp_path / "target.txt"
+    target.write_text("old\n", encoding="utf-8")
+    target.chmod(0o644)
+    link = tmp_path / "link.txt"
+    link.symlink_to(target)
+    assert main(["--no-env-secrets", "--out", str(link), str(src)]) == 0
+    assert link.is_symlink()
+    assert target.read_text(encoding="utf-8") == "plain text\n"
+    assert target.stat().st_mode & 0o777 == 0o644
+
+
 def test_cli_out_write_failure_keeps_existing_file(tmp_path, monkeypatch) -> None:
     out = tmp_path / "doc.md"
     out.write_text("original precious content\n", encoding="utf-8")
@@ -83,13 +104,21 @@ def test_cli_out_writes_redacted_file(tmp_path) -> None:
 
 def test_long_at_less_run_is_linear_time() -> None:
     # The email pattern used to rescan an @-less run from every offset:
-    # 120k hex chars took ~7s, 240k ~30s (quadratic). Now ~0.02s.
+    # 120k hex chars took ~7s, 240k ~30s (quadratic). Compare growth rather than
+    # wall-clock time: 4x the input costs ~4x when linear and ~16x when quadratic.
     import time
 
-    blob = "deadbeef" * 15000
-    start = time.perf_counter()
-    redact(blob, literals=[])
-    assert time.perf_counter() - start < 2.0
+    def best_of_three(blob: str) -> float:
+        times = []
+        for _ in range(3):
+            start = time.perf_counter()
+            redact(blob, literals=[])
+            times.append(time.perf_counter() - start)
+        return min(times)
+
+    small = best_of_three("deadbeef" * 5000)
+    large = best_of_three("deadbeef" * 20000)
+    assert large / small < 8
 
 
 def test_email_still_matched_after_long_local_part_run() -> None:

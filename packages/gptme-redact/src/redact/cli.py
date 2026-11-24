@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import stat
 import sys
 import tempfile
 from pathlib import Path
@@ -81,24 +82,32 @@ def _build_parser() -> argparse.ArgumentParser:
     return ap
 
 
-def _read_input(path: str) -> str:
+def _read_input(path: str) -> str | None:
     """Read the input without newline translation.
 
     Text-mode reads turn ``\r\n`` into ``\n``, which rewrites non-secret bytes
     of the artifact. Read files with ``newline=""``, and decode real stdin from
     its byte buffer for the same reason.
     """
-    if path != "-":
-        with open(path, encoding="utf-8", newline="") as fh:
-            return fh.read()
-    buffer: BinaryIO | None = getattr(sys.stdin, "buffer", None)
-    if buffer is None:  # an in-memory replacement such as io.StringIO
-        return sys.stdin.read()
-    # Same encoding and error handler a text-mode read would use; only the
-    # newline translation is skipped.
-    return buffer.read().decode(
-        sys.stdin.encoding or "utf-8", sys.stdin.errors or "strict"
-    )
+    try:
+        if path != "-":
+            with open(path, encoding="utf-8", newline="") as fh:
+                return fh.read()
+        buffer: BinaryIO | None = getattr(sys.stdin, "buffer", None)
+        if buffer is None:  # an in-memory replacement such as io.StringIO
+            return sys.stdin.read()
+        # Same encoding and error handler a text-mode read would use; only the
+        # newline translation is skipped.
+        return buffer.read().decode(
+            sys.stdin.encoding or "utf-8", sys.stdin.errors or "strict"
+        )
+    except UnicodeDecodeError:
+        # UTF-16 with a BOM (or other binary) does not decode at all.
+        print(
+            "error: input is not valid UTF-8 (binary or UTF-16?); refusing artifact",
+            file=sys.stderr,
+        )
+        return None
 
 
 def _refuse(result: Result, reason: str, args: argparse.Namespace) -> int:
@@ -127,6 +136,8 @@ def _main_redact(argv: list[str] | None = None) -> int:
         return 1
 
     text = _read_input(args.file)
+    if text is None:
+        return 2
     if "\x00" in text:
         # BOM-less UTF-16 of ASCII decodes as "valid" UTF-8 with a NUL between
         # every character, which splits every secret past all patterns. Refuse
@@ -214,10 +225,20 @@ def _write_atomic(path: Path, text: str) -> None:
     would destroy the existing file (e.g. ``redact - --out f < f``).
     """
     data = text.encode("utf-8")
-    fd, tmp = tempfile.mkstemp(dir=path.parent or Path("."), prefix=f".{path.name}.")
+    # Replace the symlink's target, not the link, and keep the file's mode
+    # (a new file gets the mode open() would give it, not mkstemp's 0600).
+    path = Path(os.path.realpath(path))
+    try:
+        mode = stat.S_IMODE(path.stat().st_mode)
+    except FileNotFoundError:
+        umask = os.umask(0)
+        os.umask(umask)
+        mode = 0o666 & ~umask
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
     try:
         with os.fdopen(fd, "wb") as fh:
             fh.write(data)
+        os.chmod(tmp, mode)
         os.replace(tmp, path)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
@@ -282,6 +303,8 @@ def _main_sanitize_doc(argv: list[str] | None = None) -> int:
         return 1
 
     text = _read_input(args.file)
+    if text is None:
+        return 2
     result = scan_document(text, block_severity=block_sev)
 
     if args.json:
