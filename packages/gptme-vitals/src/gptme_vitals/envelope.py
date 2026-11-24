@@ -122,6 +122,10 @@ class PageEnvelope:
             raise TypeError(
                 f"headline must be a str, got {type(self.headline).__name__}"
             )
+        if not isinstance(self.generated_at, str):
+            raise TypeError(
+                f"generated_at must be a str, got {type(self.generated_at).__name__}"
+            )
         lines = tuple(self.lines)
         if len(lines) > MAX_LINES:
             raise ValueError(
