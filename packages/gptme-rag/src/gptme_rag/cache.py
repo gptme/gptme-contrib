@@ -262,6 +262,7 @@ class SmartRAGCache:
             if not entry.is_fresh(self.ttl_seconds):
                 self.stats["ttl_evictions"] += 1
                 self.stats["misses"] += 1
+                self.stats["total_size_bytes"] -= entry.size_bytes()
                 del self.cache[key]
                 return None
 
