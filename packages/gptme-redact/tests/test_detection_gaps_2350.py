@@ -177,6 +177,19 @@ def test_cli_preserves_crlf_from_stdin_buffer(monkeypatch, capsysbinary):
     assert capsysbinary.readouterr().out == b"a\r\nb\r\n"
 
 
+def test_cli_decodes_stdin_buffer_with_the_stream_encoding(monkeypatch):
+    import io
+    import sys
+
+    from redact.cli import _read_input
+
+    # A non-UTF-8 stdin (e.g. a cp1252/latin-1 locale) decoded as before the
+    # buffer read, with CRLF still preserved.
+    stdin = io.TextIOWrapper(io.BytesIO(b"caf\xe9\r\n"), encoding="latin-1")
+    monkeypatch.setattr(sys, "stdin", stdin)
+    assert _read_input("-") == "caf\u00e9\r\n"
+
+
 # --- C8: --json refusal paths still emit JSON ---------------------------------
 
 

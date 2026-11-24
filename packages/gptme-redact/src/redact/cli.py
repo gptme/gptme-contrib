@@ -91,7 +91,11 @@ def _read_input(path: str) -> str:
     buffer: BinaryIO | None = getattr(sys.stdin, "buffer", None)
     if buffer is None:  # an in-memory replacement such as io.StringIO
         return sys.stdin.read()
-    return buffer.read().decode("utf-8")
+    # Same encoding and error handler a text-mode read would use; only the
+    # newline translation is skipped.
+    return buffer.read().decode(
+        sys.stdin.encoding or "utf-8", sys.stdin.errors or "strict"
+    )
 
 
 def _refuse(result: Result, reason: str, args: argparse.Namespace) -> int:
