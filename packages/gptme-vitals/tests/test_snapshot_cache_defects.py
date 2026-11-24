@@ -20,9 +20,19 @@ def test_name_with_slash_is_cached(tmp_path):
         return {"n": 1}
 
     sc.cached_signal(
-        "github/gptme", compute, cache_dir=tmp_path, ttl_seconds=60, now=0.0
+        "github/gptme",
+        compute,
+        cache_dir=tmp_path,
+        ttl_seconds=60,
+        now=0.0,
+        refresh=False,
     )
     sc.cached_signal(
-        "github/gptme", compute, cache_dir=tmp_path, ttl_seconds=60, now=1.0
+        "github/gptme",
+        compute,
+        cache_dir=tmp_path,
+        ttl_seconds=60,
+        now=1.0,
+        refresh=False,
     )
     assert len(calls) == 1

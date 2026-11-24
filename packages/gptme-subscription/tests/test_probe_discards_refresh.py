@@ -150,3 +150,27 @@ def test_probe_refresh_is_persisted_when_probe_times_out(tmp_path: Path) -> None
     assert (
         json.loads(slot.read_text())["claudeAiOauth"]["refreshToken"] == "new-refresh"
     )
+
+
+def test_probe_refresh_does_not_overwrite_slot_reauthenticated_mid_probe(
+    tmp_path: Path,
+) -> None:
+    # The operator re-authenticates the slot as account B while a probe that
+    # started for account A is still running.
+    slot = tmp_path / ".credentials.json.alice"
+    _write_account_slot(slot, "account-a")
+    reauth = (
+        "slot = Path(" + repr(str(slot)) + ")\n"
+        "fresh = json.loads(slot.read_text())\n"
+        'fresh["claudeAiOauth"].update(accountUuid="account-b", refreshToken="b-refresh")\n'
+        "slot.unlink()\n"
+        "slot.write_text(json.dumps(fresh))"
+    )
+    script = _refresh_script(tmp_path, reauth)
+
+    _, ok, message = probe_credential(slot, "alice", usage_script=script)
+    assert ok, message
+
+    oauth = json.loads(slot.read_text())["claudeAiOauth"]
+    assert oauth["accountUuid"] == "account-b"
+    assert oauth["refreshToken"] == "b-refresh"

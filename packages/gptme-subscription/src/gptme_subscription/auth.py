@@ -106,7 +106,11 @@ def check_credential_file(path: Path, sub: str) -> CredentialInfo:
             status="malformed",
             error="missing or non-numeric expiresAt",
         )
-    if not math.isfinite(expires_at):
+    try:
+        finite = math.isfinite(expires_at)
+    except OverflowError:  # an int too large for a float, e.g. 10**309
+        finite = False
+    if not finite:
         return CredentialInfo(
             sub=sub,
             path=path,
@@ -170,7 +174,12 @@ def _persist_probe_refresh(
         return
     if not isinstance(oauth, dict) or not oauth.get("refreshToken"):
         return
-    if expected_account is not None and oauth.get("accountUuid") != expected_account:
+    if expected_account is not None and (
+        oauth.get("accountUuid") != expected_account
+        # The slot may have been re-authenticated as another account while the
+        # probe ran; never overwrite that with the probed account's tokens.
+        or _slot_account(slot) != expected_account
+    ):
         logger.warning(
             "probe refresh for %s names a different account; slot left unchanged",
             slot.name,
