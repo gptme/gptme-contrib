@@ -3830,6 +3830,12 @@ _TEST_FILE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Rust keeps unit tests inline (``#[cfg(test)]`` modules in ``src/``), so an
+# added test attribute counts as a test even when no path looks like one.
+_ADDED_INLINE_TEST_RE = re.compile(
+    r"^\+(?!\+\+)\s*#\[(?:cfg\(test\)|(?:tokio::)?test)\b", re.MULTILINE
+)
+
 
 _VISUAL_PATH_RE = re.compile(
     r"\.(tsx|css|scss|less|svelte)$|/(tui|webui|ui|frontend|components)/",
@@ -4062,7 +4068,7 @@ def _check_visual_screenshot(
 
 
 def _check_fix_without_test(
-    pr_title: str, touched_files: Collection[str]
+    pr_title: str, touched_files: Collection[str], diff: str = ""
 ) -> list[dict]:
     """Rule 7 — fix(...) PR with zero test files is advisory P2.
 
@@ -4074,6 +4080,8 @@ def _check_fix_without_test(
     if not re.match(r"^fix(\(.*?\))?!?:", pr_title.strip(), re.IGNORECASE):
         return []
     if any(_TEST_FILE_RE.search(f) for f in touched_files):
+        return []
+    if _ADDED_INLINE_TEST_RE.search(diff):
         return []
     anchor = next(iter(touched_files), "")
     return [
@@ -4128,7 +4136,7 @@ def static_preflight_findings(
     results.extend(_check_cited_shas(pr_body, repo, touched_files, diff))
     results.extend(_check_unrelated_ci_claim(pr_body, repo, number, touched_files))
     results.extend(_check_visual_screenshot(pr_body, diff, touched_files))
-    results.extend(_check_fix_without_test(pr_title, touched_files))
+    results.extend(_check_fix_without_test(pr_title, touched_files, diff))
     results.extend(host.extra_static_checks(diff, touched_files))
     return results
 
