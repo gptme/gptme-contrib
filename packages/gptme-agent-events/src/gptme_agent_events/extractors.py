@@ -352,10 +352,22 @@ def _codex_output(out: Any) -> tuple[int | None, bool, str]:
         except ValueError:
             data = None
         if isinstance(data, dict) and ("exit_code" in data or "output" in data):
-            if isinstance(data.get("exit_code"), int):
-                code = data["exit_code"]
+            raw_code = data.get("exit_code")
+            if isinstance(raw_code, bool):
+                raw_code = None
+            if isinstance(raw_code, int):
+                code = raw_code
+            elif isinstance(raw_code, str) and re.fullmatch(r"-?\d+", raw_code.strip()):
+                # Codex serialises the code as a string in some rollouts. Not
+                # reading it made a failed push look like a landed one, because
+                # the exit regex only scanned the output payload.
+                code = int(raw_code.strip())
             if isinstance(data.get("output"), str):
                 texts.append(data["output"])
+            elif code is None:
+                # No usable payload: keep the raw block so the exit regex and
+                # the caller still see whatever the block actually said.
+                texts.append(block)
         else:
             texts.append(block)
     text = "\n".join(texts)

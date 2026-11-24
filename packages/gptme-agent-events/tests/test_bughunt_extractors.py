@@ -170,3 +170,29 @@ def test_r2_6_codex_local_shell_bash_lc_push_is_detected():
         )
     )
     assert landings(out) == ["push"]
+
+
+def test_codex_string_exit_code_is_read_not_reported_as_success():
+    """A string ``exit_code`` must not make a failed push look landed.
+
+    Codex sometimes serialises ``exit_code`` as ``"128"``. The structured path
+    only accepted ``int``, so the code stayed ``None`` and the caller read the
+    result as success.
+    """
+    from gptme_agent_events.extractors import _codex_output
+
+    block = json.dumps({"exit_code": "128", "output": "error: failed to push some refs"})
+    code, running, text = _codex_output([block])
+    assert code == 128
+    assert running is False
+    assert "failed to push" in text
+
+
+def test_codex_unusable_exit_code_keeps_the_block_text():
+    """With no ``output`` payload, the raw block stays searchable."""
+    from gptme_agent_events.extractors import _codex_output
+
+    block = json.dumps({"exit_code": True, "stderr": "exited with code 1"})
+    code, _, text = _codex_output([block])
+    assert code == 1
+    assert "exited with code 1" in text
