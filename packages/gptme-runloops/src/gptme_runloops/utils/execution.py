@@ -204,6 +204,10 @@ def execute_gptme(
             print(f"ERROR: Execution timed out after {timeout}s", file=sys.stderr)
             exit_code = 124
             timed_out = True
+        except BaseException:
+            # e.g. KeyboardInterrupt: the detached group would outlive us.
+            _kill_process_group(proc)
+            raise
 
         # Discover conversation.jsonl written by this session.
         # gptme creates one session dir per run under GPTME_LOGS_HOME.
