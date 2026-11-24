@@ -881,6 +881,27 @@ def test_rule_7_accepts_inline_rust_unit_tests(alice_io):
     )
 
 
+def test_rule_7_context_test_attribute_is_not_bridged_by_a_blank_line(alice_io):
+    """An added blank line must not reach the next context line's ``#[test]``.
+
+    ``\\s`` matches newlines, so ``^\\+\\s*#\\[`` could consume the line break of
+    an added empty line and match a test attribute that was already there. That
+    suppressed rule 7 without any regression test being added.
+    """
+    w = writer.bind_io(alice_io)
+    diff = (
+        "diff --git a/src/main.rs b/src/main.rs\n"
+        "--- a/src/main.rs\n"
+        "+++ b/src/main.rs\n"
+        "@@ -1,2 +1,3 @@\n"
+        "+    fn helper() {}\n"
+        "+\n"
+        "     #[test]\n"
+    )
+    findings = w._check_fix_without_test("fix(alerts): re-arm", ["src/main.rs"], diff)
+    assert [f["title"] for f in findings] == ["fix PR has no regression test"]
+
+
 def test_visual_rule_keys_sections_by_new_path_not_header_split(alice_io):
     """A path containing `` b/ `` must still be keyed correctly (rule 1c).
 

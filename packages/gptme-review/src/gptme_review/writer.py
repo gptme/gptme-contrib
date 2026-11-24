@@ -3832,8 +3832,10 @@ _TEST_FILE_RE = re.compile(
 
 # Rust keeps unit tests inline (``#[cfg(test)]`` modules in ``src/``), so an
 # added test attribute counts as a test even when no path looks like one.
+# Horizontal whitespace only: ``\s`` matches newlines, which let an added
+# empty line bridge onto the next context line's existing ``#[test]``.
 _ADDED_INLINE_TEST_RE = re.compile(
-    r"^\+(?!\+\+)\s*#\[(?:cfg\(test\)|(?:tokio::)?test)\b", re.MULTILINE
+    r"^\+(?!\+\+)[ \t]*#\[(?:cfg\(test\)|(?:tokio::)?test)\b", re.MULTILINE
 )
 
 
