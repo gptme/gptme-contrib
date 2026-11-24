@@ -456,3 +456,30 @@ def test_indented_code_comments_and_prose_are_not_chapters():
     )
     chapters = {d.chapter for d in docs}
     assert chapters == {"Chapter 1 Variables", "Part II Advanced"}
+
+
+def test_spelled_out_chapter_numbers_and_indented_headings():
+    """ "Chapter One" is a chapter (word numerals count), and headings indented
+    by up to three spaces are ATX headings, not body text."""
+    body = " ".join(["word"] * 80)
+    text = "\n".join(
+        [
+            "Chapter One Getting Started",
+            body,
+            "   ### Section Inside",
+            body,
+            "    # not a heading: four spaces is an indented code comment",
+            body,
+            "Part Two Advanced",
+            body,
+        ]
+    )
+    docs = parse_book_text(
+        text, source="t", title="T", url="u", target_tokens=5000, min_chunk_tokens=10
+    )
+    chapters = {d.chapter for d in docs}
+    assert chapters == {"Chapter One Getting Started", "Part Two Advanced"}
+    sections = {d.section for d in docs}
+    assert "Section Inside" in sections
+    # The indented comment stays body text, not a section boundary.
+    assert not any("not a heading" in s for s in sections)
