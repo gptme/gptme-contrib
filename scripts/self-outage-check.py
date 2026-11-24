@@ -208,16 +208,16 @@ def _redact_ambiguous_quoted(text: str) -> str:
 
 # URL-embedded credentials: ``https://user:pass@host`` and schemeless
 # ``user:pass@host`` (proxy errors). Keep the user, drop the password.
-_USERINFO_USER = re.compile(r"\b[A-Za-z0-9._%+\-]{1,128}:")
 _USERINFO_HOST = re.compile(r"@[A-Za-z0-9\[]")
 
 
 def _redact_url_credential_token(token: str) -> str:
     # The password runs to the LAST ``@host``: proxy errors don't
     # percent-encode, so a raw ``@`` or ``/`` may be part of it, and its length
-    # is unbounded. The first ``word:`` not followed by ``//`` ends the user;
-    # a ``scheme://`` colon is skipped, so ``https://bob:/pw@host`` redacts
-    # ``/pw``. Not covered: a password that itself starts with ``//``
+    # is unbounded. The first colon not followed by ``//`` ends the user,
+    # whatever characters the user contains (``$``, ``~``, ``!`` are valid
+    # userinfo); a ``scheme://`` colon is skipped, so ``https://bob:/pw@host``
+    # redacts ``/pw``. Not covered: a password that itself starts with ``//``
     # (``bob://pw@host`` reads as a scheme, like ``ssh://git@host``).
     # Look-alikes such as ``message-id:abc@example.com`` are redacted too;
     # that is deliberate — over-redacting costs detail, a leak costs a secret.
@@ -226,13 +226,12 @@ def _redact_url_credential_token(token: str) -> str:
         at = m.start()
     if at <= 0:
         return token
-    for m in _USERINFO_USER.finditer(token, 0, at):
-        if token.startswith("//", m.end()):
-            continue
-        if m.end() == at:
-            return token
-        return token[: m.end()] + "[REDACTED]" + token[at:]
-    return token
+    colon = token.find(":", 0, at)
+    while colon != -1 and token.startswith("//", colon + 1):
+        colon = token.find(":", colon + 3, at)
+    if colon == -1 or colon + 1 == at:
+        return token
+    return token[: colon + 1] + "[REDACTED]" + token[at:]
 
 
 def _redact_url_credentials(text: str) -> str:

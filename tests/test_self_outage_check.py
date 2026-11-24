@@ -1436,6 +1436,15 @@ def test_url_credential_with_leading_slash_is_redacted() -> None:
     assert soc._redact(url) == url
 
 
+def test_url_credential_with_any_userinfo_username_is_redacted() -> None:
+    for user in ("build$", "a~b", "ci!", "x&y", "(tmp)"):
+        out = soc._redact(f"https://{user}:hunter2pw@proxy.internal")
+        assert out == f"https://{user}:[REDACTED]@proxy.internal", user
+        assert soc._redact(f"{user}:hunter2pw@proxy.internal") == (
+            f"{user}:[REDACTED]@proxy.internal"
+        )
+
+
 def test_url_credential_longer_than_any_bound_is_redacted() -> None:
     password = "a" * 5000
     out = soc._redact(f"https://bob:{password}@proxy.internal")
