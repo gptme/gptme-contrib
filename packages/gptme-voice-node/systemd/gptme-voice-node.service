@@ -3,6 +3,8 @@ Description=BobBrain Voice Node — WS client to bob-voice-server
 Documentation=https://github.com/gptme/gptme-contrib/tree/master/packages/gptme-voice-node
 After=network-online.target sound.target
 Wants=network-online.target
+StartLimitIntervalSec=120
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -20,8 +22,6 @@ ExecStart=/home/pi/.local/bin/gptme-voice-node
 # Auto-restart with progressive cooldown
 Restart=always
 RestartSec=10
-StartLimitIntervalSec=120
-StartLimitBurst=5
 
 # Resource limits (target: <50 MB RSS)
 MemoryMax=128M
