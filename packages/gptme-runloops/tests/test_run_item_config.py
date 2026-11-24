@@ -311,3 +311,30 @@ def test_cli_explicitly_empty_neutral_env_wins(tmp_path, monkeypatch) -> None:
     # to the inherited BOB_BACKEND.
     assert result.exit_code != 0
     assert "--backend is required" in result.output
+
+
+def test_cli_dry_run_rejects_bad_runner_env_like_a_real_run(tmp_path) -> None:
+    """A misdeclared runner_env exits 78 under --dry-run too (gptme-contrib#2335)."""
+    _write_cli_work_file(tmp_path)
+    cfg_dir = tmp_path / "config"
+    cfg_dir.mkdir()
+    (cfg_dir / "pm-run-item.toml").write_text(
+        '[config.runner_env]\nmode = "explicitt"\n'
+    )
+    result = CliRunner().invoke(
+        cli_main,
+        [
+            "run-item",
+            "--workspace",
+            str(tmp_path),
+            "--work-file",
+            str(tmp_path / "slot.jsonl"),
+            "--backend",
+            "claude-code",
+            "--dry-run",
+        ],
+    )
+    assert result.exit_code == 78, result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    assert "runner_env.mode" in result.output
+    assert "{" not in result.output  # no plan JSON for an invalid contract

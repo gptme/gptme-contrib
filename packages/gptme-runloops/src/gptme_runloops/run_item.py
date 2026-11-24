@@ -3475,15 +3475,28 @@ def _ambient_env(config: RunItemConfig, backend: str, model: str) -> dict[str, s
     return env
 
 
+class RunnerEnvContractError(ValueError):
+    """``config.runner_env`` is misdeclared or unsatisfiable (exit code 78)."""
+
+
 def _resolve_runner_base_env(
     config: RunItemConfig, backend: str
 ) -> dict[str, str] | None:
     """Resolve ``config.runner_env`` once per work file (before lock/claim).
 
     Returns ``None`` for legacy inheritance, the explicit mapping otherwise.
-    Raises :class:`MissingRunnerEnv` or ``ValueError`` on a misdeclared
-    contract; the caller turns that into a fail-closed exit code 78.
+    Raises :class:`RunnerEnvContractError` on a misdeclared contract; the
+    caller turns that into a fail-closed exit code 78.
     """
+    try:
+        return _resolve_runner_base_env_unchecked(config, backend)
+    except (MissingRunnerEnv, ValueError) as exc:
+        raise RunnerEnvContractError(str(exc)) from exc
+
+
+def _resolve_runner_base_env_unchecked(
+    config: RunItemConfig, backend: str
+) -> dict[str, str] | None:
     spec = config.runner_env
     if not isinstance(spec, Mapping):
         raise ValueError("runner_env must be a table")
@@ -3551,7 +3564,7 @@ def run_work_file(
 
     try:
         runner_base_env = _resolve_runner_base_env(config, backend)
-    except (MissingRunnerEnv, ValueError) as exc:
+    except RunnerEnvContractError as exc:
         # Fail closed before claiming or locking: a misdeclared contract must
         # never silently degrade to ambient inheritance.
         _log(f"ERROR: {exc}")
