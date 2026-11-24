@@ -23,6 +23,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from gptme_subscription.state import locked_state_file
+
 logger = logging.getLogger(__name__)
 
 CredentialStatus = Literal[
@@ -207,6 +209,11 @@ def _persist_probe_refresh(
         Path(tmp_name).unlink(missing_ok=True)
 
 
+def probe_lock_path(slot: Path) -> Path:
+    """Path whose ``.lock`` sibling serializes probes of ``slot``."""
+    return slot.with_name(f".{slot.name}.probe")
+
+
 def probe_credential(
     path: Path, sub: str, *, usage_script: Path | None = None, timeout: int = 60
 ) -> tuple[CredentialInfo, bool, str]:
@@ -230,34 +237,40 @@ def probe_credential(
     env = os.environ.copy()
     try:
         target_credential = path.expanduser().resolve()
-        expected_account = _slot_account(target_credential)
-        original = target_credential.read_bytes()
-        with tempfile.TemporaryDirectory(
-            prefix=f"gptme-subscription-probe-{sub}-"
-        ) as tmp:
-            claude_dir = Path(tmp) / ".claude"
-            claude_dir.mkdir(parents=True, exist_ok=True)
-            live_credential = claude_dir / ".credentials.json"
-            # Make the requested slot appear as Claude's live credential so any
-            # normal usage probe reads ``path`` instead of the operator's real
-            # ~/.claude symlink.
-            live_credential.symlink_to(target_credential)
-            env["HOME"] = tmp
-            env["CLAUDE_HOME"] = str(claude_dir)
-            try:
-                result = subprocess.run(
-                    [str(usage_script), "--json", "--no-cache"],
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout,
-                    env=env,
-                )
-            finally:
-                # Also on timeout: a refresh written before a hang would
-                # otherwise be deleted with the temporary directory.
-                _persist_probe_refresh(
-                    live_credential, target_credential, expected_account, original
-                )
+        # Serialize probes of one slot from the read of ``original`` through
+        # persistence: two overlapping probes would both compare against the
+        # same ``original``, and the later refresh (the only unconsumed token)
+        # would be dropped. Hidden name, so slot globs never see the lock.
+        probe_lock = probe_lock_path(target_credential)
+        with locked_state_file(probe_lock):
+            expected_account = _slot_account(target_credential)
+            original = target_credential.read_bytes()
+            with tempfile.TemporaryDirectory(
+                prefix=f"gptme-subscription-probe-{sub}-"
+            ) as tmp:
+                claude_dir = Path(tmp) / ".claude"
+                claude_dir.mkdir(parents=True, exist_ok=True)
+                live_credential = claude_dir / ".credentials.json"
+                # Make the requested slot appear as Claude's live credential so any
+                # normal usage probe reads ``path`` instead of the operator's real
+                # ~/.claude symlink.
+                live_credential.symlink_to(target_credential)
+                env["HOME"] = tmp
+                env["CLAUDE_HOME"] = str(claude_dir)
+                try:
+                    result = subprocess.run(
+                        [str(usage_script), "--json", "--no-cache"],
+                        capture_output=True,
+                        text=True,
+                        timeout=timeout,
+                        env=env,
+                    )
+                finally:
+                    # Also on timeout: a refresh written before a hang would
+                    # otherwise be deleted with the temporary directory.
+                    _persist_probe_refresh(
+                        live_credential, target_credential, expected_account, original
+                    )
     except subprocess.TimeoutExpired:
         return info, False, f"probe timed out after {timeout}s"
     except OSError as exc:
