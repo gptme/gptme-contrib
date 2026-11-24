@@ -146,3 +146,39 @@ def test_concurrent_sends_of_same_draft_deliver_once(agent: AgentEmail, deliveri
 
     assert len(deliveries) == 1
     assert sorted(results) == ["refused"] * 2 + ["sent"]
+
+
+def test_reply_lock_follows_the_draft_read_under_lock(
+    agent: AgentEmail, deliveries: list, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reply lock key must come from the draft as read under a lock (#1807).
+
+    If In-Reply-To is read before any lock, an edit in between lets two senders
+    of the same draft take different reply locks and both deliver it.
+    """
+    import hashlib
+
+    import gptmail.lib as lib
+
+    msg = _draft(agent, "d1", "<orig@example.com>")
+    draft = agent.email_dir / "drafts" / "d1.md"
+    real_lock = lib.FileLock
+    locked: list[str] = []
+
+    class EditingLock(real_lock):  # type: ignore[misc,valid-type]
+        def __enter__(self) -> Any:
+            if not locked:
+                # A concurrent edit lands while this sender waits for a lock.
+                draft.write_text(draft.read_text().replace("orig@", "new@"))
+            locked.append(self.lock_path.stem)
+            return super().__enter__()
+
+    monkeypatch.setattr(lib, "FileLock", EditingLock)
+    agent.send(msg)
+
+    def key(k: str) -> str:
+        return hashlib.sha256(k.encode()).hexdigest()[:16]
+
+    assert key("reply:new@example.com") in locked
+    assert key("reply:orig@example.com") not in locked
+    assert len(deliveries) == 1

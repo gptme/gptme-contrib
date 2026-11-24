@@ -1035,23 +1035,31 @@ class AgentEmail:
         if not draft_path.exists() and not sent_path.exists():
             raise ValueError(f"Draft not found: {message_id}")
 
-        in_reply_to = ""
-        if draft_path.exists():
-            headers, _ = self._markdown_to_email(draft_path.read_text())
-            in_reply_to = headers.get("In-Reply-To", "").strip()
-        lock_key = f"reply:{in_reply_to.strip('<>')}" if in_reply_to else f"draft:{filename}"
-        digest = hashlib.sha256(lock_key.encode()).hexdigest()[:16]
-        lock_path = self.email_dir / ".send-locks" / f"{digest}.lock"
+        def lock_path(key: str) -> Path:
+            digest = hashlib.sha256(key.encode()).hexdigest()[:16]
+            return self.email_dir / ".send-locks" / f"{digest}.lock"
 
-        with FileLock(lock_path, timeout=SEND_LOCK_TIMEOUT):
+        # Lock the draft first and read In-Reply-To under that lock: a key read
+        # before locking can go stale if the draft is edited meanwhile, letting
+        # two senders of one draft take different reply locks. Order is always
+        # draft -> reply, so the nesting cannot deadlock.
+        with FileLock(lock_path(f"draft:{filename}"), timeout=SEND_LOCK_TIMEOUT):
             if sent_path.exists():
                 raise ValueError(f"Already sent: {message_id}")
-            if in_reply_to and not force and self._is_completed(in_reply_to):
-                raise ValueError(
-                    f"Original message {in_reply_to} is already replied to or marked "
-                    "no-reply-needed; refusing duplicate reply (use force to override)"
-                )
-            self._send_unlocked(message_id)
+            in_reply_to = ""
+            if draft_path.exists():
+                headers, _ = self._markdown_to_email(draft_path.read_text())
+                in_reply_to = headers.get("In-Reply-To", "").strip()
+            if not in_reply_to:
+                self._send_unlocked(message_id)
+                return
+            with FileLock(lock_path(f"reply:{in_reply_to.strip('<>')}"), timeout=SEND_LOCK_TIMEOUT):
+                if not force and self._is_completed(in_reply_to):
+                    raise ValueError(
+                        f"Original message {in_reply_to} is already replied to or marked "
+                        "no-reply-needed; refusing duplicate reply (use force to override)"
+                    )
+                self._send_unlocked(message_id)
 
     def _guard_email_outbound(self, text: str) -> None:
         """Apply existing secret policy without exposing scanner exception payloads."""
