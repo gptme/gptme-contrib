@@ -6177,18 +6177,11 @@ def add(
     # Ensure tasks directory exists
     tasks_dir.mkdir(parents=True, exist_ok=True)
 
-    # Generate slug from title
+    # Generate slug from title. A title with no ASCII alphanumerics would give
+    # an empty slug (hidden ".md" file, or an id starting with "-" that the CLI
+    # parses as an option), so fall back to a stable base.
     slug = re.sub(r"[^a-z0-9]+", "-", title.lower())
-    slug = slug.strip("-")[:50].rstrip("-")
-    filename = f"{slug}.md"
-    filepath = tasks_dir / filename
-
-    # Check for existing file with same name
-    if filepath.exists():
-        # Add timestamp suffix to make unique
-        timestamp = datetime.now().strftime("%H%M%S")
-        filename = f"{slug}-{timestamp}.md"
-        filepath = tasks_dir / filename
+    slug = slug.strip("-")[:50].rstrip("-") or "task"
 
     # Build frontmatter
     now = datetime.now(timezone.utc)
@@ -6257,8 +6250,25 @@ def add(
 
     content = "\n".join(lines)
 
-    # Write file
-    filepath.write_text(content)
+    # Write file without ever overwriting an existing task. Repeated adds of
+    # one title within a second share the timestamp suffix, so count past it
+    # and claim each candidate name atomically with exclusive-create.
+    timestamp = datetime.now().strftime("%H%M%S")
+    attempt = 0
+    while True:
+        if attempt == 0:
+            stem = slug
+        elif attempt == 1:
+            stem = f"{slug}-{timestamp}"
+        else:
+            stem = f"{slug}-{timestamp}-{attempt}"
+        filepath = tasks_dir / f"{stem}.md"
+        try:
+            with filepath.open("x") as f:
+                f.write(content)
+            break
+        except FileExistsError:
+            attempt += 1
 
     console.print(f"[green]✓ Created task:[/] {filepath}")
     print(filepath.stem)
