@@ -195,6 +195,26 @@ def _string_list(value: object) -> list[str]:
     return []
 
 
+def _match_terms(value: object, *, split_commas: bool) -> list[str]:
+    """Normalise a ``keywords``/``patterns`` field to a list of strings.
+
+    Accepts a string or a list. Numeric YAML scalars (``- 404``) are kept as
+    text; booleans, mappings and nulls are dropped. A bare string is split on
+    commas only when ``split_commas`` is set: keyword lists use that
+    shorthand, but a comma inside a regex (``x{1,3}``) is part of the pattern.
+    """
+    items = value if isinstance(value, list) else [value]
+    terms: list[str] = []
+    for item in items:
+        if isinstance(item, bool) or not isinstance(item, str | int | float):
+            continue
+        if split_commas and isinstance(item, str) and not isinstance(value, list):
+            terms.extend(item.split(","))
+        else:
+            terms.append(str(item))
+    return [term.strip() for term in terms if term.strip()]
+
+
 def _clean_plain_scalar(raw: str) -> str:
     """Strip surrounding quotes, then any YAML inline ``#`` comment.
 
@@ -969,13 +989,18 @@ def _parse_lesson_file(path: Path) -> dict[str, Any] | None:
         raw_keywords = []
         raw_patterns = []
 
-    if isinstance(raw_keywords, str):
-        raw_keywords = [raw_keywords]
-    keywords = _dedupe_strings([*raw_keywords, *_string_list(fm.get("keywords"))])
-
-    if isinstance(raw_patterns, str):
-        raw_patterns = [raw_patterns]
-    patterns = _dedupe_strings([*raw_patterns, *_string_list(fm.get("patterns"))])
+    keywords = _dedupe_strings(
+        [
+            *_match_terms(raw_keywords, split_commas=True),
+            *_match_terms(fm.get("keywords"), split_commas=True),
+        ]
+    )
+    patterns = _dedupe_strings(
+        [
+            *_match_terms(raw_patterns, split_commas=False),
+            *_match_terms(fm.get("patterns"), split_commas=False),
+        ]
+    )
 
     skill_name = fm.get("name") if isinstance(fm.get("name"), str) else None
     lesson_id = fm.get("id") if isinstance(fm.get("id"), str) else None
