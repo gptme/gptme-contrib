@@ -519,7 +519,7 @@ wheels = [
 
 [[package]]
 name = "aw-watcher-agent"
-version = "0.2.0"
+version = "0.2.1"
 source = { editable = "packages/aw-watcher-agent" }
 
 [package.optional-dependencies]
@@ -1488,7 +1488,7 @@ wheels = [
 
 [[package]]
 name = "gptmail"
-version = "0.2.0"
+version = "0.2.1"
 source = { editable = "packages/gptmail" }
 dependencies = [
     { name = "click" },
@@ -2483,7 +2483,7 @@ source = { editable = "plugins/gptme-ralph" }
 
 [[package]]
 name = "gptme-redact"
-version = "0.1.2"
+version = "0.1.3"
 source = { editable = "packages/gptme-redact" }
 
 [package.optional-dependencies]

@@ -3,9 +3,12 @@
 
 def test_package_import():
     """Test that gptmail package can be imported."""
+    from importlib.metadata import version
+
     import gptmail
 
-    assert gptmail.__version__ == "0.1.0"
+    # Tracks the distribution, so a release bump cannot leave it stale again.
+    assert gptmail.__version__ == version("gptmail")
 
 
 def test_submodule_imports():
