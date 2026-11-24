@@ -243,22 +243,30 @@ Common confusions:
 
 ### Legal transitions
 
+This diagram mirrors `gptodo transitions --json` (`VALID_TRANSITIONS` in `checker.py`).
+Regenerate it from that output when the table changes.
+
 ```mermaid
 stateDiagram-v2
     [*] --> backlog
     [*] --> draft
-    draft --> backlog : released
-    draft --> todo : released
-    draft --> cancelled
     backlog --> todo
+    backlog --> active
+    backlog --> waiting
+    backlog --> done
     backlog --> draft
     backlog --> someday
     backlog --> cancelled
+    backlog --> expired : auto-reap
     todo --> active
+    todo --> waiting
+    todo --> done
+    todo --> ready_for_review
     todo --> backlog
     todo --> draft
     todo --> someday
     todo --> cancelled
+    todo --> expired : auto-reap
     active --> ready_for_review
     active --> waiting
     active --> draft
@@ -266,16 +274,26 @@ stateDiagram-v2
     active --> done
     active --> cancelled
     ready_for_review --> active : review fails
+    ready_for_review --> todo
+    ready_for_review --> waiting
+    ready_for_review --> someday
     ready_for_review --> done
     ready_for_review --> cancelled
     waiting --> active : blocker resolved
+    waiting --> todo
+    waiting --> backlog
+    waiting --> done
+    waiting --> ready_for_review
     waiting --> someday
     waiting --> cancelled
+    draft --> backlog : released
+    draft --> todo : released
+    draft --> cancelled
     someday --> backlog : revived
     someday --> todo : revived
+    someday --> waiting
+    someday --> done
     someday --> cancelled
-    backlog --> expired : auto-reap
-    todo --> expired : auto-reap
     someday --> expired : auto-reap
     expired --> backlog : revived
     expired --> todo : revived

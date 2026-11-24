@@ -30,6 +30,30 @@ out of the box. The tweet and email sources read `tweets/posted/*.yml` and
 `email/sent/*.md` — the latter is where [gptmail](../gptmail/README.md) stores
 sent mail. Missing sources are skipped.
 
+### Source formats (agent mode)
+
+Files that do not match these shapes are skipped silently.
+
+- **Journal**: `journal/YYYY-MM-DD/*.md` (one directory per day). The older flat
+  layout, `journal/YYYY-MM-DD*.md`, is still read by `daily`.
+- **Standup**: `standup` reads only the `journal/YYYY-MM-DD/` directories and takes
+  each entry's `**Outcome**:` line (a leading `productive —`-style status prefix is
+  dropped). `self-merges.md` is skipped.
+- **Tweets**: `tweets/posted/tweet_YYYYMMDD_*.yml` or `reply_YYYYMMDD_*.yml`. The date
+  in the filename selects the day; the file needs non-empty `text` and an ISO
+  `created_at`. `type`, `in_reply_to` and `context.original_tweet.{author,text}` are
+  optional.
+- **Email**: `email/sent/*.md` with RFC 822 headers (`Subject:`, `To:`, `Date:`,
+  optional `In-Reply-To:`), a blank line, then the body. A message without a parsable
+  `Date:` header is skipped.
+- **GitHub**: needs an authenticated `gh` (`gh auth status` must succeed); otherwise
+  GitHub data is skipped.
+
+Summaries build on each other: `weekly` reads the saved daily summaries for the week
+and `monthly` reads the saved weekly summaries for each ISO week touching the month
+(the `.json` file when present, else the `.md`). Generate the dailies first (`smart`
+or `backfill`); `weekly` with no dailies saved exits with an error.
+
 ## Install
 
 The package depends on other gptme-contrib workspace packages
@@ -48,7 +72,7 @@ The examples below assume the workspace venv is active (or prefix them with
 
 LLM summaries use the Claude Code CLI (`claude -p`), so `claude` must be
 installed and logged in. Use `--raw` to skip the LLM in human mode. GitHub
-data uses the `gh` CLI.
+data uses the `gh` CLI, which must be authenticated.
 
 ## Usage
 

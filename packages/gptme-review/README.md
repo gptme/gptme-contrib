@@ -2,6 +2,31 @@
 
 Self-hosted PR-review engine, lifecycle tracking and transport admission.
 
+## Install
+
+The package is a library with no console script. It depends on the workspace
+packages `bobutils`, `gptme-block-registry` and `gptme-contrib-lib`, so install it
+from a gptme-contrib checkout (Python 3.11+):
+
+```bash
+uv sync --package gptme-review
+uv run python -c "import gptme_review"
+```
+
+## Modules
+
+| Module | What it holds |
+|--------|---------------|
+| `core` | Shared reviewer pieces: the one-shot `llm` engine, finding normalisation (severity, class, summary-only), `confidence_score`, merge/disposition verdicts, subscription-model availability |
+| `writer` | Per-PR review writer: marker comment, publish, threads, disposition, rendering, checkout and preflight. I/O resolves at call time through `bind_io`, so a host injects its own GitHub access and identity |
+| `routing` | Transport admission: which reviewer (OpenRouter or a subscription CLI) may serve a request, consensus admission across distinct model families |
+| `panel` | One-shot subscription transports (Codex, Claude Code, Grok, Copilot) and multi-model panels; see below |
+| `lifecycle` | Append-only, best-effort review lifecycle ledger; `python -m gptme_review.lifecycle` prints a read-only per-run JSON summary |
+| `sweep` | Sweep candidate selection, marker policy and bounded dispatch; see below |
+| `sweep_outcome` | Classifies one sweep attempt: quota exhaustion vs. broken reviewer, superseded head, deferred review, failure counts |
+| `sweep_fallback` | Retries selected primary-engine failures on a fallback engine, skipping heads already reviewed and diffs too large to retry |
+| `shard` | Shard planning for diffs larger than one review prompt; see below |
+
 ## Request billing evidence
 
 The request usage ledger distinguishes `openrouter_generation` (generation
