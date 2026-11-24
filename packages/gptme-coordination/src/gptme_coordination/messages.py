@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import hmac
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from gptme_coordination.auth import compute_hmac as _compute_hmac
@@ -99,6 +99,10 @@ class MessageBus:
         query = """SELECT * FROM messages
             WHERE (recipient = ? OR recipient IS NULL)"""
         params: list[str | int | None] = [agent_id]
+
+        # created_at is naive UTC; naive input is taken to be UTC already.
+        if since is not None and since.tzinfo is not None:
+            since = since.astimezone(timezone.utc)
 
         if since is not None and since_id is not None:
             stamp = since.strftime("%Y-%m-%d %H:%M:%S")

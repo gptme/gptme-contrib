@@ -545,7 +545,8 @@ def run_push_guard(
     # brain repo stays exempt because it pushes master directly (via
     # git-safe-push-master) and must not auto-claim pr-branch:...#master.
     _brain_root = brain_root if brain_root is not None else _get_brain_root()
-    if root == _brain_root:
+    # The git toplevel is resolved; the workspace env value may be a symlink.
+    if root.resolve() == _brain_root.resolve():
         return 0
 
     sid = session_id if session_id is not None else _get_session_id()
@@ -780,7 +781,10 @@ def run_guard(
     """
     # 1. Scope
     root = worktree_root if worktree_root is not None else _get_worktree_root()
-    if root is None or not str(root).startswith(_WORKTREE_PREFIX):
+    # Resolve both sides: on macOS /tmp is a symlink to /private/tmp.
+    if root is None or not os.path.realpath(root).startswith(
+        os.path.realpath(_WORKTREE_PREFIX) + os.sep
+    ):
         return 0
 
     _brain_root = brain_root if brain_root is not None else _get_brain_root()

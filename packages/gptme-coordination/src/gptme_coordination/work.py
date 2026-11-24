@@ -39,7 +39,8 @@ CREATE TABLE IF NOT EXISTS work (
     result TEXT,
     metadata TEXT,
     completed_at TEXT,
-    hmac TEXT
+    hmac TEXT,
+    abandoned_at TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_work_claimer ON work(claimer);
@@ -174,6 +175,10 @@ class WorkClaimManager:
         """Apply work-table migrations owned by the work manager."""
         try:
             self.db.conn.execute("ALTER TABLE work ADD COLUMN completed_at TEXT")
+        except Exception:
+            pass  # Column already exists.
+        try:
+            self.db.conn.execute("ALTER TABLE work ADD COLUMN abandoned_at TEXT")
         except Exception:
             pass  # Column already exists.
 
@@ -474,7 +479,8 @@ class WorkClaimManager:
         """Abandon a claimed task, making it available again. Returns True if successful."""
         rows = self.db.conn.execute(
             """UPDATE work SET status = 'abandoned', claimer = NULL,
-                expires_at = NULL, completed_at = NULL, hmac = NULL, result = ?
+                expires_at = NULL, completed_at = NULL, hmac = NULL, result = ?,
+                abandoned_at = datetime('now')
             WHERE task_id = ? AND claimer = ? AND status = 'claimed'""",
             (reason, task_id, agent_id),
         )
@@ -503,11 +509,12 @@ class WorkClaimManager:
             counts[f"completed_older_than_{completed_age_hours}h"] = result.rowcount
 
         if abandoned_age_hours is not None and abandoned_age_hours > 0:
+            # claimed_at covers rows abandoned before abandoned_at existed.
             result = conn.execute(
                 """DELETE FROM work
                 WHERE status = 'abandoned'
-                  AND claimed_at IS NOT NULL
-                  AND claimed_at < datetime('now', ? || ' hours')""",
+                  AND COALESCE(abandoned_at, claimed_at)
+                      < datetime('now', ? || ' hours')""",
                 (str(-abandoned_age_hours),),
             )
             counts[f"abandoned_older_than_{abandoned_age_hours}h"] = result.rowcount
