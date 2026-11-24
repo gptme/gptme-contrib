@@ -4060,7 +4060,7 @@ _EPIC_MARKER_RE = re.compile(
     r"(?im)^[ \t]*epic:[ \t]*"
     r"(?:https://github\.com/(?P<url_repo>[\w.-]+/[\w.-]+)/issues/(?P<url_num>\d+)"
     r"|(?P<repo>[\w.-]+/[\w.-]+)?#(?P<num>\d+))"
-    r"[ \t]*\.?[ \t]*$"
+    r"[ \t]*\.?[ \t]*\r?$"
 )
 
 
@@ -4125,9 +4125,17 @@ def epic_category_waiver(
         return reasons, None
     if repo.lower() not in merge_policy.epic_repos(policy):
         return reasons, None
+    repos = merge_policy.epic_repos(policy)
     listed = merge_policy.epic_issues(policy)
+    # The epic's own repo must be listed too, not just the PR's.
     epic = next(
-        (ref for ref in declared if ref in listed and _epic_issue_is_open(ref)),
+        (
+            ref
+            for ref in declared
+            if ref in listed
+            and ref.split("#", 1)[0] in repos
+            and _epic_issue_is_open(ref)
+        ),
         None,
     )
     if epic is None:

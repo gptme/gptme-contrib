@@ -101,6 +101,22 @@ def test_same_repo_short_ref_resolves_against_pr_repo() -> None:
     assert smc.declared_epics("Epic: #2310", "gptme/gptme") == ["gptme/gptme#2310"]
 
 
+def test_crlf_body_declaration_is_read() -> None:
+    assert smc.declared_epics(f"intro\r\nEpic: {EPIC}\r\nmore\r\n", REPO) == [EPIC]
+
+
+def test_epic_whose_repo_is_outside_epic_repos_is_not_waived() -> None:
+    # A listed epic still needs its own repo in [epics].repos, not just the PR's.
+    (remaining, warning), _ = _waive(
+        [PLACEMENT],
+        repo="gptme/gptme",
+        body=f"Epic: {EPIC}",
+        policy=_policy(repos=("gptme/gptme",)),
+    )
+    assert remaining == [PLACEMENT]
+    assert warning is None
+
+
 def test_unlisted_epic_is_not_waived() -> None:
     (remaining, warning), _ = _waive([PLACEMENT], body="Epic: gptme/gptme-contrib#1")
     assert remaining == [PLACEMENT]
