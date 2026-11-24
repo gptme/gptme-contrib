@@ -4025,6 +4025,40 @@ def path_classifier() -> merge_policy.PathClassifier:
     )
 
 
+#: Erik's merge rules (2026-11-24): a gptme or gptme-contrib feature merges on
+#: a clean review only under about this many counted lines. Tests and lockfiles
+#: are not counted, matching merge_policy.toml's size_exempt_classes.
+FEATURE_COUNTED_LINE_CAP = 800
+_FEATURE_LINE_CAP_REPOS = frozenset({"gptme/gptme", "gptme/gptme-contrib"})
+_FEATURE_TITLE_RE = re.compile(r"(?i)^feat(?:\([^)]*\))?!?:")
+
+
+def feature_size_reasons(repo: str, number: int, title: str) -> list[str]:
+    """Refuse a gptme/gptme-contrib ``feat`` PR above the counted-line cap."""
+    if repo not in _FEATURE_LINE_CAP_REPOS or not _FEATURE_TITLE_RE.match(
+        title.strip()
+    ):
+        return []
+    changes = fetch_pr_file_changes(repo, number)
+    if changes is None:
+        return [
+            "Feature size unknown (PR file list unavailable); the "
+            f"{FEATURE_COUNTED_LINE_CAP}-line feature cap fails closed"
+        ]
+    counted = sum(
+        c.additions + c.deletions
+        for c in changes
+        if not (is_test_file(c.path) or is_lockfile(c.path))
+    )
+    if counted <= FEATURE_COUNTED_LINE_CAP:
+        return []
+    return [
+        f"Feature is {counted} counted lines (> {FEATURE_COUNTED_LINE_CAP}, tests "
+        "and lockfiles excluded): large features are Erik's call (merge rules "
+        "2026-11-24)"
+    ]
+
+
 def merge_policy_tier_waiver(
     reasons: list[str], *, repo: str, number: int, files: list[str]
 ) -> tuple[list[str], str | None, dict[str, Any] | None]:
@@ -4550,6 +4584,12 @@ def evaluate_pr(
     else:
         category, category_reasons = classify_category(files, repo=repo)
         result.category = category
+
+    if result.category is not None:
+        size_reasons = feature_size_reasons(repo, number, title)
+        if size_reasons:
+            result.category = None
+            category_reasons.extend(size_reasons)
 
     # ErikBjare/bob#1480: a tier-0 PR in a rollout repo of gptme_contrib_lib/merge_policy.toml
     # needs no category. Evaluated before operator approval so the tier is

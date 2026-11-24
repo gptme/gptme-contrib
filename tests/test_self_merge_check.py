@@ -2765,6 +2765,16 @@ def _evaluate_gptme_core(
         url="https://github.com/gptme/gptme/pull/999",
     )
     with (
+        patch.object(
+            self_merge_check,
+            "fetch_pr_file_changes",
+            return_value=[
+                self_merge_check.merge_policy.FileChange(
+                    path=str(shape["path"]), additions=1, deletions=0, patch=None
+                )
+                for shape in file_shapes
+            ],
+        ),
         patch.object(self_merge_check, "fetch_pr", return_value=pr_data),
         patch.object(self_merge_check, "get_gh_user", return_value="TimeToBuildBob"),
         patch.object(
@@ -3514,3 +3524,44 @@ def test_gptme_core_changed_config_default_routes() -> None:
         "fix: enforce", "", [_shape("gptme/config/models.py", patch)]
     )
     assert any("Changed or removed config field" in r for r in reasons)
+
+
+def _changes(*rows: tuple[str, int]) -> list[Any]:
+    fc = self_merge_check.merge_policy.FileChange
+    return [fc(path=path, additions=n, deletions=0, patch=None) for path, n in rows]
+
+
+@pytest.mark.parametrize(
+    ("title", "rows", "expect_reason"),
+    [
+        ("feat(x): big", [("gptme/a.py", 801)], True),
+        ("feat: at cap", [("gptme/a.py", 800)], False),
+        (
+            "feat!: tests excluded",
+            [("gptme/a.py", 100), ("tests/test_a.py", 5000)],
+            False,
+        ),
+        ("feat: lockfile excluded", [("gptme/a.py", 10), ("uv.lock", 9000)], False),
+        ("fix: not a feature", [("gptme/a.py", 5000)], False),
+    ],
+)
+def test_feature_size_cap(
+    monkeypatch: pytest.MonkeyPatch,
+    title: str,
+    rows: list[tuple[str, int]],
+    expect_reason: bool,
+) -> None:
+    monkeypatch.setattr(
+        self_merge_check, "fetch_pr_file_changes", lambda repo, n: _changes(*rows)
+    )
+    reasons = self_merge_check.feature_size_reasons("gptme/gptme", 1, title)
+    assert bool(reasons) is expect_reason
+
+
+def test_feature_size_cap_other_repo_and_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(self_merge_check, "fetch_pr_file_changes", lambda repo, n: None)
+    assert self_merge_check.feature_size_reasons("o/r", 1, "feat: x") == []
+    reasons = self_merge_check.feature_size_reasons("gptme/gptme-contrib", 1, "feat: x")
+    assert reasons and "fails closed" in reasons[0]
