@@ -36,6 +36,7 @@ sys.path.insert(0, str(_Path(__file__).parent))
 # Add parent directory so `from twitter.llm import ...` resolves to scripts/twitter/
 sys.path.insert(0, str(_Path(__file__).parent.parent))
 
+import contextlib
 import hashlib
 import json
 import logging
@@ -92,9 +93,13 @@ from twitter.llm import (
     verify_draft,
 )
 from twitter.twitter import (
+    POST_DEDUP_TTL,
     DailyReadLimitReached,
     _find_placeholder_in_text,
+    _post_dedup_gate,
+    _post_dedup_key,
     cached_get_me,
+    current_account,
     load_twitter_client,
 )
 from url_utils import validate_urls_in_text  # type: ignore[import-not-found]
@@ -1679,6 +1684,37 @@ def _create_tweet_kwargs(
     }
 
 
+SHARED_DUPLICATE_REASON = (
+    "Already posted: this account replied to/quoted the same target (or posted "
+    f"this exact text) within {POST_DEDUP_TTL // 3600}h, via another posting path"
+)
+
+
+@contextlib.contextmanager
+def _shared_post_gate(draft: TweetDraft):
+    """Hold the per-target post lock shared with ``twitter.py post``.
+
+    Every posting path (manual CLI, approved queue, trusted-user auto-post) keys
+    the same lock and receipt marker, so a manual reply and an automatic reply
+    to the same tweet cannot both land, even when they race. Yields a
+    ``mark_posted`` callback to call once the main tweet is confirmed created,
+    or ``None`` when the target already has a fresh receipt.
+    """
+    key = _post_dedup_key(
+        draft.text, draft.in_reply_to, draft.quote_tweet_id, current_account()
+    )
+    with _post_dedup_gate(key, False) as mark_posted:
+        yield mark_posted
+
+
+def _reject_shared_duplicate(path: Path, draft: TweetDraft) -> None:
+    """Move a queued draft whose target already has a shared post receipt."""
+    draft.reject_reason = SHARED_DUPLICATE_REASON
+    draft.save(path)
+    rejected_path = move_draft(path, "rejected")
+    console.print(f"[yellow]{SHARED_DUPLICATE_REASON}; moved to {rejected_path}")
+
+
 def _post_tweet_with_thread(client, draft: TweetDraft, tweet_id: str) -> None:
     """Post thread follow-ups after main tweet is posted."""
     if draft.thread:
@@ -1898,20 +1934,27 @@ def post(
                 continue
 
             try:
-                # Post the main tweet (quote_tweet_id takes precedence over reply)
-                response = client.create_tweet(**_create_tweet_kwargs(draft))
+                with _shared_post_gate(draft) as mark_shared:
+                    if mark_shared is None:
+                        _reject_shared_duplicate(path, draft)
+                        continue
+                    # Post the main tweet (quote_tweet_id takes precedence over reply)
+                    response = client.create_tweet(**_create_tweet_kwargs(draft))
 
-                if response.data:
-                    tweet_id = response.data["id"]
-                    console.print(f"[green]Posted tweet: {tweet_id}")
+                    if response.data:
+                        tweet_id = response.data["id"]
+                        mark_shared()
+                        console.print(f"[green]Posted tweet: {tweet_id}")
 
-                    # Post thread follow-ups if present
-                    _post_tweet_with_thread(client, draft, tweet_id)
+                        # Post thread follow-ups if present
+                        _post_tweet_with_thread(client, draft, tweet_id)
 
-                    _mark_posted(draft, path, tweet_id)
-                    posts_this_run += 1
-                else:
-                    console.print("[red]Error: No response data from tweet creation")
+                        _mark_posted(draft, path, tweet_id)
+                        posts_this_run += 1
+                    else:
+                        console.print(
+                            "[red]Error: No response data from tweet creation"
+                        )
             except Exception as e:
                 console.print(f"[red]Error posting tweet: {e}")
                 failure_kind = _classify_tweet_post_error(e)
@@ -2440,40 +2483,53 @@ def process_timeline_tweets(
                             client_for_post = load_twitter_client(
                                 require_auth=True, headless=True
                             )
-                            post_response = client_for_post.create_tweet(
-                                **_create_tweet_kwargs(draft)
-                            )
-                            if post_response.data:
-                                tweet_id = post_response.data["id"]
-                                draft.posted_id = tweet_id
-                                draft.posted_at = datetime.now()
-                                console.print(f"[green]✓ Auto-posted tweet: {tweet_id}")
+                            with _shared_post_gate(draft) as mark_shared:
+                                if mark_shared is None:
+                                    draft.reject_reason = SHARED_DUPLICATE_REASON
+                                    path = save_draft(draft, "rejected")
+                                    console.print(
+                                        f"[yellow]{SHARED_DUPLICATE_REASON}; saved to {path}"
+                                    )
+                                    if draft.in_reply_to is not None:
+                                        _replied_tweet_ids.add(str(draft.in_reply_to))
+                                    continue
+                                post_response = client_for_post.create_tweet(
+                                    **_create_tweet_kwargs(draft)
+                                )
+                                if post_response.data:
+                                    tweet_id = post_response.data["id"]
+                                    mark_shared()
+                                    draft.posted_id = tweet_id
+                                    draft.posted_at = datetime.now()
+                                    console.print(
+                                        f"[green]✓ Auto-posted tweet: {tweet_id}"
+                                    )
 
-                                # Post thread follow-ups if present
-                                _post_tweet_with_thread(
-                                    client_for_post, draft, tweet_id
-                                )
+                                    # Post thread follow-ups if present
+                                    _post_tweet_with_thread(
+                                        client_for_post, draft, tweet_id
+                                    )
 
-                                path = save_draft(draft, "posted")
-                                console.print(f"[green]Saved to posted: {path}")
-                                _git_commit_posted(path)
-                                auto_posts_this_cycle += 1
-                                if draft.in_reply_to is not None:
-                                    _replied_tweet_ids.add(str(draft.in_reply_to))
-                                # Don't increment drafts_generated for auto-posted tweets
-                                # They go to posted/ not new/ and shouldn't count against draft limit
-                            else:
-                                console.print(
-                                    "[red]Error: No response data from auto-post"
-                                )
-                                # Fall back to saving as new
-                                path = save_draft(draft, "new")
-                                console.print(
-                                    f"[yellow]Saved as draft for manual review: {path}"
-                                )
-                                drafts_generated += 1
-                                if draft.in_reply_to is not None:
-                                    _replied_tweet_ids.add(str(draft.in_reply_to))
+                                    path = save_draft(draft, "posted")
+                                    console.print(f"[green]Saved to posted: {path}")
+                                    _git_commit_posted(path)
+                                    auto_posts_this_cycle += 1
+                                    if draft.in_reply_to is not None:
+                                        _replied_tweet_ids.add(str(draft.in_reply_to))
+                                    # Don't increment drafts_generated for auto-posted tweets
+                                    # They go to posted/ not new/ and shouldn't count against draft limit
+                                else:
+                                    console.print(
+                                        "[red]Error: No response data from auto-post"
+                                    )
+                                    # Fall back to saving as new
+                                    path = save_draft(draft, "new")
+                                    console.print(
+                                        f"[yellow]Saved as draft for manual review: {path}"
+                                    )
+                                    drafts_generated += 1
+                                    if draft.in_reply_to is not None:
+                                        _replied_tweet_ids.add(str(draft.in_reply_to))
                         except Exception as e:
                             console.print(f"[red]Error auto-posting: {e}")
                             reject_reason = _permanent_reply_failure_reason(draft, e)
@@ -3057,21 +3113,26 @@ def auto(
                     continue
 
                 try:
-                    response = client.create_tweet(**_create_tweet_kwargs(draft))
+                    with _shared_post_gate(draft) as mark_shared:
+                        if mark_shared is None:
+                            _reject_shared_duplicate(path, draft)
+                            continue
+                        response = client.create_tweet(**_create_tweet_kwargs(draft))
 
-                    if response.data:
-                        tweet_id = response.data["id"]
-                        console.print(f"[green]Posted tweet: {tweet_id}")
+                        if response.data:
+                            tweet_id = response.data["id"]
+                            mark_shared()
+                            console.print(f"[green]Posted tweet: {tweet_id}")
 
-                        # Post thread follow-ups if present
-                        _post_tweet_with_thread(client, draft, tweet_id)
+                            # Post thread follow-ups if present
+                            _post_tweet_with_thread(client, draft, tweet_id)
 
-                        _mark_posted(draft, path, tweet_id)
-                        posts_this_cycle += 1
-                    else:
-                        console.print(
-                            "[red]Error: No response data from tweet creation"
-                        )
+                            _mark_posted(draft, path, tweet_id)
+                            posts_this_cycle += 1
+                        else:
+                            console.print(
+                                "[red]Error: No response data from tweet creation"
+                            )
                 except Exception as e:
                     console.print(f"[red]Error posting tweet: {e}")
                     failure_kind = _classify_tweet_post_error(e)
