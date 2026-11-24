@@ -145,6 +145,9 @@ gptme-runloops select --lane autonomous [--class C] [--work-item ID] \
 | `pools.<p>.effort_steps` | `{at, down = n}` or `{at, to = effort}`; the highest reached step applies (no stacking); `--validate` warns when a later step resolves to a higher effort than an earlier one |
 | `pools.<p>.pace_guard` | More than this ahead of even pace forces at least one step down (max with the step, not sum) |
 | `pools.<p>.usage_unknown` | Effort when usage is unreadable: `base` (default) or an effort on the ladder |
+| `pools.<p>.max_width` | Enables the `width` field (shadow, logged and `ROUTE_WIDTH`): sessions this consumer may run on the pool's account. Target is linear, `end_target × elapsed`; behind it, width scales from 1 to `max_width` over a 10-point gap. `None` = no opinion (usage/reset unknown, or the owner on pace) |
+| `pools.<p>.end_target` | Weekly fraction to reach by reset (default 0.98); set lower for a measured owner reserve |
+| `pools.<p>.rank` | This consumer's rank on the account: 0 = owner (default), 1+ = overflow. Rank `r` widens only when more than `r × 0.02` behind, so the owner absorbs its account first |
 | `lanes.<l>.arm` | `backend:model`; bare aliases (`opus`, `sonnet`, `haiku`, `fable`) are rejected |
 | `lanes.<l>.effort` / `effort_ladder` | Base effort and its ladder, highest first; omit both for backends without effort |
 | `lanes.<l>.pool` | Pool this lane draws from (optional) |

@@ -70,6 +70,48 @@ def compute_effort(
     return effort, f"{' and '.join(why)}: {base} -> {effort}"
 
 
+#: Default weekly fraction to reach by reset (Erik 2026-11-24: linear target).
+DEFAULT_END_TARGET = 0.98
+#: Each rank waits this much further behind target before it widens.
+RANK_BAND = 0.02
+#: Behind target by this much runs at ``max_width``.
+FULL_PRESSURE_GAP = 0.10
+
+
+def compute_width(
+    pool: PoolPolicy | None, reading: PoolReading
+) -> tuple[int | None, str]:
+    """Sessions this consumer may run on the pool's account, and why.
+
+    One linear target per account: ``end_target * elapsed``. Every consumer
+    computes the same target from the reset time, so the account's usage
+    (which counts every consumer) is compared to one line. Rank is a
+    deadband: rank ``r`` widens only when the account is more than
+    ``r * RANK_BAND`` behind, so the owner absorbs its account first.
+
+    ``None`` means no opinion (no ``max_width``, usage or reset unknown, or
+    the owner on pace); the caller keeps its own width.
+    """
+    if pool is None or pool.max_width is None:
+        return None, "no width policy"
+    if reading.used is None or reading.elapsed is None:
+        return None, reading.note or "usage or reset unknown"
+    end = DEFAULT_END_TARGET if pool.end_target is None else pool.end_target
+    target = end * reading.elapsed
+    gap = reading.used - target
+    where = f"used {reading.used:.2f} vs target {target:.2f}"
+    if reading.used >= end:
+        return 0, f"{where}: at end target {end:.2f}"
+    band = pool.rank * RANK_BAND
+    if gap >= -band:
+        if pool.rank == 0:
+            return None, f"{where}: on pace, owner width unchanged"
+        return 0, f"{where}: within rank {pool.rank} band {band:.2f}"
+    pressure = min(1.0, -gap / FULL_PRESSURE_GAP)
+    width = 1 + round(pressure * (pool.max_width - 1))
+    return width, f"{where}: behind {-gap:.2f}, width {width}/{pool.max_width}"
+
+
 @dataclass
 class Choice:
     rule: str
@@ -154,6 +196,7 @@ _SHELL_FIELDS = (
     ("ROUTE_SCOPE", "scope"),
     ("ROUTE_RULE", "rule"),
     ("ROUTE_TRIGGER", "trigger"),
+    ("ROUTE_WIDTH", "width"),
     ("ROUTE_REASON", "reason"),
     ("ROUTE_DECISION_ID", "decision_id"),
 )
@@ -187,6 +230,11 @@ def format_explain(decision: Mapping[str, Any]) -> str:
         age = "-" if pool["age_s"] is None else f"{pool['age_s']}s"
         lines.append(
             f"pool: {pool['name']}  used {used}  pace gap {gap}  age {age}  source {pool['source']}"
+        )
+    if decision.get("width_reason"):
+        width = decision.get("width")
+        lines.append(
+            f"width: {'-' if width is None else width}  ({decision['width_reason']})"
         )
     for s in decision.get("skipped") or []:
         lines.append(f"skipped: {s['arm']}: {s['why']}")
