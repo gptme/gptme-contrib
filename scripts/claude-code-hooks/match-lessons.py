@@ -1570,26 +1570,43 @@ def check_prompt_repeat(
         prompt_lock.close()
 
 
+# A pointer render puts its ``*Source:`` line right after the "(skill pointer)"
+# heading; transcripts store that newline raw or JSON-escaped.
+_TRANSCRIPT_SOURCE_RE = re.compile(
+    r"(?P<pointer>\(skill pointer\)(?:\\n|\n))?\*Source: (?P<path>[^*]+)\*"
+)
+
+
 def get_already_injected(
-    session_id: str, transcript_path: str | None = None
+    session_id: str,
+    transcript_path: str | None = None,
+    *,
+    include_pointers: bool = False,
 ) -> set[str]:
     """Get set of lesson paths already injected in this session.
 
     Uses session state file as primary source, with transcript fallback.
+    A skill pointer only counts when ``include_pointers`` is set: it suppresses
+    a repeat pointer on tool events, but must not stop a later prompt from
+    delivering the full body.
     """
     injected: set[str] = set()
 
     # From state file
     state = load_session_state(session_id)
     injected.update(state.get("injected", []))
+    if include_pointers:
+        injected.update(state.get("pointed", []))
 
     # From transcript (catches lessons from before state tracking)
     if transcript_path:
         try:
             with open(transcript_path, encoding="utf-8") as f:
                 for line in f:
-                    for m in re.finditer(r"\*Source: ([^*]+)\*", line):
-                        injected.add(m.group(1).strip())
+                    for m in _TRANSCRIPT_SOURCE_RE.finditer(line):
+                        if m.group("pointer") and not include_pointers:
+                            continue
+                        injected.add(m.group("path").strip())
         except TimeoutError:
             raise  # hook budget alarm: must reach the top-level handler
         except Exception:
@@ -1761,6 +1778,11 @@ def _is_skill_path(path: str) -> bool:
     return Path(path).name.lower() == "skill.md"
 
 
+def _renders_as_pointer(m: dict, event_type: str) -> bool:
+    """True if this match is emitted as a skill pointer rather than its body."""
+    return event_type == "PreToolUse" and _is_skill_path(m["path"])
+
+
 def _render_lesson(m: dict, event_type: str) -> list[str]:
     """Render one matched lesson as context lines.
 
@@ -1769,7 +1791,7 @@ def _render_lesson(m: dict, event_type: str) -> list[str]:
     on a low-confidence trigger. Lessons (small by design, 30-50 lines) and all
     UserPromptSubmit matches keep full-body injection.
     """
-    if event_type == "PreToolUse" and _is_skill_path(m["path"]):
+    if _renders_as_pointer(m, event_type):
         desc = m.get("description", "").strip()
         lines = [f"### {m['title']} (skill pointer)"]
         lines.append(f"*Source: {m['path']}*")
@@ -2534,7 +2556,9 @@ def _match_and_emit(
         return
 
     # --- Dedup: skip already-injected lessons ---
-    already_injected = get_already_injected(session_id, transcript_path)
+    already_injected = get_already_injected(
+        session_id, transcript_path, include_pointers=event_type == "PreToolUse"
+    )
 
     # --- Holdout filtering (A/B testing via HOLDOUT_LESSONS env var) ---
     matches = filter_held_out_lessons(raw_matches, holdout_lessons)
@@ -2630,11 +2654,15 @@ def _match_and_emit(
 
     # Commit dedup only after output succeeds. A pre-emission timeout must leave
     # the real session state retryable, not merely the workspace prompt window.
-    # Only lessons that were actually emitted are marked injected.
+    # Only lessons that were actually emitted are marked injected. A skill
+    # pointer is tracked separately so a later prompt can still inject the body.
     def _commit(state: dict) -> None:
+        pointed = {m["path"] for m in matches if _renders_as_pointer(m, event_type)}
         existing = set(state.get("injected", []))
-        existing.update(m["path"] for m in matches)
+        existing.update(m["path"] for m in matches if m["path"] not in pointed)
         state["injected"] = list(existing)
+        if pointed:
+            state["pointed"] = sorted(pointed.union(state.get("pointed", [])))
         if event_type == "PreToolUse":
             state["last_pretool"] = time.time()
 
