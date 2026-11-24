@@ -354,6 +354,20 @@ class UnrepliedEmail(NamedTuple):
     folder: str
 
 
+def _part_text(part: EmailMessage) -> str:
+    """Text of a MIME part; an unknown charset decodes as UTF-8 with replacement.
+
+    ``get_content()`` raises ``LookupError`` for e.g. ``charset=unknown-8bit``.
+    """
+    try:
+        return str(part.get_content())
+    except LookupError:
+        payload = part.get_payload(decode=True)
+        if isinstance(payload, bytes):
+            return payload.decode("utf-8", errors="replace")
+        return str(payload or "")
+
+
 class AgentEmail:
     """Handles email operations for agent communication.
 
@@ -1877,7 +1891,7 @@ class AgentEmail:
             for part in email_msg.walk():
                 if part.get_content_type() == "text/plain":
                     content = (
-                        part.get_content()
+                        _part_text(part)
                         if isinstance(part, EmailMessage)
                         else part.get_payload(decode=True)
                     )
@@ -1887,7 +1901,7 @@ class AgentEmail:
                     break
         else:
             body = (
-                email_msg.get_content()
+                _part_text(email_msg)
                 if isinstance(email_msg, EmailMessage)
                 else email_msg.get_payload(decode=True)
             )
@@ -2174,18 +2188,21 @@ class AgentEmail:
 
                         if text_part:
                             if isinstance(text_part, EmailMessage):
-                                body = text_part.get_content()
+                                body = _part_text(text_part)
                             else:
-                                body = text_part.get_payload(decode=True)
-                                if isinstance(body, bytes):
-                                    body = body.decode("utf-8", errors="replace")
+                                payload = text_part.get_payload(decode=True)
+                                body = (
+                                    payload.decode("utf-8", errors="replace")
+                                    if isinstance(payload, bytes)
+                                    else str(payload or "")
+                                )
                         else:
                             print(f"Warning: No text content found in {message_id}")
                             body = ""
                     else:
                         # Single part message
                         if isinstance(email_msg, EmailMessage):
-                            body = email_msg.get_content()
+                            body = _part_text(email_msg)
                         else:
                             body = email_msg.get_payload(decode=True)
                             if isinstance(body, bytes):
