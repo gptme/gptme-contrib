@@ -225,3 +225,63 @@ Test rule.
 
             assert len(lessons) >= 1
             assert any(lesson["path"] == "/lessons/test.md" for lesson in lessons)
+
+
+def _write_log(logs: Path, name: str, lesson: str = "lessons/workflow/a.md") -> None:
+    d = logs / name
+    d.mkdir(parents=True)
+    content = (
+        "# Relevant Lessons\n\n## Lesson A\n"
+        f"*Path: {lesson}*\n*Matched by: keyword:git*\n"
+    )
+    (d / "conversation.jsonl").write_text(
+        json.dumps({"role": "system", "content": content}) + "\n"
+    )
+
+
+def test_incremental_processes_log_whose_name_sorts_earlier(tmp_path: Path) -> None:
+    # #2362 E1: gptme log dirs are "<date>-<random words>", so a log created
+    # after the last run can sort before it and was never processed.
+    logs, state = tmp_path / "logs", tmp_path / "state.json"
+    _write_log(logs, "2025-10-02-zesty-blue-fish")
+    EffectivenessTracker(logs_dir=logs, state_file=state).analyze()
+
+    _write_log(logs, "2025-10-02-amber-red-owl")
+    s = EffectivenessTracker(logs_dir=logs, state_file=state).analyze()
+    assert s.processed_count == 2
+    assert s.lesson_stats["lessons/workflow/a.md"].total_inclusions == 2
+
+    # A third run has nothing new to do
+    s = EffectivenessTracker(logs_dir=logs, state_file=state).analyze()
+    assert s.processed_count == 2
+
+
+def test_full_run_does_not_double_count(tmp_path: Path) -> None:
+    # #2362 E2: --full re-read every log into the loaded totals.
+    logs, state = tmp_path / "logs", tmp_path / "state.json"
+    _write_log(logs, "2025-10-02-one")
+    EffectivenessTracker(logs_dir=logs, state_file=state).analyze()
+
+    s = EffectivenessTracker(logs_dir=logs, state_file=state).analyze(incremental=False)
+    stats = s.lesson_stats["lessons/workflow/a.md"]
+    assert s.total_sessions == 1
+    assert s.processed_count == 1
+    assert stats.total_inclusions == 1
+    assert stats.sessions_included == ["2025-10-02-one"]
+
+
+def test_legacy_state_keeps_high_water_mark(tmp_path: Path) -> None:
+    # State from before processed_logs: logs up to last_processed were counted.
+    logs, state = tmp_path / "logs", tmp_path / "state.json"
+    _write_log(logs, "2025-10-01-old")
+    _write_log(logs, "2025-10-03-new")
+    state.write_text(
+        json.dumps({"last_processed": "2025-10-01-old", "processed_count": 1})
+    )
+
+    s = EffectivenessTracker(logs_dir=logs, state_file=state).analyze()
+    assert s.processed_count == 2
+    assert sorted(s.processed_logs) == ["2025-10-01-old", "2025-10-03-new"]
+    # The seeded names stay processed on the next run
+    s = EffectivenessTracker(logs_dir=logs, state_file=state).analyze()
+    assert s.processed_count == 2

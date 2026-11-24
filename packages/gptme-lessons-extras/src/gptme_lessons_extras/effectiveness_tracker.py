@@ -50,6 +50,9 @@ class TrackerState:
 
     version: str = "1.0"
     last_processed: str | None = None  # Last log directory processed
+    # Every processed log directory name. Log names are "<date>-<random words>",
+    # so name order is not creation order and a high-water mark misses logs.
+    processed_logs: list[str] = field(default_factory=list)
     processed_count: int = 0
     total_sessions: int = 0
     lesson_stats: dict[str, LessonStats] = field(default_factory=dict)
@@ -68,6 +71,7 @@ class TrackerState:
         return cls(
             version=data.get("version", "1.0"),
             last_processed=data.get("last_processed"),
+            processed_logs=list(data.get("processed_logs", [])),
             processed_count=data.get("processed_count", 0),
             total_sessions=data.get("total_sessions", 0),
             lesson_stats=lesson_stats,
@@ -126,12 +130,12 @@ class EffectivenessTracker:
         with open(self.state_file, "w") as f:
             json.dump(self.state.to_dict(), f, indent=2)
 
-    def _get_log_dirs(self, since: str | None = None) -> list[Path]:
+    def _get_log_dirs(self, incremental: bool = True) -> list[Path]:
         """
         Get log directories to process.
 
         Args:
-            since: Only process logs newer than this directory name
+            incremental: Skip logs already processed in an earlier run
         """
         if not self.logs_dir.exists():
             return []
@@ -141,9 +145,14 @@ class EffectivenessTracker:
             key=lambda x: x.name,
         )
 
-        if since:
-            # Filter to only newer logs
-            dirs = [d for d in dirs if d.name > since]
+        if incremental:
+            mark = self.state.last_processed
+            if mark and not self.state.processed_logs:
+                # State written before processed_logs existed only has the
+                # high-water mark; record the names up to it as processed.
+                self.state.processed_logs = [d.name for d in dirs if d.name <= mark]
+            processed = set(self.state.processed_logs)
+            dirs = [d for d in dirs if d.name not in processed]
 
         return dirs
 
@@ -284,8 +293,11 @@ class EffectivenessTracker:
         Returns:
             Updated TrackerState
         """
-        since = self.state.last_processed if incremental else None
-        log_dirs = self._get_log_dirs(since=since)
+        if not incremental:
+            # A full run recounts every log, so start from empty counters
+            # instead of adding to the persisted totals.
+            self.state = TrackerState()
+        log_dirs = self._get_log_dirs(incremental=incremental)
 
         if limit:
             log_dirs = log_dirs[:limit]
@@ -301,6 +313,7 @@ class EffectivenessTracker:
 
             self.state.processed_count += 1
             self.state.last_processed = log_dir.name
+            self.state.processed_logs.append(log_dir.name)
 
             # Checkpoint periodically
             if (i + 1) % checkpoint_interval == 0:
