@@ -1366,3 +1366,44 @@ def test_failed_close_is_not_reported_as_recovered(
     assert "Closed issue" not in out.out
     assert "close of #97 failed" in out.err
     assert any(a[:2] == ["issue", "close"] for a in calls)
+
+
+@pytest.mark.parametrize("bad_line", ["[1,2,3]", "null", "42", '"text"', "9" * 5000])
+def test_non_object_jsonl_line_is_skipped(tmp_path: Path, bad_line: str) -> None:
+    # Regression (contrib#2346 item 1): a valid-JSON but non-object line (or an
+    # int beyond Python's digit limit) must be skipped, not crash assess()
+    # before escalation.
+    records = [rec(40, "productive")] + [
+        rec(h, "failed", "api_error_403") for h in (1, 2, 3, 4)
+    ]
+    write_records(tmp_path, records)
+    rf = cfg_for(tmp_path).records_file
+    with rf.open("a") as f:
+        f.write(bad_line + "\n")
+    status = assess(tmp_path)
+    assert status["outage"] is True
+    assert status["auth_failures_in_window"] == 4
+    assert soc.last_productive_ts(rf, NOW) == NOW - timedelta(hours=40)
+
+
+def test_url_embedded_credentials_redacted(tmp_path: Path) -> None:
+    # Regression (contrib#2346 item 2): ``user:pass@host`` credentials (with or
+    # without a scheme) must not reach the published issue body.
+    records = [rec(40, "productive")]
+    for h in (1, 2, 3, 4):
+        r = rec(h, "failed", "api_error_403")
+        r["error"] = (
+            "proxy auth failed for user bob:s3cr3t@proxy.internal:8080 "
+            "via https://alice:hunter2pw@example.com/v1"
+        )
+        records.append(r)
+    write_records(tmp_path, records)
+    status = assess(tmp_path)
+    body = soc._issue_body(cfg_for(tmp_path), status)
+    for secret in ("s3cr3t", "hunter2pw"):
+        assert secret not in status["sample_error"]
+        assert secret not in body
+    assert "bob:[REDACTED]@proxy.internal" in status["sample_error"]
+    # Plain emails and ssh remotes carry no password and stay intact.
+    assert soc._redact("mail bob@example.com") == "mail bob@example.com"
+    assert soc._redact("git@github.com:o/r") == "git@github.com:o/r"

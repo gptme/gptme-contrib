@@ -61,11 +61,17 @@ quota_gate_check() {
     five_hour_util=$(echo "$quota_json" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('five_hour',{}).get('utilization',0) if isinstance(d.get('five_hour'), dict) else 0)" 2>/dev/null || echo "0")
     seven_day_util=$(echo "$quota_json" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('seven_day',{}).get('utilization',0))" 2>/dev/null || echo "0")
 
-    # Sonnet uses a separate weekly counter
+    # Sonnet uses a separate weekly counter. When the pane has no Sonnet
+    # window (CC >=2.1.318 layouts), an absent counter is not 0% quota: fall
+    # back to the all-models weekly counter, which still caps Sonnet usage.
     local weekly_key="seven_day"
     if [ "$model" = "sonnet" ]; then
-        weekly_key="seven_day_sonnet"
-        seven_day_util=$(echo "$quota_json" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('seven_day_sonnet',{}).get('utilization',0))" 2>/dev/null || echo "0")
+        local sonnet_util
+        sonnet_util=$(echo "$quota_json" | python3 -c "import json,sys; d=json.load(sys.stdin); w=d.get('seven_day_sonnet'); u=w.get('utilization') if isinstance(w, dict) else None; print(u if type(u) in (int, float) else '')" 2>/dev/null || echo "")
+        if [ -n "$sonnet_util" ]; then
+            weekly_key="seven_day_sonnet"
+            seven_day_util="$sonnet_util"
+        fi
     fi
 
     if [ "$five_hour_present" = "yes" ]; then

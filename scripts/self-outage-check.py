@@ -95,6 +95,9 @@ _SECRET_PATTERNS = (
     re.compile(r"\b(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{6,}"),
     re.compile(r"\bxox[abprs]-[A-Za-z0-9\-]{6,}"),
     re.compile(r"\bAIza[A-Za-z0-9_\-]{10,}"),
+    # URL-embedded credentials: ``https://user:pass@host`` and schemeless
+    # ``user:pass@host`` (proxy errors). Keep the user, drop the password.
+    re.compile(r"\b([A-Za-z0-9._%+\-]+:)[^\s@/]+(?=@[A-Za-z0-9\[])"),
     # Authorization headers / bearer tokens.
     re.compile(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=\-]{6,}"),
     # key=value / key: value for secret-ish keys. A quoted value is removed
@@ -383,7 +386,12 @@ def load_records(records_file: Path, window_hours: float, now: datetime) -> list
                 continue
             try:
                 rec = json.loads(line)
-            except (json.JSONDecodeError, RecursionError):
+            except (ValueError, RecursionError):
+                # ValueError covers JSONDecodeError and int-digit-limit errors.
+                continue
+            if not isinstance(rec, dict):
+                # A non-object line (list, null, number, string) must not
+                # crash assess() before escalation.
                 continue
             ts = _parse_ts(rec.get("timestamp", ""))
             if ts is None or ts < cutoff or ts > now:
@@ -404,7 +412,12 @@ def last_productive_ts(records_file: Path, now: datetime) -> datetime | None:
                 continue
             try:
                 rec = json.loads(line)
-            except (json.JSONDecodeError, RecursionError):
+            except (ValueError, RecursionError):
+                # ValueError covers JSONDecodeError and int-digit-limit errors.
+                continue
+            if not isinstance(rec, dict):
+                # A non-object line (list, null, number, string) must not
+                # crash assess() before escalation.
                 continue
             if rec.get("outcome") != "productive":
                 continue
