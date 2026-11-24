@@ -113,10 +113,21 @@ def sync_emails():
 
 
 def find_email_file(message_id: str) -> Path | None:
-    """Find email file by message ID."""
+    """Find the inbox file whose own ``Message-ID`` header is ``message_id``.
+
+    A substring match also hit later replies in the thread (they carry the ID in
+    In-Reply-To/References) and bodies quoting it, so glob order decided which
+    file the agent was handed.
+    """
+    wanted = message_id.strip().strip("<>")
     for f in INBOX_DIR.glob("*.md"):
-        if message_id in f.read_text():
-            return f
+        header_block = f.read_text().split("\n\n", 1)[0]
+        for line in header_block.splitlines():
+            key, sep, value = line.partition(":")
+            if sep and key.strip().lower() == "message-id":
+                if value.strip().strip("<>") == wanted:
+                    return f
+                break
     return None
 
 
