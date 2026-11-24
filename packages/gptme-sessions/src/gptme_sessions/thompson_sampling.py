@@ -785,7 +785,34 @@ class Bandit:
             self._decode_state(current)
         except (OSError, ValueError, TypeError, KeyError, AttributeError):
             return
+        if self._backup_holds_undecodable_history():
+            print(
+                f"Warning: backup not rotated: {self.backup_file} holds mature arms "
+                "that cannot be decoded; recover or move it aside",
+                file=sys.stderr,
+            )
+            return
         _atomic_write_text(self.backup_file, current)
+
+    def _backup_holds_undecodable_history(self) -> bool:
+        """Whether ``.bak`` is the only copy of mature history we cannot load.
+
+        This is the half-erased case: the state file was already reset by a
+        reader that could not decode it, and rotating would finish the job.
+        """
+        try:
+            text = self.backup_file.read_text()
+        except (OSError, UnicodeDecodeError):
+            return False
+        try:
+            self._decode_state(text)
+            return False
+        except (ValueError, TypeError, KeyError, AttributeError):
+            pass
+        try:
+            return _has_mature_arm(json.loads(text))
+        except ValueError:
+            return False
 
     def sample(
         self,

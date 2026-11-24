@@ -1329,3 +1329,23 @@ def test_undecodable_mature_history_is_never_overwritten(tmp_path, contextual):
         reader.prune()
 
     assert (bandit.state_file.read_text(), bandit.backup_file.read_text()) == before
+
+
+def test_undecodable_mature_backup_is_not_rotated_over(tmp_path, capsys):
+    """A reader that already reset the state file must not erase .bak too (#2321)."""
+    bandit = Bandit(state_dir=tmp_path)
+    for _ in range(13):
+        bandit.update(["a"], outcome=1.0)
+    data = json.loads(bandit.state_file.read_text())
+    data["arms"]["a"]["extra"] = "from a richer arm_class"
+    bandit.backup_file.write_text(json.dumps(data))
+    history = bandit.backup_file.read_text()
+    bandit.state_file.write_text(json.dumps({"arms": {}, "total_sessions": 1}))
+
+    reader = Bandit(state_dir=tmp_path)
+    reader.update(["b"], outcome=1.0)
+    reader.update(["b"], outcome=1.0)
+
+    assert bandit.backup_file.read_text() == history
+    assert "backup not rotated" in capsys.readouterr().err
+    assert Bandit(state_dir=tmp_path).state.total_sessions == 3
