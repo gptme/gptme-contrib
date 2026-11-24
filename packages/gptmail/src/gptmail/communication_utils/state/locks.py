@@ -54,19 +54,17 @@ class FileLock:
         start_time = time.time()
 
         while True:
+            # Open file for writing (create if doesn't exist). An error here
+            # (EMFILE, EACCES, ...) is not contention and must not be retried as
+            # "still locked" — let it propagate.
+            fd = os.open(str(self.lock_path), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
             try:
-                # Open file for writing (create if doesn't exist)
-                fd = os.open(str(self.lock_path), os.O_CREAT | os.O_WRONLY | os.O_TRUNC)
-
                 # Try to acquire exclusive lock (non-blocking)
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-
-                # Success! Save file descriptor
-                self._lock_file = fd
-                return True
-
-            except OSError as err:
-                # Lock is held by another process
+            except BlockingIOError as err:
+                # Lock is held by another process. Close this attempt's fd so
+                # contended retries do not leak one descriptor each.
+                os.close(fd)
                 if self.timeout is None:
                     # Wait indefinitely
                     time.sleep(0.1)
@@ -80,6 +78,14 @@ class FileLock:
                     ) from err
 
                 time.sleep(0.1)
+                continue
+            except BaseException:
+                os.close(fd)
+                raise
+            else:
+                # Success! Save file descriptor
+                self._lock_file = fd
+                return True
 
     def release(self) -> None:
         """Release the lock."""

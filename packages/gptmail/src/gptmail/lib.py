@@ -64,6 +64,7 @@ from typing import Any, Dict, NamedTuple, Tuple
 import markdown
 
 from gptmail.communication_utils.outbound_redact import guard_outbound
+from gptmail.communication_utils.private_io import open_private, write_private_text
 from gptmail.communication_utils.rate_limiting.limiters import RateLimiter
 from gptmail.communication_utils.state.locks import FileLock, LockError
 from gptmail.communication_utils.state.tracking import ConversationTracker, MessageState
@@ -162,7 +163,29 @@ _SYNC_HEADERS = (
     "In-Reply-To",
     "References",
     "Content-Type",
+    # The receiving MTA's verdict (topmost instance). Kept so the agent and
+    # get_unreplied_emails can see a forged From that failed SPF/DMARC.
+    "Authentication-Results",
 )
+
+_AUTH_RESULT_RE = re.compile(r"\b(spf|dkim|dmarc)\s*=\s*([a-z]+)", re.IGNORECASE)
+
+
+def authentication_failed(auth_results: str) -> bool:
+    """Whether an ``Authentication-Results`` value shows a forged/unauthenticated From.
+
+    True on ``dmarc=fail``, or on ``spf=fail`` without any ``dkim=pass`` (a
+    domain with no DMARC record, where forwarding cannot explain the failure).
+    Only failures are acted on: a sender can add its own header claiming
+    ``pass``, so a pass is never treated as proof of anything.
+    """
+    verdicts: dict[str, set[str]] = {}
+    for method, result in _AUTH_RESULT_RE.findall(auth_results or ""):
+        verdicts.setdefault(method.lower(), set()).add(result.lower())
+    if "fail" in verdicts.get("dmarc", set()):
+        return True
+    return "fail" in verdicts.get("spf", set()) and "pass" not in verdicts.get("dkim", set())
+
 
 _HEADER_LINE_BREAK_RE = re.compile(r"[\r\n]+")
 
@@ -634,6 +657,11 @@ class AgentEmail:
                     if not self._is_allowlisted_sender(sender):
                         continue
 
+                    # An allowlisted From that failed SPF/DMARC at the receiving
+                    # MTA is a forgery candidate, not a trusted auto-reply.
+                    if authentication_failed(headers.get("Authentication-Results", "")):
+                        continue
+
                     # Skip notification-type emails that don't need replies
                     if self._is_notification_email(subject, content):
                         continue
@@ -927,6 +955,21 @@ class AgentEmail:
         filename = message_id.strip("<>").replace("@", "_at_").replace("/", "_")
         return f"{filename}.md"
 
+    _MESSAGE_FOLDERS = ("inbox", "sent", "archive", "drafts")
+
+    def _message_folder_of(self, filename: str) -> str | None:
+        """Return the local folder already holding ``filename``, if any.
+
+        Stored mail is keyed only by the (sender-chosen) Message-ID, and
+        ``read_message``/thread views search every folder. A second message
+        reusing a known Message-ID — or one that maps to the same filename —
+        must not be stored next to the original, or it shadows it.
+        """
+        for folder in self._MESSAGE_FOLDERS:
+            if (self.email_dir / folder / filename).exists():
+                return folder
+        return None
+
     def compose(
         self,
         to: str,
@@ -1010,7 +1053,7 @@ class AgentEmail:
         # Save to drafts
         filename = self._format_filename(message_id)
         draft_path = self.email_dir / "drafts" / filename
-        draft_path.write_text(message)
+        write_private_text(draft_path, message)
 
         return message_id
 
@@ -1339,10 +1382,15 @@ class AgentEmail:
             raise ValueError("Message-ID header missing")
         message_id = match.group(1)
 
-        # Save markdown version to inbox
+        # Save markdown version to inbox. Refuse a Message-ID that already
+        # names a stored message: overwriting it (or shadowing a sent/archived
+        # copy) would substitute attacker-chosen content into the thread.
         filename = self._format_filename(message_id)
+        existing = self._message_folder_of(filename)
+        if existing is not None:
+            raise ValueError(f"Message {message_id} already exists in {existing}")
         inbox_path = self.email_dir / "inbox" / filename
-        inbox_path.write_text(message_data)
+        write_private_text(inbox_path, message_data)
 
         return message_id
 
@@ -1364,6 +1412,11 @@ class AgentEmail:
         for source_path in source_paths:
             if source_path.exists():
                 archive_path = self.email_dir / "archive" / filename
+                if archive_path.exists():
+                    # rename() would silently replace the archived original.
+                    raise ValueError(
+                        f"Message {message_id} already exists in archive; refusing to overwrite"
+                    )
                 source_path.rename(archive_path)
                 print(f"Message {message_id} archived")
                 return
@@ -2063,7 +2116,7 @@ class AgentEmail:
         state_path = self._get_sync_state_path(folder)
         temp_path = state_path.with_name(f".{state_path.name}.{uuid.uuid4().hex}.tmp")
         try:
-            with open(temp_path, "w") as f:
+            with os.fdopen(open_private(temp_path), "w") as f:
                 json.dump({"processed_files": sorted(processed_files)}, f)
             os.replace(temp_path, state_path)
         except OSError as e:
@@ -2118,6 +2171,15 @@ class AgentEmail:
         save_dir = self.email_dir / folder
         save_dir.mkdir(parents=True, exist_ok=True)
         existing_files = {f.name for f in save_dir.glob("*.md")}
+        # Filenames already stored in any *other* folder. A synced mail that
+        # reuses one of these Message-IDs would shadow the sent/archived
+        # original in read_message and thread views, so it is not imported.
+        other_folder_files: dict[str, str] = {}
+        for other in self._MESSAGE_FOLDERS:
+            if other == folder:
+                continue
+            for f in (self.email_dir / other).glob("*.md"):
+                other_folder_files.setdefault(f.name, other)
 
         # Process messages in both cur/ (read) and new/ (unread) directories
         for subdir in ["cur", "new"]:
@@ -2167,6 +2229,15 @@ class AgentEmail:
                         skipped += 1
                         # Mark as processed so we don't re-check next time
                         processed_files.add(maildir_filename)
+                        continue
+
+                    if filename in other_folder_files:
+                        skipped += 1
+                        processed_files.add(maildir_filename)
+                        print(
+                            f"Skipping message whose Message-ID is already stored in "
+                            f"{other_folder_files[filename]}/: {message_id[:50]}..."
+                        )
                         continue
 
                     # Check for duplicates by content/metadata (prevents Gmail Message-ID reassignment duplicates)
@@ -2238,7 +2309,7 @@ class AgentEmail:
 
                     # Save the file
                     md_path = save_dir / filename
-                    md_path.write_text(content)
+                    write_private_text(md_path, content)
                     success += 1
 
                     # Track successful sync for incremental optimization
@@ -2341,7 +2412,7 @@ class AgentEmail:
 
                 # Write to maildir cur/ directory (for read messages)
                 dest_file = dest_maildir / "cur" / filename
-                dest_file.write_text(content)
+                write_private_text(dest_file, content)
 
                 success += 1
 
@@ -2438,7 +2509,7 @@ class AgentEmail:
                         continue
 
                     # Write to markdown storage
-                    dest_file.write_text(content)
+                    write_private_text(dest_file, content)
                     success += 1
 
                 except Exception as e:

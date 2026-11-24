@@ -35,6 +35,7 @@ from pathlib import Path
 
 import yaml
 
+from gptmail.communication_utils.private_io import write_private_text
 from gptmail.communication_utils.outbound_redact import (
     SecretScannerUnavailable,
     guard_outbound,
@@ -357,8 +358,18 @@ class AgentTransport:
         )
         # Local outboxes can be synced independently of the delivery callback.
         # Check the exact rendered bytes before either publication boundary.
+        # yaml.dump quotes/escapes/folds frontmatter values (doubling ``'``,
+        # escaping ``\`` and ``"``, wrapping at 80 columns), so a secret in the
+        # subject no longer appears verbatim in the rendered bytes even though
+        # the recipient's parser restores it. Scan the raw values alongside.
+        raw_fields = "\n".join(v for v in (subject, to, reply_to or "") if v)
         try:
-            allowed = guard_outbound(message, self.channel, self._root.parent, require_scanner=True)
+            allowed = guard_outbound(
+                f"{message}\n{raw_fields}",
+                self.channel,
+                self._root.parent,
+                require_scanner=True,
+            )
             # A block is reported after the try: raising it here would be
             # re-labelled as a scanner failure by the generic handler below.
             if allowed:
@@ -384,7 +395,7 @@ class AgentTransport:
         if not allowed:
             raise ValueError("Outbound agent message blocked by secret policy")
         local_path = self.outbox / filename
-        local_path.write_text(message)
+        write_private_text(local_path, message)
         if self._deliver is not None and not self._deliver(local_path, to.lower()):
             self._stamp_delivery_failed(local_path)
         return filename

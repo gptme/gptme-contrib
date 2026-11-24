@@ -14,7 +14,7 @@ import sys
 import tempfile
 import time
 from datetime import timezone
-from email.utils import getaddresses
+from email.utils import getaddresses, parseaddr
 from pathlib import Path
 
 import importlib.metadata
@@ -57,15 +57,56 @@ def load_env_file(workspace_dir: Path) -> None:
         return
 
     for line in env_path.read_text().splitlines():
-        line = line.strip()
-        # Skip empty lines and comments
-        if not line or line.startswith("#"):
-            continue
-        # Parse KEY=VALUE
-        if "=" in line:
-            key, value = line.split("=", 1)
+        parsed = _parse_env_line(line)
+        if parsed is not None:
+            key, value = parsed
             # Only set if not already in environment (don't override)
-            os.environ.setdefault(key.strip(), value.strip())
+            os.environ.setdefault(key, value)
+
+
+def _display_sender_address(sender: str) -> str:
+    """Return the real addr-spec of a ``From`` header for display.
+
+    Taking the text after the first ``<`` shows a forged display name such as
+    ``"boss <boss@corp>" <attacker@evil>`` as ``boss@corp``; ``parseaddr`` returns
+    the actual address.
+    """
+    _, addr = parseaddr(sender)
+    return addr or sender
+
+
+def _parse_env_line(line: str) -> tuple[str, str] | None:
+    """Parse one ``.env`` line into ``(key, value)`` the way dotenv does.
+
+    Strips an ``export`` prefix, matching surrounding quotes and unquoted inline
+    ``# comments``. Keeping them would put ``"secret"`` in ``os.environ``, so the
+    outbound secret scan (which matches environment literals) would search for
+    the quoted string and let the bare secret through.
+    """
+    line = line.strip()
+    # Skip empty lines and comments
+    if not line or line.startswith("#") or "=" not in line:
+        return None
+    key, value = line.split("=", 1)
+    key = key.strip()
+    if key.startswith("export ") or key.startswith("export\t"):
+        key = key[len("export") :].strip()
+    if not key:
+        return None
+    value = value.strip()
+    if value[:1] in ("'", '"'):
+        quote = value[0]
+        end = value.find(quote, 1)
+        if end != -1:
+            return key, value[1:end]
+        # Unterminated quote: keep the raw value rather than guess.
+        return key, value
+    # Unquoted: an inline comment starts at whitespace followed by '#'.
+    for i, ch in enumerate(value):
+        if ch == "#" and i > 0 and value[i - 1] in " \t":
+            value = value[:i].rstrip()
+            break
+    return key, value
 
 
 # Load .env file at module initialization. Best-effort: a non-git cwd (pip
@@ -282,8 +323,7 @@ def read(message_id: str, thread: bool = False, thread_only: bool = False) -> No
             date = headers.get("Date", "Unknown")[:16]  # Truncate date
             sender = headers.get("From", "Unknown")
             if "<" in sender and ">" in sender:
-                # Extract email from "Name <email>" format
-                sender = sender[sender.find("<") + 1 : sender.find(">")]
+                sender = _display_sender_address(sender)
             subject = headers.get("Subject", "No Subject")[:40]  # Truncate subject
 
             click.echo(f"{i + 1:2d}. {date} | {sender:25s} | {subject}{marker}")
@@ -457,7 +497,7 @@ def thread(message_id: str, structure: bool = False, stats: bool = False) -> Non
             # Track senders
             sender = msg["headers"].get("From", "")
             if "<" in sender and ">" in sender:
-                sender = sender[sender.find("<") + 1 : sender.find(">")]
+                sender = _display_sender_address(sender)
             senders.add(sender)
 
             # Track date range
@@ -494,7 +534,7 @@ def thread(message_id: str, structure: bool = False, stats: bool = False) -> Non
 
             sender = headers.get("From", "Unknown")
             if "<" in sender and ">" in sender:
-                sender = sender[sender.find("<") + 1 : sender.find(">")]
+                sender = _display_sender_address(sender)
             elif " " in sender:
                 sender = sender.split()[0]  # Take first part if no email brackets
 

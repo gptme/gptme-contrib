@@ -886,8 +886,10 @@ def _remote_pending_rows(
         if not isinstance(item, dict):
             continue
         row = dict(item)
-        row["agent"] = str(row.get("agent") or agent_name)
-        row["workspace"] = str(row.get("workspace") or agent["workspace"])
+        # Attribution comes from the peer we queried, never from its JSON: a
+        # remote could otherwise label rows as another peer's.
+        row["agent"] = agent_name
+        row["workspace"] = agent["workspace"]
         rows.append(row)
     return rows
 
