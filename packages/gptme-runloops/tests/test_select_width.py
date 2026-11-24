@@ -26,7 +26,8 @@ def at(used: float | None, elapsed: float | None) -> PoolReading:
         # erik: 30% used at 58%, Bob is rank 1 -> far past the band, near full
         ({"rank": 1}, 0.30, 0.58, 16),
         # owner slightly behind: widens a little
-        ({}, 0.45, 0.50, 1 + round(0.04 / 0.10 * 15)),
+        # owner 4 points behind: pressure 0.4 of the 10-point gap -> 1 + 0.4 * 15 = 7
+        ({}, 0.45, 0.50, 7),
         # overflow inside its 2-point band stays shut
         ({"rank": 1}, 0.48, 0.50, 0),
         # ahead of target: overflow takes nothing
@@ -93,3 +94,10 @@ def test_pool_fields_parse_and_validate():
 def test_shell_output_carries_width():
     assert "ROUTE_WIDTH=3" in format_shell({"width": 3})
     assert "ROUTE_WIDTH=''" in format_shell({"width": None})
+
+
+@pytest.mark.parametrize("max_width", [0, -3])
+def test_nonpositive_max_width_has_no_opinion(max_width):
+    """A PoolPolicy built in code (bypassing the parser's >= 1 check) never yields width <= 0."""
+    width, why = compute_width(pool(max_width=max_width), at(0.10, 0.90))
+    assert width is None and why == "no width policy"

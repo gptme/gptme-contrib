@@ -194,7 +194,7 @@ and bypass both `--default-arm` and `--shadow`. Capture the exit code without tr
 and clear `ROUTE_*` before `eval` so a loop cannot reuse a previous iteration's values:
 
 ```bash
-unset ROUTE_BACKEND ROUTE_MODEL ROUTE_EFFORT ROUTE_SCOPE ROUTE_RULE ROUTE_TRIGGER \
+unset ROUTE_BACKEND ROUTE_MODEL ROUTE_EFFORT ROUTE_SCOPE ROUTE_RULE ROUTE_TRIGGER ROUTE_WIDTH \
       ROUTE_REASON ROUTE_DECISION_ID
 rc=0
 out=$(gptme-runloops select --lane autonomous --format shell \

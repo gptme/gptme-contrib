@@ -93,7 +93,7 @@ def compute_width(
     ``None`` means no opinion (no ``max_width``, usage or reset unknown, or
     the owner on pace); the caller keeps its own width.
     """
-    if pool is None or pool.max_width is None:
+    if pool is None or pool.max_width is None or pool.max_width < 1:
         return None, "no width policy"
     if reading.used is None or reading.elapsed is None:
         return None, reading.note or "usage or reset unknown"
