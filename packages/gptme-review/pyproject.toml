@@ -7,12 +7,14 @@ dependencies = [
     "bobutils",
     "gptme-block-registry",
     "gptme-contrib-lib",
+    "gptme-usage",
 ]
 
 [tool.uv.sources]
 bobutils = { workspace = true }
 gptme-block-registry = { workspace = true }
 gptme-contrib-lib = { workspace = true }
+gptme-usage = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]

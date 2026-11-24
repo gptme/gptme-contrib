@@ -2527,6 +2527,7 @@ dependencies = [
     { name = "bobutils" },
     { name = "gptme-block-registry" },
     { name = "gptme-contrib-lib" },
+    { name = "gptme-usage" },
 ]
 
 [package.metadata]
@@ -2534,6 +2535,7 @@ requires-dist = [
     { name = "bobutils", editable = "packages/bobutils" },
     { name = "gptme-block-registry", editable = "packages/gptme-block-registry" },
     { name = "gptme-contrib-lib", editable = "packages/gptme-contrib-lib" },
+    { name = "gptme-usage", editable = "packages/gptme-usage" },
 ]
 
 [[package]]
