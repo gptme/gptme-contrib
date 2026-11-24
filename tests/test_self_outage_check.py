@@ -1448,6 +1448,13 @@ def test_url_credential_with_any_userinfo_username_is_redacted() -> None:
         )
 
 
+def test_url_credential_before_any_reg_name_host_is_redacted() -> None:
+    for host in ("_proxy.internal:8080", "bücher.example", "%41host"):
+        assert soc._redact(f"https://bob:hunter2pw@{host}") == (
+            f"https://bob:[REDACTED]@{host}"
+        ), host
+
+
 def test_url_credential_longer_than_any_bound_is_redacted() -> None:
     password = "a" * 5000
     out = soc._redact(f"https://bob:{password}@proxy.internal")

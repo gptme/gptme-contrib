@@ -208,7 +208,9 @@ def _redact_ambiguous_quoted(text: str) -> str:
 
 # URL-embedded credentials: ``https://user:pass@host`` and schemeless
 # ``user:pass@host`` (proxy errors). Keep the user, drop the password.
-_USERINFO_HOST = re.compile(r"@[A-Za-z0-9\[]")
+# Any host start a URI reg-name allows (``_proxy``, non-ASCII), not just
+# ASCII alnum; only whitespace, a second ``@`` or a delimiter rule it out.
+_USERINFO_HOST = re.compile(r"@[^\s@/:?#]")
 
 
 def _redact_url_credential_token(token: str) -> str:
