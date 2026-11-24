@@ -1,12 +1,14 @@
 import hashlib
 import json
 import logging
+import re
 import subprocess
 import time
 from collections.abc import Generator, Sequence
 from contextlib import nullcontext
 from datetime import datetime
 from fnmatch import fnmatch as fnmatch_path
+from functools import lru_cache
 from logging import Filter
 from pathlib import Path
 from typing import Any, cast
@@ -78,6 +80,49 @@ def _looks_like_openrouter_model(model_name: str) -> bool:
     if "/" not in model_name:
         return False
     return not any(model_name.startswith(ns) for ns in _SENTENCE_TRANSFORMER_NAMESPACES)
+
+
+@lru_cache(maxsize=256)
+def _segment_glob_regex(pattern: str) -> re.Pattern[str]:
+    """Compile a path glob where ``*``/``?`` stay within one path segment.
+
+    ``**/`` matches zero or more directories, a trailing ``/**`` matches
+    anything below, and ``[...]`` is a character class (``[!...]`` negated).
+    Unlike ``fnmatch``, ``src/*.py`` does not match ``src/sub/x.py``.
+    """
+    out: list[str] = []
+    i, n = 0, len(pattern)
+    while i < n:
+        if pattern.startswith("**/", i):
+            out.append("(?:.*/)?")
+            i += 3
+        elif pattern.startswith("/**", i) and i + 3 == n:
+            out.append("(?:/.*)?")
+            i += 3
+        elif pattern.startswith("**", i):
+            out.append(".*")
+            i += 2
+        elif pattern[i] == "*":
+            out.append("[^/]*")
+            i += 1
+        elif pattern[i] == "?":
+            out.append("[^/]")
+            i += 1
+        elif pattern[i] == "[" and "]" in pattern[i + 2 :]:
+            end = pattern.index("]", i + 2)
+            body = pattern[i + 1 : end]
+            if body.startswith("!"):
+                body = "^" + body[1:]
+            out.append("[" + body.replace("\\", "\\\\") + "]")
+            i = end + 1
+        else:
+            out.append(re.escape(pattern[i]))
+            i += 1
+    return re.compile("".join(out))
+
+
+def _segment_glob_match(path: str, pattern: str) -> bool:
+    return _segment_glob_regex(pattern).fullmatch(path) is not None
 
 
 class ChromaDBFilter(Filter):
@@ -1177,11 +1222,11 @@ class Indexer:
 
                     # Try different matching strategies
                     if (
-                        fnmatch_path(source_str, pattern)
-                        or fnmatch_path(source_str, f"**/{pattern}")
+                        _segment_glob_match(source_str, pattern)
+                        or _segment_glob_match(source_str, f"**/{pattern}")
                         or (
                             len(pattern_parts) <= len(source_parts)
-                            and fnmatch_path(
+                            and _segment_glob_match(
                                 str(Path(*source_parts[-len(pattern_parts) :])), pattern
                             )
                         )
