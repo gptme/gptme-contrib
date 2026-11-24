@@ -2092,8 +2092,13 @@ latest_comment_is_bot_waiting() {
     # The PM human-merge marker is head-scoped: a marker whose head sha no
     # longer prefixes the PR's current head is a stale handoff and must not
     # suppress the updated head (Greptile P1, gptme/gptme-contrib#1669).
-    local head_sha
-    head_sha=$(gh api "repos/$repo/pulls/$number" --jq '.head.sha' 2>/dev/null) || return 1
+    # Only that marker reads $head, so look it up only when a comment carries
+    # one: pulls/N's ETag never validates, so each lookup is a charged core
+    # call (~95/h from PM on 2026-11-24 while core quota exhausted hourly).
+    local head_sha=""
+    if printf '%s' "$comments_json" | grep -qi 'bob-pm-human-merge-required'; then
+        head_sha=$(gh api "repos/$repo/pulls/$number" --jq '.head.sha' 2>/dev/null) || return 1
+    fi
 
     # `user` is nullable in GitHub's schema (deleted accounts), so every login
     # read is null-safe: one such comment must not crash the filter. jq -e

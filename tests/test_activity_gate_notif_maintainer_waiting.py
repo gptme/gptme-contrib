@@ -191,6 +191,10 @@ if argv[0] == "api":
         print(apply_jq({"state": subject_state}, jq_expr))
         sys.exit(0)
     if "/pulls/" in endpoint and endpoint.endswith(str(notif_number)):
+        lookup_log = os.environ.get("TEST_PULLS_LOOKUP_LOG")
+        if lookup_log:
+            with open(lookup_log, "a") as fh:
+                fh.write(endpoint + "\n")
         pr = {"head": {"sha": head_sha}}
         print(apply_jq(pr, jq_expr))
         sys.exit(0)
@@ -461,6 +465,28 @@ def test_human_merge_marker_suppresses_author_notification() -> None:
         result = _run_gate(tmp, state_dir, waiting_body=PM_HUMAN_MERGE_BODY)
         assert result.returncode in (0, 1), result.stderr
         assert _emitted_notifications(result.stdout) == [], result.stdout
+
+
+def test_head_sha_looked_up_only_for_human_merge_marker(monkeypatch) -> None:
+    """pulls/N is a charged core call (its ETag never validates); only the
+    head-scoped marker needs the head, so a plain handoff must not fetch it."""
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        log = tmp / "pulls-lookups.log"
+        monkeypatch.setenv("TEST_PULLS_LOOKUP_LOG", str(log))
+        plain = tmp / "plain"
+        plain.mkdir()
+        result = _run_gate(tmp, plain)
+        assert result.returncode in (0, 1), result.stderr
+        assert _emitted_notifications(result.stdout) == [], result.stdout
+        assert not log.exists() or log.read_text() == ""
+
+        marker = tmp / "marker"
+        marker.mkdir()
+        result = _run_gate(tmp, marker, waiting_body=PM_HUMAN_MERGE_BODY)
+        assert result.returncode in (0, 1), result.stderr
+        assert _emitted_notifications(result.stdout) == [], result.stdout
+        assert log.read_text().count(f"/pulls/{NOTIF_NUMBER}") >= 1
 
 
 def test_human_merge_marker_reopens_on_human_comment() -> None:
