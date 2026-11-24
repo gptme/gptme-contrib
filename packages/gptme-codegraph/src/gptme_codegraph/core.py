@@ -334,18 +334,28 @@ def _iter_source_files(directory: Path) -> list[Path]:
     if git_dir.exists() and git_dir.is_dir():
         try:
             all_files: set[Path] = set()
-            for pattern in (f"*{ext}" for ext in _SOURCE_EXTENSIONS):
-                result = subprocess.run(
-                    ["git", "ls-files", pattern],
-                    cwd=directory,
-                    capture_output=True,
-                    text=True,
-                    timeout=15,
-                )
-                if result.returncode == 0 and result.stdout.strip():
-                    all_files.update(
-                        directory / p for p in result.stdout.strip().split("\n") if p
-                    )
+            # -z: NUL-separated, unquoted paths (non-ASCII names stay intact).
+            # --others --exclude-standard: include new files not yet added.
+            result = subprocess.run(
+                [
+                    "git",
+                    "ls-files",
+                    "-z",
+                    "--cached",
+                    "--others",
+                    "--exclude-standard",
+                    "--",
+                    *(f"*{ext}" for ext in _SOURCE_EXTENSIONS),
+                ],
+                cwd=directory,
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            if result.returncode == 0:
+                all_files.update(directory / p for p in result.stdout.split("\0") if p)
+            # The index can still list files deleted from the worktree.
+            all_files = {fp for fp in all_files if fp.is_file()}
             if all_files:
                 return sorted(
                     fp for fp in all_files if not _is_noise_path(fp, directory)
@@ -356,6 +366,8 @@ def _iter_source_files(directory: Path) -> list[Path]:
     files: list[Path] = []
     for fp in sorted(directory.rglob("*")):
         if not fp.suffix:
+            continue
+        if not fp.is_file():  # dangling symlinks, dirs named like files
             continue
         if _detect_language(fp) is None:
             continue
