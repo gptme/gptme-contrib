@@ -76,27 +76,39 @@ def init_repo(network_dir: Path = DEFAULT_NETWORK_DIR, force: bool = False) -> P
             print(f"✓ Network repo exists: {network_dir}")
             return network_dir
         except SyncError:
-            print(f"⚠ Invalid repo at {network_dir}, re-cloning...")
+            # Never delete a directory we did not create without --force.
+            raise SyncError(
+                f"{network_dir} exists but is not a git repository; "
+                "move it aside or re-run with --force to replace it"
+            ) from None
 
-    # Clone repository
+    # Clone next to the target first, so a failed clone (offline, auth)
+    # leaves any existing directory untouched.
     network_dir.parent.mkdir(parents=True, exist_ok=True)
-    if network_dir.exists():
-        import shutil
+    import shutil
+    import tempfile
 
-        shutil.rmtree(network_dir)
-
+    staging = Path(
+        tempfile.mkdtemp(prefix=f".{network_dir.name}.", dir=network_dir.parent)
+    )
+    clone_dir = staging / network_dir.name
     print(f"📥 Cloning {NETWORK_REPO}...")
     try:
         subprocess.run(
-            ["git", "clone", NETWORK_REPO_URL, str(network_dir)],
+            ["git", "clone", NETWORK_REPO_URL, str(clone_dir)],
             check=True,
             capture_output=True,
             text=True,
         )
+        if network_dir.exists():
+            shutil.rmtree(network_dir)
+        clone_dir.rename(network_dir)
         print(f"✓ Cloned to {network_dir}")
         return network_dir
     except subprocess.CalledProcessError as e:
         raise SyncError(f"Failed to clone: {e.stderr}") from e
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
 
 
 def export_to_network(
@@ -155,6 +167,14 @@ def push_lessons(
     # Check for changes
     status = run_git(["status", "--porcelain"], network_dir)
     if not status.stdout.strip():
+        # A commit from an earlier sync whose push failed leaves the tree
+        # clean, so also check for commits the upstream does not have yet.
+        ahead = run_git(["rev-list", "--count", "@{u}..HEAD"], network_dir, check=False)
+        if ahead.returncode == 0 and ahead.stdout.strip() not in ("", "0"):
+            print("📤 Pushing commits from an earlier failed push...")
+            run_git(["push"], network_dir)
+            print("✓ Pushed successfully")
+            return True
         print("ℹ No changes to push")
         return False
 
