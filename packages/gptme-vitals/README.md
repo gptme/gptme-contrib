@@ -7,10 +7,23 @@ Tracking issue: [gptme/gptme-contrib#2060](https://github.com/gptme/gptme-contri
 `gptme-dashboard` stays what it is in practice: the generator for the
 gptme-contrib catalog on GitHub Pages.
 
+## Install
+
+From a gptme-contrib checkout:
+
+```bash
+uv pip install -e packages/gptme-vitals
+# or
+pip install "git+https://github.com/gptme/gptme-contrib#subdirectory=packages/gptme-vitals"
+```
+
+This installs the `gptme-vitals` CLI (see [`gptme-vitals build`](#gptme-vitals-build-page)).
+
 ## Status
 
-Slice 1, in progress. This commit lands the piece the rest depends on: the
-typed **page envelope**.
+Slice 1 has landed: the typed page envelope, the route registry, the theme,
+the derived `core.json`/`headline.json` pair, `build`, per-page timers and the
+portal, each described below.
 
 ## The page envelope
 
@@ -168,10 +181,6 @@ blocks (manual and media-query) are identical, and that text, status colours
 and badges meet WCAG AA (4.5:1) on every surface in both schemes. The light
 accent is `#9c5204`, darker than a straight inversion would give, because the
 first draft measured 4.46:1 on the tile surface.
-
-## Next in slice 1
-
-The portal and `build` emitting the derived `core.json`/`headline.json` pair.
 
 ## Derived `core.json` / `headline.json`
 
@@ -348,7 +357,8 @@ doubled), not `shlex`'s.
 
 ## The portal
 
-`render_portal(registry, envelopes, title=…)` is the one renderer: every card is
+`render_portal(registry, envelopes, title=…)` (import it from
+`gptme_vitals.portal`; the package root does not re-export it) is the one renderer: every card is
 the page's `status` badge, `headline` and up to four `lines`, so no page needs a
 bespoke preview function. Only `PUBLIC` routes get a card, and only those three
 fields are read, so `detail` and `core` cannot reach the page even if a caller
@@ -362,7 +372,3 @@ build still shows every page). Pass `--title` to name it. `head_html` and
 `toolbar_html` take the theme fragments (`theme.render_head_assets()` /
 `render_theme_toggle()`); the CLI passes both, so a built portal carries the
 shared tokens and the theme toggle.
-
-## Next in slice 1
-
-Switch Bob's own repo onto the package.

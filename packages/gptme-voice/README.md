@@ -106,6 +106,19 @@ Endpoints: `GET /` (health), `WS /local` (local and embedded clients),
 `POST /incoming` + `WS /twilio` (phone), and with `--enable-browser-transport`
 also `WS /voice` + `GET /browser`.
 
+### Preflight probe
+
+`gptme-voice-probe` sends the provider the same `session.update` the server
+would (same workspace instructions, provider, model, voice and options) and
+waits for `session.updated` or `error`. No audio is sent, so it costs one
+websocket handshake. Run it before pointing a deployment at a new
+provider or model: it exits 1 on a rejected, timed-out or failed connection.
+
+```bash
+gptme-voice-probe --provider openai --model gpt-realtime-2 --voice cedar
+gptme-voice-probe --provider grok --json
+```
+
 ## Phone calls via Twilio
 
 ### Inbound

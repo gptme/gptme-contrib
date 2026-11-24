@@ -72,6 +72,8 @@ result = mgr.switch_to("personal", reason="work quota exhausted")
 if not result.ok:
     print(result.reason, result.deferred_locks)
 
+# switch_to() does not check for drift: it replaces whatever is at the live
+# path. Check (and heal) first, or a login written since the last switch is lost.
 # Live file matches no slot (e.g. after /login)?
 drift = mgr.detect_live_slot_drift()
 if drift and drift["drift"]:

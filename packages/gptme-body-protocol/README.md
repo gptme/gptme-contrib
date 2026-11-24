@@ -79,7 +79,7 @@ require_command_result(decode_message(await reader.readline()), cmd.command_id)
 |------|---------|
 | `PROTOCOL_VERSION` | `"bob-body/0"` |
 | `Handshake(token, controller_id)` | Frozen dataclass; `type="handshake"` |
-| `Command(command_id, controller_id, command, args={}, ttl_ms=2000)` | Frozen dataclass; `command` is one of `status`, `move`, `turn`, `stop`, `interact`, `sensor_frame` |
+| `Command(command_id, controller_id, command, args={}, ttl_ms=2000, sent_at_ms=<now>)` | Frozen dataclass; `command` is one of `status`, `move`, `turn`, `stop`, `interact`, `sensor_frame` |
 | `encode_message(msg) -> bytes` | Compact JSON + trailing newline |
 | `decode_message(line) -> dict` | Rejects non-object JSON and a foreign `protocol` value |
 | `require_handshake_ok(resp)` | Raises `PermissionError` unless `type == "handshake_ok"`; `ValueError` on protocol mismatch |

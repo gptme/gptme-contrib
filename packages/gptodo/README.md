@@ -356,7 +356,7 @@ Every command has `--help`. The top-level options are `-v/--verbose` and
 | `next [--limit N] [--order priority\|unblock] [--json]` | The highest-priority ready task, or a simulated sequence of N tasks (see below). |
 | `show <id> [--render]` | One task's metadata and body. |
 | `browse [--all] [--state S] [--project P] [--no-fzf]` | Interactive browser (fzf, or a pager). |
-| `tags [--state S] [--list] [TAG...]` | Tag counts and the tasks under each tag. |
+| `tags [--state S] [--list] [TAG...]` | Tag counts; `--list` also lists the tasks under each tag. |
 | `stale [--days 30] [--state active\|backlog\|waiting\|all]` | Tasks not modified recently. |
 | `effective <id>` / `explain <id>` | Why a task is or isn't ready: its effective state, and each readiness filter in turn. |
 | `plan <id>` | What finishing this task would unblock. |

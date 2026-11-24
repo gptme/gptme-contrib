@@ -87,7 +87,10 @@ Scanned from the workspace (and from nested git submodules that have gptme-like 
 - **README** of the workspace, rendered as an About section
 - **KPIs** when present: reads `state/sessions/session-records.jsonl`,
   `state/lesson-thompson/loo-results.json` and `state/weekly-goals.yaml`
-- **Community plugins** from `docs/community_plugins.json`, if present
+- **Community plugins** from `docs/community_plugins.json` (or `community_plugins.json`
+  at the workspace root), if present. Only its `entries` list is read; each entry has
+  `name` (`owner/repo`), `type` (`plugin`, `skill` or `mcp-server`), `description`, `url`,
+  `stars`, `language` and `topics`: `{"fetched_at": "...", "entries": [{...}]}`
 - **Sessions** (only with `--sessions`)
 
 ## Live server
