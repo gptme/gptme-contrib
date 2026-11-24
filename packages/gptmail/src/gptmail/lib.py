@@ -335,6 +335,20 @@ def fix_list_spacing(markdown_text: str) -> str:
     return "\n".join(result)
 
 
+def _part_text(part: EmailMessage) -> str:
+    """Text of a MIME part; an unknown charset decodes as UTF-8 with replacement.
+
+    ``get_content()`` raises ``LookupError`` for e.g. ``charset=unknown-8bit``.
+    """
+    try:
+        return str(part.get_content())
+    except LookupError:
+        payload = part.get_payload(decode=True)
+        if isinstance(payload, bytes):
+            return payload.decode("utf-8", errors="replace")
+        return str(payload or "")
+
+
 class UnrepliedEmail(NamedTuple):
     """Typed representation of an unreplied email.
 
@@ -352,20 +366,6 @@ class UnrepliedEmail(NamedTuple):
     sender: str
     date: datetime
     folder: str
-
-
-def _part_text(part: EmailMessage) -> str:
-    """Text of a MIME part; an unknown charset decodes as UTF-8 with replacement.
-
-    ``get_content()`` raises ``LookupError`` for e.g. ``charset=unknown-8bit``.
-    """
-    try:
-        return str(part.get_content())
-    except LookupError:
-        payload = part.get_payload(decode=True)
-        if isinstance(payload, bytes):
-            return payload.decode("utf-8", errors="replace")
-        return str(payload or "")
 
 
 class AgentEmail:
