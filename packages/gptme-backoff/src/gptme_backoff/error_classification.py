@@ -44,6 +44,8 @@ logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
+_DEFAULT_SLEEP = time.sleep
+
 
 def _is_coroutine_callable(fn: Any) -> bool:
     """Return True if *fn* is async — either an async def or a callable object with async __call__."""
@@ -105,7 +107,10 @@ class StrategyConfig:
         """
         if attempt < 1:
             raise ValueError("attempt must be >= 1")
-        wait = self.base_wait * (self.multiplier ** (attempt - 1))
+        try:
+            wait = self.base_wait * (self.multiplier ** (attempt - 1))
+        except OverflowError:  # huge attempt: the formula's min() caps it anyway
+            wait = self.max_wait
         wait = min(wait, self.max_wait)
         if self.jitter:
             # Additive jitter: spread retries across [wait, 2*wait) so a fleet
@@ -271,7 +276,7 @@ def retry_classified(
     *,
     classifier: ErrorClassifier | None = None,
     configs: dict[RetryStrategy, StrategyConfig] | None = None,
-    sleep: Callable[[float], None] = time.sleep,
+    sleep: Callable[[float], Any] = _DEFAULT_SLEEP,
     on_retry: Callable[[BaseException, RetryStrategy, int, float], None] | None = None,
 ) -> Callable[[Callable[..., T]], Callable[..., T]]:
     """Decorator that retries a function using a per-error-class strategy.
@@ -281,7 +286,9 @@ def retry_classified(
             :meth:`ErrorClassifier.default`.
         configs: per-strategy parameters. Defaults to
             :data:`DEFAULT_STRATEGY_CONFIGS`.
-        sleep: injectable sleep (tests pass a no-op / recorder).
+        sleep: injectable sleep (tests pass a no-op / recorder). Async
+            functions use ``asyncio.sleep`` unless one is injected; an injected
+            sleep may return an awaitable, which is then awaited.
         on_retry: optional callback ``(exc, strategy, next_attempt, wait)``
             invoked before each backoff sleep.
 
@@ -323,7 +330,12 @@ def retry_classified(
                         )
                         if on_retry is not None:
                             on_retry(exc, strategy, attempt + 1, wait)
-                        await asyncio.sleep(wait)
+                        if sleep is _DEFAULT_SLEEP:
+                            await asyncio.sleep(wait)
+                        else:
+                            result = sleep(wait)
+                            if inspect.isawaitable(result):
+                                await result
 
             return async_wrapper  # type: ignore[return-value]
 

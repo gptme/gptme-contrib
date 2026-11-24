@@ -170,7 +170,7 @@ async def test_retry_api_call_retries_async_functions():
 
 
 def test_retry_api_call_timeout_stops_retries():
-    """stop_after_delay limits the total retry budget, not per-call execution time."""
+    """stop_before_delay limits the total retry budget, not per-call execution time."""
     call_count = [0]
 
     @retry_api_call(max_attempts=10, timeout=0.02)

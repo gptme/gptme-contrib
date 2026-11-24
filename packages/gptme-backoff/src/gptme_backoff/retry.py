@@ -201,7 +201,7 @@ def retry_api_call(
     """Convenience decorator tuned for API call retries.
 
     Combines exponential backoff with optional jitter and a hard wall-clock
-    timeout via ``tenacity.stop_after_delay``.
+    timeout via ``tenacity.stop_before_delay`` (no attempt starts past it).
 
     Parameters
     ----------
@@ -232,7 +232,7 @@ def retry_api_call(
     """
     stop_conditions: list[stop_base] = [tenacity.stop_after_attempt(max_attempts)]
     if timeout is not None:
-        stop_conditions.append(tenacity.stop_after_delay(timeout))
+        stop_conditions.append(tenacity.stop_before_delay(timeout))
 
     wait_strategy = _make_wait_strategy(min_wait, max_wait, multiplier, jitter)
 
