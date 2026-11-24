@@ -188,7 +188,15 @@ def _persist_probe_refresh(
             slot.name,
         )
         return None
-    fd, tmp_name = tempfile.mkstemp(prefix=f".{slot.name}.", dir=slot.parent)
+    try:
+        fd, tmp_name = tempfile.mkstemp(prefix=f".{slot.name}.", dir=slot.parent)
+    except OSError as exc:
+        message = (
+            f"probe refreshed {slot.name} but staging the rotated token "
+            f"failed ({exc}); re-authenticate the slot"
+        )
+        logger.error("%s", message)
+        return message
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(text)
@@ -255,6 +263,7 @@ def probe_credential(
         return info, True, "probe skipped (no usage_script configured)"
 
     env = os.environ.copy()
+    persist_error: str | None = None
     try:
         target_credential = path.expanduser().resolve()
         # Serialize probes of one slot from the read of ``original`` through
@@ -294,7 +303,10 @@ def probe_credential(
                         live_credential, target_credential, expected_account, original
                     )
     except subprocess.TimeoutExpired:
-        return info, False, f"probe timed out after {timeout}s"
+        message = f"probe timed out after {timeout}s"
+        if persist_error is not None:
+            message += f"; {persist_error}"
+        return info, False, message
     except OSError as exc:
         return info, False, f"probe error: {exc}"
 

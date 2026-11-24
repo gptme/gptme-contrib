@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 from gptme_subscription.auth import probe_credential
@@ -230,3 +231,39 @@ os.replace(tmp, live)
     assert (
         json.loads(kept.read_text())["claudeAiOauth"]["refreshToken"] == "new-refresh"
     )
+
+
+def test_probe_reports_a_refresh_it_could_not_stage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    slot = tmp_path / ".credentials.json.alice"
+    _write_slot(slot)
+    script = tmp_path / "usage.py"
+    script.write_text(
+        """#!/usr/bin/env python3
+import json, os
+from pathlib import Path
+live = Path.home() / ".claude" / ".credentials.json"
+data = json.loads(live.read_text())
+data["claudeAiOauth"].update(refreshToken="new-refresh")
+tmp = live.with_name(".credentials.json.tmp")
+tmp.write_text(json.dumps(data))
+os.replace(tmp, live)
+"""
+    )
+    script.chmod(0o755)
+    import gptme_subscription.auth as auth
+
+    real_mkstemp = auth.tempfile.mkstemp
+
+    def mkstemp(*args: Any, **kwargs: Any) -> Any:
+        if kwargs.get("dir") == slot.parent:
+            raise OSError(28, "No space left on device")
+        return real_mkstemp(*args, **kwargs)
+
+    monkeypatch.setattr(auth.tempfile, "mkstemp", mkstemp)
+
+    _, ok, msg = probe_credential(slot, "alice", usage_script=script)
+
+    assert ok is False
+    assert "staging the rotated token failed" in msg
