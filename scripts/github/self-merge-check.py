@@ -1517,6 +1517,82 @@ def _sha_matches_head(marker_sha: str, head_sha: str) -> bool:
     return head_sha.startswith(marker_sha)
 
 
+_SHA_RE = re.compile(r"[0-9a-f]+")
+_BASE_REF_RE = re.compile(r"[A-Za-z0-9._/-]+")
+
+
+@cache
+def _pr_diff_patch_id(repo: str, base_ref: str, sha: str) -> str | None:
+    """``git patch-id --verbatim`` of ``merge-base(base_ref, sha)..sha``, or None.
+
+    The diff comes from GitHub's three-dot compare, so no local clone is needed,
+    and the base is the merge-base: a rebase onto a newer base leaves this diff
+    unchanged when the PR's own changes are unchanged. ``--verbatim`` keeps
+    whitespace significant (the default ignores it, which would equate an
+    indentation change in Python). Line numbers are still ignored, which is what
+    lets the same change survive a base that moved.
+
+    None on any failure, an empty diff, or a binary file, whose diff text names
+    the file without its content.
+    """
+    raw = run_gh_checked(
+        [
+            "api",
+            "-H",
+            "Accept: application/vnd.github.diff",
+            f"repos/{repo}/compare/{base_ref}...{sha}",
+        ],
+        timeout=60,
+    )
+    if not raw or "Binary files " in raw or "GIT binary patch" in raw:
+        return None
+    try:
+        proc = subprocess.run(
+            ["git", "patch-id", "--verbatim"],
+            input=raw + "\n",
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    fields = proc.stdout.split()
+    if proc.returncode != 0 or len(fields) != 2:
+        return None
+    return fields[0]
+
+
+def _review_carries_to_head(
+    repo: str, base_ref: str, marker_sha: str, head_sha: str
+) -> bool:
+    """Whether a review of *marker_sha* still covers *head_sha*.
+
+    True on an exact (prefix) match, or when both commits carry the same diff
+    against *base_ref*: a rebase or merge-from-base that left the PR's own
+    changes untouched. Review evidence only; CI must still pass at the exact
+    head. Fails closed (False) whenever the diff cannot be read for either
+    commit.
+    """
+    if _sha_matches_head(marker_sha, head_sha):
+        return True
+    marker_sha = (marker_sha or "").strip().lower()
+    head_sha = (head_sha or "").strip().lower()
+    if (
+        not repo
+        or not _BASE_REF_RE.fullmatch(base_ref or "")
+        or ".." in base_ref
+        or len(marker_sha) < MIN_SHA_PREFIX_LEN
+        or len(head_sha) < MIN_SHA_PREFIX_LEN
+        or not _SHA_RE.fullmatch(marker_sha)
+        or not _SHA_RE.fullmatch(head_sha)
+    ):
+        return False
+    marker_id = _pr_diff_patch_id(repo, base_ref, marker_sha)
+    if marker_id is None:
+        return False
+    return marker_id == _pr_diff_patch_id(repo, base_ref, head_sha)
+
+
 def _consensus_shortfall(consensus: Any) -> str | None:
     """Why a review's consensus is not trustworthy evidence, or None if it is.
 
@@ -1727,6 +1803,7 @@ def fetch_ai_review_status(
     review_data: tuple[list[dict[str, Any]], list[dict[str, Any]]]
     | None
     | object = _UNSET,
+    base_ref: str = "",
 ) -> dict[str, Any]:
     """Whether our own reviewer's verdict is strong enough to stand in for Greptile.
 
@@ -1768,15 +1845,16 @@ def fetch_ai_review_status(
             "refusal": "lookup_failed",
         }
     marker = raw
+    # A marker on an older head still counts when the head only moved the base
+    # (same diff against base_ref). Without base_ref this is the exact match.
+    marker_current = marker is not None and _review_carries_to_head(
+        repo, base_ref, str(marker.get("sha") or ""), head_sha
+    )
     # These early refusals can be replaced by Greptile. Check disposition
     # first: a stale/absent/abstained summary does not retire finding threads,
     # and even an off-diff negative summary still needs a proved disposition.
     # Reuse the existing predicate, including its fail-closed API handling.
-    if (
-        marker is None
-        or not _sha_matches_head(str(marker.get("sha") or ""), head_sha)
-        or marker.get("score") is None
-    ):
+    if marker is None or not marker_current or marker.get("score") is None:
         if review_data is _UNSET:
             review_data = _fetch_greptile_review_data(repo, pr_number)
         raw_score = (marker or {}).get("score")
@@ -1840,7 +1918,7 @@ def fetch_ai_review_status(
             "refusal": "invalid_score",
         }
 
-    if not _sha_matches_head(str(marker.get("sha") or ""), head_sha):
+    if not marker_current:
         return {
             "accepted": False,
             "detail": (
@@ -4185,7 +4263,12 @@ def evaluate_pr(
     greptile_is_fresh: bool = (
         bool(greptile.get("has_review"))
         and greptile_reviewed_sha is not None
-        and _sha_matches_head(greptile_reviewed_sha, result.head_sha or "")
+        and _review_carries_to_head(
+            repo,
+            pr.get("baseRefName") or "",
+            greptile_reviewed_sha,
+            result.head_sha or "",
+        )
     )
     greptile_score: int | None = None
     greptile_unresolved = int(greptile.get("unresolved") or 0)
@@ -4239,6 +4322,7 @@ def evaluate_pr(
         expected_author=current_user,
         marker_result=shared_marker,
         review_data=shared_review_data,
+        base_ref=pr.get("baseRefName") or "",
     )
     if not _ai_review_enabled():
         result.warnings.append(
@@ -4291,7 +4375,12 @@ def evaluate_pr(
                     signal_sha = signal.get("reviewed_commit")
                     if greptile_is_fresh or (
                         isinstance(signal_sha, str)
-                        and _sha_matches_head(signal_sha, result.head_sha or "")
+                        and _review_carries_to_head(
+                            repo,
+                            pr.get("baseRefName") or "",
+                            signal_sha,
+                            result.head_sha or "",
+                        )
                     ):
                         if refreshed_greptile_unresolved:
                             result.reasons.append(
@@ -4344,7 +4433,12 @@ def evaluate_pr(
                 signal_score = signal.get("score")
                 if (
                     not isinstance(signal_sha, str)
-                    or not _sha_matches_head(signal_sha, result.head_sha or "")
+                    or not _review_carries_to_head(
+                        repo,
+                        pr.get("baseRefName") or "",
+                        signal_sha,
+                        result.head_sha or "",
+                    )
                     or type(signal_score) is not int
                     or signal_score < _parse_self_merge_min_greptile_score()
                 ):
@@ -4370,6 +4464,7 @@ def evaluate_pr(
                         expected_author=current_user,
                         marker_result=shared_marker,
                         review_data=shared_review_data,
+                        base_ref=pr.get("baseRefName") or "",
                     )
                     refreshed_greptile_unresolved = sum(
                         1
