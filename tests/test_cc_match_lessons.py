@@ -3014,3 +3014,31 @@ def test_transcript_pointer_is_not_counted_as_injected(hook, tmp_path):
     injected = hook.get_already_injected("no-state-session", str(transcript))
     assert lesson["path"] in injected
     assert skill["path"] not in injected
+
+
+def test_budget_timeout_still_records_a_receipt(tmp_path: Path) -> None:
+    # A hook that runs out of budget must leave a measured-zero receipt;
+    # otherwise it is indistinguishable from a hook that never ran.
+    import os
+    import subprocess
+
+    hook_input = {
+        "hook_event_name": "UserPromptSubmit",
+        "session_id": "budget-timeout",
+        "prompt": "fix the git commit pre-commit hook failure",
+        "cwd": str(tmp_path),
+    }
+    env = {**os.environ, "TMPDIR": str(tmp_path), "MATCH_LESSONS_HOOK_BUDGET": "0.001"}
+    result = subprocess.run(
+        [sys.executable, str(HOOK_PATH)],
+        input=json.dumps(hook_input),
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=60,
+    )
+    assert result.returncode == 0
+    receipts = tmp_path / "cc-session-budget-timeout-lessons-receipts.jsonl"
+    rows = [json.loads(line) for line in receipts.read_text().splitlines()]
+    assert rows[-1]["reason"] == "hook_budget_timeout"
+    assert rows[-1]["outcome"] == "empty"

@@ -2704,12 +2704,16 @@ if __name__ == "__main__":
         # still readable here. A PreToolUse timeout must emit no payload, not
         # a UserPromptSubmit-shaped one.
         event = "UserPromptSubmit"
+        session_id = None
         try:
-            cached_input = _STDIN_CACHE or ""
-            event = json.loads(cached_input).get("hook_event_name") or event
+            cached = json.loads(_STDIN_CACHE or "")
+            event = cached.get("hook_event_name") or event
+            session_id = cached.get("session_id") or None
         except (json.JSONDecodeError, TypeError, ValueError, AttributeError):
             pass
-        emit_empty(event)
+        # Record the timeout as a measured-zero receipt: without one, a hook
+        # that ran out of budget is indistinguishable from one that never ran.
+        emit_empty(event, session_id, "hook_budget_timeout")
         sys.exit(0)
     finally:
         _disarm_hook_budget()
