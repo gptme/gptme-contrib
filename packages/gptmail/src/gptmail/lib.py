@@ -765,6 +765,11 @@ class AgentEmail:
         """
         if env_allowlist is None:
             env_allowlist = os.getenv("EMAIL_SEND_ALLOWLIST", "")
+        # msmtp takes the recipient as a positional argument, so an address that
+        # starts with "-" is read as an option (--logfile=, -C, --passwordeval=).
+        # Refuse it whatever the allowlist says.
+        if any(addr.startswith("-") for _, addr in getaddresses([recipient or ""])):
+            return False
         if env_allowlist == "*":
             return True
         elif env_allowlist:
@@ -1249,7 +1254,8 @@ class AgentEmail:
             msmtp_cmd = ["msmtp"]
             if account:
                 msmtp_cmd.extend(["-a", account])
-            msmtp_cmd.append(recipient_email)
+            # "--" ends option parsing: the recipient is never an msmtp option.
+            msmtp_cmd.extend(["--", recipient_email])
 
             # Check rate limit before sending
             if not self.rate_limiter.can_proceed():

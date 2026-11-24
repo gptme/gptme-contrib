@@ -61,7 +61,8 @@ def test_clean_payload_delivered_once_and_archived(recording_send, body):
     agent.send("fixture")
     assert len(calls) == 1
     command, kwargs = calls[0]
-    assert command == ["msmtp", "recipient@example.com"]
+    # "--" ends option parsing so the recipient can never be read as an msmtp option
+    assert command == ["msmtp", "--", "recipient@example.com"]
     message = BytesParser(policy=policy.default).parsebytes(kwargs["input"])
     assert str(message["Subject"]) == "Clean"
     assert "Hello" in str(kwargs["input"])
