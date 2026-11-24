@@ -889,6 +889,97 @@ def test_push_guard_claims_both_keys_for_fork_push(tmp_path: Path) -> None:
             assert claim is not None and claim.claimer == "agent-b"
 
 
+def test_push_guard_aliases_origin_when_no_upstream_remote(tmp_path: Path) -> None:
+    """A ``worktree-create`` layout has ``origin`` = base, ``fork`` = fork.
+
+    There is no ``upstream`` remote, so pre-fix the fork push claimed only the
+    fork slug and never met the base-repo claim held by the worktree creator.
+    """
+    from gptme_coordination.db import CoordinationDB
+    from gptme_coordination.work import WorkClaimManager
+    from gptme_coordination.worktree_guard import run_push_guard
+
+    db_path = tmp_path / "coord.db"
+    with CoordinationDB(db_path) as db:
+        assert WorkClaimManager(db).claim(
+            "holder-agent", "pr-branch:activitywatch/aw-server#feat", ttl_minutes=60
+        )
+
+    kwargs = {
+        "worktree_root": tmp_path / "wt",
+        "brain_root": tmp_path / "brain",
+        "remote_url": "git@github.com:TimeToBuildBob/aw-server.git",
+        "origin_url": "git@github.com:ActivityWatch/aw-server.git",
+        "session_id": "sess-1",
+        "agent_id": "agent-b",
+        "db_path": db_path,
+    }
+    refspec = ["refs/heads/feat abc123 refs/heads/feat def456"]
+
+    assert run_push_guard(refspec, deny=False, **kwargs) == 0
+    assert run_push_guard(refspec, deny=True, **kwargs) == 1
+
+    ledger = tmp_path / "brain" / "state" / "coordination" / "worktree-guard.jsonl"
+    rows = [json.loads(line) for line in ledger.read_text().splitlines()]
+    denied = [r for r in rows if r["type"] in {"push_would_deny", "push_deny"}]
+    assert {r["key"] for r in denied} == {"pr-branch:activitywatch/aw-server#feat"}
+    assert {r["holder"] for r in denied} == {"holder-agent"}
+
+
+def test_push_guard_reads_base_slug_from_origin_remote(tmp_path: Path) -> None:
+    """With no explicit ``origin_url``, the guard reads the ``origin`` remote."""
+    from gptme_coordination.db import CoordinationDB
+    from gptme_coordination.work import WorkClaimManager
+    from gptme_coordination.worktree_guard import run_push_guard
+
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(tmp_path),
+            "remote",
+            "add",
+            "origin",
+            "git@github.com:ActivityWatch/aw-server.git",
+        ],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(tmp_path),
+            "remote",
+            "add",
+            "fork",
+            "git@github.com:TimeToBuildBob/aw-server.git",
+        ],
+        check=True,
+    )
+
+    db_path = tmp_path / "coord.db"
+    rc = run_push_guard(
+        ["refs/heads/feat abc123 refs/heads/feat def456"],
+        worktree_root=tmp_path / "wt",
+        brain_root=tmp_path / "brain",
+        remote_url="git@github.com:TimeToBuildBob/aw-server.git",
+        session_id="sess-1",
+        agent_id="agent-b",
+        deny=True,
+        db_path=db_path,
+    )
+    assert rc == 0
+    with CoordinationDB(db_path) as db:
+        work = WorkClaimManager(db)
+        for key in (
+            "pr-branch:timetobuildbob/aw-server#feat",
+            "pr-branch:activitywatch/aw-server#feat",
+        ):
+            claim = work.get(key)
+            assert claim is not None and claim.claimer == "agent-b"
+
+
 def test_push_guard_same_upstream_and_destination_is_unchanged(tmp_path: Path) -> None:
     from gptme_coordination.db import CoordinationDB
     from gptme_coordination.work import WorkClaimManager

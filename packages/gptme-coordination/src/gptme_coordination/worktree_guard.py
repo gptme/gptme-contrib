@@ -484,6 +484,7 @@ def run_push_guard(
     brain_root: Path | None = None,
     remote_url: str | None = None,
     upstream_url: str | None = None,
+    origin_url: str | None = None,
     session_id: str | None = None,
     agent_id: str | None = None,
     deny: bool | None = None,
@@ -546,25 +547,39 @@ def run_push_guard(
         return 0
 
     # Fork-based PRs push to the fork while ``worktree-create`` claims the
-    # branch under the base repo's slug. Treat the ``upstream`` remote's slug as
-    # an alias so both keys meet (offline; any failure leaves no alias).
-    alias_slugs: list[str] = []
-    if upstream_url is None:
+    # branch under the base repo's slug. Two remote layouts occur:
+    #   * a fork clone, where ``origin`` is the fork and ``upstream`` the base;
+    #   * a ``worktree-create`` checkout, where ``origin`` is the base and
+    #     ``fork`` the fork — there is no ``upstream`` remote.
+    # Alias both ``upstream`` and ``origin`` so a fork push meets the base-repo
+    # claim in either layout (offline; any failure leaves no alias).
+    def _remote_slug(remote: str) -> str | None:
         import subprocess
 
         try:
-            upstream_url = subprocess.run(
-                ["git", "remote", "get-url", "upstream"],
+            url = subprocess.run(
+                ["git", "remote", "get-url", remote],
                 capture_output=True,
                 text=True,
                 check=True,
                 timeout=5,
             ).stdout.strip()
         except Exception:
-            upstream_url = ""
-    upstream_slug = origin_slug(upstream_url or "")
-    if upstream_slug and upstream_slug != slug:
-        alias_slugs.append(upstream_slug)
+            return None
+        return origin_slug(url)
+
+    upstream_slug = (
+        _remote_slug("upstream")
+        if upstream_url is None
+        else origin_slug(upstream_url or "")
+    )
+    base_origin_slug = (
+        _remote_slug("origin") if origin_url is None else origin_slug(origin_url or "")
+    )
+    alias_slugs: list[str] = []
+    for candidate in (upstream_slug, base_origin_slug):
+        if candidate and candidate != slug and candidate not in alias_slugs:
+            alias_slugs.append(candidate)
 
     should_deny = deny if deny is not None else _env_flag(*_PUSH_GUARD_DENY_ENV)
     try:
