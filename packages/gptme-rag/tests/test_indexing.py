@@ -1425,3 +1425,19 @@ def test_watch_exception_filter_catches_cannot_index_directory_error(
     assert (
         "Warning" in result.output or "warning" in result.output.lower()
     ), f"Expected a warning in output but got:\n{result.output}"
+
+
+def test_search_paths_filter_applies_before_top_k(indexer, tmp_path):
+    """Documents inside ``paths`` are found even when outside ones rank higher."""
+    outside = tmp_path / "outside"
+    inside = tmp_path / "inside"
+    outside.mkdir()
+    inside.mkdir()
+    for i in range(6):
+        (outside / f"pelican{i}.txt").write_text(f"pelican pelican pelican beak number {i}")
+    (inside / "notes.txt").write_text("a short note that mentions a pelican once")
+    indexer.index_directory(tmp_path, "**/*.txt")
+
+    results, _, _ = indexer.search("pelican pelican pelican beak", n_results=1, paths=[inside])
+
+    assert [Path(r.metadata["source"]).name for r in results] == ["notes.txt"]

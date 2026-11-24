@@ -1283,9 +1283,11 @@ class Indexer:
         # Prepare where clause
         search_where = where.copy() if where else {}
 
-        # Pre-filter documents based on all patterns
-        if path_filters:
-            logger.debug(f"Filtering with patterns: {path_filters}")
+        # Pre-filter documents based on all paths and patterns, so the top-k
+        # query runs inside them instead of losing their documents to
+        # higher-ranked ones outside.
+        if path_filters or paths:
+            logger.debug(f"Filtering with paths {paths} and patterns {path_filters}")
             all_docs = self.collection.get()
             matching_sources = set()
 
@@ -1303,7 +1305,7 @@ class Indexer:
                 )
 
                 # Use _matches_paths to check all patterns
-                if self._matches_paths(doc, paths=None, path_filters=path_filters):
+                if self._matches_paths(doc, paths=paths, path_filters=path_filters):
                     matching_sources.add(str(source_path))
 
             if matching_sources:
