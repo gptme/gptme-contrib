@@ -1059,3 +1059,42 @@ def test_no_subagents_directory_returns_only_parent(tmp_path: Path) -> None:
     assert len(spans) == 1
     assert spans[0].spawn_depth == 0
     assert spans[0].agent_type is None
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "null",
+        "[1, 2]",
+        '{"type": "user", "message": "hi"}',
+        '{"type": "assistant", "timestamp": 1700000000, "message": {"content": []}}',
+    ],
+)
+def test_odd_json_lines_are_skipped_not_fatal(tmp_path: Path, line: str) -> None:
+    # One valid-JSON line that is not the expected shape must not abort the
+    # whole file; the later tool span is still extracted.
+    good = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-11-24T00:00:00Z",
+            "message": {"content": [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {}}]},
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-11-24T00:00:01Z",
+            "message": {"content": [{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]},
+        },
+    ]
+    p = tmp_path / "session.jsonl"
+    p.write_text(line + "\n" + "\n".join(json.dumps(r) for r in good) + "\n")
+    spans = extract_spans_from_cc_jsonl(p)
+    assert [s.tool_name for s in spans] == ["Bash"]
+
+
+@pytest.mark.parametrize(
+    "extract", [extract_spans_from_gptme_jsonl, extract_spans_from_codex_jsonl]
+)
+def test_non_object_lines_do_not_crash_other_extractors(tmp_path: Path, extract) -> None:
+    p = tmp_path / "session.jsonl"
+    p.write_text('null\n[1]\n"text"\n')
+    assert extract(p) == []

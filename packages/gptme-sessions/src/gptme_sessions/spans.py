@@ -60,8 +60,8 @@ def _normalize_ts(ts_str: str) -> str:
     return _FRAC_RE.sub(_pad, ts_str.replace("Z", "+00:00"))
 
 
-def _parse_ts(ts_str: str | None) -> datetime | None:
-    if not ts_str:
+def _parse_ts(ts_str: object) -> datetime | None:
+    if not ts_str or not isinstance(ts_str, str):
         return None
     try:
         return datetime.fromisoformat(_normalize_ts(ts_str))
@@ -378,10 +378,14 @@ def _extract_cc_spans_from_text(
             record = json.loads(line)
         except json.JSONDecodeError:
             continue
+        if not isinstance(record, dict):
+            continue
 
         rec_type = record.get("type")
-        ts = _parse_ts(record.get("timestamp"))
         ts_str = record.get("timestamp", "")
+        if not isinstance(ts_str, str):
+            ts_str = ""
+        ts = _parse_ts(ts_str)
 
         if rec_type == "assistant":
             message = record.get("message", {})
@@ -405,7 +409,8 @@ def _extract_cc_spans_from_text(
             turn_index += 1
 
         elif rec_type == "user":
-            content = record.get("message", {}).get("content", [])
+            message = record.get("message")
+            content = message.get("content", []) if isinstance(message, dict) else []
             if not isinstance(content, list):
                 continue
             for item in content:
@@ -591,6 +596,8 @@ def extract_spans_from_gptme_jsonl(
             record = json.loads(line)
         except json.JSONDecodeError:
             continue
+        if not isinstance(record, dict):
+            continue
 
         role = record.get("role")
         content = record.get("content", "")
@@ -746,6 +753,8 @@ def extract_spans_from_codex_jsonl(
         try:
             record = json.loads(line)
         except json.JSONDecodeError:
+            continue
+        if not isinstance(record, dict):
             continue
 
         if record.get("type") == "turn_context":
