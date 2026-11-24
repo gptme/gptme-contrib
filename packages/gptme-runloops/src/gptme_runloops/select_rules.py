@@ -102,6 +102,9 @@ def compute_width(
     gap = reading.used - target
     where = f"used {reading.used:.2f} vs target {target:.2f}"
     if reading.used >= end:
+        if pool.rank == 0:
+            # The owner is never capped on its own account; only overflow stops.
+            return None, f"{where}: at end target {end:.2f}, owner width unchanged"
         return 0, f"{where}: at end target {end:.2f}"
     band = pool.rank * RANK_BAND
     if gap >= -band or math.isclose(gap, -band, rel_tol=0.0, abs_tol=1e-12):

@@ -32,8 +32,9 @@ def at(used: float | None, elapsed: float | None) -> PoolReading:
         ({"rank": 1}, 0.48, 0.50, 0),
         # ahead of target: overflow takes nothing
         ({"rank": 1}, 0.60, 0.50, 0),
-        # at end target: nobody widens
-        ({}, 0.98, 0.70, 0),
+        # at end target: overflow stops; the owner keeps its own width (None)
+        ({"rank": 1}, 0.98, 0.70, 0),
+        ({}, 0.98, 0.70, None),
     ],
 )
 def test_width(kw, used, elapsed, width):
