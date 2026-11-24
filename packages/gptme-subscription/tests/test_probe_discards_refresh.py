@@ -114,7 +114,10 @@ def test_probe_refresh_never_overwrites_slot_of_another_account(
     script = _refresh_script(tmp_path, account_update)
 
     _, ok, message = probe_credential(slot, "alice", usage_script=script)
-    assert ok, message  # the script ran and refreshed
+    # The usage it read belongs to other credentials, and the slot's refresh
+    # token may be consumed: not a successful probe of this slot.
+    assert ok is False
+    assert "different account" in message
 
     oauth = json.loads(slot.read_text())["claudeAiOauth"]
     assert oauth["accountUuid"] == "account-a"

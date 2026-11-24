@@ -169,7 +169,8 @@ def _persist_probe_refresh(
     ``expected_account`` is the slot's ``accountUuid`` read before the probe.
     When the slot names an account, a file that names a different account (or
     none) is never written: one slot must not end up holding another
-    account's tokens. ``original`` is the slot's content before the probe;
+    account's tokens. That case also returns an error, so the probe is not
+    reported as a success for this slot. ``original`` is the slot's content before the probe;
     a slot changed since then (e.g. re-authenticated by the operator, whether
     or not it names an account) is never overwritten.
     """
@@ -183,11 +184,14 @@ def _persist_probe_refresh(
     if not isinstance(oauth, dict) or not oauth.get("refreshToken"):
         return None
     if expected_account is not None and (oauth.get("accountUuid") != expected_account):
-        logger.warning(
-            "probe refresh for %s names a different account; slot left unchanged",
-            slot.name,
+        # Not a successful probe of this slot: the usage read belongs to other
+        # credentials, and the slot's refresh token may now be consumed.
+        message = (
+            f"probe refresh for {slot.name} names a different account; slot left "
+            "unchanged, re-authenticate it if the probe consumed its token"
         )
-        return None
+        logger.warning("%s", message)
+        return message
     try:
         fd, tmp_name = tempfile.mkstemp(prefix=f".{slot.name}.", dir=slot.parent)
     except OSError as exc:
