@@ -177,8 +177,25 @@ def default_io(
 
 
 def _find_all_marker_comments(repo: str, number: int) -> list[dict]:
-    """All AI-review marker comments on this PR (should normally be 0 or 1)."""
-    comments = _io.gh_paginated_list(["api", f"repos/{repo}/issues/{number}/comments"])
+    """All AI-review marker comments on this PR (should normally be 0 or 1).
+
+    Raises ``ReviewError`` when the comment list cannot be read. Do not use
+    ``gh_paginated_list`` here: it returns [] on any failure, so a refused read
+    (REST quota breaker, 403, timeout) would look exactly like "no marker" —
+    spending a review on a PR already reviewed at head, reporting a vanished
+    marker mid-publish, or stacking a duplicate one.
+    """
+    parsed = _io.gh_json(
+        ["api", f"repos/{repo}/issues/{number}/comments", "--paginate", "--slurp"]
+    )
+    if not isinstance(parsed, list):
+        raise ReviewError(
+            f"cannot read {repo}#{number} comments (GitHub API refused or failed)"
+        )
+    if all(isinstance(page, list) for page in parsed):
+        comments: list[object] = [item for page in parsed for item in page]
+    else:
+        comments = list(parsed)
     return [
         c
         for c in comments
@@ -212,6 +229,9 @@ def _delete_marker_comment(repo: str, comment_id: int) -> None:
 
 def find_marker_comment(repo: str, number: int) -> dict | None:
     """The existing AI-review comment on this PR, if any.
+
+    Raises ``ReviewError`` when the comments cannot be read: an unreadable
+    list is not an empty one.
 
     Matched on the marker prefix ALONE — not on the SHA — so that a re-review
     edits the same comment instead of stacking a new one per commit.
@@ -855,7 +875,13 @@ def publish_review(
         # Re-read after acquiring the lock. If another local publisher changed
         # the comment while this run was analysing, its result wins; overwriting
         # it would create duplicate native reviews or resurrect stale state.
-        current = _io.find_marker_comment(repo, number)
+        try:
+            current = _io.find_marker_comment(repo, number)
+        except ReviewError as exc:
+            # Unreadable is not vanished, and on a first publish it is not
+            # absent either: posting now could stack a duplicate marker.
+            print(f"error: {exc}; not publishing this run", file=sys.stderr)
+            return False
         initial_body = str((existing or {}).get("body") or "")
         required_served_through = final_state.get("served_through")
         if existing is None and current is not None:

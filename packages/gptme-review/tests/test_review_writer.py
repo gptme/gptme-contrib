@@ -65,7 +65,7 @@ def test_find_marker_comment_reads_through_the_bound_io(alice_io):
         calls.append(cmd)
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
-    alice_io.gh_paginated_list = lambda args: comments
+    alice_io.gh_json = lambda args: [comments]  # one --slurp page
     alice_io.run = fake_run
     keeper = writer.bind_io(alice_io).find_marker_comment("o/r", 7)
     assert keeper is not None and keeper["id"] == 2
@@ -86,7 +86,7 @@ def test_copied_marker_from_another_author_is_ignored_not_deleted(alice_io):
         "user": {"login": "mallory"},
     }
     calls: list[list[str]] = []
-    alice_io.gh_paginated_list = lambda args: [real, copied]
+    alice_io.gh_json = lambda args: [[real, copied]]
     alice_io.run = lambda cmd, **kw: calls.append(cmd)
     keeper = writer.bind_io(alice_io).find_marker_comment("o/r", 7)
     assert keeper is not None and keeper["id"] == 1
@@ -1356,3 +1356,34 @@ def test_publish_review_yields_to_a_marker_that_appeared_while_analysing(alice_i
     w, lock = _publish_io(alice_io, fake_run, current=current)
     assert w.publish_review(**_publish_kwargs()) is False
     assert calls == [] and lock.closed
+
+
+def test_unreadable_comment_list_raises_instead_of_reading_as_no_marker(alice_io):
+    # bobutils' gh_paginated_list reads a failed call as []; the marker read must not.
+    alice_io.gh_paginated_list = lambda args: []
+    alice_io.gh_json = lambda args: None  # breaker refusal / 403 / timeout
+    w = writer.bind_io(alice_io)
+    with pytest.raises(writer.ReviewError, match="cannot read o/r#7 comments"):
+        w.find_marker_comment("o/r", 7)
+    alice_io.gh_json = lambda args: [[]]  # a real, empty page
+    assert w.find_marker_comment("o/r", 7) is None
+
+
+@pytest.mark.parametrize(
+    "existing", [None, {"id": 123, "body": "<!-- alice-ai-review {} -->"}]
+)
+def test_refused_marker_reread_publishes_nothing(alice_io, capsys, existing):
+    calls: list[list[str]] = []
+    alice_io.gh_json = lambda args, **kw: None  # REST core exhausted
+    alice_io.gh_paginated_list = lambda args: []
+    alice_io.run = lambda cmd, **kw: calls.append(cmd)
+    alice_io._publication_lock = lambda repo, number: _Lock()
+    w = writer.bind_io(alice_io)
+    assert (
+        w.publish_review(**_publish_kwargs(existing=existing), host=_AdvisoryHost())
+        is False
+    )
+    err = capsys.readouterr().err
+    assert "cannot read o/r#7 comments" in err
+    assert "disappeared" not in err
+    assert calls == []  # no POST/PATCH: an unreadable marker must not be duplicated
