@@ -59,6 +59,10 @@ comment_count = int(os.environ.get("TEST_COMMENT_COUNT", "1"))
 # `--author` differs (e.g. Alice) serve their own login so the gate must
 # recognise it as a bot identity rather than anonymous human activity.
 comment_author = os.environ.get("TEST_COMMENT_AUTHOR", "TimeToBuildBob")
+# A comment and review from a deleted account: GitHub serves `"user": null`.
+ghost_activity = os.environ.get("TEST_GHOST_ACTIVITY", "0")
+# A bot comment whose body is not a string, so the jq filter itself errors.
+malformed_bot_body = os.environ.get("TEST_MALFORMED_BOT_BODY", "0")
 
 
 def apply_jq(data, jq_expr):
@@ -135,6 +139,18 @@ if argv[0] == "api":
                 }
                 for index in range(1, comment_count)
             )
+            if ghost_activity == "1":
+                comments.insert(0, {
+                    "user": None,
+                    "body": "Comment by an account that was later deleted.",
+                    "created_at": "2026-08-25T12:00:00Z",
+                })
+            if malformed_bot_body == "1":
+                comments.append({
+                    "user": {"login": comment_author, "type": "User"},
+                    "body": 42,
+                    "created_at": "2026-08-26T16:45:00Z",
+                })
             if bot_after_waiting == "1":
                 comments.append({
                     "user": {"login": "codecov[bot]", "type": "Bot"},
@@ -180,6 +196,12 @@ if argv[0] == "api":
         sys.exit(0)
     if endpoint.endswith("/reviews?per_page=100"):
         reviews = []
+        if ghost_activity == "1":
+            reviews.append({
+                "user": None,
+                "state": "COMMENTED",
+                "submitted_at": "2026-08-25T12:30:00Z",
+            })
         if human_review_after_waiting == "1":
             reviews.append({
                 "user": {"login": "ErikBjare", "type": "User"},
@@ -213,6 +235,8 @@ def _run_gate(
     head_sha: str | None = None,
     author: str = "test-author",
     comment_author: str = "test-author",
+    ghost_activity: str = "0",
+    malformed_bot_body: str = "0",
 ) -> subprocess.CompletedProcess[str]:
     fake_gh = tmp / "gh"
     fake_gh.write_text(FAKE_GH)
@@ -236,6 +260,8 @@ def _run_gate(
     env["TEST_BOT_REAFFIRM_WAITING"] = bot_reaffirm_waiting
     env["TEST_COMMENT_COUNT"] = str(comment_count)
     env["TEST_COMMENT_AUTHOR"] = comment_author
+    env["TEST_GHOST_ACTIVITY"] = ghost_activity
+    env["TEST_MALFORMED_BOT_BODY"] = malformed_bot_body
     # Hermetic: the gate must resolve its own identity from --author, not an
     # ambient BOT_USERNAME exported in the developer's shell.
     env.pop("BOT_USERNAME", None)
@@ -556,3 +582,33 @@ def test_author_pr_notification_still_emits_when_subject_open() -> None:
         emitted = _emitted_notifications(result.stdout)
         assert len(emitted) == 1, result.stdout
         assert emitted[0]["detail"].split(";")[0].strip() == "author"
+
+
+def test_deleted_account_comment_does_not_disable_suppression() -> None:
+    # gptme/gptme-contrib#2384 (#1811): `.user.login | ascii_downcase` on a
+    # `"user": null` comment made jq exit 5, which read as "not waiting" on
+    # every cycle, so the PR dispatched NOOP sessions indefinitely.
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+        result = _run_gate(tmp, state_dir, ghost_activity="1")
+        assert result.returncode in (0, 1), result.stderr
+        assert _emitted_notifications(result.stdout) == [], result.stdout
+        assert "maintainer-waiting check failed" not in result.stderr
+
+
+def test_jq_filter_error_emits_and_warns() -> None:
+    # A filter error is "unknown", not "not waiting": keep emitting (do not
+    # drop a possible human ask), but leave a trace instead of failing silently.
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+        result = _run_gate(tmp, state_dir, malformed_bot_body="1")
+        assert result.returncode in (0, 1), result.stderr
+        assert len(_emitted_notifications(result.stdout)) == 1, result.stdout
+        assert (
+            f"maintainer-waiting check failed for {NOTIF_REPO}#{NOTIF_NUMBER}"
+            in result.stderr
+        ), result.stderr
