@@ -84,6 +84,34 @@ def validate_lesson(lesson_path: Path) -> tuple[bool, list[str]]:
     return len(errors) == 0, errors
 
 
+def _undo_lesson_branch(
+    repo_root: Path,
+    original_ref: str,
+    start_sha: str,
+    branch_name: str,
+    relative_path: Path,
+) -> None:
+    """Return to the original ref after a failure, keeping the lesson on disk.
+
+    A plain checkout would delete a lesson that is tracked only on the new
+    branch (or revert uncommitted edits to it), and the leftover branch would
+    block every retry. Stops at the first failing step so nothing is lost.
+    """
+    for args in (
+        # Drop the lesson commit; the index and working tree stay as they are
+        ["reset", "--soft", start_sha],
+        ["reset", "-q", start_sha, "--", str(relative_path)],
+        ["checkout", original_ref],
+        ["branch", "-D", branch_name],
+    ):
+        if subprocess.run(["git", *args], cwd=repo_root).returncode != 0:
+            print(
+                f"⚠️  Cleanup stopped at `git {' '.join(args)}`; "
+                f"check branch {branch_name}"
+            )
+            return
+
+
 def create_lesson_pr(
     lesson_file: Path,
     judge_scores: dict | None = None,
@@ -132,15 +160,19 @@ def create_lesson_pr(
 
     # Determine category from file path
     # Assume path is like lessons/workflow/my-lesson.md or lessons/tools/my-tool.md
+    # Resolve the directory only, so a symlinked lesson is committed as the link
     try:
-        relative_path = lesson_file.relative_to(repo_root)
-        parts = relative_path.parts
-        if len(parts) >= 2 and parts[0] == "lessons":
-            category = parts[1]
-        else:
-            category = "workflow"  # default
+        relative_path = (lesson_file.parent.resolve() / lesson_file.name).relative_to(
+            repo_root.resolve()
+        )
     except ValueError:
-        category = "workflow"
+        print(f"❌ Lesson file is outside the repository: {lesson_file}")
+        return False
+    parts = relative_path.parts
+    if len(parts) >= 2 and parts[0] == "lessons":
+        category = parts[1]
+    else:
+        category = "workflow"  # default
 
     # Create slug from filename
     slug = lesson_file.stem
@@ -157,8 +189,17 @@ def create_lesson_pr(
         print("🔍 Dry run - would create PR but not actually doing it")
         return True
 
+    start_sha = current_branch = ""
+    branch_created = pushed = False
     try:
-        # Store current branch
+        # Store current branch (or the commit itself when HEAD is detached)
+        start_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+            cwd=repo_root,
+        ).stdout.strip()
         current_branch = subprocess.run(
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
             check=True,
@@ -166,6 +207,8 @@ def create_lesson_pr(
             text=True,
             cwd=repo_root,
         ).stdout.strip()
+        if current_branch == "HEAD":
+            current_branch = start_sha
 
         # Create and checkout branch
         print(f"📌 Creating branch: {branch_name}")
@@ -174,6 +217,7 @@ def create_lesson_pr(
             check=True,
             cwd=repo_root,
         )
+        branch_created = True
 
         # Add the lesson file
         print(f"➕ Adding file: {relative_path}")
@@ -183,11 +227,11 @@ def create_lesson_pr(
             cwd=repo_root,
         )
 
-        # Commit
+        # Commit only the lesson: other staged work stays staged and unpushed
         commit_msg = f"feat(lessons): add {title}"
         print(f"💾 Committing: {commit_msg}")
         subprocess.run(
-            ["git", "commit", "-m", commit_msg],
+            ["git", "commit", "-m", commit_msg, "--", str(relative_path)],
             check=True,
             cwd=repo_root,
         )
@@ -199,6 +243,7 @@ def create_lesson_pr(
             check=True,
             cwd=repo_root,
         )
+        pushed = True
 
         # Create PR body
         pr_body = f"""## New Lesson: {title}
@@ -258,32 +303,29 @@ def create_lesson_pr(
         pr_url = pr_result.stdout.strip()
         print(f"✅ PR created: {pr_url}")
 
-        # Return to previous branch
-        print(f"🔙 Returning to branch: {current_branch}")
-        subprocess.run(
-            ["git", "checkout", current_branch],
-            check=True,
-            cwd=repo_root,
-        )
-
-        return True
-
-    except subprocess.CalledProcessError as e:
+    except (subprocess.CalledProcessError, OSError) as e:
         print(f"❌ Error creating PR: {e}")
         if hasattr(e, "stderr") and e.stderr:
             print(f"   Error output: {e.stderr}")
 
-        # Try to clean up - return to previous branch
-        try:
-            subprocess.run(
-                ["git", "checkout", current_branch],
-                check=False,
-                cwd=repo_root,
+        if branch_created:
+            _undo_lesson_branch(
+                repo_root, current_branch, start_sha, branch_name, relative_path
             )
-        except Exception:
-            pass
+        if pushed:
+            print(
+                f"ℹ️  {branch_name} is already on origin. Open the PR with "
+                f"`gh pr create --head {branch_name}` rather than rerunning."
+            )
 
         return False
+
+    # Return to previous branch. The PR exists, so a failure here undoes nothing.
+    print(f"🔙 Returning to branch: {current_branch}")
+    if subprocess.run(["git", "checkout", current_branch], cwd=repo_root).returncode:
+        print(f"⚠️  PR created, but still on {branch_name}")
+
+    return True
 
 
 @click.command()
