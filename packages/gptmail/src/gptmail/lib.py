@@ -771,8 +771,11 @@ class AgentEmail:
         # msmtp delivers to every comma-separated address in its recipient
         # argument, so each address in a list must be allowlisted on its own.
         # Unparseable input fails closed.
-        addresses = [addr for _, addr in getaddresses([recipient]) if addr]
-        if not addresses:
+        addresses = [addr for _, addr in getaddresses([recipient])]
+        # A quoted address can retain a comma that msmtp subsequently splits
+        # into multiple envelope recipients. Do not authorize that ambiguity,
+        # or silently discard empty/unparseable list elements.
+        if not addresses or any(not addr or "," in addr for addr in addresses):
             return False
 
         allowed_lower = [allowed.lower() for allowed in allowlisted]

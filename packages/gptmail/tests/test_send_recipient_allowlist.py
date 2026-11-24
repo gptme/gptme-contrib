@@ -306,6 +306,9 @@ def test_send_audit_does_not_recreate_archived_message(
         "evil@attacker.test, ok@example.com",
         "evil@attacker.test,ok@example.com",
         "Evil <evil@attacker.test>, OK <ok@example.com>",
+        '"evil@attacker.test, ok@example.com"',
+        "ok@example.com, <>",
+        "ok@example.com, (empty address)",
     ],
 )
 def test_recipient_list_requires_every_address_allowlisted(
