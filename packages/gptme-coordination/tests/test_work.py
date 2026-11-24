@@ -428,3 +428,16 @@ class TestAuthCompatibility:
         assert verify_hmac(
             secret, claim.hmac, "agent-a", "task-1", claim.epoch, expires_at_str
         ), "auth.verify_hmac encoding must match WorkClaimManager.compute_hmac"
+
+
+def test_cli_work_list_agent_filter_without_claimed(tmp_path, capsys) -> None:
+    from gptme_coordination.cli import main as cli_main
+
+    """`work-list --agent X` documents 'Filter by agent ID' but lists all."""
+    db = str(tmp_path / "c.db")
+    assert cli_main(["--db", db, "work-claim", "alice", "task-a"]) == 0
+    assert cli_main(["--db", db, "work-claim", "bob", "task-b"]) == 0
+    capsys.readouterr()
+    assert cli_main(["--db", db, "work-list", "--agent", "alice"]) == 0
+    out = capsys.readouterr().out
+    assert "task-b" not in out, out

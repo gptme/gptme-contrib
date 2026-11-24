@@ -882,3 +882,41 @@ def test_push_guard_same_upstream_and_destination_is_unchanged(tmp_path: Path) -
     )
     with CoordinationDB(db_path) as db:
         assert WorkClaimManager(db).get("pr-branch:org/repo#feat") is not None
+
+
+def test_denied_multi_branch_push_releases_earlier_branch_claims(
+    tmp_path: Path,
+) -> None:
+    """A denied push (exit 1 aborts the whole git push) must not keep claims
+    it took on *other* branches of the same push."""
+    from gptme_coordination.db import CoordinationDB
+    from gptme_coordination.work import WorkClaimManager
+    from gptme_coordination.worktree_guard import run_push_guard
+
+    db_path = tmp_path / "coord.db"
+    with CoordinationDB(db_path) as db:
+        assert WorkClaimManager(db).claim(
+            "holder-agent", "pr-branch:org/repo#b", ttl_minutes=60
+        )
+
+    rc = run_push_guard(
+        [
+            "refs/heads/a 1111111 refs/heads/a 2222222",
+            "refs/heads/b 3333333 refs/heads/b 4444444",
+        ],
+        deny=True,
+        worktree_root=tmp_path / "wt",
+        brain_root=tmp_path / "brain",
+        remote_url="git@github.com:org/repo.git",
+        upstream_url="",
+        session_id="sess-1",
+        agent_id="agent-b",
+        db_path=db_path,
+    )
+    assert rc == 1  # push refused -> branch a was never pushed
+
+    with CoordinationDB(db_path) as db:
+        a = WorkClaimManager(db).get("pr-branch:org/repo#a")
+    assert (
+        a is None or a.status != "claimed"
+    ), f"refused push left claim on branch a held by {a.claimer}"

@@ -568,6 +568,9 @@ def run_push_guard(
         resolved_db = db_path or resolve_coordination_db_path(_brain_root)
         with CoordinationDB(resolved_db) as db:
             work = WorkClaimManager(db)
+            # Per push, not per branch: a deny on a later branch must also
+            # release the keys newly claimed for earlier branches of this push.
+            newly_claimed: list[str] = []
             for branch in pushed_branches(refspec_lines):
                 key = f"pr-branch:{slug}#{branch}"
                 legacy_key = legacy_pr_branch_key(key)
@@ -604,7 +607,6 @@ def run_push_guard(
                         f"informational only); claiming {key}",
                         file=sys.stderr,
                     )
-                newly_claimed: list[str] = []
                 for claim_key in [
                     key,
                     *(f"pr-branch:{a}#{branch}" for a in alias_slugs),
