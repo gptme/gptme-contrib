@@ -25,9 +25,9 @@
 import pkg from 'whatsapp-web.js';
 const { Client, LocalAuth } = pkg;
 import qrcode from 'qrcode-terminal';
+import { logLineCount, replySince } from './gptme-log.js';
 import { spawn } from 'child_process';
 import { existsSync } from 'fs';
-import { logLineCount, replySince } from './gptme-log.js';
 
 // Config from env
 const AGENT_NAME = process.env.GPTME_AGENT || 'sven';
