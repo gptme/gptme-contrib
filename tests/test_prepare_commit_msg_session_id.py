@@ -368,7 +368,8 @@ def test_hash_body_line_from_dash_m_is_not_treated_as_comment(tmp_path: Path) ->
     """
     msg = tmp_path / "COMMIT_EDITMSG"
     msg.write_text("feat: x\n\nRe-pins onto the still-open\n#2077 branch.\n")
-    env = _clean_env(GIT_COMMITTER_SESSION_ID="s1")
+    # git exports GIT_EDITOR=: to the hook when no editor will run.
+    env = _clean_env(GIT_COMMITTER_SESSION_ID="s1", GIT_EDITOR=":")
 
     result = _run_hook_with_source(msg, "message", env)
 
@@ -447,3 +448,64 @@ def test_scissors_keeps_trailer_above_diff(tmp_path: Path) -> None:
     body = msg.read_text()
     assert result.returncode == 0, result.stderr
     assert body.index("Git-Session-Id: s4") < body.index(">8")
+
+
+def _real_commit(tmp_path: Path, *args: str) -> str:
+    repo = tmp_path / "repo"
+    env = _clean_env(
+        GIT_COMMITTER_SESSION_ID="s10",
+        GIT_EDITOR="true",
+        GIT_AUTHOR_NAME="T",
+        GIT_AUTHOR_EMAIL="t@example.com",
+        GIT_COMMITTER_NAME="T",
+        GIT_COMMITTER_EMAIL="t@example.com",
+        HOME=str(tmp_path),
+        GIT_CONFIG_NOSYSTEM="1",
+    )
+    subprocess.run(["git", "init", "-q", str(repo)], check=True, env=env)
+    # Only prepare-commit-msg matters here; other dotfiles hooks are exercised
+    # elsewhere and may need a configured workspace.
+    hooks = repo / ".git/hooks-only"
+    hooks.mkdir()
+    (hooks / "prepare-commit-msg").symlink_to(HOOK)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "core.hooksPath", str(hooks)],
+        check=True,
+        env=env,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "-q", "--allow-empty", *args],
+        check=True,
+        env=env,
+        capture_output=True,
+    )
+    return subprocess.run(
+        ["git", "-C", str(repo), "log", "-1", "--format=%(trailers:only,unfold)"],
+        check=True,
+        env=env,
+        capture_output=True,
+        text=True,
+    ).stdout
+
+
+@pytest.mark.parametrize("edit", [False, True])
+def test_signoff_and_session_trailer_share_one_block(
+    tmp_path: Path, edit: bool
+) -> None:
+    """`git commit -s -m x -e` must keep Signed-off-by in the parsed trailers.
+
+    Regression (#2346 item 10): with the comment-char override applied under
+    -e, git's '#' editor block became the last paragraph, so the session
+    trailer landed in a new paragraph after cleanup and Signed-off-by dropped
+    out of the trailer block.
+    """
+    trailers = _real_commit(tmp_path, "-s", "-m", "feat: x", *(["-e"] if edit else []))
+    assert "Signed-off-by: T <t@example.com>" in trailers
+    assert "Git-Session-Id: s10" in trailers
+
+
+def test_editor_runs_unless_git_exports_noop_editor() -> None:
+    ns = runpy.run_path(str(HOOK))
+    assert ns["editor_will_run"]({}) is True
+    assert ns["editor_will_run"]({"GIT_EDITOR": "vim"}) is True
+    assert ns["editor_will_run"]({"GIT_EDITOR": ":"}) is False
