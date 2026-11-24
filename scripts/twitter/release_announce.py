@@ -137,17 +137,30 @@ _MISSING_CREDENTIALS_RE = re.compile(
 )
 
 
+# ``twitter.py post`` also refuses before it builds an API client when its
+# outbound secret gate blocks the text (or the scanner is unavailable), and when
+# a URL in the text is dead. All three exit 1 before any request is sent.
+_PRE_API_REFUSAL_RE = re.compile(
+    r"Outbound secret gate blocked publication"
+    r"|Outbound secret scan unavailable; refusing to post"
+    r"|Aborting post\s*[\u2014-]+\s*fix dead URLs before tweeting"
+)
+
+
 def _is_post_never_created(output: str) -> bool:
     """True when the post provably does not exist.
 
-    Either the API refused the request outright, or ``twitter.py`` failed on
-    missing credentials before sending anything. Such a failure must not leave
+    Either the API refused the request outright, or ``twitter.py`` refused
+    before sending anything (missing credentials, outbound secret gate, dead
+    URLs). Such a failure must not leave
     an ambiguous-side-effect marker behind: the marker would only wedge this tag
     until someone reconciles it by hand. Transient failures stay ambiguous and
     keep their marker.
     """
     return bool(
-        _DEFINITE_REJECTION_RE.search(output) or _MISSING_CREDENTIALS_RE.search(output)
+        _DEFINITE_REJECTION_RE.search(output)
+        or _MISSING_CREDENTIALS_RE.search(output)
+        or _PRE_API_REFUSAL_RE.search(output)
     )
 
 

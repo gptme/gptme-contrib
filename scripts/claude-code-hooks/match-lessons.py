@@ -1235,21 +1235,33 @@ def _window_workspace(workspace: Path) -> Path:
     ``.git`` *file* pointing at ``<common>/worktrees/<name>``, whose
     ``commondir`` file locates the shared git dir. Anything unreadable or not
     shaped like that keeps the workspace as-is.
+
+    The hook ``cwd`` may be a subdirectory of the worktree, so the nearest
+    ancestor holding ``.git`` is the worktree root; the subdirectory maps to the
+    same relative path under the owning checkout (``<wt>/sub`` ->
+    ``<main>/sub``), so every worktree's ``sub`` shares one window.
     """
+    original = Path(workspace)
     try:
-        dot_git = Path(workspace) / ".git"
+        start = original.resolve()
+        root = next((d for d in (start, *start.parents) if (d / ".git").exists()), None)
+        if root is None:
+            return original
+        dot_git = root / ".git"
         if not dot_git.is_file():
-            return Path(workspace)
+            return original
         first = dot_git.read_text(encoding="utf-8").splitlines()[0]
         if not first.startswith("gitdir:"):
-            return Path(workspace)
+            return original
         gitdir = Path(first[len("gitdir:") :].strip())
         if not gitdir.is_absolute():
-            gitdir = Path(workspace) / gitdir
+            gitdir = root / gitdir
         common = (gitdir / (gitdir / "commondir").read_text().strip()).resolve()
-        return common.parent if common.name == ".git" else Path(workspace)
+        if common.name != ".git":
+            return original
+        return common.parent / start.relative_to(root)
     except (OSError, IndexError, ValueError):
-        return Path(workspace)
+        return original
 
 
 def _prompt_window_file(workspace: Path, state_dir: Path | None = None) -> Path:

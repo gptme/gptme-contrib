@@ -93,10 +93,18 @@ class Goldfish:
                 connection.row_factory = sqlite3.Row
                 # Bound individual returned text columns inside SQLite, before
                 # Python materializes them. Mark source truncation explicitly.
+                # SQLite's text length()/substr() stop at the first NUL, so a
+                # NUL-prefixed value reads as short and would reach Python whole.
+                # Its byte length has no such blind spot: text of at most 12000
+                # characters is at most 48000 UTF-8 bytes, so anything longer
+                # hides content behind a NUL and gets the pre-NUL prefix only.
                 columns = """s.snapshot_id, CASE WHEN length(s.content)>12000
                     THEN substr(s.content,1,4000) || char(10) || '[... middle omitted ...]' || char(10) || substr(s.content,-7900)
+                    WHEN length(CAST(s.content AS BLOB))>48000
+                    THEN substr(s.content,1,12000)
                     ELSE s.content END AS content,
-                    length(s.content)>12000 AS source_truncated,
+                    (length(s.content)>12000
+                     OR length(CAST(s.content AS BLOB))>48000) AS source_truncated,
                     substr(s.app,1,1000) AS app,
                     substr(s.window_title,1,2000) AS window_title,
                     substr(s.url,1,2000) AS url, substr(s.domain,1,1000) AS domain,
