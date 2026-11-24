@@ -1174,7 +1174,16 @@ class AgentEmail:
             final_message = message_from_bytes(mime_bytes, policy=default)
             # Structured header objects can discard wire-visible comments (Date
             # in particular). Decode raw values too, before that information is lost.
-            outbound_parts = [mime_bytes.decode("utf-8")]
+            # Only the header blocks are scanned verbatim: body parts are scanned
+            # below as their decoded payloads, and their quoted-printable form turns
+            # "key — x" into "key =E2=80=94 x", a false secret assignment.
+            outbound_parts = [re.split(r"\r?\n\r?\n", mime_bytes.decode("utf-8"), maxsplit=1)[0]]
+            for part in final_message.walk():
+                if part is not final_message:
+                    outbound_parts.extend(f"{name}: {value}" for name, value in part.raw_items())
+                outbound_parts.extend(
+                    text for text in (part.preamble, part.epilogue) if isinstance(text, str)
+                )
             for _, value in final_message.raw_items():
                 unfolded = re.sub(r"\r?\n[ \t]+", " ", value)
                 outbound_parts.append(unfolded)

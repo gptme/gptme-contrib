@@ -271,3 +271,50 @@ def test_html_character_references_are_scanned(recording_send, monkeypatch, body
     assert not (agent.email_dir / "sent/fixture.md").exists()
     captured = capsys.readouterr()
     assert literal not in captured.out + captured.err
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "Rotate the Perplexity API key — live value is a fixture",
+        "token — see the issue",
+        "Status: SECRET key ✓ rotated",
+    ],
+)
+def test_quoted_printable_escapes_are_not_secret_assignments(recording_send, monkeypatch, body):
+    """A secret-named word before non-ASCII text must stay deliverable.
+
+    The text parts are quoted-printable on the wire, so ``key —`` serializes as
+    ``key =E2=80=94``. Scanning that encoded form reads it as ``KEY = value``.
+    The decoded payloads are what the recipient reads, and they are clean.
+    """
+    import os
+
+    monkeypatch.setattr(os, "environ", {"EMAIL_SEND_ALLOWLIST": "recipient@example.com"})
+    monkeypatch.delitem(sys.modules, "redact")  # drop the fixture's fake scanner
+    real_redact = pytest.importorskip("redact")
+    assert not real_redact.redact(body, literals=[]).blocked
+    agent, draft, calls = recording_send
+    draft.write_text(f"To: recipient@example.com\nSubject: Clean\n\n{body}")
+    agent.send("fixture")
+    assert len(calls) == 1
+    assert b"=E2=80=94" in calls[0][1]["input"] or b"=E2=9C=93" in calls[0][1]["input"]
+
+
+def test_real_scanner_still_blocks_assignment_in_quoted_printable_body(
+    recording_send, monkeypatch, capsys
+):
+    """Narrowing the raw scan must not let a real assignment in the body through."""
+    import os
+
+    monkeypatch.setattr(os, "environ", {"EMAIL_SEND_ALLOWLIST": "recipient@example.com"})
+    monkeypatch.delitem(sys.modules, "redact")  # drop the fixture's fake scanner
+    real_redact = pytest.importorskip("redact")
+    secret = "api_key = sk-synthetic0123456789abcdefABCDEF — rotate"
+    assert real_redact.redact(secret, literals=[]).blocked
+    agent, draft, calls = recording_send
+    draft.write_text(f"To: recipient@example.com\nSubject: Clean\n\n{secret}")
+    with pytest.raises(ValueError, match="Outbound"):
+        agent.send("fixture")
+    assert not calls
+    assert draft.exists()
