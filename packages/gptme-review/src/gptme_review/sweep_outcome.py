@@ -132,16 +132,21 @@ def failure_reason(
     A bare ``no output`` collapses an OOM SIGKILL, a service stop and a clean
     non-zero exit into one shape; the signal name keeps them distinguishable.
     """
-    text = (stderr or stdout or "").strip()
+    # Whitespace-only stderr must not hide the cause printed on stdout.
+    text = (stderr or "").strip() or (stdout or "").strip()
     tail = text.splitlines()
-    if tail:
-        return tail[-1]
+    last = tail[-1] if tail else None
     if returncode is not None and returncode < 0:
         try:
             name = signal.Signals(-returncode).name
         except ValueError:
             name = f"signal {-returncode}"
+        # Progress lines on stdout are not the cause of a kill; keep the signal.
+        if last:
+            return f"killed by {name} (exit {returncode}): {last}"
         return f"killed by {name} (exit {returncode}) with no output"
+    if last:
+        return last
     return f"exited {returncode} with no output"
 
 
