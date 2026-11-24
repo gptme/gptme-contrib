@@ -169,6 +169,34 @@ def test_failed_or_unconfirmed_commit_is_not_credited():
         assert signals["git_commits"] == [], result
 
 
+def test_failed_push_is_not_commit_evidence():
+    failed = "error: failed to push some refs to 'github.com:o/r.git'\n"
+    for cmd, result in (
+        ("git commit -m x 2>&1 | tail -1; git push -q 2>&1", failed),
+        (
+            "git commit -m x | tail -1; git push --all 2>&1",
+            "   e294aad05f..52fad08fbe  master -> master\n"
+            " ! [rejected]        dev -> dev (fetch first)\n" + failed,
+        ),
+        (
+            "git commit -m x | tail -1; git push -u fork b 2>&1",
+            " * [new branch]      b -> b\n" + failed,
+        ),
+    ):
+        signals = extract_signals_cc(_bash("t1", cmd, result))
+        assert signals["git_commits"] == [], result
+
+    # The commit's own diffstat still proves the local commit landed.
+    signals = extract_signals_cc(
+        _bash(
+            "t1",
+            "git commit -m x | tail -2; git push -q 2>&1",
+            " 1 file changed, 2 insertions(+)\n" + failed,
+        )
+    )
+    assert len(signals["git_commits"]) == 1
+
+
 def test_diffstat_from_git_diff_is_not_commit_evidence():
     cmd = "git diff --stat a.md; git-safe-commit --scope-only a.md -m x 2>&1 | tail -1"
     signals = extract_signals_cc(

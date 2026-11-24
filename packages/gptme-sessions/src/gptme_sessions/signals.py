@@ -84,6 +84,7 @@ _COMMIT_FAILED_RE = re.compile(
     r"COMMIT OUTCOME UNCONFIRMED|nothing to commit|no changes added to commit"
     r"|pre-commit checks failed|hook failed|Aborting commit"
 )
+_PUSH_FAILED_RE = re.compile(r"error: failed to push")
 _MUTATION_FAILED_RE = re.compile(
     r"(?i)\brejected\b|fatal:|error:|permission denied|could not read from remote|"
     r"failed to (?:push|create)|timed out"
@@ -2365,15 +2366,19 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                         commit_evidence = _commit_cmd_pending.pop(tool_use_id)
                         stat_trusted = bool(commit_evidence.pop("stat_trusted", False))
                         if not _direct_commit_matched and not _COMMIT_FAILED_RE.search(result_str):
+                            # A failed push is not evidence that the commit
+                            # landed; only the commit's own diffstat still is.
+                            push_ok = not _PUSH_FAILED_RE.search(result_str)
                             push_hash = None
-                            for push_match in _PUSH_REF_RE.finditer(result_str):
-                                if _is_push_ref_update(push_match.group(4)):
-                                    push_hash = push_match.group(2)
+                            if push_ok:
+                                for push_match in _PUSH_REF_RE.finditer(result_str):
+                                    if _is_push_ref_update(push_match.group(4)):
+                                        push_hash = push_match.group(2)
                             if (
                                 push_hash is not None
-                                or _COMMIT_PUSH_EVIDENCE_RE.search(result_str)
+                                or (push_ok and _COMMIT_PUSH_EVIDENCE_RE.search(result_str))
                                 or (stat_trusted and _COMMIT_STAT_RE.search(result_str))
-                                or commit_evidence.get("quiet_push")
+                                or (push_ok and commit_evidence.get("quiet_push"))
                             ):
                                 fallback_hash = push_hash or f"unknown-{tool_use_id}"
                                 already = any(
