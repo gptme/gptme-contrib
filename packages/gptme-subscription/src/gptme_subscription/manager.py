@@ -542,7 +542,7 @@ class SubscriptionManager:
                             parsed = json.loads(raw)
                             if isinstance(parsed, dict):
                                 data = parsed
-                    except json.JSONDecodeError:
+                    except ValueError:  # JSONDecodeError or UnicodeDecodeError
                         pass  # corrupt file — start fresh
                 entry: dict[str, Any] = {
                     "observed_at": datetime.now(timezone.utc).isoformat(),
@@ -577,7 +577,7 @@ class SubscriptionManager:
                 data = json.loads(path.read_text())
                 if isinstance(data, dict):
                     return {str(k): v for k, v in data.items() if isinstance(v, dict)}
-        except (OSError, json.JSONDecodeError):
+        except (OSError, ValueError):  # ValueError covers JSON and UTF-8 decoding
             pass
         return {}
 

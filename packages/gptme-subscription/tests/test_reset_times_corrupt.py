@@ -38,3 +38,13 @@ def test_non_dict_reset_times_file_does_not_crash_evaluate(make_manager) -> None
     sm.config.reset_times_file.write_text("[]\n")
     decision = sm.evaluate(USAGE, "bob")  # raises TypeError on current code
     assert decision.action in ("stay", "switch")
+
+
+def test_non_utf8_reset_times_file_does_not_crash_evaluate(make_manager) -> None:
+    # UnicodeDecodeError is a ValueError, not a JSONDecodeError or OSError.
+    sm = make_manager()
+    sm.config.reset_times_file.write_bytes(b'{"alice": "\xff\xfe')
+    decision = sm.evaluate(USAGE, "bob")
+    assert decision.action in ("stay", "switch")
+    data = json.loads(sm.config.reset_times_file.read_text())
+    assert "bob" in data, "observation silently dropped; file never self-heals"
