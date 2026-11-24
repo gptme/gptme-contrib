@@ -1530,7 +1530,7 @@ check_greptile_scores() {
             fetched_at="$now"
             greptile_score=$(fetch_issue_comments_json "$repo" "$pr_number" \
                 | jq -r '
-                    [.[] | select(.user.login | test("greptile"; "i"))] | last |
+                    [.[] | select(.user.login // "" | test("greptile"; "i"))] | last |
                     .body // "" | capture("Score: (?<n>[0-9])/5") | .n // empty
                 ' 2>/dev/null || true)
         fi
@@ -2016,7 +2016,7 @@ has_maintainer_waiting_comment() {
 
     local bot_comments
     bot_comments=$(gh api "repos/$repo/issues/$number/comments?per_page=100" \
-        --jq "[.[] | select((.user.login | ascii_downcase) == (\"$bot\" | ascii_downcase) or (.user.login | ascii_downcase) == (\"$author\" | ascii_downcase)) | .body] | join(\"\n\")" 2>/dev/null) || return 1
+        --jq "[.[] | select((.user.login // \"\" | ascii_downcase) == (\"$bot\" | ascii_downcase) or (.user.login // \"\" | ascii_downcase) == (\"$author\" | ascii_downcase)) | .body] | join(\"\n\")" 2>/dev/null) || return 1
 
     [ -n "$bot_comments" ] || return 1
 
