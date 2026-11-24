@@ -133,8 +133,8 @@ Windows):
 ## Building the session index
 
 There is no CLI for this yet; use the Python API. `index_all_sessions` is
-incremental (already-indexed paths are skipped), so it is safe to re-run from
-a cron job or timer:
+incremental (unchanged sessions are skipped, and a session that grew since it
+was indexed is re-indexed), so it is safe to re-run from a cron job or timer:
 
 ```python
 from pathlib import Path

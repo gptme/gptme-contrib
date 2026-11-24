@@ -36,6 +36,65 @@ def test_session_index_roundtrip():
             assert json.loads(stored_metadata) == {"model": "test-model", "tokens": 123}
 
 
+def _cc_line(kind: str, text: str, ts: str) -> str:
+    content = text if kind == "user" else [{"type": "text", "text": text}]
+    return json.dumps(
+        {"type": kind, "timestamp": ts, "message": {"role": kind, "content": content}}
+    )
+
+
+def test_grown_session_is_reindexed(tmp_path: Path):
+    """A session indexed mid-write picks up later turns on the next run (cron)."""
+    from gptme_wisdom_mcp.indexer import SessionIndex, index_all_sessions
+
+    projects = tmp_path / "projects"
+    f = projects / "-home-u-repo" / "abc.jsonl"
+    f.parent.mkdir(parents=True)
+    f.write_text(_cc_line("user", "start the migration", "2026-01-01T00:00:00Z") + "\n")
+    with SessionIndex(tmp_path / "s.db") as idx:
+        assert index_all_sessions(idx, cc_projects_dir=projects)["claude_code"] == 1
+        # Unchanged file: nothing to do
+        assert index_all_sessions(idx, cc_projects_dir=projects)["claude_code"] == 0
+
+        with f.open("a") as fh:
+            fh.write(
+                _cc_line("assistant", "root cause was a zeppelin deadlock", "2026-01-01T01:00:00Z")
+                + "\n"
+            )
+        assert index_all_sessions(idx, cc_projects_dir=projects)["claude_code"] == 1
+
+        assert len(idx.search("zeppelin")) == 1
+        # The earlier content is still found, once (old FTS row was replaced)
+        assert len(idx.search("migration")) == 1
+        assert idx.count() == 1
+
+
+def test_changed_document_drops_stale_terms(tmp_path: Path):
+    """Re-indexing removes terms that are no longer in the document."""
+    from gptme_wisdom_mcp.indexer import SessionIndex
+    from gptme_wisdom_mcp.parsers import SessionDocument
+
+    def doc(content: str) -> SessionDocument:
+        return SessionDocument(
+            source="journal",
+            path="/journal/2026-01-01/session.md",
+            date=datetime(2026, 1, 1),
+            title="Session",
+            content=content,
+            summary="summary",
+        )
+
+    with SessionIndex(tmp_path / "s.db") as idx:
+        assert idx.add(doc("draft mentions walrus")) is True
+        assert idx.add(doc("final mentions narwhal")) is True
+        assert idx.search("walrus") == []
+        assert len(idx.search("narwhal")) == 1
+        # The FTS index stays consistent with the stored rows
+        idx.conn.execute(
+            "INSERT INTO sessions_fts (sessions_fts, rank) VALUES ('integrity-check', 1)"
+        )
+
+
 def test_purge_rebuild_preserves_content_search():
     """Purging one path should not degrade FTS recall for remaining content."""
     from gptme_wisdom_mcp.indexer import SessionIndex

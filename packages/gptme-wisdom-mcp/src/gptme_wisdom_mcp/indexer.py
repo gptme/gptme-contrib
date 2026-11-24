@@ -83,7 +83,12 @@ class SessionIndex:
         self.conn.commit()
 
     def add(self, doc: SessionDocument) -> bool:
-        """Add a session document to the index. Returns True if new, False if exists.
+        """Add or refresh a session document. Returns True if the index changed.
+
+        A new path is inserted. A known path is re-indexed when its parsed
+        title, content or summary differ from the stored row, so a session
+        indexed while it was still being written picks up later turns on the
+        next run. An unchanged document returns False.
 
         Skips documents from /tmp/worktrees/ paths to avoid indexing duplicates.
         """
@@ -91,24 +96,60 @@ class SessionIndex:
         if "/tmp/worktrees/" in doc.path:
             return False
 
+        values = (
+            doc.source,
+            doc.date.isoformat(),
+            doc.title,
+            doc.content,
+            doc.summary,
+            json.dumps(doc.metadata),
+        )
         try:
-            cursor = self.conn.execute(
-                """
-                INSERT INTO sessions (source, path, date, title, content, summary, metadata)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    doc.source,
-                    doc.path,
-                    doc.date.isoformat(),
+            return self._upsert(doc, values)
+        except sqlite3.IntegrityError:
+            # A concurrent writer inserted the same path first (path is UNIQUE)
+            return False
+
+    def _upsert(self, doc: SessionDocument, values: tuple) -> bool:
+        with self.conn:
+            existing = self.conn.execute(
+                "SELECT id, title, content, summary FROM sessions WHERE path = ?",
+                (doc.path,),
+            ).fetchone()
+            if existing is None:
+                cursor = self.conn.execute(
+                    """
+                    INSERT INTO sessions (source, date, title, content, summary, metadata, path)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (*values, doc.path),
+                )
+                row_id = cursor.lastrowid
+            else:
+                row_id = existing["id"]
+                if (existing["title"], existing["content"], existing["summary"]) == (
                     doc.title,
                     doc.content,
                     doc.summary,
-                    json.dumps(doc.metadata),
-                ),
-            )
-            row_id = cursor.lastrowid
-            # Add to FTS index
+                ):
+                    return False
+                # A contentless FTS5 table can only drop a row when given the
+                # exact values that were indexed; the sessions row holds them.
+                self.conn.execute(
+                    """
+                    INSERT INTO sessions_fts (sessions_fts, rowid, title, content, summary)
+                    VALUES ('delete', ?, ?, ?, ?)
+                    """,
+                    (row_id, existing["title"], existing["content"], existing["summary"]),
+                )
+                self.conn.execute(
+                    """
+                    UPDATE sessions
+                    SET source = ?, date = ?, title = ?, content = ?, summary = ?, metadata = ?
+                    WHERE id = ?
+                    """,
+                    (*values, row_id),
+                )
             self.conn.execute(
                 """
                 INSERT INTO sessions_fts (rowid, title, content, summary)
@@ -116,11 +157,7 @@ class SessionIndex:
                 """,
                 (row_id, doc.title, doc.content, doc.summary),
             )
-            self.conn.commit()
-            return True
-        except sqlite3.IntegrityError:
-            # Already indexed (path is UNIQUE)
-            return False
+        return True
 
     def search(
         self,
@@ -376,7 +413,8 @@ def index_all_sessions(
 ) -> dict[str, int]:
     """Index all available session sources.
 
-    Returns counts of new sessions indexed per source.
+    Returns counts of new or re-indexed (changed since the last run) sessions
+    per source.
     Pass cursor_home_dir or codex_home_dir to enable cross-agent indexing.
     """
     counts: dict[str, int] = {
