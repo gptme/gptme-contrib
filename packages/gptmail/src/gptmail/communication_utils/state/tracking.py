@@ -6,6 +6,8 @@ messages, and completion status across platforms.
 """
 
 import json
+import os
+import tempfile
 from dataclasses import asdict, dataclass, fields
 from datetime import datetime
 from enum import Enum
@@ -56,6 +58,18 @@ class MessageInfo:
         data = {k: v for k, v in data.items() if k in known}
         data["state"] = MessageState(data["state"])
         return cls(**data)
+
+
+def _write_state(state_file: Path, data: dict) -> None:
+    """Write ``data`` atomically: a crash mid-write leaves the previous file intact."""
+    fd, tmp = tempfile.mkstemp(dir=state_file.parent, prefix=f".{state_file.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp, state_file)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 class ConversationTracker:
@@ -156,9 +170,7 @@ class ConversationTracker:
             if metadata:
                 data["messages"][message_id].update(metadata)
 
-            # Save updated state
-            with open(state_file, "w") as f:
-                json.dump(data, f, indent=2)
+            _write_state(state_file, data)
 
     def track_message(
         self,
@@ -203,9 +215,7 @@ class ConversationTracker:
 
             data["messages"][message_id] = message_info.to_dict()
 
-            # Save state
-            with open(state_file, "w") as f:
-                json.dump(data, f, indent=2)
+            _write_state(state_file, data)
 
             return message_info
 
