@@ -196,7 +196,7 @@ def test_generate_map_directory_is_portable(tmp_path):
     assert result["directory"] == "."
 
 
-def test_cmd_refresh_force_regenerates_fresh_map(tmp_path):
+def test_cmd_refresh_force_regenerates_fresh_map(tmp_path, capsys):
     # --refresh --force must regenerate even when the map is already fresh.
     output = tmp_path / commit_map.DEFAULT_OUTPUT_FILE
     data = {
@@ -233,6 +233,10 @@ def test_cmd_refresh_force_regenerates_fresh_map(tmp_path):
     loaded = commit_map._load_existing_map(output)
     assert loaded is not None
     assert loaded.get("source_file_count") == 1
+    # A forced refresh says so instead of claiming the map was stale/missing.
+    out = capsys.readouterr().out
+    assert "Forced regeneration" in out
+    assert "stale or missing" not in out
 
 
 # ── Stat-fingerprint cache tests ──────────────────────────────────────
