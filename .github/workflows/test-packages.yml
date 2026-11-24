@@ -31,6 +31,7 @@ jobs:
       pull-requests: read
     outputs:
       packages: ${{ steps.filter.outputs.packages }}
+      rag: ${{ steps.filter.outputs.rag }}
     steps:
     - uses: actions/checkout@v4
     - uses: dorny/paths-filter@v3
@@ -45,6 +46,12 @@ jobs:
             - 'uv.lock'
             - 'Makefile'
             - 'conftest.py'
+            - '.github/workflows/test-packages.yml'
+          rag:
+            - 'packages/gptme-rag/**'
+            - 'scripts/claude-code-hooks/**'
+            - 'pyproject.toml'
+            - 'uv.lock'
             - '.github/workflows/test-packages.yml'
 
   # Discovery job - outputs package matrix dynamically using Makefile (single source of truth)
@@ -191,7 +198,9 @@ jobs:
   # A workspace sync can mask missing dependencies with other members' installs.
   rag-lightweight:
     needs: changes
-    if: github.event_name != 'pull_request' || needs.changes.outputs.packages == 'true'
+    # Installs only packages/gptme-rag and runs the lesson-match hook, so PRs
+    # that touch neither skip it. Push, schedule and dispatch always run it.
+    if: github.event_name != 'pull_request' || needs.changes.outputs.rag == 'true'
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -215,9 +224,17 @@ jobs:
 
   # Coverage report (combined for all packages)
   coverage:
-    needs: changes
-    # Always run on push to master; on PRs, only when package code changed
-    if: github.event_name != 'pull_request' || needs.changes.outputs.packages == 'true'
+    needs: [changes, discover]
+    # Push, schedule and dispatch cover every package. On PRs, cover only the
+    # packages discover selected for the test matrix: Codecov's patch coverage
+    # needs only the changed lines, and the full loop (~12 runner-minutes) was
+    # most of this workflow's cost on a PR that touches one package. This job
+    # cannot fail a PR (each package run ends in `|| true`), so it gates nothing.
+    # !cancelled() keeps push runs independent of discover's result, as before.
+    if: >-
+      ${{ !cancelled() && needs.changes.result == 'success' &&
+      (github.event_name != 'pull_request' ||
+       (needs.discover.result == 'success' && needs.discover.outputs.packages != '[]')) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -252,6 +269,9 @@ jobs:
           uv sync --all-packages --all-extras
 
       - name: Run coverage for all packages
+        env:
+          # JSON array of package names on PRs; empty (cover everything) otherwise
+          PR_PACKAGES: ${{ github.event_name == 'pull_request' && needs.discover.outputs.packages || '' }}
         run: |
           # Find all packages with tests and collect coverage
           for pkg in packages/*/; do
@@ -260,6 +280,9 @@ jobs:
             # Skip __pycache__ and symlinks
             [ -L "$pkg" ] && continue
             [ "$name" = "__pycache__" ] && continue
+            if [ -n "$PR_PACKAGES" ] && ! PKG="$name" python3 -c 'import json,os,sys; sys.exit(os.environ["PKG"] not in json.loads(os.environ["PR_PACKAGES"]))'; then
+              continue
+            fi
             # Only packages with both tests/ and src/
             if [ -d "$pkg/tests" ] && [ -d "$pkg/src" ]; then
               echo "=== Coverage for $name ==="
