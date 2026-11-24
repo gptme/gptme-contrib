@@ -118,17 +118,37 @@ def _parse_aria_to_elements(snapshot: str) -> list[dict[str, str]]:
     #   - link "Home" [ref=e1]
     #   - button "Submit" [ref=e3]
     #   - textbox "Email" [ref=e7]
+    #   - link /r/rust/:               (names delimited by "/" are unquoted)
+    #   - 'link "Show HN: My project"':  (YAML-quoted when the name has ": ", " #", ...)
+    item_re = re.compile(r"^(?P<indent>\s*)-\s+(?P<rest>.*)$")
     line_re = re.compile(
-        r'^[\s\-]*(?P<role>[\w-]+)\s+"(?P<name>(?:[^"\\]|\\.)*)"(?:\s+\[(?P<ref>[^\]]+)\])?'
+        r'^(?P<role>[\w-]+)\s+(?:"(?P<name>(?:[^"\\]|\\.)*)"|(?P<slash>/\S*/)(?=:|\s|$))'
+        r"(?:\s+\[(?P<ref>[^\]]+)\])?"
     )
-    for line in snapshot.splitlines():
-        m = line_re.match(line)
+    # Split on "\n" only: str.splitlines() also splits on \x0b etc., which a
+    # page title can contain, letting the page fabricate element lines.
+    lines = snapshot.split("\n")
+    for i, line in enumerate(lines):
+        item = item_re.match(line)
+        if not item:
+            continue
+        rest = item.group("rest")
+        if rest.startswith("'"):
+            # YAML single-quoted scalar: '' is an escaped quote.
+            end = re.match(r"'((?:[^']|'')*)'", rest)
+            if not end:
+                continue
+            rest = end.group(1).replace("''", "'")
+        m = line_re.match(rest)
         if not m:
             continue
         role = m.group("role").strip()
-        # Unescape only the two escape sequences the ARIA snapshot uses: \" and \\.
-        # A broad r"\\(.)" would corrupt names with literal \n, Windows paths, etc.
-        name = re.sub(r'\\("|\\)', r"\1", m.group("name")).strip()
+        if m.group("slash") is not None:
+            name = m.group("slash")
+        else:
+            # Unescape only the two escape sequences the ARIA snapshot uses: \" and \\.
+            # A broad r"\\(.)" would corrupt names with literal \n, Windows paths, etc.
+            name = re.sub(r'\\("|\\)', r"\1", m.group("name")).strip()
         ref = m.group("ref") or ""
         if not name:
             continue
@@ -147,20 +167,47 @@ def _parse_aria_to_elements(snapshot: str) -> list[dict[str, str]]:
         selector = (
             f"[{actual_ref}]" if actual_ref else f"role={role}[name='{escaped_name}']"
         )
-        elements.append(
-            {
-                "role": role,
-                "name": name,
-                "selector": selector,
-            }
-        )
+        element = {"role": role, "name": name, "selector": selector}
+        if role == "combobox" and _has_option_children(
+            lines, i, len(item.group("indent"))
+        ):
+            # A native <select> is exposed as a combobox with option children;
+            # it needs select_option, not fill.
+            element["method"] = "select"
+        elements.append(element)
+
+    # Several elements with the same role+name share one role selector, which
+    # resolves to multiple elements (a strict-mode violation on click). Make
+    # each one target its own match.
+    counts: dict[str, int] = {}
+    for e in elements:
+        counts[e["selector"]] = counts.get(e["selector"], 0) + 1
+    seen: dict[str, int] = {}
+    for e in elements:
+        sel = e["selector"]
+        if counts[sel] > 1 and sel.startswith("role="):
+            e["selector"] = f"{sel} >> nth={seen.get(sel, 0)}"
+            seen[sel] = seen.get(sel, 0) + 1
     return elements
+
+
+def _has_option_children(lines: list[str], index: int, indent: int) -> bool:
+    """True if the snapshot item at ``index`` has ``option`` child items."""
+    for line in lines[index + 1 :]:
+        stripped = line.lstrip()
+        if not stripped:
+            continue
+        if len(line) - len(stripped) <= indent:
+            return False
+        if re.match(r"-\s+'?option\b", stripped):
+            return True
+    return False
 
 
 def _method_for_role(role: str) -> str:
     """Return the default interaction method for an ARIA role."""
     r = role.lower()
-    if r in {"textbox", "searchbox", "combobox"}:
+    if r in {"textbox", "searchbox", "combobox", "spinbutton"}:
         return "fill"
     if r in {"select", "listbox"}:
         return "select"
@@ -242,7 +289,7 @@ def browser_observe(
         ObserveResult(
             description=f"{e['role']} {e['name']!r}",
             selector=e["selector"],
-            method=_method_for_role(e["role"]),
+            method=e.get("method") or _method_for_role(e["role"]),
             instruction=instruction,
         )
         for _, e in scored
@@ -411,8 +458,14 @@ def browser_act(
         "detached",
         "target closed",
         "navigation",
+        # gptme's click runs the action, then snapshots; a failed post-action
+        # snapshot means the click already happened.
+        "could not get accessibility snapshot",
     )
     msg_lower = result.message.lower()
+    # A refusal (e.g. the user denied a sensitive fill) must not re-prompt.
+    if result.message.startswith("PermissionError"):
+        return result
     if any(phrase in msg_lower for phrase in _no_retry_phrases):
         return result  # post-action failure — don't retry (avoid double-acting)
 
@@ -487,7 +540,7 @@ def examples() -> list[str]:
     """Example tool invocations surfaced to the LLM."""
     return [
         'browser_observe("the submit button")',
-        'browser_act("type hello@example.com into the email field")',
+        'browser_act(browser_observe("the email field")[0], arguments=["hello@example.com"])',
         "browser_act(<ObserveResult from prior observe()>)",
         'browser_extract("all product names and prices")',
     ]
