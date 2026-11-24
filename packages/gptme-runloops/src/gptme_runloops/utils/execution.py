@@ -3,6 +3,7 @@
 import os
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -46,6 +47,20 @@ class ExecutionResult:
         if self.tmpdir and self.tmpdir.exists():
             shutil.rmtree(self.tmpdir, ignore_errors=True)
             self.tmpdir = None
+
+
+def _kill_process_group(proc: subprocess.Popen, grace: float = 5.0) -> None:
+    """SIGTERM the process group led by ``proc``, then SIGKILL after ``grace``."""
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(proc.pid, sig)
+        except ProcessLookupError:
+            break
+        try:
+            proc.wait(timeout=grace)
+            break
+        except subprocess.TimeoutExpired:
+            continue
 
 
 def execute_gptme(
@@ -160,22 +175,27 @@ def execute_gptme(
         # (exit 75) would be recorded as success. The whole pipeline must run
         # inside the pipefail shell — `bash -o pipefail -c '<child>' | tee`
         # would still leave the outer shell owning the pipeline.
+        #
+        # The pipeline runs in its own session so a timeout can kill the whole
+        # process group: subprocess.run(timeout=) kills only the bash wrapper,
+        # leaving gptme and tee orphaned and still editing the workspace after
+        # the loop has reported the timeout and released its lock.
+        proc = subprocess.Popen(
+            ["bash", "-o", "pipefail", "-c", cmd_with_tee],
+            cwd=workspace,
+            env=run_env,
+            start_new_session=True,
+        )
         try:
-            result = subprocess.run(
-                ["bash", "-o", "pipefail", "-c", cmd_with_tee],
-                cwd=workspace,
-                env=run_env,
-                timeout=timeout,
-            )
+            exit_code = proc.wait(timeout=timeout)
 
             # Append exit code
             with log_file.open("a") as f:
                 f.write("\n=== Execution completed ===\n")
-                f.write(f"Exit code: {result.returncode}\n")
-
-            exit_code = result.returncode
+                f.write(f"Exit code: {exit_code}\n")
 
         except subprocess.TimeoutExpired:
+            _kill_process_group(proc)
             # Log timeout to file (append to preserve tee output)
             with log_file.open("a") as f:
                 f.write("\n=== Execution timed out ===\n")

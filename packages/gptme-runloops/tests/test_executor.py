@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -110,6 +111,15 @@ def test_gptme_executor_passes_run_type():
         assert call_kwargs[1]["run_type"] == "autonomous"
 
 
+class _FinishedPopen:
+    """Stand-in for a pipeline that already exited 0."""
+
+    pid = -1
+
+    def wait(self, timeout=None):
+        return 0
+
+
 @pytest.fixture
 def gptme_child_env(tmp_path, monkeypatch):
     """Capture what a real child process receives through the gptme route."""
@@ -194,9 +204,9 @@ def test_execute_gptme_persists_trajectory_and_removes_isolated_logs(
         session_dir = isolated_logs / "2026-07-02-test-session"
         session_dir.mkdir(parents=True)
         (session_dir / "conversation.jsonl").write_text('{"role": "user"}\n')
-        return subprocess.CompletedProcess(cmd, 0)
+        return _FinishedPopen()
 
-    monkeypatch.setattr(execution_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(execution_mod.subprocess, "Popen", fake_run)
 
     result = execution_mod.execute_gptme(
         "Test prompt",
@@ -230,9 +240,9 @@ def test_execute_gptme_logs_duplicate_conversation_files(tmp_path, monkeypatch):
         session_b.mkdir(parents=True)
         (session_a / "conversation.jsonl").write_text('{"session": "a"}\n')
         (session_b / "conversation.jsonl").write_text('{"session": "b"}\n')
-        return subprocess.CompletedProcess(cmd, 0)
+        return _FinishedPopen()
 
-    monkeypatch.setattr(execution_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(execution_mod.subprocess, "Popen", fake_run)
 
     result = execution_mod.execute_gptme(
         "Test prompt",
@@ -825,3 +835,23 @@ def test_grok_build_executor_uses_devnull_stdin():
 
         call_kwargs = mock_run.call_args[1]
         assert call_kwargs["stdin"] == subprocess.DEVNULL
+
+
+def test_execute_gptme_timeout_kills_gptme_not_just_the_wrapper(tmp_path, monkeypatch):
+    """A timed-out run must stop gptme itself, not only the bash/tee wrapper."""
+    binary_dir = tmp_path / "bin"
+    binary_dir.mkdir()
+    marker = tmp_path / "still-running"
+    binary = binary_dir / "gptme"
+    binary.write_text(f"#!/bin/bash\nsleep 3\ntouch {marker}\n")
+    binary.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{binary_dir}{os.pathsep}{os.environ['PATH']}")
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    monkeypatch.setattr(execution_mod, "GLOBAL_LOG_DIR", logs)
+
+    result = execution_mod.execute_gptme("Test", tmp_path, timeout=1)
+
+    assert result.timed_out and result.exit_code == 124
+    time.sleep(3.5)
+    assert not marker.exists(), "gptme kept running after the timeout was reported"
