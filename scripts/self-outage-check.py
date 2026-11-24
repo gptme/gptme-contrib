@@ -214,11 +214,12 @@ _USERINFO_HOST = re.compile(r"@[A-Za-z0-9\[]")
 def _redact_url_credential_token(token: str) -> str:
     # The password runs to the LAST ``@host``: proxy errors don't
     # percent-encode, so a raw ``@`` or ``/`` may be part of it, and its length
-    # is unbounded. The first colon not followed by ``//`` ends the user,
-    # whatever characters the user contains (``$``, ``~``, ``!`` are valid
-    # userinfo); a ``scheme://`` colon is skipped, so ``https://bob:/pw@host``
-    # redacts ``/pw``. Not covered: a password that itself starts with ``//``
-    # (``bob://pw@host`` reads as a scheme, like ``ssh://git@host``).
+    # is unbounded. The first colon ends the user, whatever characters the
+    # user contains (``$``, ``~``, ``!`` are valid userinfo), unless it is a
+    # ``scheme://`` colon: then the next colon ends the user, whatever the
+    # password starts with (``https://bob://pw@host`` redacts ``//pw``).
+    # Ambiguous and not redacted: a schemeless ``bob://pw@host`` reads as a
+    # scheme, the same shape as ``ssh://git@host``.
     # Look-alikes such as ``message-id:abc@example.com`` are redacted too;
     # that is deliberate — over-redacting costs detail, a leak costs a secret.
     at = -1
@@ -227,7 +228,7 @@ def _redact_url_credential_token(token: str) -> str:
     if at <= 0:
         return token
     colon = token.find(":", 0, at)
-    while colon != -1 and token.startswith("//", colon + 1):
+    if colon != -1 and token.startswith("//", colon + 1):
         colon = token.find(":", colon + 3, at)
     if colon == -1 or colon + 1 == at:
         return token

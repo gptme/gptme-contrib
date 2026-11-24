@@ -1431,6 +1431,9 @@ def test_url_credential_with_leading_slash_is_redacted() -> None:
     assert soc._redact("bob:/hunter2pw@proxy.internal") == (
         "bob:[REDACTED]@proxy.internal"
     )
+    assert soc._redact("https://bob://hunter2pw@proxy.internal") == (
+        "https://bob:[REDACTED]@proxy.internal"
+    )
     # A URL with ``@`` in its path and no credentials is left alone.
     url = "https://registry.npmjs.org/@types/node"
     assert soc._redact(url) == url
