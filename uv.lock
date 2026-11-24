@@ -1985,11 +1985,6 @@ provides-extras = ["test"]
 name = "gptme-contrib-lib"
 version = "0.1.0"
 source = { editable = "packages/gptme-contrib-lib" }
-dependencies = [
-    { name = "click" },
-    { name = "pydantic" },
-    { name = "pyyaml" },
-]
 
 [package.optional-dependencies]
 dev = [
@@ -2004,14 +1999,11 @@ test = [
 
 [package.metadata]
 requires-dist = [
-    { name = "click", specifier = ">=8.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.0.0" },
-    { name = "pydantic", specifier = ">=2.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=8.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23.0" },
     { name = "pytest-asyncio", marker = "extra == 'test'", specifier = ">=0.23.0" },
-    { name = "pyyaml", specifier = ">=6.0" },
     { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=2.0.0" },
 ]
 provides-extras = ["dev", "test"]
