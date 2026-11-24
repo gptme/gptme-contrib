@@ -84,6 +84,7 @@ def export_lesson(
     output_dir: Path,
     agent_origin: str = "agent",
     force: bool = False,
+    lessons_root: Path | None = None,
 ) -> bool:
     """Export a single lesson to interchange format.
 
@@ -92,10 +93,24 @@ def export_lesson(
         output_dir: Directory to write exported lesson
         agent_origin: Which agent created this
         force: Overwrite existing exports
+        lessons_root: Lessons directory the category path is taken relative
+            to. Defaults to the lesson's grandparent (one category level).
 
     Returns:
-        True if successful, False otherwise
+        True if exported or already exported, False on failure
     """
+    status = _export_lesson(lesson_path, output_dir, agent_origin, force, lessons_root)
+    return status != "failed"
+
+
+def _export_lesson(
+    lesson_path: Path,
+    output_dir: Path,
+    agent_origin: str,
+    force: bool,
+    lessons_root: Path | None,
+) -> str:
+    """Export one lesson; return "success", "skipped" or "failed"."""
     try:
         # Read lesson
         content = lesson_path.read_text()
@@ -105,12 +120,30 @@ def export_lesson(
 
         if frontmatter is None:
             print(f"Warning: No frontmatter in {lesson_path}, skipping")
-            return False
+            return "failed"
+
+        # Preserve the full category structure: tools/shell/quoting.md
+        root = lessons_root if lessons_root is not None else lesson_path.parent.parent
+        relative_path = lesson_path.relative_to(root)
+        output_path = output_dir / relative_path
+
+        # Check if exists
+        if output_path.exists() and not force:
+            print(
+                f"Skipping {lesson_path.name} (already exported, use --force to overwrite)"
+            )
+            return "skipped"
+
+        # A nested category joins its levels, so tools/shell/x.md and
+        # workflow/shell/x.md get distinct ids (tools-shell vs workflow-shell).
+        id_path = lesson_path
+        if len(relative_path.parent.parts) > 1:
+            id_path = Path("-".join(relative_path.parent.parts)) / relative_path.name
 
         # Add network metadata
         frontmatter = add_network_metadata(
             frontmatter=frontmatter,
-            lesson_path=str(lesson_path),
+            lesson_path=str(id_path),
             agent_origin=agent_origin,
         )
 
@@ -121,32 +154,18 @@ def export_lesson(
 {markdown}
 """
 
-        # Write to output directory
-        # Preserve category structure: workflow/autonomous-run.md
-        relative_path = lesson_path.relative_to(lesson_path.parent.parent)
-        output_path = output_dir / relative_path
-
-        # Create parent directories
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-
-        # Check if exists
-        if output_path.exists() and not force:
-            print(
-                f"Skipping {lesson_path.name} (already exported, use --force to overwrite)"
-            )
-            return True
-
         # Write
+        output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(export_content)
 
         lesson_id = frontmatter["network"]["lesson_id"]
         print(f"✓ Exported: {lesson_path.name} → {lesson_id}")
 
-        return True
+        return "success"
 
     except Exception as e:
         print(f"Error exporting {lesson_path}: {e}")
-        return False
+        return "failed"
 
 
 def export_all_lessons(
@@ -183,17 +202,10 @@ def export_all_lessons(
 
     # Export each lesson
     for lesson_path in sorted(lesson_files):
-        success = export_lesson(
-            lesson_path=lesson_path,
-            output_dir=output_dir,
-            agent_origin=agent_origin,
-            force=force,
+        status = _export_lesson(
+            lesson_path, output_dir, agent_origin, force, lessons_root=lessons_dir
         )
-
-        if success:
-            counts["success"] += 1
-        else:
-            counts["failed"] += 1
+        counts[status] += 1
 
     return counts
 
