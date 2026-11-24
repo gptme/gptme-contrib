@@ -1,25 +1,28 @@
 """A text part with an unknown charset must still import (gptme/gptme-contrib#2303 item 2)."""
 
+import email
 from pathlib import Path
 
 import pytest
 from gptmail.lib import AgentEmail
 
-RAW = (
+HEADERS = (
     "From: Friend <friend@example.com>\n"
     "To: test@example.com\n"
     "Subject: Odd charset\n"
     "Date: Wed, 07 Oct 2026 11:00:00 +0000\n"
-    "Message-ID: {mid}\n"
+    "Message-ID: <odd-charset@example.com>\n"
     "MIME-Version: 1.0\n"
-    "{ctype}\n"
+)
+PART = (
+    "Content-Type: text/plain; charset=unknown-8bit\n"
     "Content-Transfer-Encoding: 8bit\n"
     "\n"
     "Hello there\n"
 )
+SINGLE = HEADERS + PART
 MULTIPART = (
-    'Content-Type: multipart/alternative; boundary="b"\n\n'
-    "--b\nContent-Type: text/plain; charset=unknown-8bit\n\nHello there\n--b--"
+    HEADERS + 'Content-Type: multipart/alternative; boundary="b"\n\n' + "--b\n" + PART + "--b--\n"
 )
 
 
@@ -31,11 +34,12 @@ def test_unknown_charset_part_is_imported(tmp_path: Path, multipart: bool) -> No
     maildir = tmp_path / "maildir"
     (maildir / "new").mkdir(parents=True)
     mid = "<odd-charset@example.com>"
-    if multipart:
-        raw = RAW.format(mid=mid, ctype="").rsplit("\n\nHello there\n", 1)[0]
-        raw = raw.replace("Content-Transfer-Encoding: 8bit\n", "") + MULTIPART + "\n"
-    else:
-        raw = RAW.format(mid=mid, ctype="Content-Type: text/plain; charset=unknown-8bit")
+    raw = MULTIPART if multipart else SINGLE
+    # Guard against a vacuous fixture: the message must have the intended shape.
+    parsed = email.message_from_string(raw)
+    assert parsed.is_multipart() is multipart
+    leaf = parsed.get_payload(0) if multipart else parsed
+    assert leaf.get_content_charset() == "unknown-8bit"
     (maildir / "new" / "odd").write_bytes(raw.encode())
     agent.external_maildir_folders["inbox"] = maildir
 
