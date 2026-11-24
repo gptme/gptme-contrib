@@ -1131,6 +1131,8 @@ def load_session_state(session_id: str, *, strict: bool = False) -> dict:
             data = json.loads(sf.read_text())
             if isinstance(data, dict):
                 return data
+    except TimeoutError:
+        raise  # hook budget alarm: must reach the top-level handler
     except Exception:
         if strict:
             raise
@@ -1588,6 +1590,8 @@ def get_already_injected(
                 for line in f:
                     for m in re.finditer(r"\*Source: ([^*]+)\*", line):
                         injected.add(m.group(1).strip())
+        except TimeoutError:
+            raise  # hook budget alarm: must reach the top-level handler
         except Exception:
             pass
 
@@ -1721,6 +1725,8 @@ def extract_recent_transcript_text(
             flags=re.DOTALL,
         )
         return combined[:max_total_chars]
+    except TimeoutError:
+        raise  # hook budget alarm: must reach the top-level handler
     except Exception:
         return ""
 
@@ -1913,6 +1919,8 @@ def extract_tool_sequence(
                         if isinstance(block, dict) and block.get("type") == "tool_use":
                             tools.append(block.get("name", "?"))
         return tools[-max_tools:]
+    except TimeoutError:
+        raise  # hook budget alarm: must reach the top-level handler
     except Exception:
         return []
 
