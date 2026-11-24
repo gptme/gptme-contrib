@@ -97,7 +97,13 @@ _SECRET_PATTERNS = (
     re.compile(r"\bAIza[A-Za-z0-9_\-]{10,}"),
     # URL-embedded credentials: ``https://user:pass@host`` and schemeless
     # ``user:pass@host`` (proxy errors). Keep the user, drop the password.
-    re.compile(r"\b([A-Za-z0-9._%+\-]+:)[^\s@/]+(?=@[A-Za-z0-9\[])"),
+    # The password runs to the LAST ``@host`` in the token, so a raw ``@`` or
+    # ``/`` in it (proxy errors don't percent-encode) is not published. This
+    # also redacts look-alikes such as ``message-id:abc@example.com``; that is
+    # deliberate — over-redacting costs detail, a leak costs a secret. Both
+    # runs are bounded: this text is untrusted and redacted before truncation,
+    # and unbounded runs made a long colon-rich token quadratic.
+    re.compile(r"\b([A-Za-z0-9._%+\-]{1,128}:)[^\s/][^\s]{0,255}(?=@[A-Za-z0-9\[])"),
     # Authorization headers / bearer tokens.
     re.compile(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=\-]{6,}"),
     # key=value / key: value for secret-ish keys. A quoted value is removed

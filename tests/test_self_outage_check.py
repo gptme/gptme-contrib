@@ -10,6 +10,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -1407,3 +1408,23 @@ def test_url_embedded_credentials_redacted(tmp_path: Path) -> None:
     # Plain emails and ssh remotes carry no password and stay intact.
     assert soc._redact("mail bob@example.com") == "mail bob@example.com"
     assert soc._redact("git@github.com:o/r") == "git@github.com:o/r"
+
+
+def test_url_credential_with_raw_at_or_slash_is_fully_redacted() -> None:
+    # Proxy errors don't percent-encode: the password runs to the last ``@host``.
+    assert (
+        soc._redact("proxy auth for user:pa@ss@proxy.internal:8080")
+        == "proxy auth for user:[REDACTED]@proxy.internal:8080"
+    )
+    assert (
+        soc._redact("http://bob:pa/ss@example.com/x")
+        == "http://bob:[REDACTED]@example.com/x"
+    )
+
+
+def test_url_credential_redaction_is_linear_on_hostile_input() -> None:
+    # Error text is untrusted and redacted before truncation.
+    start = time.monotonic()
+    soc._redact("a:" * 100_000)
+    soc._redact("a." * 100_000 + ":")
+    assert time.monotonic() - start < 2.0
