@@ -111,6 +111,8 @@ Beyond the CLI, the package exposes building blocks for agents that assemble the
 - `gptme_rag.sources` — declarative source registry for collecting a reproducible corpus.
 - `gptme_rag.knowledge_source.KnowledgeEntrySource` — indexes the store written by
   `gptme-util knowledge save` as `memory_type="knowledge_entry"` documents.
+  Both import `tiktoken`, so they need the `full` or `lexical` extra; a base install raises
+  `ModuleNotFoundError: No module named 'tiktoken'`.
 - `gptme_rag.memory_type` — caller-supplied rules for classifying documents (identity, project,
   preference, …) and boosting matching results.
 - `gptme_rag.observability` — injection logging and index-health ("is my index stale?") checks.

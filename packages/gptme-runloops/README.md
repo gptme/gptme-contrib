@@ -145,6 +145,9 @@ gptme-runloops select --lane autonomous [--class C] [--work-item ID] \
 | `pools.<p>.effort_steps` | `{at, down = n}` or `{at, to = effort}`; the highest reached step applies (no stacking); `--validate` warns when a later step resolves to a higher effort than an earlier one |
 | `pools.<p>.pace_guard` | More than this ahead of even pace forces at least one step down (max with the step, not sum) |
 | `pools.<p>.usage_unknown` | Effort when usage is unreadable: `base` (default) or an effort on the ladder |
+| `pools.<p>.max_width` | Enables the `width` field (shadow, logged and `ROUTE_WIDTH`): sessions this consumer may run on the pool's account. Target is linear, `end_target × elapsed`; behind it, width scales from 1 to `max_width` over a 10-point gap. `None` = no opinion (usage/reset unknown, or the owner on pace) |
+| `pools.<p>.end_target` | Weekly fraction to reach by reset (default 0.98); set lower for a measured owner reserve |
+| `pools.<p>.rank` | This consumer's rank on the account: 0 = owner (default), 1+ = overflow. Rank `r` widens only when more than `r × 0.02` behind, so the owner absorbs its account first |
 | `lanes.<l>.arm` | `backend:model`; bare aliases (`opus`, `sonnet`, `haiku`, `fable`) are rejected |
 | `lanes.<l>.effort` / `effort_ladder` | Base effort and its ladder, highest first; omit both for backends without effort |
 | `lanes.<l>.pool` | Pool this lane draws from (optional) |
@@ -191,7 +194,7 @@ and bypass both `--default-arm` and `--shadow`. Capture the exit code without tr
 and clear `ROUTE_*` before `eval` so a loop cannot reuse a previous iteration's values:
 
 ```bash
-unset ROUTE_BACKEND ROUTE_MODEL ROUTE_EFFORT ROUTE_SCOPE ROUTE_RULE ROUTE_TRIGGER \
+unset ROUTE_BACKEND ROUTE_MODEL ROUTE_EFFORT ROUTE_SCOPE ROUTE_RULE ROUTE_TRIGGER ROUTE_WIDTH \
       ROUTE_REASON ROUTE_DECISION_ID
 rc=0
 out=$(gptme-runloops select --lane autonomous --format shell \
@@ -207,6 +210,24 @@ EFFORT="${ROUTE_EFFORT-high}"   # set but empty: the routed backend has no effor
 ```
 
 Run shadow calls as `gptme-runloops select --lane autonomous --shadow ... >/dev/null || true`.
+
+### Dispatcher tick coverage
+
+A dispatcher (fanout timer, worker sweep) can append one row per fire with
+`gptme_runloops.dispatch_ticks.append_tick(path, granted=..., bindable=..., pacing=...)`.
+`granted` is the slot width after the resource/quota gate, `bindable` the work
+items it could bind (`null` = not computed) and `pacing` the account's position
+against its usage target. Then:
+
+```bash
+gptme-runloops tick-coverage state/dispatch-ticks.jsonl --since-hours 168
+```
+
+prints the share of `behind` ticks where `bindable >= granted`, plus counts of
+the ticks it could not judge (unknown pacing, unknown bindable, no capacity).
+The target is `granted`, not the slots the dispatcher requested: covering a
+one-slot request while five granted slots sit idle is the starvation this
+measures.
 
 ## Review artifact output
 

@@ -142,6 +142,7 @@ def resolve_coordination_db_path(
             ["git", "rev-parse", "--show-toplevel"],
             cwd=str(base_dir),
             text=True,
+            stderr=subprocess.DEVNULL,
         ).strip()
     except (subprocess.CalledProcessError, FileNotFoundError):
         return base_dir / DEFAULT_DB_PATH

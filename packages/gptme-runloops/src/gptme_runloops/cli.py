@@ -991,5 +991,32 @@ def run_cmd(
     sys.exit(1 if out["is_error"] else 0)
 
 
+@main.command("tick-coverage")
+@click.argument("path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option(
+    "--since-hours",
+    type=float,
+    default=None,
+    help="Only count ticks newer than this many hours (default: all rows)",
+)
+def tick_coverage(path: Path, since_hours: float | None):
+    """Share of behind-pace dispatcher ticks where bindable >= granted.
+
+    PATH is a dispatcher tick log (JSONL); see gptme_runloops.dispatch_ticks
+    for the row contract. Prints one JSON object.
+    """
+    import json as _json
+    from datetime import datetime, timedelta, timezone
+
+    from gptme_runloops.dispatch_ticks import bindable_coverage, read_ticks
+
+    since = (
+        datetime.now(timezone.utc) - timedelta(hours=since_hours)
+        if since_hours is not None
+        else None
+    )
+    click.echo(_json.dumps(bindable_coverage(read_ticks(path, since)).to_dict()))
+
+
 if __name__ == "__main__":
     main()

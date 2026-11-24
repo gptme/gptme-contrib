@@ -42,7 +42,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--literal",
         action="append",
         default=[],
-        help="extra literal secret to redact (repeatable)",
+        help="extra literal secret; any occurrence is critical and blocks (repeatable)",
     )
     ap.add_argument(
         "--allowlist",

@@ -43,7 +43,7 @@ oauth = [
     "python-dotenv>=0.19",
 ]
 bridge = [
-    "mcp>=1.2",
+    "mcp>=1.2,<2",
     "starlette>=0.27",
     "uvicorn>=0.23",
 ]

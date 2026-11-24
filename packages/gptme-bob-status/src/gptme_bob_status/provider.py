@@ -83,10 +83,17 @@ def _active_tasks(lines: int = 3) -> list[dict]:
     if not raw:
         return []
     tasks: list[dict] = []
+    # --compact groups rows under section headers ("📥 BACKLOG (1):",
+    # "🏃 ACTIVE (2):", ...); only rows under the ACTIVE header are active.
+    in_active = False
     for line in raw.splitlines():
         line = line.strip()
+        if re.match(r"^\S+\s+[A-Z][A-Z_-]*\s+\(\d+\):$", line):
+            in_active = line.split()[1] == "ACTIVE"
+            continue
         if (
-            not line
+            not in_active
+            or not line
             or line.startswith("📋")
             or line.startswith("Summary")
             or line == "0 tasks"
@@ -238,7 +245,8 @@ def _first_nonempty_line(value: object, limit: int) -> str:
 
 
 def _blockers(limit: int = 3) -> list[dict]:
-    raw = _run(["gptodo", "ready", "--state", "waiting", "--jsonl"], timeout=15)
+    # `gptodo ready --state` has no "waiting" choice; list all and filter.
+    raw = _run(["gptodo", "list", "--jsonl"], timeout=15)
     if not raw:
         return []
     blockers: list[dict] = []
@@ -246,6 +254,8 @@ def _blockers(limit: int = 3) -> list[dict]:
         try:
             t = json.loads(line)
         except json.JSONDecodeError:
+            continue
+        if not isinstance(t, dict) or t.get("state") != "waiting":
             continue
         wf = _first_nonempty_line(t.get("waiting_for"), 70)
         if not wf:
@@ -284,7 +294,8 @@ def _journal_entries(limit: int = 5) -> list[str]:
         return []
     entries: list[Path] = []
     for day_dir in sorted(journal_dir.iterdir(), reverse=True):
-        if not day_dir.is_dir():
+        # Only YYYY-MM-DD day dirs; skip e.g. journal/templates/.
+        if not day_dir.is_dir() or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day_dir.name):
             continue
         day_entries = [
             entry.relative_to(root)

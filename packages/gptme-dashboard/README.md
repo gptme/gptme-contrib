@@ -62,7 +62,7 @@ python3 -m http.server -d _site 8000
 |--------|-------------|
 | `--workspace PATH` | Workspace root (default `.`) |
 | `--output DIR` | Output directory (default `<workspace>/_site`) |
-| `--templates DIR` | Custom Jinja2 template directory (must provide `index.html`) |
+| `--templates DIR` | Custom Jinja2 template directory (must provide every page template the generator loads: `index`, `guidance`, `task`, `tasks_index`, `journal`, `plugin`, `package` and `summary` `.html`; copy the bundled `templates/` dir as a starting point) |
 | `--json` | Print the JSON data dump to stdout. Without `--output`, HTML generation is skipped |
 | `--sessions / --no-sessions` | Include a snapshot of recent agent sessions (needs gptme-sessions; default off) |
 | `--sessions-days N` | How many days back to scan for sessions (default 30) |
@@ -76,7 +76,7 @@ gptme-dashboard generate --workspace . --json | jq '.stats'
 ## What it shows
 
 Scanned from the workspace (and from nested git submodules that have gptme-like structure —
-`lessons/`, `skills/`, `packages/`, `plugins/` or a `gptme.toml` — tagged with a **Source** label):
+`lessons/`, `skills/`, `packages/` or `plugins/` — tagged with a **Source** label):
 
 - **Guidance** — lessons (`lessons/`) and skills (`skills/*/SKILL.md`) in one filterable table,
   each with a rendered detail page
