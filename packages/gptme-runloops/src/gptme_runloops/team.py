@@ -10,6 +10,7 @@ This forces:
 - Parallel execution: multiple subagents can work simultaneously
 """
 
+from datetime import datetime, timezone
 from pathlib import Path
 
 from gptme_runloops.base import BaseRunLoop
@@ -20,7 +21,7 @@ from gptme_runloops.utils.prompt import get_agent_name
 TEAM_PROMPT_TEMPLATE = """\
 You are {agent_name}, running in **autonomous-team coordinator mode**.
 
-**Current Time**: {{timestamp}}
+**Current Time**: {timestamp}
 
 ## Your Role: COORDINATOR
 
@@ -122,7 +123,10 @@ class TeamRun(BaseRunLoop):
             return template_file.read_text()
 
         # Use built-in template
-        return TEAM_PROMPT_TEMPLATE.format(agent_name=agent_name)
+        return TEAM_PROMPT_TEMPLATE.format(
+            agent_name=agent_name,
+            timestamp=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+        )
 
     def execute(self, prompt: str) -> ExecutionResult:
         """Execute backend with restricted tools for coordinator mode."""

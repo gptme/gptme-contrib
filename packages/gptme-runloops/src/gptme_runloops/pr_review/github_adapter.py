@@ -195,7 +195,8 @@ def _iter_range_lines(line_range: str):
         end = int(parts[1]) if len(parts) > 1 else start
     except (ValueError, IndexError):
         start, end = 1, 1
-    yield from range(start, end + 1)
+    # The model can report "49-42"; an empty range would leave nothing to post.
+    yield from range(min(start, end), max(start, end) + 1)
 
 
 def _severity_label(severity: Severity) -> str:
