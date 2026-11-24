@@ -310,6 +310,7 @@ def test_thread_view_shows_real_sender(mail: AgentEmail, monkeypatch: pytest.Mon
         "Date: Mon, 01 Jun 2026 12:00:00 +0000\n"
         "Subject: hi\n\nbody\n"
     )
+    monkeypatch.setenv("AGENT_EMAIL", "bob@example.com")
     monkeypatch.setattr(gptmail_cli, "get_workspace_dir", lambda *a, **k: mail.workspace)
     result = CliRunner().invoke(gptmail_cli.cli, ["read", message_id, "--thread-only"])
     assert result.exit_code == 0, result.output
