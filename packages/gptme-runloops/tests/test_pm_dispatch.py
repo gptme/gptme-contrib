@@ -1079,7 +1079,7 @@ class TestLaneDispatcher:
         )
 
         items = [
-            make_item(repo="a/b", number=1, types=["assigned"]),
+            make_item(repo="a/b", number=1, types=["assigned_issue"]),
             make_item(repo="a/b", number=2, types=["pr_update"]),
             make_item(repo="a/b", number=3, types=["ci_failure"]),
         ]
@@ -1526,6 +1526,10 @@ class TestRecordsAggregateMain:
 
 
 class TestClassifyItemWorkType:
+    def test_assigned_issue_maps_to_assigned_issue(self) -> None:
+        # Producers emit "assigned_issue"; it fell through to notification-triage.
+        assert classify_item_work_type(["assigned_issue"]) == "assigned-issue"
+
     def test_ci_failure(self):
         assert classify_item_work_type(["ci_failure"]) == "ci-fix"
 

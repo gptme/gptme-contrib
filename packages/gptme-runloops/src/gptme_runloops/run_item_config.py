@@ -156,7 +156,9 @@ def load_run_item_config(
     valid_fields = {f.name for f in dataclass_fields(RunItemConfig)}
     kwargs: dict[str, Any] = {}
     for key, value in section.items():
-        if key not in valid_fields:
+        # ``workspace`` is the caller's argument (the TOML is found inside
+        # it); a TOML copy would be passed twice and crash the constructor.
+        if key not in valid_fields or key == "workspace":
             continue
         if key in _PATH_FIELDS and isinstance(value, str):
             p = Path(value)

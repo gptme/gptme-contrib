@@ -3619,6 +3619,24 @@ def test_promote_item_state_copies_only_number_scoped_matching_files(
     }
 
 
+def test_promote_item_state_does_not_match_numeric_prefix_siblings(tmp_path) -> None:
+    # Promoting #12 must not consume #1234's or issue #120's pending state.
+    config = make_config(tmp_path)
+    pending = config.pending_state_dir
+    pending.mkdir(parents=True)
+    for name in (
+        "gptme-gptme-pr-12.state",
+        "gptme-gptme-pr-12-ci.state",
+        "gptme-gptme-pr-1234.state",
+        "gptme-gptme-pr-1234-greptile.state",
+        "gptme-gptme-issue-120.state",
+    ):
+        (pending / name).write_text("x")
+    promote_item_state(config, "gptme/gptme", 12)
+    names = {p.name for p in config.state_dir.iterdir()}
+    assert names == {"gptme-gptme-pr-12.state", "gptme-gptme-pr-12-ci.state"}
+
+
 def test_promote_item_state_copies_master_ci_only_when_requested(tmp_path) -> None:
     config = make_config(tmp_path)
     pending = config.pending_state_dir

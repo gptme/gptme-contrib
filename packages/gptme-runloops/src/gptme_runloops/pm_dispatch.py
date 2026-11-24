@@ -638,7 +638,9 @@ def classify_item_work_type(types: list[str], repo: str | None = None) -> str:
         ):
             return "automated-pr-review"
         return "pr-review"
-    if "assigned" in types_set:
+    # Producers emit "assigned_issue" (activity-gate, check_assigned_issues);
+    # bare "assigned" is kept for older callers.
+    if types_set & {"assigned_issue", "assigned"}:
         return "assigned-issue"
     return "notification-triage"
 

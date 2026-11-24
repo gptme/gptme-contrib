@@ -66,6 +66,19 @@ delivery_check = []
     assert hooks.delivery_check is None
 
 
+def test_toml_workspace_key_is_ignored(tmp_path) -> None:
+    # The workspace argument locates the TOML; a [config] workspace key used
+    # to be passed twice and crash RunItemConfig() with a TypeError.
+    cfg_dir = tmp_path / "config"
+    cfg_dir.mkdir()
+    (cfg_dir / "pm-run-item.toml").write_text(
+        '[config]\nworkspace = "/elsewhere"\nauthor = "x"\n'
+    )
+    config, _ = load_run_item_config(tmp_path)
+    assert config.author == "x"
+    assert config.workspace == tmp_path.resolve()
+
+
 def test_env_overrides_win_over_toml(tmp_path, monkeypatch) -> None:
     cfg_dir = tmp_path / "config"
     cfg_dir.mkdir()
