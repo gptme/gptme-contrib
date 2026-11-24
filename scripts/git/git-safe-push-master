@@ -176,6 +176,7 @@ import os
 import stat
 import subprocess
 import sys
+import time
 
 
 def git(*args, **kwargs):
@@ -196,20 +197,59 @@ def tree(revision):
     return entries
 
 
+def restore_root(after, root, can_restore):
+    """git restore one root, waiting out sibling index.lock holders.
+
+    A sibling `git status`/`git add` holds .git/index.lock for short windows. One
+    unretried attempt used to abort the whole materialization and leave every
+    upstream-added file staged-deleted (2026-11-24 15:23Z, 7 task files).
+    """
+    deadline = time.monotonic() + float(
+        os.environ.get("GIT_SAFE_PUSH_MATERIALIZE_BUDGET_SECONDS", "60"))
+    while True:
+        # A sibling may edit/stage this root while holding index.lock. Never
+        # reuse the preservation decision from before the failed attempt.
+        if not can_restore():
+            return False
+        proc = subprocess.run(
+            ["git", "restore", "--source", after, "--staged", "--worktree",
+             "--", b":(literal)" + root], capture_output=True)
+        if proc.returncode == 0:
+            return True
+        if b"index.lock" not in proc.stderr or time.monotonic() >= deadline:
+            raise subprocess.CalledProcessError(
+                proc.returncode, proc.args, proc.stdout, proc.stderr)
+        time.sleep(0.1)
+
+
+def record_marker(entries, before, after):
+    """Append root TAB before TAB after lines to the durable marker file."""
+    marker = os.path.join(os.fsdecode(git("rev-parse", "--git-common-dir")[:-1]),
+                          "gsc-unreconciled.tsv")
+    try:
+        with open(marker, "ab") as handle:
+            for root in entries:
+                handle.write(root + b"\t" + before.encode() + b"\t" + after.encode() + b"\n")
+    except OSError as error:
+        print(f"warning: could not record unreconciled paths: {error}", file=sys.stderr)
+
+
+def phantom_deletions(old, new):
+    """Paths the ref move added that are in neither the index nor the worktree.
+
+    That is the `D ` signature: HEAD has the file, the shared index and disk do
+    not, so ready-tasks says "Task not found" and a whole-index commit deletes it.
+    """
+    indexed = {record.split(b"\t", 1)[1] for record in
+               git("ls-files", "--stage", "-z").split(b"\0") if record}
+    return sorted(path for path in new if path not in old
+                  and path not in indexed and not os.path.lexists(path))
+
+
 def main():
     os.chdir(os.fsdecode(git("rev-parse", "--show-toplevel")[:-1]))
     before, after = sys.argv[1:]
     old, new = tree(before), tree(after)
-    index = {}
-    for record in git("ls-files", "--stage", "-z").split(b"\0"):
-        if record:
-            metadata, path = record.split(b"\t", 1)
-            mode, oid, stage = metadata.split()
-            index.setdefault(path, []).append((mode, oid, stage))
-    flagged = set()
-    for record in git("ls-files", "-v", "-z").split(b"\0"):
-        if record and record[:1] != b"H":
-            flagged.add(record[2:])
 
     changed = set(filter(None, git(
         "diff", "--no-renames", "--name-only", "-z", before, after
@@ -267,11 +307,21 @@ def main():
         expected = {path: entry for path, entry in old.items() if within(path, root)}
         expected_index = {path: [(mode, oid, b"0")]
                           for path, (mode, oid) in expected.items()}
-        actual_index = {path: entries for path, entries in index.items() if within(path, root)}
         unsupported = any(mode not in (b"100644", b"100755", b"120000")
                           for entries in (old, new) for path, (mode, _) in entries.items()
                           if within(path, root))
-        try:
+        def can_restore():
+            index = {}
+            for record in git("ls-files", "--stage", "-z").split(b"\0"):
+                if record:
+                    metadata, path = record.split(b"\t", 1)
+                    mode, oid, stage = metadata.split()
+                    index.setdefault(path, []).append((mode, oid, stage))
+            flagged = {record[2:] for record in
+                       git("ls-files", "-v", "-z").split(b"\0")
+                       if record and record[:1] != b"H"}
+            actual_index = {path: entries for path, entries in index.items()
+                            if within(path, root)}
             # An untracked symlink/file in an ancestor must not redirect checkout.
             parts = root.split(b"/")
             ancestors_clean = True
@@ -282,22 +332,27 @@ def main():
                             and not stat.S_ISDIR(os.lstat(ancestor).st_mode))):
                     ancestors_clean = False
                     break
-            if (unsupported or actual_index != expected_index
-                    or any(within(path, root) for path in flagged)
-                    or not ancestors_clean or not disk_matches(root, expected)):
-                skipped += 1
-                unreconciled.append(root)
-                continue
+            return not (unsupported or actual_index != expected_index
+                        or any(within(path, root) for path in flagged)
+                        or not ancestors_clean or not disk_matches(root, expected))
+
+        try:
             # Literal root includes all leaves of a type transition. Unlike
             # checkout, restore also handles paths deleted from the source tree.
-            subprocess.run(["git", "restore", "--source", after, "--staged",
-                            "--worktree", "--", b":(literal)" + root], check=True)
-            materialized += 1
+            if restore_root(after, root, can_restore):
+                materialized += 1
+            else:
+                skipped += 1
+                unreconciled.append(root)
         except (OSError, subprocess.CalledProcessError) as error:
             failed += 1
+            detail = (getattr(error, "stderr", b"") or b"").decode(errors="replace").strip()
             print(f"warning: materialization failed/potentially partial for "
-                  f"{os.fsdecode(root)!r}: {error}; stopping further restores",
+                  f"{os.fsdecode(root)!r}: {error} {detail}; stopping further restores",
                   file=sys.stderr)
+            # Stderr dies with the calling session; leave a durable record of the
+            # failed root and every root left unattempted.
+            record_marker([root] + [r for r in sorted(roots) if r > root], before, after)
             break
     unattempted = len(roots) - materialized - skipped - failed
     if unreconciled:
@@ -305,14 +360,19 @@ def main():
         # editing session's next commit can read: committing that file would
         # publish a revert of what upstream just landed (the journal line alone
         # never reaches that session). Format: root TAB before TAB after.
-        marker = os.path.join(os.fsdecode(git("rev-parse", "--git-common-dir")[:-1]),
-                              "gsc-unreconciled.tsv")
-        try:
-            with open(marker, "ab") as handle:
-                for root in unreconciled:
-                    handle.write(root + b"\t" + before.encode() + b"\t" + after.encode() + b"\n")
-        except OSError as error:
-            print(f"warning: could not record unreconciled paths: {error}", file=sys.stderr)
+        record_marker(unreconciled, before, after)
+    phantoms = phantom_deletions(old, new)
+    if phantoms:
+        print(f"ERROR: {len(phantoms)} file(s) published to HEAD are missing from both the "
+              f"index and the worktree (staged-deletion state: dispatch reports "
+              f"'Task not found' and a whole-index commit would delete them):",
+              file=sys.stderr)
+        for path in phantoms[:20]:
+            print(f"  {os.fsdecode(path)}", file=sys.stderr)
+        print("  Repair: git restore --source=HEAD --staged --worktree -- <path>",
+              file=sys.stderr)
+        record_marker(phantoms, before, after)
+        failed += 1
     print(f"  Local materialization: {materialized} clean group(s) updated, "
           f"{skipped} locally changed/unsupported skipped, {failed} failed, "
           f"{unattempted} unattempted")

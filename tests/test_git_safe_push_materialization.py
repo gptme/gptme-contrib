@@ -6,8 +6,10 @@ index. No mocks, installed hooks, user config, or network remotes are involved.
 """
 
 import os
+import shutil
 import stat
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -46,7 +48,7 @@ class Sandbox:
         self.git(cwd, "commit", "-m", message)
         return self.git(cwd, "rev-parse", "HEAD").decode().strip()
 
-    def publish(self) -> None:
+    def publish(self) -> subprocess.CompletedProcess[str]:
         """Prove squash publication independently, before examining local files."""
         local_before = self.git(self.local, "rev-parse", "HEAD").decode().strip()
         remote_before = self.git(self.remote, "rev-parse", "main").decode().strip()
@@ -99,6 +101,7 @@ class Sandbox:
             b"\r\n", b"\n"
         ) == b"upstream control\n"
         assert self.git(self.local, "diff", "HEAD", "--", "clean-control") == b""
+        return result
 
 
 @pytest.fixture
@@ -449,3 +452,136 @@ def test_squash_uses_literal_restore_pathspec(sandbox, name):
     sandbox.publish()
     assert (sandbox.local / name).read_bytes() == b"upstream\n"
     assert sandbox.git(sandbox.local, "status", "--porcelain=v1", "-z") == b""
+
+
+def _intercept_first_restore_lock(box: Sandbox, change: str = "none") -> Path:
+    """Release the lock only after real restore failed, then expose sibling work.
+
+    The wrapper waits synchronously inside the actual failed git invocation. It
+    cannot release early on a slow runner, and production needs no test hook.
+    Staging uses real Git on a private index, then atomically publishes it while
+    holding index.lock, like the sibling transaction that prevented the restore.
+    """
+    real_git = shutil.which("git", path=box.env["PATH"])
+    assert real_git is not None
+    wrapper_dir = box.root / "git-wrapper"
+    wrapper_dir.mkdir()
+    receipt = box.root / "failed-restore.txt"
+    wrapper = wrapper_dir / "git"
+    wrapper.write_text(
+        f"#!{sys.executable}\n"
+        + r"""import os
+import pathlib
+import shutil
+import subprocess
+import sys
+
+real_git = os.environ["MATERIALIZE_TEST_REAL_GIT"]
+receipt = pathlib.Path(os.environ["MATERIALIZE_TEST_RECEIPT"])
+args = sys.argv[1:]
+if "restore" not in args or args[-1] != ":(literal)subject" or receipt.exists():
+    os.execv(real_git, [real_git, *args])
+
+lock = pathlib.Path(".git/index.lock")
+with lock.open("xb"):
+    pass
+try:
+    failed = subprocess.run([real_git, *args], capture_output=True)
+    assert failed.returncode != 0 and b"index.lock" in failed.stderr, failed
+    receipt.write_bytes(failed.stderr)
+    change = os.environ["MATERIALIZE_TEST_CHANGE"]
+    subject = pathlib.Path("subject")
+    if change in ("disk", "both"):
+        subject.write_bytes(b"sibling disk\n")
+    if change in ("index", "both"):
+        sibling_index = pathlib.Path(".git/sibling-index").resolve()
+        shutil.copyfile(".git/index", sibling_index)
+        sibling_env = {**os.environ, "GIT_INDEX_FILE": str(sibling_index)}
+        if change == "both":
+            subprocess.run([real_git, "add", "--", "subject"],
+                           env=sibling_env, check=True, capture_output=True)
+            subject.write_bytes(b"sibling unstaged\n")
+        else:
+            oid = subprocess.run([real_git, "hash-object", "-w", "--stdin"],
+                                 input=b"sibling staged\n", check=True,
+                                 capture_output=True).stdout.decode().strip()
+            subprocess.run([real_git, "update-index", "--cacheinfo",
+                            f"100644,{oid},subject"], env=sibling_env,
+                           check=True, capture_output=True)
+        os.replace(sibling_index, ".git/index")
+finally:
+    lock.unlink()
+sys.stdout.buffer.write(failed.stdout)
+sys.stderr.buffer.write(failed.stderr)
+sys.exit(failed.returncode)
+"""
+    )
+    wrapper.chmod(0o755)
+    box.env.update(
+        PATH=str(wrapper_dir) + os.pathsep + box.env["PATH"],
+        MATERIALIZE_TEST_REAL_GIT=real_git,
+        MATERIALIZE_TEST_RECEIPT=str(receipt),
+        MATERIALIZE_TEST_CHANGE=change,
+    )
+    return receipt
+
+
+def test_squash_waits_out_a_transient_index_lock(sandbox):
+    """One proven lock failure must not strand an upstream-added file."""
+    _prepare(sandbox, "subject", "absent", "updated")
+    receipt = _intercept_first_restore_lock(sandbox)
+    sandbox.publish()
+    assert b"index.lock" in receipt.read_bytes()
+    assert (sandbox.local / "subject").read_bytes() == b"upstream\n"
+    assert sandbox.git(sandbox.local, "status", "--porcelain=v1", "-z") == b""
+
+
+@pytest.mark.parametrize("change", ["disk", "index", "both"])
+def test_retry_preserves_sibling_changes_after_failed_restore(sandbox, change):
+    """A failed attempt does not authorize retrying against stale clean state."""
+    _prepare(sandbox, "subject", "file", "updated")
+    receipt = _intercept_first_restore_lock(sandbox, change)
+    result = sandbox.publish()
+    assert b"index.lock" in receipt.read_bytes()
+    expected_disk = {
+        "disk": b"sibling disk\n",
+        "index": b"base\n",
+        "both": b"sibling unstaged\n",
+    }[change]
+    expected_index = {
+        "disk": b"base\n",
+        "index": b"sibling staged\n",
+        "both": b"sibling disk\n",
+    }[change]
+    assert (sandbox.local / "subject").read_bytes() == expected_disk
+    assert sandbox.git(sandbox.local, "show", ":subject") == expected_index
+    marker = (sandbox.local / ".git" / "gsc-unreconciled.tsv").read_text()
+    assert any(line.split("\t")[0] == "subject" for line in marker.splitlines())
+    assert "1 locally changed/unsupported skipped, 0 failed" in result.stdout
+
+
+def test_squash_reports_phantom_deletions_when_the_lock_never_clears(sandbox):
+    """When restore cannot win, say so loudly and durably instead of silently."""
+    _prepare(sandbox, "subject", "absent", "updated")
+    lock = sandbox.local / ".git" / "index.lock"
+    lock.write_bytes(b"")
+    env = {**sandbox.env, "GIT_SAFE_PUSH_MATERIALIZE_BUDGET_SECONDS": "1"}
+    try:
+        result = subprocess.run(
+            [str(SAFE_PUSH)],
+            cwd=sandbox.local,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    finally:
+        lock.unlink(missing_ok=True)
+    diagnostic = f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    assert result.returncode == 0, diagnostic  # publication itself succeeded
+    assert "missing from both the index and the worktree" in result.stderr, diagnostic
+    assert "  subject\n" in result.stderr, diagnostic
+    marker = (sandbox.local / ".git" / "gsc-unreconciled.tsv").read_text()
+    assert "subject\t" in marker, marker
+    # The path is in HEAD but absent from disk: exactly the "D " signature.
+    assert not (sandbox.local / "subject").exists()

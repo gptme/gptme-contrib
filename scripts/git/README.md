@@ -25,6 +25,11 @@ real directories with no index leaf. File/directory transitions are checked as
 a unit, including unexpected or dirty descendants; ordinary sibling paths can
 still update independently. Names are NUL-delimited and pathspecs literal.
 
+When `index.lock` blocks a restore, each retry rechecks the live index, flags,
+ancestors and disk against the old commit. A sibling change during contention
+skips that group and records it in `gsc-unreconciled.tsv`; a prior clean check
+does not authorize overwriting later work.
+
 Checks intentionally use raw bytes without clean filters. A file that Git
 considers clean only after normalization/filtering may therefore be skipped.
 This is conservative preservation, not a promise to materialize every Git-clean
