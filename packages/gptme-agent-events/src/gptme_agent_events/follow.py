@@ -47,6 +47,12 @@ from .gitwatch import GitWatcher
 HARNESSES = tuple(EXTRACTORS)
 
 
+#: How long a reported commit sha stays deduplicated. A tool result can lag its
+#: reflog entry by a slow push or a pre-push hook running a full suite, well
+#: past two minutes; entries are tiny, so keep them long enough to cover that.
+GIT_EMITTED_RETENTION = 1800.0
+
+
 @dataclass(frozen=True)
 class Source:
     harness: str
@@ -385,7 +391,9 @@ class Follower:
                     self.git.watch(e.detail[key])
         now = self.clock()
         self._git_shell = [item for item in self._git_shell if now - item[0] <= 120]
-        self._git_emitted = [item for item in self._git_emitted if now - item[0] <= 120]
+        self._git_emitted = [
+            item for item in self._git_emitted if now - item[0] <= GIT_EMITTED_RETENTION
+        ]
         kept = []
         for e in events:
             directory = str(e.detail.get("dir") or e.detail.get("cwd") or "")

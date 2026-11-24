@@ -300,3 +300,33 @@ def test_r1_2b_retired_gptme_log_rewritten_with_result_keeps_the_landing(tmp_pat
         clock.t += 61
         events += f.poll()
     assert [e.kind for e in events] == ["pr_open"]
+
+
+def test_r1_5c_reflog_commit_not_repeated_when_tool_result_lags_past_two_minutes(repo):
+    """Review finding on gptme/gptme-contrib#2371: a reflog commit flushed unmatched
+    stays reported when the shell evidence arrives minutes later (a slow push or a
+    pre-push hook running the full suite), not only within 120s."""
+    now = [100.0]
+    w = GitWatcher()
+    w.watch(str(repo))
+    f = Follower([], git=w, clock=lambda: now[0])
+    sha = commit(repo, "slow hook", None)
+    events = f._with_git([], False)
+    now[0] += 6
+    events += f._with_git([], False)  # released from the reflog alone
+    now[0] += 150
+    shell = AgentEvent(
+        kind="commit",
+        ts="2099-01-01T00:00:00+00:00",
+        harness="claude-code",
+        session="s",
+        tool="Bash",
+        detail={"dir": str(repo), "sha": sha[:7]},
+    )
+    events += f._with_git([shell], False)
+    now[0] += 6
+    events += f._with_git([], False)
+    commits = [e for e in events if e.kind == "commit"]
+    assert len(commits) == 1, [
+        (e.session, e.detail.get("source"), e.detail.get("sha")) for e in commits
+    ]
