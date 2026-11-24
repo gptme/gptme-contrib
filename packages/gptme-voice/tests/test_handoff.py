@@ -406,3 +406,18 @@ def test_archive_filename_encodes_both_agents_and_id():
     assert name.startswith("1777000000-bob-alice-")
     assert payload["handoff_id"] in name
     assert name.endswith(".json")
+
+
+@pytest.mark.parametrize(
+    "fields", [["initiated_at"], ["expires_at"], ["initiated_at", "expires_at"]]
+)
+def test_validate_rejects_timestamps_without_timezone(fields):
+    """A naive timestamp is a rejection, not a TypeError before the HMAC check (#2320)."""
+    payload = _sample_payload()
+    for field in fields:
+        payload[field] = payload[field].replace("Z", "").replace("+00:00", "")
+
+    result = validate(payload, secret=SECRET, now=SAMPLE_VALIDATION_NOW)
+
+    assert not result.ok
+    assert "timezone" in result.reason
