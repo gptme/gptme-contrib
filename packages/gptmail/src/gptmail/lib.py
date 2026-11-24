@@ -354,6 +354,13 @@ class UnrepliedEmail(NamedTuple):
     folder: str
 
 
+def _bare_address(header: str) -> str:
+    """Lower-cased address part of a From/To header ("" when none)."""
+    from email.utils import parseaddr
+
+    return parseaddr(header or "")[1].strip().lower()
+
+
 class AgentEmail:
     """Handles email operations for agent communication.
 
@@ -1930,7 +1937,12 @@ class AgentEmail:
             if to_addr and normalize_addr(existing["to"]) == normalize_addr(to_addr):
                 matches.append("to")
 
-            if from_addr and normalize_addr(existing["from"]) == normalize_addr(from_addr):
+            # Compare the address, not the header text: a re-synced copy may
+            # format the display name differently.
+            if from_addr and (
+                normalize_addr(existing["from"]) == normalize_addr(from_addr)
+                or _bare_address(existing["from"]) == (_bare_address(from_addr) or None)
+            ):
                 matches.append("from")
 
             # Date match (within 2 minutes)
@@ -1963,7 +1975,9 @@ class AgentEmail:
                 if "subject" in matches and "to" in matches and "date" in matches:
                     return True
             else:  # inbox
-                if "in_reply_to" in matches and "body" in matches:
+                # Same thread and text from a *different* sender is a separate
+                # reply ("Sounds good!" from two people), not a copy.
+                if "in_reply_to" in matches and "body" in matches and "from" in matches:
                     return True
                 if (
                     "subject" in matches
