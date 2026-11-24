@@ -111,6 +111,19 @@ def test_superseded_head_and_provider_extraction() -> None:
     assert o.failed_provider("boom") is None
 
 
+def test_failure_reason_keeps_signal_when_there_is_output() -> None:
+    # The reviewer prints progress to stdout; an OOM kill must still say so.
+    reason = o.failure_reason(-9, "[shard 1/3] prompt: 12345 chars\n", "")
+    assert "SIGKILL" in reason
+    assert "[shard 1/3] prompt: 12345 chars" in reason
+
+
+def test_failure_reason_whitespace_stderr_falls_back_to_stdout() -> None:
+    # A bare newline on stderr must not hide the cause printed on stdout,
+    # which is_primary_provider_failure reads from this reason.
+    assert o.failure_reason(1, "openrouter timed out", "\n") == "openrouter timed out"
+
+
 def test_failure_reason_keeps_exit_status() -> None:
     assert o.failure_reason(1, "", "line one\nlast line\n") == "last line"
     assert o.failure_reason(1, "stdout only", "") == "stdout only"

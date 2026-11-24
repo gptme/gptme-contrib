@@ -213,6 +213,11 @@ def adopt_network_lesson(
         slug = parts[2]
 
         local_path = local_lessons_dir / category / f"{slug}.md"
+        # lesson_id comes from untrusted network frontmatter: keep the write
+        # inside the lessons dir.
+        if not local_path.resolve().is_relative_to(local_lessons_dir.resolve()):
+            print(f"Error: Unsafe lesson_id (escapes lessons dir): {lesson_id}")
+            return False
 
         # Create category directory if needed
         local_path.parent.mkdir(parents=True, exist_ok=True)

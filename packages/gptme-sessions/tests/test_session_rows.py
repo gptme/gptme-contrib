@@ -140,3 +140,11 @@ def test_read_jsonl_rows_skips_bad_lines(tmp_path):
     p = tmp_path / "r.jsonl"
     p.write_text('{"session_id": "a"}\n\nnot json\n[1, 2]\n{"session_id": "b"}\n')
     assert [r["session_id"] for r in read_jsonl_rows(p)] == ["a", "b"]
+
+
+def test_read_jsonl_rows_skips_undecodable_row(tmp_path):
+    # SessionStore keeps a torn multibyte tail byte-for-byte; the reader must
+    # skip that row like the store's own loader does, not raise.
+    p = tmp_path / "session-records.jsonl"
+    p.write_bytes(b'{"session_id":"aaaaaaaa"}\n{"session_id":"bb\xe2\x82\n')
+    assert read_jsonl_rows(p) == [{"session_id": "aaaaaaaa"}]

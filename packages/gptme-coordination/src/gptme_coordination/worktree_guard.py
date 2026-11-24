@@ -60,6 +60,10 @@ UTC = timezone.utc  # datetime.UTC was added in Python 3.11.
 # forked agent; see the module docstring.
 _SESSION_PID_ENV = ("AGENT_SESSION_PID", "BOB_SESSION_PID")
 _AGENT_ID_ENV = ("AGENT_ID", "BOB_AUTONOMOUS_AGENT_ID")
+# Owner a launcher uses for the session's own ``pr-branch:``/``worktree:``
+# claims. Push identity only: never recorded in the occupancy marker (see
+# ``_get_marker_agent_id``).
+_CLAIM_OWNER_ENV = ("CASCADE_SUPPLEMENTAL_AGENT",)
 _GUARD_FORCE_ENV = ("AGENT_WORKTREE_GUARD_FORCE", "BOB_WORKTREE_GUARD_FORCE")
 _PUSH_GUARD_DENY_ENV = (
     "AGENT_WORKTREE_PUSH_GUARD_DENY",
@@ -108,8 +112,13 @@ def _get_session_pid() -> int:
 
 
 def _get_agent_id() -> str:
-    """Autonomous agent ID for sentinel-based liveness fallback."""
-    if agent_id := _env_first(*_AGENT_ID_ENV):
+    """Push-claim identity: explicit agent id, then the launcher's claim owner.
+
+    Without the claim owner, a session that claimed its branch under that
+    owner (e.g. via ``worktree-create``) saw its own claim as a live sibling
+    on push, because the synthesized fallback below lacks the session label.
+    """
+    if agent_id := _env_first(*_AGENT_ID_ENV, *_CLAIM_OWNER_ENV):
         return agent_id
     if session_id := _get_session_id():
         harness = (

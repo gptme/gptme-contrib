@@ -1098,10 +1098,24 @@ def check_links(content: str, task_path: Path, repo_root: Path) -> List[str]:
     return broken
 
 
-# ``-`` stays unanchored (historical behaviour); an ordered marker (``3.``/``3)``)
-# must start its line, so prose such as "version 2. [x]" never counts.
-_BULLET_OR_NUMBER = r"(?:-|\d+[.)])"
-_ITEM_MARKER = r"(?:-|(?m:^)[ \t]*(?:>[ \t]*)?\d+[.)])"
+# ``-`` stays unanchored (historical behaviour); ``*``/``+`` bullets and ordered
+# markers (``3.``/``3)``) must start their line, so prose such as
+# "version 2. [x]" or "a + [ ] b" never counts.
+_BULLET_OR_NUMBER = r"(?:[-*+]|\d+[.)])"
+_ITEM_MARKER = r"(?:-|(?m:^)[ \t]*(?:>[ \t]*)?(?:[*+]|\d+[.)]))"
+
+
+def _fence_opening(line: str) -> re.Match[str] | None:
+    """Match a fence opener at the start of an unindented, unquoted line.
+
+    Backtick fence info strings cannot contain backticks: a line like
+    ```bash``` is an inline code span, not a fence opener (mirrors
+    :func:`gptodo.lifecycle.untick_checklist`).
+    """
+    opening = re.match(r"(`{3,}|~{3,})", line)
+    if opening and opening.group(1)[0] == "`" and "`" in line[opening.end() :]:
+        return None
+    return opening
 
 
 def count_subtasks(content: str, *, checklist_only: bool = False) -> SubtaskCount:
@@ -1158,11 +1172,11 @@ def count_subtasks(content: str, *, checklist_only: bool = False) -> SubtaskCoun
                 if re.fullmatch(rf"{re.escape(fence[0])}{{{len(fence)},}}\s*", line):
                     fence = ""
                 continue
-            opening = re.match(r"(`{3,}|~{3,})", line)
+            opening = _fence_opening(line)
             if opening:
                 fence = opening.group(1)
                 continue
-            item = re.match(r"(?:-|\d+[.)]) (\[[ x-]\]|\[SKIP\]|✅|🏃)\s*(.*)", line)
+            item = re.match(rf"{_BULLET_OR_NUMBER} (\[[ x-]\]|\[SKIP\]|✅|🏃)\s*(.*)", line)
             if item:
                 marker, title = item.groups()
                 title = "~~skipped~~" if re.match(r"~~.+?~~", title) else "item"
@@ -1238,8 +1252,8 @@ def skipped_subtask_items(content: str) -> list[tuple[str, bool]]:
             if re.fullmatch(rf"{re.escape(fence[0])}{{{len(fence)},}}\s*", line):
                 fence = ""
             continue
-        opening = re.match(r"(`{3,}|~{3,})", line)
-        item = re.match(r"(?:-|\d+[.)]) (\[[ x-]\]|\[SKIP\]|✅|🏃)\s*(.*)", line)
+        opening = _fence_opening(line)
+        item = re.match(rf"{_BULLET_OR_NUMBER} (\[[ x-]\]|\[SKIP\]|✅|🏃)\s*(.*)", line)
         list_start = re.match(r"(?:[-+*]|\d+[.)])(?:\s|$)", line)
         if current is not None and line and not opening and not list_start and indent > current[2]:
             current[1].append(line)

@@ -622,7 +622,11 @@ def _pending_messages(
     if no_reply_subject_patterns is None:
         no_reply_subject_patterns = _no_reply_subject_patterns()
 
-    replied_to: set[str] = set()
+    # (recipient, in_reply_to) pairs. in_reply_to echoes the sender-chosen
+    # message_id, so a reply only answers a message from the agent it went to:
+    # otherwise carol could name alice's inbox file as her message_id and a
+    # reply to carol would clear alice's message.
+    replied_to: set[tuple[str, str]] = set()
     my_outbox_ids: set[str] = set()
     if outbox.exists():
         for f in outbox.glob("*.md"):
@@ -631,7 +635,7 @@ def _pending_messages(
                 recipient = str(m.get("to") or "")
                 delivered_ok = m.get("delivered") is not False
                 if delivered_ok or not _is_push_reachable(recipient, agents):
-                    replied_to.add(str(m["in_reply_to"]))
+                    replied_to.add((recipient.strip().lower(), str(m["in_reply_to"])))
             my_outbox_ids.add(f.name)
 
     pending: list[dict] = []
@@ -649,7 +653,8 @@ def _pending_messages(
             continue
         if m.get("replied"):
             continue
-        if f.name in replied_to or str(m.get("message_id") or "") in replied_to:
+        sender = str(m.get("from")).strip().lower()
+        if {(sender, f.name), (sender, str(m.get("message_id") or ""))} & replied_to:
             continue
         in_reply_to = m.get("in_reply_to")
         thread_ids = in_reply_to if isinstance(in_reply_to, list) else [in_reply_to]

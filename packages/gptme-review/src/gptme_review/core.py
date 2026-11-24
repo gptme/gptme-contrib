@@ -1775,7 +1775,9 @@ def fetch_pr_diff_via_files_api(
         blocks.append(
             f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n{patch}"
         )
-    return "\n".join(blocks)
+    # End every block with a newline (a patch usually lacks a final one), so
+    # the result is a terminated unified diff like ``gh pr diff`` output.
+    return "".join(b if b.endswith("\n") else f"{b}\n" for b in blocks)
 
 
 def reconcile_change_summary(

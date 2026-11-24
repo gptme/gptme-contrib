@@ -1101,9 +1101,18 @@ def promote_item_state(
             if f.is_file() and not f.with_suffix(".map").is_file():
                 shutil.copy(f, state / f.name)
     else:
-        patterns = [f"{repo_safe}-pr-{number}*.state"] if include_pr else []
+        # Anchor the number: a bare ``pr-{number}*`` also matches PR #1234's
+        # state when promoting #12, consuming another item's pending event.
+        patterns = (
+            [f"{repo_safe}-pr-{number}.state", f"{repo_safe}-pr-{number}-*.state"]
+            if include_pr
+            else []
+        )
         if include_issue:
-            patterns.append(f"{repo_safe}-issue-{number}*.state")
+            patterns += [
+                f"{repo_safe}-issue-{number}.state",
+                f"{repo_safe}-issue-{number}-*.state",
+            ]
         if include_master_ci:
             patterns.append(f"{repo_safe}-master-ci.state")
     for pattern in patterns:

@@ -457,6 +457,34 @@ def test_compute_run_analytics(tmp_path: Path):
     assert analytics["noop_by_run_type"]["monitoring"]["noop"] == 1
 
 
+def test_run_analytics_noop_by_dispatch_source(tmp_path: Path):
+    """NOOP share is broken down by dispatch_cause.kind (the work source)."""
+    import io
+
+    store = SessionStore(sessions_dir=tmp_path)
+    for kind, outcome in [
+        ("fanout", "productive"),
+        ("fanout", "noop"),
+        ("pm-slot", "productive"),
+        (None, "noop"),
+    ]:
+        cause = {"kind": kind, "id": "x"} if kind else None
+        store.append(SessionRecord(outcome=outcome, dispatch_cause=cause))
+
+    analytics = compute_run_analytics(store.load_all())
+    assert analytics["noop_share"] == 0.5
+    by_source = analytics["noop_by_dispatch_source"]
+    assert by_source["fanout"] == {"total": 2, "noop": 1, "rate": 0.5}
+    assert by_source["pm-slot"] == {"total": 1, "noop": 0, "rate": 0.0}
+    assert by_source["unknown"] == {"total": 1, "noop": 1, "rate": 1.0}
+
+    buf = io.StringIO()
+    format_run_analytics(analytics, buf)
+    out = buf.getvalue()
+    assert "NOOP share: 2/4 (50%)" in out
+    assert "NOOP rate by dispatch source:" in out
+
+
 def test_format_run_analytics_empty():
     """format_run_analytics handles empty data gracefully."""
     import io

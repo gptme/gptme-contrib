@@ -76,14 +76,17 @@ def dedupe_monitoring_pairs(rows: Iterable[dict], *, keep: str = "controller") -
 def read_jsonl_rows(path: str | Path) -> list[dict]:
     """Read dict rows from a JSONL file, skipping blank and malformed lines."""
     rows: list[dict] = []
-    with open(path, encoding="utf-8") as fh:
+    # The store keeps undecodable bytes (e.g. a torn multibyte tail) verbatim;
+    # they arrive as lone surrogates, so treat such a row as malformed.
+    with open(path, encoding="utf-8", errors="surrogateescape") as fh:
         for line in fh:
             line = line.strip()
             if not line:
                 continue
             try:
+                line.encode("utf-8")
                 row = json.loads(line)
-            except json.JSONDecodeError:
+            except (UnicodeEncodeError, json.JSONDecodeError):
                 continue
             if isinstance(row, dict):
                 rows.append(row)
