@@ -412,6 +412,59 @@ def test_unknown_workflows_do_not_prove_supersession() -> None:
     )
 
 
+def _fallback_entry(conclusion: str, completed_at: str, workflow: str) -> dict:
+    """A CheckRun as `gh pr list --json statusCheckRollup` renders it."""
+    return {
+        "__typename": "CheckRun",
+        "name": "test",
+        "status": "COMPLETED",
+        "conclusion": conclusion,
+        "completedAt": completed_at,
+        "workflowName": workflow,
+    }
+
+
+def test_supersession_works_on_gh_pr_list_fallback_shape() -> None:
+    """gptme-contrib#2346 item 5: the `gh pr list` fallback has no checkSuite.
+
+    Without keying on `workflowName` there, a superseded cancellation re-emits
+    `ci_failure` on every run while the fallback is in use.
+    """
+    assert (
+        _classify(
+            [
+                _fallback_entry("CANCELLED", "2026-11-18T10:00:00Z", "Build"),
+                _fallback_entry("SUCCESS", "2026-11-22T10:00:00Z", "Build"),
+            ]
+        )
+        == "green"
+    )
+
+
+def test_fallback_shape_other_workflow_does_not_supersede() -> None:
+    assert (
+        _classify(
+            [
+                _fallback_entry("CANCELLED", "2026-11-18T10:00:00Z", "Build"),
+                _fallback_entry("SUCCESS", "2026-11-22T10:00:00Z", "CodeQL"),
+            ]
+        )
+        == "bad"
+    )
+
+
+def test_fallback_shape_missing_workflow_name_does_not_supersede() -> None:
+    assert (
+        _classify(
+            [
+                _fallback_entry("CANCELLED", "2026-11-18T10:00:00Z", ""),
+                _fallback_entry("SUCCESS", "2026-11-22T10:00:00Z", ""),
+            ]
+        )
+        == "bad"
+    )
+
+
 def test_pr_3472_shape_is_inflight_not_green() -> None:
     """The real stranded PR: mostly green, one CANCELLED, three QUEUED for hours.
 
