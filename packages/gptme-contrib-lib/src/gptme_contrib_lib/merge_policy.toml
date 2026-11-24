@@ -36,6 +36,17 @@ size_exempt_classes = ["tests", "lockfile"]
 # himself. Outside this list the tier is reported, never acted on.
 repos = []
 
+[epics]
+# Epic tracking issues Erik set direction on (Erik, 2026-11-24: slices of such
+# an epic merge through the gate without his per-PR approval; per-repo holds
+# still apply). A PR in one of `repos` whose body has a line of the form
+# `Epic: owner/repo#N` naming an OPEN issue listed here gets the placement /
+# category waiver in self-merge-check.py (`_EPIC_WAIVABLE_REASON_PREFIXES`).
+# Review score, CI, threads, sensitive paths, bot/CI config, config and
+# default-change holds and the feature size cap are never waived by it.
+repos = ["gptme/gptme", "gptme/gptme-contrib"]
+issues = ["gptme/gptme-contrib#2310"]
+
 [[tier]]
 id = 0
 name = "low-risk classes"
