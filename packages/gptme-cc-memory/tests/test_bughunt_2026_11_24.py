@@ -582,6 +582,20 @@ def test_cs7_corrupt_state_silently_wiped_on_next_save(tmp_path: Path):
     assert "new" in load_memory_state(state_file)
 
 
+def test_cs7_second_corruption_keeps_the_first_backup(tmp_path: Path):
+    """A second corrupt state must not replace the first backup's bytes."""
+    state_file = tmp_path / "metadata.json"
+    first = '{"old": {"confidence": 0.99'
+    second = '{"older": {"references": 12'
+    state_file.write_text(first)
+    record_memory_injections(["one"], state_file=state_file)
+    state_file.write_text(second)
+    record_memory_injections(["two"], state_file=state_file)
+    assert (tmp_path / "metadata.json.corrupt").read_text() == first
+    assert (tmp_path / "metadata.json.corrupt.1").read_text() == second
+    assert "two" in load_memory_state(state_file)
+
+
 def test_cs7_failed_append_truncates_pending_updates(tmp_path: Path, monkeypatch):
     workspace = tmp_path / "ws"
     pending = workspace / "memory" / "pending-updates.md"

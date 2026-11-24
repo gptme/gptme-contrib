@@ -212,7 +212,8 @@ def save_memory_state(state: dict[str, dict[str, Any]], state_file: Path) -> Non
 
     If the existing file is corrupt, it is moved aside to
     ``metadata.json.corrupt`` instead of being silently overwritten, so the
-    old bytes stay recoverable.
+    old bytes stay recoverable. A later corruption keeps the earlier backup:
+    ``os.replace`` would otherwise overwrite it with the newer corrupt bytes.
     """
     state_file.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -220,7 +221,12 @@ def save_memory_state(state: dict[str, dict[str, Any]], state_file: Path) -> Non
     except FileNotFoundError:
         existing = None
     if existing is not None and existing.strip() and _parse_state(existing) is None:
-        os.replace(state_file, state_file.with_name(state_file.name + ".corrupt"))
+        backup = state_file.with_name(state_file.name + ".corrupt")
+        n = 1
+        while backup.exists():
+            backup = state_file.with_name(f"{state_file.name}.corrupt.{n}")
+            n += 1
+        os.replace(state_file, backup)
     atomic_write_text(state_file, json.dumps(state, indent=2, sort_keys=True) + "\n")
 
 
