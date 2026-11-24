@@ -31,6 +31,10 @@ from gptmail.agent_cli import agent
 # ---------------------------------------------------------------------------
 
 
+# A well-formed gordon -> erik message, for stubs that fake the SCP copy.
+_PULLED_MSG = "---\nfrom: gordon\nto: erik\nsubject: stub\n---\n\n{body}\n"
+
+
 def _write_outbox_msg(
     outbox_dir: Path,
     *,
@@ -192,6 +196,40 @@ def test_pull_skips_messages_for_others(pull_workspace: Path) -> None:
 
     local_inbox = pull_workspace / "erik" / "messages" / "inbox"
     assert not list(local_inbox.glob("*.md")), "inbox must remain empty"
+
+
+def test_pull_refuses_message_claiming_another_sender(pull_workspace: Path) -> None:
+    """A peer cannot deliver a message claiming to be from someone else."""
+    gordon_outbox = pull_workspace / "gordon" / "messages" / "outbox"
+    _write_outbox_msg(gordon_outbox, sender="carol", recipient="erik", subject="Forged sender")
+
+    result = CliRunner().invoke(agent, ["pull"])
+    assert result.exit_code == 0, result.output
+    assert "refusing" in result.output and "carol" in result.output
+
+    local_inbox = pull_workspace / "erik" / "messages" / "inbox"
+    assert not list(local_inbox.glob("*.md")), "forged message must not be imported"
+    assert not list(local_inbox.glob(".delivery-*")), "temp file must be cleaned up"
+
+
+def test_pull_refuses_message_addressed_to_someone_else(
+    pull_workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fetched file's ``to`` must name us even if the remote listing claims it."""
+    gordon_outbox = pull_workspace / "gordon" / "messages" / "outbox"
+    name = _write_outbox_msg(gordon_outbox, sender="gordon", recipient="alice", subject="Misrouted")
+    monkeypatch.setattr(
+        agent_cli,
+        "_remote_pending_rows",
+        lambda *args, **kwargs: [{"file": name, "mailbox": "default", "subject": "Misrouted"}],
+    )
+
+    result = CliRunner().invoke(agent, ["pull"])
+    assert result.exit_code == 0, result.output
+    assert "refusing" in result.output
+
+    local_inbox = pull_workspace / "erik" / "messages" / "inbox"
+    assert not list(local_inbox.glob("*.md"))
 
 
 def test_pull_deduplicates_on_repull(pull_workspace: Path) -> None:
@@ -520,7 +558,7 @@ def test_pull_quotes_remote_workspace_with_spaces(
 
     def _record_scp(cmd, **kwargs):
         scp_calls.append(cmd)
-        Path(cmd[-1]).write_text("message")
+        Path(cmd[-1]).write_text(_PULLED_MSG.format(body="message"))
         return subprocess.CompletedProcess(cmd, 0)
 
     monkeypatch.setattr(agent_cli.subprocess, "run", _record_scp)
@@ -606,7 +644,7 @@ def test_pull_concurrent_publish_deduplicates_atomically(
     )
 
     def _concurrent_scp(cmd, **kwargs):
-        Path(cmd[-1]).write_text("this pull")
+        Path(cmd[-1]).write_text(_PULLED_MSG.format(body="this pull"))
         destination.write_text("concurrent winner")
         return subprocess.CompletedProcess(cmd, 0)
 

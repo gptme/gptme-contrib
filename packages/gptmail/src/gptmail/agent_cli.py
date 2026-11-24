@@ -1592,6 +1592,26 @@ def _pull_destination(row: dict, *, fallback_mailbox: str) -> Path | None:
     return _within(inbox, filename)
 
 
+def _pulled_binding_error(path: Path, *, peer: str, recipient: str) -> str | None:
+    """Why a message pulled from ``peer`` must not be imported, or ``None``.
+
+    The pulled bytes come from the peer's own outbox, so ``from`` must name that
+    peer, the same binding ``receive`` enforces on its per-sender key. ``to``
+    is checked against the fetched file, not the peer-supplied listing row.
+    """
+    meta = meta_of(path)
+    if meta is None:
+        return "no parseable frontmatter"
+    sender = str(meta.get("from") or "").strip().lower()
+    if sender != peer.strip().lower():
+        return f"'from' is {sender or '(missing)'!r}, not the peer {peer!r}"
+    to = meta.get("to")
+    targets = to if isinstance(to, list) else [to]
+    if recipient.strip().lower() not in {str(t or "").strip().lower() for t in targets}:
+        return f"'to' does not name {recipient!r}"
+    return None
+
+
 def _fetch_from_agent(
     agent_name: str,
     agent: dict[str, str],
@@ -1692,6 +1712,10 @@ def _fetch_from_agent(
                 capture_output=True,
                 timeout=15,
             )
+            refusal = _pulled_binding_error(temp_dest, peer=agent_name, recipient=self_name)
+            if refusal:
+                click.echo(f"Warning: refusing {filename} from {agent_name}: {refusal}", err=True)
+                continue
             # Receiver-local arrival, not a timestamp supplied by the sender.
             arrival = time.time()
             os.utime(temp_dest, (arrival, arrival))
