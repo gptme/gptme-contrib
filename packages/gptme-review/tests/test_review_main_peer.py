@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import subprocess
+from types import SimpleNamespace
 
 import pytest
 from gptme_review import review as review_cli
@@ -22,7 +23,7 @@ DIFF = """diff --git a/app.py b/app.py
 """
 
 
-def _peer(calls: list, *, pr_state: str = "OPEN"):
+def _peer_io(calls: list, *, pr_state: str = "OPEN"):
     io = writer.default_io(sweep_identity("alice-agent", "alice-ai-review"))
 
     def gh_json(cmd, *a, **kw):
@@ -46,7 +47,11 @@ def _peer(calls: list, *, pr_state: str = "OPEN"):
     io.gh_json = gh_json
     io.gh_paginated_list = lambda cmd, *a, **kw: []
     io.run = run
-    return writer.bind_io(io)
+    return io
+
+
+def _peer(calls: list, *, pr_state: str = "OPEN"):
+    return writer.bind_io(_peer_io(calls, pr_state=pr_state))
 
 
 def test_peer_plan_only_runs_without_brain_names(capsys):
@@ -70,6 +75,24 @@ def test_peer_refuses_the_subscription_engine(capsys):
     rc = w.review_main(["alice/repo", "7", "--engine", "subscription", "--plan-only"])
     assert rc == 2
     assert "error:" in capsys.readouterr().err
+
+
+def test_subscription_hook_must_set_panel_reviewers(capsys):
+    """A hook that only returns the plan dict gets a clear error before any review,
+    not an AttributeError on args.panel_reviewers after the diff is fetched."""
+    calls: list = []
+    io = _peer_io(calls)
+    admitted = SimpleNamespace(engine="subscription", reviewers=["x"], skipped=[])
+    io.routing = SimpleNamespace(resolve_route=lambda repo, **kw: admitted)
+    io.configure_subscription_plan = lambda args: {
+        "reviewers": ["x"],
+        "requested_passes": 1,
+        "requested_min_agreement": 1,
+    }
+    rc = writer.bind_io(io).review_main(["alice/repo", "7", "--engine", "subscription"])
+    assert rc == 2
+    assert "args.panel_reviewers" in capsys.readouterr().err
+    assert not any(c[0] == "run" and c[1][:3] == ("gh", "pr", "diff") for c in calls)
 
 
 def test_peer_agent_engine_fails_closed_without_posting(capsys):

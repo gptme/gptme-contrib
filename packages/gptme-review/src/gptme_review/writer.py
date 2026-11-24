@@ -4644,6 +4644,12 @@ def shard_review_key_remaining() -> float | None:
 
 
 def configure_subscription_plan(args: argparse.Namespace) -> dict[str, object]:
+    """Host hook: return the review plan and set ``args.panel_reviewers``.
+
+    ``review_main`` stores the returned plan as ``args.resolved_review_plan``;
+    the plan carries reviewer keys only, so the hook must also attach the
+    selected reviewer objects. The peer default refuses the engine.
+    """
     raise ReviewError("--engine subscription needs a host that implements it")
 
 
@@ -4941,6 +4947,15 @@ def review_main(
             plan = _io.configure_subscription_plan(args)
         except _io.ReviewError as exc:
             print(f"error: {exc}", file=sys.stderr)
+            return 2
+        # Contract: the hook returns the plan and sets args.panel_reviewers to
+        # the selected reviewer objects (the plan only carries their keys).
+        args.resolved_review_plan = plan
+        if not getattr(args, "panel_reviewers", None):
+            print(
+                "error: configure_subscription_plan must set args.panel_reviewers",
+                file=sys.stderr,
+            )
             return 2
         planned_reviewers = plan["reviewers"]
         assert isinstance(planned_reviewers, list)
