@@ -152,7 +152,7 @@ def _slot_account(path: Path) -> str | None:
 
 
 def _persist_probe_refresh(
-    live: Path, slot: Path, expected_account: str | None
+    live: Path, slot: Path, expected_account: str | None, original: bytes
 ) -> None:
     """Copy tokens Claude Code refreshed during a probe back into the slot.
 
@@ -163,7 +163,9 @@ def _persist_probe_refresh(
     ``expected_account`` is the slot's ``accountUuid`` read before the probe.
     When the slot names an account, a file that names a different account (or
     none) is never written: one slot must not end up holding another
-    account's tokens.
+    account's tokens. ``original`` is the slot's content before the probe;
+    a slot changed since then (e.g. re-authenticated by the operator, whether
+    or not it names an account) is never overwritten.
     """
     if live.is_symlink() or not live.is_file():
         return
@@ -174,15 +176,19 @@ def _persist_probe_refresh(
         return
     if not isinstance(oauth, dict) or not oauth.get("refreshToken"):
         return
-    if expected_account is not None and (
-        oauth.get("accountUuid") != expected_account
-        # The slot may have been re-authenticated as another account while the
-        # probe ran; never overwrite that with the probed account's tokens.
-        or _slot_account(slot) != expected_account
-    ):
+    if expected_account is not None and (oauth.get("accountUuid") != expected_account):
         logger.warning(
             "probe refresh for %s names a different account; slot left unchanged",
             slot.name,
+        )
+        return
+    try:
+        unchanged = slot.read_bytes() == original
+    except OSError:
+        unchanged = False
+    if not unchanged:
+        logger.warning(
+            "slot %s changed while it was probed; refresh not written", slot.name
         )
         return
     fd, tmp_name = tempfile.mkstemp(prefix=f".{slot.name}.", dir=slot.parent)
@@ -219,6 +225,7 @@ def probe_credential(
     try:
         target_credential = path.expanduser().resolve()
         expected_account = _slot_account(target_credential)
+        original = target_credential.read_bytes()
         with tempfile.TemporaryDirectory(
             prefix=f"gptme-subscription-probe-{sub}-"
         ) as tmp:
@@ -243,7 +250,7 @@ def probe_credential(
                 # Also on timeout: a refresh written before a hang would
                 # otherwise be deleted with the temporary directory.
                 _persist_probe_refresh(
-                    live_credential, target_credential, expected_account
+                    live_credential, target_credential, expected_account, original
                 )
     except subprocess.TimeoutExpired:
         return info, False, f"probe timed out after {timeout}s"

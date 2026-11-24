@@ -39,3 +39,10 @@ def test_long_retry_loop_reraises_original_error_not_overflow():
 
     with pytest.raises(Flaky):
         poll()
+
+
+def test_zero_base_wait_stays_zero_past_overflow():
+    from gptme_backoff.error_classification import StrategyConfig
+
+    cfg = StrategyConfig(base_wait=0.0, multiplier=2.0, max_wait=60.0, jitter=False)
+    assert cfg.compute_wait(1025) == 0.0

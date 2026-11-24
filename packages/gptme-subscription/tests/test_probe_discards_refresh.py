@@ -174,3 +174,23 @@ def test_probe_refresh_does_not_overwrite_slot_reauthenticated_mid_probe(
     oauth = json.loads(slot.read_text())["claudeAiOauth"]
     assert oauth["accountUuid"] == "account-b"
     assert oauth["refreshToken"] == "b-refresh"
+
+
+def test_probe_refresh_does_not_overwrite_legacy_slot_reauthenticated_mid_probe(
+    tmp_path: Path,
+) -> None:
+    # Same race for a slot written before Claude Code recorded accountUuid.
+    slot = tmp_path / ".credentials.json.alice"
+    _write_slot(slot)
+    script = _refresh_script(
+        tmp_path,
+        "slot = Path(" + repr(str(slot)) + ")\n"
+        "slot.unlink()\n"
+        'slot.write_text(json.dumps({"claudeAiOauth": {"refreshToken": "b-refresh", '
+        '"accessToken": "b", "expiresAt": 1}}))',
+    )
+
+    _, ok, message = probe_credential(slot, "alice", usage_script=script)
+    assert ok, message
+
+    assert json.loads(slot.read_text())["claudeAiOauth"]["refreshToken"] == "b-refresh"

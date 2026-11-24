@@ -110,7 +110,8 @@ class StrategyConfig:
         try:
             wait = self.base_wait * (self.multiplier ** (attempt - 1))
         except OverflowError:  # huge attempt: the formula's min() caps it anyway
-            wait = self.max_wait
+            # ...unless the base is zero, where every wait stays zero.
+            wait = self.max_wait if self.base_wait > 0 else 0.0
         wait = min(wait, self.max_wait)
         if self.jitter:
             # Additive jitter: spread retries across [wait, 2*wait) so a fleet
