@@ -150,3 +150,16 @@ def test_small_text():
 
     assert len(chunks) == 1
     assert chunks[0]["text"] == text
+
+
+@pytest.mark.parametrize("chunk_size,overlap", [(5, 0), (7, 3), (10, 4), (3, 1)])
+def test_chunks_never_split_multibyte_characters(chunk_size, overlap):
+    """#2356 R4: a token boundary inside a character decoded to U+FFFD."""
+    text = "日本語のテキスト 🎉🚀 emoji ünïcödé " * 8
+    processor = DocumentProcessor(chunk_size=chunk_size, chunk_overlap=overlap)
+    chunks = [c["text"] for c in processor.process_text(text)]
+    assert len(chunks) > 1
+    for chunk in chunks:
+        assert "�" not in chunk, chunk
+    # Every character of the input is covered by some chunk.
+    assert set(text) <= set("".join(chunks))
