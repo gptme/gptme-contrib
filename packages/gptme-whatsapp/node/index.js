@@ -27,6 +27,7 @@ const { Client, LocalAuth } = pkg;
 import qrcode from 'qrcode-terminal';
 import { spawn } from 'child_process';
 import { existsSync } from 'fs';
+import { sessionArgs } from './claude-session.js';
 
 // Config from env
 const AGENT_NAME = process.env.GPTME_AGENT || 'sven';
@@ -134,7 +135,8 @@ async function callGptme(sender, message) {
 
 /**
  * Call Claude Code with the message and return the response.
- * Uses --append-system-prompt-file for agent identity and --resume for history.
+ * Uses --append-system-prompt-file for agent identity and a per-sender session
+ * (--session-id on the first message, --resume after) for history.
  */
 async function callClaudeCode(sender, message) {
     const args = ['-p', message, '--output-format', 'text'];
@@ -144,9 +146,10 @@ async function callClaudeCode(sender, message) {
         args.push('--append-system-prompt-file', SYSTEM_PROMPT_FILE);
     }
 
-    // Resume previous conversation for this sender (maintains history)
+    // Per-sender session (maintains history). --resume needs an existing
+    // session, so the first message creates it under a deterministic UUID.
     const convId = `whatsapp-${AGENT_NAME}-${sender.replace(/[^a-zA-Z0-9]/g, '-')}`;
-    args.push('--resume', convId);
+    args.push(...sessionArgs(convId));
 
     return spawnAndCapture(CLAUDE_CMD, args, (output) => {
         // Claude Code --output-format text returns just the response
