@@ -20,6 +20,10 @@ from .detect import Detection, Detector
 
 logger = logging.getLogger(__name__)
 
+# After this many consecutive failed reads the cached frame is dropped so a
+# dead camera cannot be described as the current view.
+STALE_AFTER_FAILED_READS = 5
+
 # Event kinds
 PERSON_APPEARED = "person_appeared"
 PERSON_LEFT = "person_left"
@@ -91,10 +95,12 @@ class VisionPipeline:
             self.latest_frame = frame.copy()
 
         detections: list[Detection] = []
+        detector_failed = False
         for detector in self.detectors:
             try:
                 detections.extend(detector.detect(frame))
             except Exception:
+                detector_failed = True
                 logger.exception("detector %r failed", detector)
 
         events: list[VisionEvent] = []
@@ -106,7 +112,8 @@ class VisionPipeline:
             if not self._person_present:
                 self._person_present = True
                 events.append(VisionEvent(PERSON_APPEARED, persons))
-        elif self._person_present:
+        elif self._person_present and not detector_failed:
+            # A failing detector is not evidence of absence.
             self._frames_without_person += 1
             if self._frames_without_person >= self.absent_frames_for_left:
                 self._person_present = False
@@ -127,6 +134,7 @@ class VisionPipeline:
     # -- thread lifecycle --------------------------------------------------
 
     def _run(self) -> None:
+        failed_reads = 0
         while not self._stop.is_set():
             started = time.monotonic()
             try:
@@ -134,10 +142,16 @@ class VisionPipeline:
                 if frame is None:
                     if getattr(self.source, "stop_on_empty", True):
                         break
+                    failed_reads += 1
                 else:
+                    failed_reads = 0
                     self._process_frame(frame)
             except Exception:
+                failed_reads += 1
                 logger.exception("pipeline step failed")
+            if failed_reads == STALE_AFTER_FAILED_READS:
+                with self._latest_frame_lock:
+                    self.latest_frame = None
             elapsed = time.monotonic() - started
             self._stop.wait(max(0.0, self.interval_s - elapsed))
 
@@ -150,6 +164,11 @@ class VisionPipeline:
         with self._latest_frame_lock:
             # Drop the previous session's snapshot so look cannot describe a stale scene.
             self.latest_frame = None
+        for detector in self.detectors:
+            reset = getattr(detector, "reset", None)
+            if callable(reset):
+                # Don't diff the first frame against the previous session's background.
+                reset()
         self._thread = threading.Thread(
             target=self._run, name="vision-pipeline", daemon=True
         )

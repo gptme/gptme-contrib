@@ -21,10 +21,11 @@ import cv2
 from .detect import Detection, Detector
 from .frame_source import FrameSource
 from .look import encode_frame_jpeg
-from .pipeline import VisionEvent, VisionPipeline
+from .pipeline import MOTION, VisionEvent, VisionPipeline
 
 logger = logging.getLogger(__name__)
 _MAX_PENDING_EVENT_SENDS = 4
+_MAX_PENDING_STATE_SENDS = 16
 
 SendMessage = Callable[[str], Awaitable[None]]
 _T = TypeVar("_T")
@@ -89,8 +90,19 @@ class VisionBridge:
         send_message = self._send_message
         if send_message is None:
             return
-        if len(self._pending_sends) >= _MAX_PENDING_EVENT_SENDS:
-            logger.warning("dropping vision event while transport is backlogged")
+        # Motion is dropped first under backlog: presence changes are
+        # edge-triggered and never re-sent, so losing one leaves the host with
+        # a permanently wrong view of whether someone is there. They still
+        # get a (larger) bound so a dead transport cannot grow the queue.
+        limit = (
+            _MAX_PENDING_EVENT_SENDS
+            if event.kind == MOTION
+            else _MAX_PENDING_STATE_SENDS
+        )
+        if len(self._pending_sends) >= limit:
+            logger.warning(
+                "dropping %s event while transport is backlogged", event.kind
+            )
             return
         message = json.dumps(
             {
