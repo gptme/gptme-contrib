@@ -141,6 +141,9 @@ class Follower:
         # Tool results can arrive a poll after the corresponding reflog entry.
         self._git_shell: list[tuple[float, Path, AgentEvent]] = []
         self._git_pending: list[tuple[float, Path, AgentEvent]] = []
+        # Recently emitted reflog commits (time, common dir, sha): a shell
+        # result naming the same sha after the pairing window is a duplicate.
+        self._git_emitted: list[tuple[float, Path, str]] = []
         self.agent = agent
         self.active_window = active_window
         self.rescan_interval = rescan_interval
@@ -151,6 +154,9 @@ class Follower:
         self.clock = clock
         self._files: dict[Path, _File] = {}  # followed (recently active)
         self._cold: dict[Path, tuple[int, int]] = {}  # idle: (offset, inode)
+        # Extractors of idle files with open tool calls: a long call's result
+        # can arrive after the file went idle.
+        self._cold_extractors: dict[Path, Extractor] = {}
         self._children: dict[Path, set[str]] = {}  # directory listings
         self._warm: set[Path] = set()  # directories quick scans descend into
         self._listed_mtime: dict[Path, float] = {}  # directory mtime at last listing
@@ -224,6 +230,7 @@ class Follower:
         if full:
             for gone in [p for p in self._cold if p not in seen]:
                 del self._cold[gone]
+                self._cold_extractors.pop(gone, None)
 
     def _consider(self, harness: str, path: Path, full: bool, first: bool, now: float) -> None:
         if path in self._files or (path in self._cold and not full):
@@ -237,6 +244,7 @@ class Follower:
             if st.st_ino == inode and st.st_size == offset:
                 return
             del self._cold[path]
+            extractor = self._cold_extractors.pop(path, None)
             appended = st.st_ino == inode and st.st_size > offset
             self._files[path] = _File(
                 harness,
@@ -244,7 +252,8 @@ class Follower:
                 offset=offset if appended else 0,
                 inode=st.st_ino,
                 mtime=st.st_mtime,
-                not_before="" if appended else _iso(now - self.discovery_slack),
+                not_before="" if appended else _iso(now - self._slack(full)),
+                extractor=extractor if appended else None,
             )
             return
         if first:
@@ -253,6 +262,10 @@ class Follower:
                 return
             offset = 0 if self.from_start else st.st_size
             self._files[path] = _File(harness, path, offset, st.st_ino, st.st_mtime)
+            if not self.from_start:
+                # Nothing before the file's current end is new: if it is later
+                # rewritten (gptme compaction), don't replay its history.
+                self._files[path].last_ts = _iso(st.st_mtime)
             return
         # Appeared after startup: a new session, or history moved into place.
         self._files[path] = _File(
@@ -262,8 +275,16 @@ class Follower:
             inode=st.st_ino,
             mtime=st.st_mtime,
             announce="subagents" not in path.parts,  # subagents belong to their parent
-            not_before=_iso(now - self.discovery_slack),
+            not_before=_iso(now - self._slack(full)),
         )
+
+    def _slack(self, full: bool) -> float:
+        """How far before discovery a new file's events still count as live.
+
+        Only the full sweep finds files in directories quick scans skip, up to
+        ``full_scan_interval`` after they appear.
+        """
+        return self.discovery_slack + (self.full_scan_interval if full else 0.0)
 
     # -- reading -----------------------------------------------------------
 
@@ -347,6 +368,8 @@ class Follower:
             if f.path in self._files and now - f.mtime > self.active_window:
                 del self._files[f.path]
                 self._cold[f.path] = (f.offset - len(f.buf), f.inode)
+                if f.extractor is not None and f.extractor._pending:
+                    self._cold_extractors[f.path] = f.extractor
         for e in events:
             self._session_harness[e.session] = e.harness
         if self.git is not None:
@@ -362,10 +385,21 @@ class Follower:
                     self.git.watch(e.detail[key])
         now = self.clock()
         self._git_shell = [item for item in self._git_shell if now - item[0] <= 120]
+        self._git_emitted = [item for item in self._git_emitted if now - item[0] <= 120]
         kept = []
         for e in events:
             directory = str(e.detail.get("dir") or e.detail.get("cwd") or "")
             common = self.git.common_dir(directory) if e.kind in ("commit", "push") else None
+            sha = str(e.detail.get("sha") or "") if e.kind == "commit" else ""
+            if (
+                common is not None
+                and sha
+                and any(
+                    repo == common and (done.startswith(sha) or sha.startswith(done))
+                    for _, repo, done in self._git_emitted
+                )
+            ):
+                continue  # the reflog already reported this commit
             if common is not None and self.git.watches(directory):
                 self._git_shell.append((now, common, e))
             else:
@@ -416,6 +450,8 @@ class Follower:
                 pending.append((seen, common, e))
                 continue
             e.harness = self._session_harness.get(e.session, e.harness)
+            if e.kind == "commit" and e.detail.get("sha"):
+                self._git_emitted.append((now, common, str(e.detail["sha"])))
             kept.append(e)
         self._git_pending = pending
         # If no reflog exists (e.g. core.logAllRefUpdates=false), retain the
