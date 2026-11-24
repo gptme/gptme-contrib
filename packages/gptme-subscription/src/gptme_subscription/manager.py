@@ -546,7 +546,7 @@ class SubscriptionManager:
                         value = source.get(source_key)
                         if isinstance(value, int | float):
                             entry[key] = float(value)
-                    pressure = subscription_pressure_from_usage(usage)
+                    pressure = self._pressure(usage)
                     if pressure is not None:
                         entry["pressure"] = round(pressure, 3)
                 data[sub] = entry
@@ -620,12 +620,22 @@ class SubscriptionManager:
 
         return sorted(cfg.fallback_order, key=score)
 
+    def _pressure(self, usage: dict[str, Any]) -> float | None:
+        """Score pressure with the same thresholds ``is_subscription_blocked`` uses."""
+        cfg = self.config
+        return subscription_pressure_from_usage(
+            usage,
+            weekly_exhausted=cfg.weekly_exhausted,
+            five_hour_threshold=cfg.five_hour_exhausted,
+            sonnet_weekly_exhausted=cfg.sonnet_weekly_exhausted,
+        )
+
     def best_lower_pressure_fallback(
         self, active: str, active_usage: dict[str, Any], now: datetime | None = None
     ) -> tuple[str, float, float] | None:
         cfg = self.config
         current_time = now or datetime.now(timezone.utc)
-        active_pressure = subscription_pressure_from_usage(active_usage)
+        active_pressure = self._pressure(active_usage)
         if (
             active_pressure is None
             or active_pressure < cfg.capacity_rebalance_min_pressure
