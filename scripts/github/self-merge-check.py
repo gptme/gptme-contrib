@@ -1751,10 +1751,9 @@ def _single_pass_consensus_coherent(consensus: Any) -> bool:
         and jobs_requested is not None
         and jobs_requested >= 1
         and jobs_answered == jobs_requested
-        and applied is not None
-        and asked is not None
-        and applied >= 1
-        and applied == asked
+        # One pass can only agree with itself: any other threshold is incoherent.
+        and applied == 1
+        and asked == 1
     )
 
 

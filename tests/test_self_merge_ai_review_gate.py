@@ -310,6 +310,8 @@ def test_explicit_single_pass_consensus_below_clean_is_rejected(
         {"min_agreement_requested": 2},  # clamped: the sweep's until-dry shape
         {"jobs_answered": 0},
         {"answered": 0},
+        # One pass cannot supply two agreeing passes, even unclamped.
+        {"min_agreement": 2, "min_agreement_requested": 2},
     ],
 )
 def test_incoherent_single_pass_is_rejected_even_at_clean(
