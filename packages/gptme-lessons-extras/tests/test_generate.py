@@ -5,6 +5,8 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
+
 # Only stub gptme when the real package is absent. Installing a bare
 # types.ModuleType (which has no __path__) unconditionally pollutes sys.modules
 # across multi-package test runs: the stub shadows the real package for all
@@ -266,3 +268,50 @@ def test_generate_lessons_from_analysis_uses_default_lessons_dir(
 
     assert seen["existing_lessons_dir"].resolve() == lessons_dir.resolve()
     assert generated == [output_dir / "patterns" / "generated.md"]
+
+
+def _raise_401(*args, **kwargs):
+    raise RuntimeError("401 invalid x-api-key")
+
+
+def test_generate_cli_exits_nonzero_when_every_generation_errors(
+    monkeypatch, tmp_path: Path
+) -> None:
+    # #2362 E9: an LLM outage was reported as "No lessons generated", exit 0.
+    from click.testing import CliRunner
+
+    analysis_file = tmp_path / "analysis.json"
+    _write_author_analysis(analysis_file, "Use patch tool", "ctx")
+    monkeypatch.setattr(generate, "llm_author_reflect", _raise_401)
+
+    result = CliRunner().invoke(
+        generate.cli,
+        [
+            "generate",
+            str(analysis_file),
+            "-o",
+            str(tmp_path / "out"),
+            "--no-check-existing",
+            "--existing-lessons-dir",
+            str(tmp_path),
+        ],
+    )
+
+    assert "Usage:" not in result.output
+    assert result.exit_code == 1
+    assert "401 invalid x-api-key" in result.output
+
+
+def test_generate_lessons_with_evolution_raises_when_every_generation_errors(
+    monkeypatch, tmp_path: Path
+) -> None:
+    analysis_file = tmp_path / "analysis.json"
+    _write_analysis(analysis_file, "Use patch tool", "ctx")
+    monkeypatch.setattr(generate, "gepa_lite_evolve", _raise_401)
+
+    with pytest.raises(RuntimeError, match="all 1 lesson generation attempt"):
+        generate.generate_lessons_with_evolution(
+            analysis_file=analysis_file,
+            output_dir=tmp_path / "out",
+            check_existing=False,
+        )

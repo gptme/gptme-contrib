@@ -121,6 +121,20 @@ def _check_existing_lesson_similarity(
     )
 
 
+def _raise_if_every_generation_failed(
+    generated: list[Path], errors: list[Exception]
+) -> None:
+    """Turn "every attempt errored" into an error instead of an empty result.
+
+    Otherwise an outage (e.g. a 401 from the LLM provider) is reported as
+    "no lessons generated" and the CLI exits 0.
+    """
+    if errors and not generated:
+        raise RuntimeError(
+            f"all {len(errors)} lesson generation attempt(s) failed; last error: {errors[-1]}"
+        )
+
+
 def generate_lessons_with_evolution(
     analysis_file: Path,
     output_dir: Path,
@@ -187,7 +201,8 @@ def generate_lessons_with_evolution(
         print(f"  Experiences: {len(experiences)} (min confidence: {min_confidence})")
         print(f"  Variants per experience: {num_variants}")
 
-    generated_files = []
+    generated_files: list[Path] = []
+    errors: list[Exception] = []
 
     for i, moment in enumerate(experiences, 1):
         title = moment.get("title", "Unknown")
@@ -257,7 +272,10 @@ def generate_lessons_with_evolution(
         except Exception as e:
             if verbose:
                 print(f"  ❌ Error generating lesson: {e}")
+            errors.append(e)
             continue
+
+    _raise_if_every_generation_failed(generated_files, errors)
 
     if verbose:
         print(f"\n{'=' * 60}")
@@ -338,6 +356,7 @@ def generate_lessons_from_analysis(
         click.echo(f"  Checking against existing lessons in {existing_lessons_dir}")
 
     generated_lessons = []
+    errors: list[Exception] = []
     skipped_lessons = []
 
     for i, moment in enumerate(high_confidence_moments, 1):
@@ -396,7 +415,10 @@ def generate_lessons_from_analysis(
             click.echo(f"    ✓ Saved to {filepath}")
         except Exception as e:
             click.echo(f"    ✗ Error: {e}", err=True)
+            errors.append(e)
             continue
+
+    _raise_if_every_generation_failed(generated_lessons, errors)
 
     # Report summary
     if skipped_lessons:
