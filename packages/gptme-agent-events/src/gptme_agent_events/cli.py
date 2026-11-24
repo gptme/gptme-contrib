@@ -10,6 +10,7 @@ ssh bob 'gptme-agent-events tail --agent bob' | gptme-agent-events sound
 from __future__ import annotations
 
 import json
+import math
 import os
 import socket
 import sys
@@ -96,15 +97,21 @@ def tail(
     follower = Follower(sources, agent, active_window=active_window, from_start=from_start, git=git)
     try:
         if once:
-            for ev in follower.poll():
+            # flush(): a single poll must not drop commits/pushes held for pairing.
+            for ev in [*follower.poll(), *follower.flush()]:
                 click.echo(ev.to_json())
+            sys.stdout.flush()
             return
         for ev in follower.run(interval):
             # Flush per event: consumers are usually on the far end of a pipe or ssh.
             click.echo(ev.to_json())
             sys.stdout.flush()
-    except (KeyboardInterrupt, BrokenPipeError):
+    except KeyboardInterrupt:
         pass
+    except BrokenPipeError:
+        # The consumer went away (head, a closed ssh pipe): a normal shutdown.
+        # Point stdout at devnull so the interpreter's final flush cannot fail.
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
 
 
 def _pairs(values: tuple[str, ...], what: str) -> dict[str, str]:
@@ -164,6 +171,9 @@ def sound(
         factors = {k: float(v) for k, v in _pairs(agent_volume, "--agent-volume").items()}
     except ValueError as e:
         raise click.BadParameter(f"--agent-volume factor must be a number: {e}") from e
+    for name, factor in factors.items():
+        if not math.isfinite(factor) or factor < 0:
+            raise click.BadParameter(f"--agent-volume factor for {name} must be >= 0")
     player = SoundPlayer(
         directory or Path("."),
         mapping=mapping,

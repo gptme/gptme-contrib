@@ -142,12 +142,17 @@ class SoundPlayer:
             self.last_status = "dry-run"
             return name
         path = self.sounds_dir / f"{name}.wav"
-        volume = self.volume * self.agent_volume.get(event.agent, 1.0)
+        volume = min(1.0, max(0.0, self.volume * self.agent_volume.get(event.agent, 1.0)))
         cmd = player_command(path, volume)
         if cmd is None or not path.exists():
             self.last_status = "unavailable"
             return None
-        proc = self._spawn(cmd)
+        try:
+            proc = self._spawn(cmd)
+        except OSError:
+            # The player vanished after `which`, or fork failed: skip this sound.
+            self.last_status = "unavailable"
+            return None
         if proc is not None:
             self._inflight.append(proc)
         self.last_status = "played"

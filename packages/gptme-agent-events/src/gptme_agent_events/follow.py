@@ -353,6 +353,19 @@ class Follower:
             events = self._with_git(events, rediscover=scanned)
         return events
 
+    def flush(self) -> list[AgentEvent]:
+        """Release commits/pushes still held back for reflog pairing.
+
+        :meth:`poll` holds them for a later poll; a one-shot caller has none.
+        """
+        out = []
+        for _, _, e in self._git_pending:
+            e.harness = self._session_harness.get(e.session, e.harness)
+            out.append(e)
+        out += [e for _, _, e in self._git_shell]
+        self._git_pending, self._git_shell = [], []
+        return out
+
     def _with_git(self, events: list[AgentEvent], rediscover: bool) -> list[AgentEvent]:
         """Use git's reflogs as the source of truth for commits and pushes."""
         assert self.git is not None
