@@ -11,6 +11,7 @@ Rules, first that applies: ``excluded_fallback``, ``lane``, ``lane_pressure``,
 
 from __future__ import annotations
 
+import math
 import shlex
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -103,7 +104,7 @@ def compute_width(
     if reading.used >= end:
         return 0, f"{where}: at end target {end:.2f}"
     band = pool.rank * RANK_BAND
-    if gap >= -band:
+    if gap >= -band or math.isclose(gap, -band, rel_tol=0.0, abs_tol=1e-12):
         if pool.rank == 0:
             return None, f"{where}: on pace, owner width unchanged"
         return 0, f"{where}: within rank {pool.rank} band {band:.2f}"

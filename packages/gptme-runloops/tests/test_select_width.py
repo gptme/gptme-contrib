@@ -39,6 +39,18 @@ def test_width(kw, used, elapsed, width):
     assert compute_width(pool(**kw), at(used, elapsed))[0] == width
 
 
+@pytest.mark.parametrize("rank", [0, 1, 2])
+@pytest.mark.parametrize("offset", [-0.000001, 0.0, 0.000001])
+def test_rank_band_boundary(rank, offset):
+    # At half-week the target is 0.49; equality must not open the consumer.
+    used = 0.49 - rank * 0.02 + offset
+    width, _ = compute_width(pool(rank=rank), at(used, 0.5))
+    if offset < 0:
+        assert width is not None and width > 0
+    else:
+        assert width == (None if rank == 0 else 0)
+
+
 def test_owner_on_pace_has_no_opinion():
     width, why = compute_width(pool(), at(0.50, 0.50))
     assert width is None and "owner width unchanged" in why
