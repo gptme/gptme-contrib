@@ -95,15 +95,9 @@ _SECRET_PATTERNS = (
     re.compile(r"\b(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{6,}"),
     re.compile(r"\bxox[abprs]-[A-Za-z0-9\-]{6,}"),
     re.compile(r"\bAIza[A-Za-z0-9_\-]{10,}"),
-    # URL-embedded credentials: ``https://user:pass@host`` and schemeless
-    # ``user:pass@host`` (proxy errors). Keep the user, drop the password.
-    # The password runs to the LAST ``@host`` in the token, so a raw ``@`` or
-    # ``/`` in it (proxy errors don't percent-encode) is not published. This
-    # also redacts look-alikes such as ``message-id:abc@example.com``; that is
-    # deliberate — over-redacting costs detail, a leak costs a secret. Both
-    # runs are bounded: this text is untrusted and redacted before truncation,
-    # and unbounded runs made a long colon-rich token quadratic.
-    re.compile(r"\b([A-Za-z0-9._%+\-]{1,128}:)[^\s/][^\s]{0,255}(?=@[A-Za-z0-9\[])"),
+    # URL-embedded credentials (``user:pass@host``) are handled by
+    # ``_redact_url_credentials`` below: a bounded regex either leaks passwords
+    # longer than its bound or goes quadratic on colon-rich tokens.
     # Authorization headers / bearer tokens.
     re.compile(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=\-]{6,}"),
     # key=value / key: value for secret-ish keys. A quoted value is removed
@@ -212,9 +206,49 @@ def _redact_ambiguous_quoted(text: str) -> str:
         pos = close + 1
 
 
+# URL-embedded credentials: ``https://user:pass@host`` and schemeless
+# ``user:pass@host`` (proxy errors). Keep the user, drop the password.
+_USERINFO_USER = re.compile(r"\b[A-Za-z0-9._%+\-]{1,128}:")
+_USERINFO_HOST = re.compile(r"@[A-Za-z0-9\[]")
+
+
+def _redact_url_credential_token(token: str) -> str:
+    # The password runs to the LAST ``@host``: proxy errors don't
+    # percent-encode, so a raw ``@`` or ``/`` may be part of it, and its length
+    # is unbounded. The first ``word:`` not followed by ``//`` ends the user;
+    # a ``scheme://`` colon is skipped, so ``https://bob:/pw@host`` redacts
+    # ``/pw``. Not covered: a password that itself starts with ``//``
+    # (``bob://pw@host`` reads as a scheme, like ``ssh://git@host``).
+    # Look-alikes such as ``message-id:abc@example.com`` are redacted too;
+    # that is deliberate — over-redacting costs detail, a leak costs a secret.
+    at = -1
+    for m in _USERINFO_HOST.finditer(token):
+        at = m.start()
+    if at <= 0:
+        return token
+    for m in _USERINFO_USER.finditer(token, 0, at):
+        if token.startswith("//", m.end()):
+            continue
+        if m.end() == at:
+            return token
+        return token[: m.end()] + "[REDACTED]" + token[at:]
+    return token
+
+
+def _redact_url_credentials(text: str) -> str:
+    """Redact ``user:pass@host`` passwords, per whitespace-delimited token.
+
+    Linear in the input: this text is untrusted and is redacted before
+    truncation, so every token of any length is scanned a bounded number of
+    times.
+    """
+    return re.sub(r"\S+", lambda m: _redact_url_credential_token(m.group(0)), text)
+
+
 def _redact(text: str) -> str:
     """Scrub credential-shaped substrings from text bound for outbound channels."""
     text = _redact_ambiguous_quoted(text)
+    text = _redact_url_credentials(text)
     for pat in _SECRET_PATTERNS:
         if pat.groups:
             text = pat.sub(lambda m: m.group(1) + "[REDACTED]", text)

@@ -1422,9 +1422,33 @@ def test_url_credential_with_raw_at_or_slash_is_fully_redacted() -> None:
     )
 
 
+def test_url_credential_with_leading_slash_is_redacted() -> None:
+    # The ``scheme://`` colon is skipped, not every password starting with ``/``.
+    assert (
+        soc._redact("https://bob:/hunter2pw@proxy.internal")
+        == "https://bob:[REDACTED]@proxy.internal"
+    )
+    assert soc._redact("bob:/hunter2pw@proxy.internal") == (
+        "bob:[REDACTED]@proxy.internal"
+    )
+    # A URL with ``@`` in its path and no credentials is left alone.
+    url = "https://registry.npmjs.org/@types/node"
+    assert soc._redact(url) == url
+
+
+def test_url_credential_longer_than_any_bound_is_redacted() -> None:
+    password = "a" * 5000
+    out = soc._redact(f"https://bob:{password}@proxy.internal")
+    assert out == "https://bob:[REDACTED]@proxy.internal"
+    assert password[:20] not in out
+
+
 def test_url_credential_redaction_is_linear_on_hostile_input() -> None:
     # Error text is untrusted and redacted before truncation.
     start = time.monotonic()
     soc._redact("a:" * 100_000)
     soc._redact("a." * 100_000 + ":")
+    soc._redact("a:" * 100_000 + "@h")
+    soc._redact("a://" * 100_000 + "@h")
+    soc._redact("a." * 100_000 + ":x@h")
     assert time.monotonic() - start < 2.0
