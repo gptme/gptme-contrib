@@ -141,8 +141,8 @@ class Follower:
         # Tool results can arrive a poll after the corresponding reflog entry.
         self._git_shell: list[tuple[float, Path, AgentEvent]] = []
         self._git_pending: list[tuple[float, Path, AgentEvent]] = []
-        # Recently emitted reflog commits (time, common dir, sha): a shell
-        # result naming the same sha after the pairing window is a duplicate.
+        # Recently emitted commits (time, common dir, sha), from the reflog or
+        # from shell evidence alone: the other side arriving later is a duplicate.
         self._git_emitted: list[tuple[float, Path, str]] = []
         self.agent = agent
         self.active_window = active_window
@@ -390,15 +390,7 @@ class Follower:
         for e in events:
             directory = str(e.detail.get("dir") or e.detail.get("cwd") or "")
             common = self.git.common_dir(directory) if e.kind in ("commit", "push") else None
-            sha = str(e.detail.get("sha") or "") if e.kind == "commit" else ""
-            if (
-                common is not None
-                and sha
-                and any(
-                    repo == common and (done.startswith(sha) or sha.startswith(done))
-                    for _, repo, done in self._git_emitted
-                )
-            ):
+            if common is not None and self._emitted(common, e):
                 continue  # the reflog already reported this commit
             if common is not None and self.git.watches(directory):
                 self._git_shell.append((now, common, e))
@@ -411,6 +403,8 @@ class Follower:
         # consumed: proximity alone must be unique in both directions.
         batch = list(self._git_pending)
         for seen, common, e in batch:
+            if self._emitted(common, e):
+                continue  # already reported from shell evidence alone
             matches = []
             for item in self._git_shell:
                 when, repo, shell = item
@@ -459,11 +453,21 @@ class Follower:
         waiting = []
         for seen, common, e in self._git_shell:
             if now - seen >= 5:
+                if e.kind == "commit" and e.detail.get("sha"):
+                    self._git_emitted.append((now, common, str(e.detail["sha"])))
                 kept.append(e)
             else:
                 waiting.append((seen, common, e))
         self._git_shell = waiting
         return kept
+
+    def _emitted(self, common: Path, e: AgentEvent) -> bool:
+        """Whether commit ``e`` was already reported for the repo at ``common``."""
+        sha = str(e.detail.get("sha") or "") if e.kind == "commit" else ""
+        return bool(sha) and any(
+            repo == common and (done.startswith(sha) or sha.startswith(done))
+            for _, repo, done in self._git_emitted
+        )
 
     def run(self, interval: float = 0.5) -> Iterator[AgentEvent]:
         while True:

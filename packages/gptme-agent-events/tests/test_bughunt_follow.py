@@ -228,3 +228,75 @@ def test_r1_5_commit_double_reported_when_tool_result_lags_reflog(repo):
     assert len(commits) == 1, [
         (e.session, e.detail.get("source"), e.detail.get("sha")) for e in commits
     ]
+
+
+def test_r1_5b_shell_commit_flushed_without_reflog_not_repeated_when_reflog_lands(repo):
+    """A shell commit released after 5s with no reflog (core.logAllRefUpdates=false
+    or a late reflog) must count as reported: when the reflog entry for that same
+    sha shows up later, it is not a second landing."""
+    now = [100.0]
+    w = GitWatcher()
+    w.watch(str(repo))
+    f = Follower([], git=w, clock=lambda: now[0])
+    sha = commit(repo, "late reflog", None)
+    log = repo / ".git" / "logs" / "HEAD"
+    saved = log.read_bytes()
+    log.write_bytes(b"")  # the reflog entry is not visible yet
+    shell = AgentEvent(
+        kind="commit",
+        ts="2099-01-01T00:00:00+00:00",
+        harness="claude-code",
+        session="s",
+        tool="Bash",
+        detail={"dir": str(repo), "sha": sha[:7]},
+    )
+    events = f._with_git([shell], False)
+    now[0] += 6
+    events += f._with_git([], False)  # released from shell evidence alone
+    assert [e.session for e in events] == ["s"]
+    log.write_bytes(saved)
+    now[0] += 20
+    events += f._with_git([], False)
+    now[0] += 6
+    events += f._with_git([], False)
+    commits = [e for e in events if e.kind == "commit"]
+    assert len(commits) == 1, [
+        (e.session, e.detail.get("source"), e.detail.get("sha")) for e in commits
+    ]
+
+
+def test_r1_2b_retired_gptme_log_rewritten_with_result_keeps_the_landing(tmp_path):
+    """gptme only replaces conversation.jsonl (edit/undo/compaction) by rewriting the
+    whole log, so the replacement still holds the open call: a fresh extractor that
+    re-reads it from the start pairs the result. History stays unreported."""
+    clock = Clock()
+    root = tmp_path / "logs"
+    convo = root / "2026-11-12-convo"
+    convo.mkdir(parents=True)
+    log = convo / "conversation.jsonl"
+    log.write_text("")
+    touch(log, clock)
+    f = Follower([gptme_source(root)], rescan_interval=0, full_scan_interval=60, clock=clock)
+    f.poll()
+
+    def msg(role: str, content: str, ts: str, call_id: str | None = None) -> str:
+        rec = {"role": role, "content": content, "timestamp": ts}
+        if call_id:
+            rec["call_id"] = call_id
+        return json.dumps(rec) + "\n"
+
+    call = msg("assistant", '\n@gh(call_1): {"command": "pr create --fill"}', iso(clock.t))
+    log.write_text(call)
+    touch(log, clock)
+    assert [e.kind for e in f.poll()] == ["tool"]
+    clock.t += 601  # the call is still running; the file is retired
+    assert f.poll() == []
+    tmp = convo / "tmp"
+    tmp.write_text(call + msg("system", "https://github.com/o/r/pull/7", iso(clock.t), "call_1"))
+    tmp.replace(log)  # new inode
+    touch(log, clock)
+    events = []
+    for _ in range(3):
+        clock.t += 61
+        events += f.poll()
+    assert [e.kind for e in events] == ["pr_open"]
