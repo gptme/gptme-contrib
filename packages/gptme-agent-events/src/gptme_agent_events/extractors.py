@@ -323,6 +323,47 @@ _CODEX_EXIT_RE = re.compile(
     r"(?:exited with code|exit_code[\"']?\s*:|Exit code:)\s*(-?\d+)", re.IGNORECASE
 )
 _CODEX_PATCH_PATH_RE = re.compile(r"^\*\*\* (?:Add|Update) File: (.+)$", re.MULTILINE)
+_CODEX_WORKDIR_RE = re.compile(r"""\bworkdir["']?\s*:\s*("(?:\\.|[^"\\])*")""")
+_SHELL_WRAPPERS = {"bash", "sh", "zsh", "dash"}
+
+
+def _codex_output(out: Any) -> tuple[int | None, bool, str]:
+    """(exit code, still running, text) of a Codex tool result.
+
+    The ``exec`` tool returns a list of text blocks, one holding
+    ``JSON.stringify`` of the exec_command result; read its ``exit_code`` and
+    ``output`` directly instead of regex-matching an escaped dump of it.
+    """
+    if isinstance(out, list):
+        blocks = [
+            b["text"] if isinstance(b, dict) else b
+            for b in out
+            if isinstance(b, str) or (isinstance(b, dict) and isinstance(b.get("text"), str))
+        ]
+    elif isinstance(out, str):
+        blocks = [out]
+    else:
+        blocks = [json.dumps(out)]
+    code: int | None = None
+    texts = []
+    for block in blocks:
+        try:
+            data = json.loads(block)
+        except ValueError:
+            data = None
+        if isinstance(data, dict) and ("exit_code" in data or "output" in data):
+            if isinstance(data.get("exit_code"), int):
+                code = data["exit_code"]
+            if isinstance(data.get("output"), str):
+                texts.append(data["output"])
+        else:
+            texts.append(block)
+    text = "\n".join(texts)
+    if code is None:
+        m = _CODEX_EXIT_RE.search(text)
+        code = int(m.group(1)) if m else None
+    running = code is None and text.lstrip().startswith("Script running")
+    return code, running, text
 
 
 class CodexExtractor(Extractor):
@@ -359,16 +400,23 @@ class CodexExtractor(Extractor):
             raw = payload.get("arguments", payload.get("input", payload.get("action")))
             text = raw if isinstance(raw, str) else json.dumps(raw)
             ev, _ = self._tool(ts, name, self._command(text), call_id)
+            workdir = self._workdir(text)
+            if call_id in self._pending and workdir:
+                # exec_command's own workdir, not the session cwd, is where git ran.
+                self._pending[call_id] = (*self._pending[call_id][:3], workdir)
             if name == "apply_patch":
                 m = _CODEX_PATCH_PATH_RE.search(text)
                 if m:
                     ev.detail["path"] = m.group(1).strip()
             return [ev]
         if ptype in ("function_call_output", "custom_tool_call_output") and call_id:
-            out = payload.get("output")
-            text = out if isinstance(out, str) else json.dumps(out)
-            m = _CODEX_EXIT_RE.search(text)
-            return self._result(ts, call_id, bool(m and int(m.group(1)) != 0), text)
+            code, running, text = _codex_output(payload.get("output"))
+            if running:
+                # Yield expired with the command still going (slow hooks): its
+                # outcome is unknown here, so report no landing.
+                self._pending.pop(call_id, None)
+                return []
+            return self._result(ts, call_id, code is not None and code != 0, text)
         return []
 
     @staticmethod
@@ -381,11 +429,38 @@ class CodexExtractor(Extractor):
         if isinstance(args, dict):
             cmd = args.get("cmd", args.get("command"))
             if isinstance(cmd, list):
-                return " ".join(str(c) for c in cmd)
+                argv = [str(c) for c in cmd]
+                # Legacy shell / local_shell_call: ["bash", "-lc", script].
+                if (
+                    len(argv) == 3
+                    and os.path.basename(argv[0]) in _SHELL_WRAPPERS
+                    and argv[1].startswith("-")
+                    and argv[1].endswith("c")
+                ):
+                    return argv[2]
+                return " ".join(argv)
             if isinstance(cmd, str):
                 return cmd
         found = [m.group(2) for m in _CODEX_CMD_RE.finditer(text)]
         return "\n".join(found) if found else None
+
+    @staticmethod
+    def _workdir(text: str) -> str | None:
+        """The call's own ``workdir``, when every command in it names the same one."""
+        try:
+            args = json.loads(text)
+        except ValueError:
+            args = None
+        if isinstance(args, dict):
+            wd = args.get("workdir")
+            return wd if isinstance(wd, str) and wd else None
+        found = set()
+        for m in _CODEX_WORKDIR_RE.finditer(text):
+            try:
+                found.add(json.loads(m.group(1)))
+            except ValueError:
+                return None
+        return found.pop() if len(found) == 1 else None
 
 
 EXTRACTORS: dict[str, type[Extractor]] = {

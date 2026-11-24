@@ -1,0 +1,172 @@
+"""Regression tests from the 2026-11-24 verified bug hunt (Codex extractor, timestamps).
+
+Record shapes mirror real Codex rollouts: the ``exec`` custom tool returns a list of
+``input_text`` blocks, one holding ``JSON.stringify`` of the exec_command result.
+"""
+
+from __future__ import annotations
+
+import json
+import subprocess
+
+import pytest
+
+from gptme_agent_events import CodexExtractor, GptmeExtractor
+from gptme_agent_events.extractors import _github_slug
+
+
+def codex(rtype, payload, ts="2026-11-12T12:00:00.000Z"):
+    return {"type": rtype, "timestamp": ts, "payload": payload}
+
+
+def exec_call(call_id, cmd, workdir=None):
+    args = {"cmd": cmd, "yield_time_ms": 30000, "max_output_tokens": 12000}
+    if workdir:
+        args["workdir"] = workdir
+    src = f"const r = await tools.exec_command({json.dumps(args)});\ntext(JSON.stringify(r));\n"
+    return codex(
+        "response_item",
+        {"type": "custom_tool_call", "name": "exec", "call_id": call_id, "input": src},
+    )
+
+
+def exec_output(call_id, exit_code, output):
+    inner = json.dumps(
+        {
+            "chunk_id": "33ee69",
+            "wall_time_seconds": 0.1,
+            "exit_code": exit_code,
+            "original_token_count": 10,
+            "output": output,
+        },
+        separators=(",", ":"),
+    )
+    return codex(
+        "response_item",
+        {
+            "type": "custom_tool_call_output",
+            "call_id": call_id,
+            "output": [
+                {
+                    "type": "input_text",
+                    "text": "Script completed\nWall time 0.1 seconds\nOutput:\n",
+                },
+                {"type": "input_text", "text": inner},
+            ],
+        },
+    )
+
+
+def landings(events):
+    return [e.kind for e in events if e.kind in ("commit", "push", "pr_open", "error")]
+
+
+@pytest.fixture
+def two_repos(tmp_path):
+    """A private brain checkout (the session cwd) and a public worktree (the workdir)."""
+    repos = {}
+    for name, origin in (
+        ("brain", "git@github.com:ErikBjare/bob.git"),
+        ("wt", "git@github.com:gptme/gptme-contrib.git"),
+    ):
+        d = tmp_path / name
+        d.mkdir()
+        subprocess.run(["git", "init", "-q", str(d)], check=True)
+        subprocess.run(["git", "-C", str(d), "remote", "add", "origin", origin], check=True)
+        repos[name] = d
+    _github_slug.cache_clear()
+    return repos
+
+
+# R2-1 -------------------------------------------------------------------------
+def test_r2_1_codex_exec_failed_commit_is_error_not_commit():
+    """Real rollout: git commit failed with exit 128 (index.lock) -> must not be a commit."""
+    ex = CodexExtractor("r")
+    ex.feed(exec_call("c1", "git commit -m 'fix: x'"))
+    out = ex.feed(
+        exec_output("c1", 128, "fatal: Unable to create '.git/index.lock': File exists.\n")
+    )
+    assert landings(out) == ["error"]
+
+
+# R2-2 -------------------------------------------------------------------------
+def test_r2_2_codex_exec_commit_uses_workdir_not_session_cwd(two_repos):
+    """exec_command's ``workdir`` (present on ~94% of real calls) is where git runs."""
+    ex = CodexExtractor("r")
+    ex.feed(codex("turn_context", {"cwd": str(two_repos["brain"])}))
+    ex.feed(exec_call("c1", "git commit -m 'fix: x'", workdir=str(two_repos["wt"])))
+    (commit,) = ex.feed(exec_output("c1", 0, "[feat/x 6528ea53] fix: x\n 1 file changed\n"))
+    assert commit.kind == "commit"
+    assert commit.detail.get("dir") == str(two_repos["wt"])
+    assert commit.detail.get("repo") == "gptme/gptme-contrib"
+
+
+# R2-3 -------------------------------------------------------------------------
+def test_r2_3_codex_still_running_commit_is_not_reported_as_landed():
+    """'Script running with cell ID N' (yield expired, hooks still running) shows no success."""
+    ex = CodexExtractor("r")
+    ex.feed(exec_call("c1", "git commit -m 'fix: x'"))
+    out = ex.feed(
+        codex(
+            "response_item",
+            {
+                "type": "custom_tool_call_output",
+                "call_id": "c1",
+                "output": "Script running with cell ID 22\nWall time 10.0 seconds\nOutput:\n",
+            },
+        )
+    )
+    assert "commit" not in landings(out)
+
+
+# R2-4 -------------------------------------------------------------------------
+def test_r2_4_codex_exec_commit_sha_is_extracted():
+    """Real exec commit output (rollout 2026-10-01): hook output with '[100%]' precedes '[master sha]'."""
+    ex = CodexExtractor("r")
+    ex.feed(exec_call("c1", "git commit -m 'refactor: x'"))
+    (commit,) = ex.feed(
+        exec_output(
+            "c1",
+            0,
+            ".....                                                    [100%]\n"
+            "9 passed, 63 deselected in 1.44s\n"
+            "ruff-format..............................................Passed\n"
+            "[master 8eea2ac] refactor: x\n 1 file changed\n",
+        )
+    )
+    assert commit.kind == "commit"
+    assert commit.detail.get("sha") == "8eea2ac"
+
+
+# R2-5 -------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "ts", ["9999-12-31T23:59:59-05:00", "0001-01-01T00:00:00+01:00", "0001-01-01T00:00:00"]
+)
+def test_r2_5_out_of_range_timestamp_does_not_crash_feed(ts):
+    """normalize_ts promises 'unparseable values fall back to now'; one odd line must not raise."""
+    ex = GptmeExtractor("c")
+    events = ex.feed({"role": "assistant", "content": "done", "timestamp": ts})
+    assert [e.kind for e in events] == ["turn_end"]
+
+
+# R2-6 -------------------------------------------------------------------------
+def test_r2_6_codex_local_shell_bash_lc_push_is_detected():
+    """local_shell_call / legacy shell pass argv ['bash','-lc', script]; the script is the command."""
+    ex = CodexExtractor("r")
+    ex.feed(
+        codex(
+            "response_item",
+            {
+                "type": "local_shell_call",
+                "call_id": "c1",
+                "action": {"type": "exec", "command": ["bash", "-lc", "git push origin HEAD"]},
+            },
+        )
+    )
+    out = ex.feed(
+        codex(
+            "response_item",
+            {"type": "function_call_output", "call_id": "c1", "output": "Exit code: 0\n"},
+        )
+    )
+    assert landings(out) == ["push"]

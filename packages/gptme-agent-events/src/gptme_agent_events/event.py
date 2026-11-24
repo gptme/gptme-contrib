@@ -54,9 +54,12 @@ def normalize_ts(ts: Any) -> str:
         dt = datetime.fromisoformat(text)
     except ValueError:
         return utc_now()
-    if dt.tzinfo is None:
-        dt = dt.astimezone()  # naive: local time
-    return dt.astimezone(timezone.utc).isoformat(timespec="milliseconds")
+    try:
+        if dt.tzinfo is None:
+            dt = dt.astimezone()  # naive: local time
+        return dt.astimezone(timezone.utc).isoformat(timespec="milliseconds")
+    except (ValueError, OverflowError):  # e.g. year 1 or 9999 near the UTC edge
+        return utc_now()
 
 
 @dataclass
