@@ -1142,3 +1142,18 @@ def test_classify_rate_limit_phrases(error_text: str):
         error_text=error_text,
     )
     assert reason == FAILURE_REASON_RATE_LIMIT
+
+
+def test_classify_empty_provider_stream_as_model_stream_crash():
+    """gptme's EmptyStreamError: the provider stream ended without output (#1890)."""
+    reason = classify_failure_reason(
+        exit_code=1,
+        duration_seconds=106,
+        input_tokens=30536,
+        has_assistant_turn=False,
+        error_text=(
+            "gh pass-through: gh issue list --limit 200\n"
+            "ERROR Provider stream for openai-subscription/gpt-6.1-sol ended without any output"
+        ),
+    )
+    assert reason == FAILURE_REASON_MODEL_STREAM_CRASH

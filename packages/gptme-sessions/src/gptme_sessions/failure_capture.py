@@ -100,13 +100,19 @@ def _mentions_http_400(error_text: str) -> bool:
 
 
 def _mentions_model_stream_crash(lower: str) -> bool:
-    """gptme OpenAI-stream IndexError — not an unrelated list-index crash.
+    """A model stream that broke or ended empty — not an unrelated crash.
 
-    ``llm_openai`` is the observed production marker (module path in the
-    traceback / harness stderr). A bare ``in stream`` substring also matches
-    "in streaming mode" / "requests in stream" and is not used.
+    Two production shapes:
+    - gptme OpenAI-stream IndexError. ``llm_openai`` is the observed marker
+      (module path in the traceback / harness stderr). A bare ``in stream``
+      substring also matches "in streaming mode" / "requests in stream" and
+      is not used.
+    - gptme ``EmptyStreamError``: "Provider stream for MODEL ended without any
+      output".
     """
-    return "list index out of range" in lower and "llm_openai" in lower
+    if "list index out of range" in lower and "llm_openai" in lower:
+        return True
+    return "provider stream for " in lower and "ended without any output" in lower
 
 
 # HTTP status codes must stand alone: a bare ``402`` alternation matched the
