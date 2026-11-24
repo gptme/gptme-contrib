@@ -254,7 +254,9 @@ def test_agent_id_harness_prefers_neutral_env(monkeypatch) -> None:
     from gptme_coordination.worktree_guard import _get_agent_id
 
     for var in (
+        "AGENT_ID",
         "BOB_AUTONOMOUS_AGENT_ID",
+        "CASCADE_SUPPLEMENTAL_AGENT",
         "GIT_COMMITTER_SESSION_ID",
         "BOB_SESSION_ID",
         "CC_SESSION_ID",
@@ -274,6 +276,32 @@ def test_agent_id_harness_prefers_neutral_env(monkeypatch) -> None:
     monkeypatch.delenv("AGENT_AMBIENT_HARNESS", raising=False)
     monkeypatch.delenv("BOB_AMBIENT_HARNESS", raising=False)
     assert _get_agent_id() == "bob-autonomous-agent-s1"
+
+
+def test_push_identity_uses_claim_owner_but_marker_does_not(monkeypatch) -> None:
+    """A launcher that claims branches under a claim-owner id must push as it.
+
+    Without this, a session's own ``pr-branch:`` claim (made under the
+    claim owner) read as a live sibling on its own push: 255 of 381
+    ``push_would_deny`` soak rows on Bob were such self-matches. The occupancy
+    marker must still ignore it: a dead PID plus a recorded agent id is
+    treated as alive, so recording it would pin dead holders' markers.
+    """
+    from gptme_coordination.worktree_guard import _get_agent_id, _get_marker_agent_id
+
+    for var in ("AGENT_ID", "BOB_AUTONOMOUS_AGENT_ID"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("BOB_SESSION_ID", "s1")
+    monkeypatch.setenv("BOB_AMBIENT_HARNESS", "claude-code")
+    monkeypatch.setenv(
+        "CASCADE_SUPPLEMENTAL_AGENT", "bob-autonomous-claude-code-9983-s1"
+    )
+    assert _get_agent_id() == "bob-autonomous-claude-code-9983-s1"
+    assert _get_marker_agent_id() == ""
+
+    # An explicit agent id (e.g. a project-monitoring executor) still wins.
+    monkeypatch.setenv("BOB_AUTONOMOUS_AGENT_ID", "project-monitoring-42")
+    assert _get_agent_id() == "project-monitoring-42"
 
 
 def test_brain_root_honors_workspace_env(monkeypatch, tmp_path: Path) -> None:
@@ -583,6 +611,7 @@ def test_agent_id_reads_agent_neutral_spelling(monkeypatch) -> None:
     for var in (
         "AGENT_ID",
         "BOB_AUTONOMOUS_AGENT_ID",
+        "CASCADE_SUPPLEMENTAL_AGENT",
         "AGENT_AMBIENT_HARNESS",
         "BOB_AMBIENT_HARNESS",
         "AGENT_SESSION_ID",
