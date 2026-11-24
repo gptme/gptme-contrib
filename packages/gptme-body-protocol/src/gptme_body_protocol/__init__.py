@@ -40,12 +40,19 @@ class Command:
 
 def encode_message(message: Handshake | Command) -> bytes:
     """Encode one newline-framed protocol message."""
-    return (json.dumps(asdict(message), separators=(",", ":")) + "\n").encode()
+    # allow_nan=False: NaN/Infinity are not JSON, and a non-finite goal must be
+    # refused here rather than framed for the body node.
+    payload = json.dumps(asdict(message), separators=(",", ":"), allow_nan=False)
+    return (payload + "\n").encode()
+
+
+def _reject_constant(token: str) -> Any:
+    raise ValueError(f"body-node response contains non-JSON constant {token}")
 
 
 def decode_message(line: bytes) -> dict[str, Any]:
     """Decode one response, rejecting non-object JSON and foreign protocols."""
-    value = json.loads(line)
+    value = json.loads(line, parse_constant=_reject_constant)
     if not isinstance(value, dict):
         raise ValueError("body-node response must be a JSON object")
     protocol = value.get("protocol")
