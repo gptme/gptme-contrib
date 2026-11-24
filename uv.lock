@@ -1526,7 +1526,7 @@ requires-dist = [
     { name = "flask", marker = "extra == 'oauth'", specifier = ">=2.0" },
     { name = "gptme-redact", marker = "python_full_version >= '3.11' and extra == 'secrets'", editable = "packages/gptme-redact" },
     { name = "markdown", specifier = ">=3.4" },
-    { name = "mcp", marker = "extra == 'bridge'", specifier = ">=1.2" },
+    { name = "mcp", marker = "extra == 'bridge'", specifier = ">=1.2,<2" },
     { name = "mypy", marker = "extra == 'test'", specifier = ">=1.0" },
     { name = "packaging", marker = "extra == 'test'", specifier = ">=23.0" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=7.0" },
@@ -2352,7 +2352,7 @@ test = [
 [package.metadata]
 requires-dist = [
     { name = "gptme", git = "https://github.com/gptme/gptme.git?branch=master" },
-    { name = "mcp", specifier = ">=1.0" },
+    { name = "mcp", specifier = ">=1.0,<2" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.0.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=7.0" },
@@ -2957,7 +2957,7 @@ test = [
 [package.metadata]
 requires-dist = [
     { name = "gptme-wisdom", editable = "packages/gptme-wisdom" },
-    { name = "mcp", specifier = ">=1.0" },
+    { name = "mcp", specifier = ">=1.0,<2" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.0.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=7.0" },

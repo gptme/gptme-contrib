@@ -21,7 +21,7 @@ classifiers = [
     "Topic :: Utilities",
 ]
 dependencies = [
-    "mcp>=1.0",
+    "mcp>=1.0,<2",
     "gptme>=0.1.0",
 ]
 
