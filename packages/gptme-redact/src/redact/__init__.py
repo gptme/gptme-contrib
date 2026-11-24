@@ -217,7 +217,9 @@ _PATTERNS: list[Pattern] = [
     # emails for 3 days, 2026-10-23..26). Real API keys appear after whitespace,
     # punctuation, or an assignment character (`=`/`:`) — never after a letter.
     Pattern(
-        re.compile(r"(?<![A-Za-z])(?:sk|pk)-[A-Za-z0-9_-]{24,64}"),
+        # Unbounded: a 64-char cap left the tail of longer keys (e.g.
+        # sk-ant-sid01-…) visible after the redaction marker.
+        re.compile(r"(?<![A-Za-z])(?:sk|pk)-[A-Za-z0-9_-]{24,}"),
         Severity.CRITICAL,
         "openai_key",
     ),
@@ -479,6 +481,15 @@ _PATTERNS: list[Pattern] = [
         Severity.CRITICAL,
         "bearer_header",
     ),
+    # HTTP Basic auth: base64("user:password"), the sibling of the Bearer form.
+    Pattern(
+        re.compile(
+            r"\bAuthorization:\s*Basic\s+[A-Za-z0-9+/]{8,}={0,2}",
+            re.IGNORECASE,
+        ),
+        Severity.CRITICAL,
+        "basic_auth_header",
+    ),
     # JWT (JSON Web Token) — header.payload.signature in base64url. The header
     # and payload are base64url-encoded JSON objects, which may include JSON
     # whitespace. Validate decoded objects rather than assuming an eyJ prefix.
@@ -616,7 +627,9 @@ _PATTERNS: list[Pattern] = [
             # A closing mapping-key quote followed by ':' permits JSON's
             # multiline whitespace. Line-based assignments keep horizontal
             # padding so an empty value cannot consume the next setting.
-            r"(?P<sep>['\"][ \t\r\n]*:[ \t\r\n]*|['\"]?[ \t]*[:=][ \t]*)"
+            # `=>` (PHP/Ruby hashes) and `:=` (Go) are separators too; otherwise
+            # the `>`/`=` was captured as a short HIGH value and the secret leaked.
+            r"(?P<sep>['\"][ \t\r\n]*:[ \t\r\n]*|['\"]?[ \t]*(?:=>|:=|[:=])[ \t]*)"
             # Quoted values include punctuation/spaces and escaped delimiters.
             # Prefer a complete quoted value, including embedded newlines.
             # Truncated snippets end at a line boundary or EOF instead of a

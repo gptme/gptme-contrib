@@ -96,3 +96,27 @@ def test_email_still_matched_after_long_local_part_run() -> None:
     r = redact("contact " + "a" * 500 + "@example.org now", literals=[])
     assert any(f.category == "email" for f in r.findings)
     assert "a" * 500 not in r.redacted
+
+
+SECRET = "Zq9xVb7mN3kL2pR8"
+
+
+def test_php_ruby_hash_rocket_password_is_redacted() -> None:
+    _contained(f"'password' => '{SECRET}',", SECRET)
+
+
+def test_go_short_var_decl_token_is_redacted() -> None:
+    _contained(f'token := "{SECRET}"', SECRET)
+
+
+def test_http_basic_authorization_header_is_redacted() -> None:
+    b64 = "dXNlcjpaczl4VmI3bU4za0wycFI4"  # base64("user:" + synthetic pw)
+    _contained(f"Authorization: Basic {b64}", b64)
+
+
+def test_long_sk_key_leaves_no_tail() -> None:
+    tail = "Zz" * 30
+    key = "sk-ant-sid01-" + "Ab_-" * 16 + tail
+    r = redact(key, literals=[])
+    assert r.blocked
+    assert tail not in r.redacted
