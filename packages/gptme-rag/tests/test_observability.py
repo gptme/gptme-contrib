@@ -682,3 +682,44 @@ def test_slice_age_only_stale_has_per_slice_reason():
     assert health.slices["task"].status == "stale"
     slice_reasons = [r for r in health.reasons if "task" in r]
     assert slice_reasons, f"expected per-slice reason for 'task', got: {health.reasons}"
+
+
+def _strict_json(line: str):
+    def reject(token):
+        raise ValueError(f"non-standard JSON constant {token}")
+
+    return json.loads(line, parse_constant=reject)
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf"), "nan"])
+def test_log_injection_writes_non_finite_scores_as_zero(tmp_path, bad):
+    """#2356 L5: a NaN score was written as the invalid JSON token ``NaN``."""
+    log = tmp_path / "injections.jsonl"
+    record = log_injection(
+        log,
+        "q",
+        [{"id": "d", "similarity": bad}, {"id": "e", "similarity": 0.5}],
+        backend="tfidf",
+        session_id="s",
+        harness="test",
+    )
+    assert record is not None
+    assert record["top_score"] == 0.0
+    assert [h["score"] for h in record["hits"]] == [0.0, 0.5]
+    written = _strict_json(log.read_text().strip())
+    assert written["top_score"] == 0.0
+
+
+def test_summarize_skips_non_finite_top_score(tmp_path):
+    """A NaN already in a log must not turn avg_top_score into NaN."""
+    log = tmp_path / "injections.jsonl"
+    log.write_text(
+        '{"num_hits": 1, "top_score": NaN}\n'
+        '{"num_hits": 1, "top_score": Infinity}\n'
+        + json.dumps({"num_hits": 2, "top_score": 0.8})
+        + "\n"
+    )
+    stats = summarize_injections(log)
+    assert stats.malformed == 2
+    assert stats.total == 1
+    assert stats.avg_top_score == pytest.approx(0.8)

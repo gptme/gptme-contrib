@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
@@ -119,13 +120,19 @@ def detect_session_id(env_vars: Sequence[str] = DEFAULT_SESSION_ENV_VARS) -> str
 
 
 def _as_score(value: Any) -> float:
-    """Coerce a hit score to float; unusable values become 0.0 rather than raise."""
+    """Coerce a hit score to float; unusable values become 0.0 rather than raise.
+
+    NaN and infinities count as unusable: ``json.dumps`` would write them as
+    ``NaN``/``Infinity``, which is not valid JSON, and one NaN poisons any
+    average computed from the log.
+    """
     if value is None:
         return 0.0
     try:
-        return float(value)
+        score = float(value)
     except (TypeError, ValueError, OverflowError):
         return 0.0
+    return score if math.isfinite(score) else 0.0
 
 
 def _copyable_hit_field(value: Any) -> bool:
@@ -252,6 +259,9 @@ def summarize_injections(log_file: Path) -> InjectionStats:
             try:
                 num_hits = int(rec.get("num_hits", 0) or 0)
                 top_score = float(rec.get("top_score", 0.0) or 0.0)
+                if not math.isfinite(top_score):
+                    # json.loads accepts NaN/Infinity from older writers.
+                    raise ValueError("non-finite top_score")
             except (TypeError, ValueError, OverflowError):
                 # Same contract as a partial trailing line: skip, don't raise.
                 stats.malformed += 1
