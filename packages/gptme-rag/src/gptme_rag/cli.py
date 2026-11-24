@@ -398,7 +398,9 @@ def index(
         # Sources indexed earlier under one of the requested paths whose file no
         # longer exists: drop their chunks so search stops returning deleted
         # content. Sources outside the requested paths are left alone.
-        roots = [os.path.abspath(p) for p in paths]
+        # Collection resolves symlink roots before storing source paths; pruning
+        # must use that same namespace, including when a root is relative.
+        roots = [str(p.resolve()) for p in paths]
         deleted_sources = {
             source
             for source in existing_files
