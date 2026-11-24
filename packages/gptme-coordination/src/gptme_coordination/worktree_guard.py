@@ -65,6 +65,8 @@ _AGENT_ID_ENV = ("AGENT_ID", "BOB_AUTONOMOUS_AGENT_ID")
 # ``_get_marker_agent_id``).
 _CLAIM_OWNER_ENV = ("CASCADE_SUPPLEMENTAL_AGENT",)
 _GUARD_FORCE_ENV = ("AGENT_WORKTREE_GUARD_FORCE", "BOB_WORKTREE_GUARD_FORCE")
+# Optional identity-aware holder liveness probe; see ``_probe_holder_liveness``.
+_LIVENESS_PROBE_ENV = "AGENT_WORKTREE_LIVENESS_PROBE"
 _PUSH_GUARD_DENY_ENV = (
     "AGENT_WORKTREE_PUSH_GUARD_DENY",
     "BOB_WORKTREE_PUSH_GUARD_DENY",
@@ -374,10 +376,10 @@ def _is_holder_alive(marker: dict[str, Any]) -> bool:
     1. Direct ``/proc/<pid>`` check — fast and conclusive when the pid is fresh.
     2. No authoritative ``agent_id`` recorded → the dead PID is conclusive:
        treat the holder as dead so dead-holder takeover can proceed.
-    3. Authoritative ``agent_id`` present → fail-safe-alive. The brain repo
-       additionally probes claim-shape-aware liveness via ``coordination.health``
-       (sentinel scans for autonomous session ids); until that lands upstream,
-       an unverifiable holder is treated as alive rather than stolen.
+    3. Authoritative ``agent_id`` present → ask the workspace liveness probe
+       named by ``AGENT_WORKTREE_LIVENESS_PROBE`` (see ``_probe_holder_liveness``).
+       Without a probe, or when it has no verdict, fail-safe-alive: an
+       unverifiable holder is treated as alive rather than stolen.
 
     The marker only records an env-provided ``agent_id`` (see
     ``_get_marker_agent_id``), so a synthesized id can never mask a dead PID.
@@ -388,7 +390,42 @@ def _is_holder_alive(marker: dict[str, Any]) -> bool:
 
     # PID is dead. Only an authoritative agent id can keep the holder "alive"
     # for further probing; otherwise the dead PID is conclusive.
-    return bool(marker.get("agent_id", ""))
+    if not marker.get("agent_id", ""):
+        return False
+    verdict = _probe_holder_liveness(marker)
+    return True if verdict is None else verdict
+
+
+def _probe_holder_liveness(marker: dict[str, Any]) -> bool | None:
+    """Ask the workspace's identity-aware liveness probe, if one is configured.
+
+    ``AGENT_WORKTREE_LIVENESS_PROBE`` names a Python file (absolute path) that
+    defines ``is_holder_alive(marker) -> bool | None``. Agents whose session
+    identities carry a liveness signal (a launcher PID, a process sentinel)
+    can prove a dead holder dead instead of leaving the worktree pinned.
+
+    The file is loaded by path, so it works under the hooks' ``python3 -I``.
+    Returns None (no verdict, so the caller stays fail-safe-alive) when the
+    variable is unset or relative, the file is missing, it raises, or it
+    returns anything other than a bool.
+    """
+    probe_path = os.environ.get(_LIVENESS_PROBE_ENV, "")
+    if not probe_path or not os.path.isabs(probe_path):
+        return None
+    try:
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "_agent_worktree_liveness_probe", probe_path
+        )
+        if spec is None or spec.loader is None:
+            return None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        verdict = module.is_holder_alive(dict(marker))
+    except Exception:  # noqa: BLE001 — a broken probe must not steal a worktree
+        return None
+    return verdict if isinstance(verdict, bool) else None
 
 
 def _claim_expired(claim: Any) -> bool:

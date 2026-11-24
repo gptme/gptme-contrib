@@ -22,6 +22,8 @@ CONTRIB_ROOT = Path(__file__).resolve().parents[3]
 def _outside_any_checkout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep ``git remote get-url upstream`` from reading this checkout's remotes."""
     monkeypatch.chdir(tmp_path)
+    # A workspace may configure this fleet-wide; tests set it explicitly.
+    monkeypatch.delenv("AGENT_WORKTREE_LIVENESS_PROBE", raising=False)
 
 
 def test_legacy_key_unqualifies_repo_qualified_branch_claim() -> None:
@@ -391,6 +393,85 @@ def test_dead_pid_without_authoritative_agent_id_is_dead() -> None:
     dead_pid = 2**22  # > pid_max on Linux default configurations
     assert _is_holder_alive({"pid": dead_pid, "agent_id": ""}) is False
     assert _is_holder_alive({"pid": dead_pid, "agent_id": "bob-autonomous-x"}) is True
+
+
+_DEAD_PID = 2**22  # > pid_max on Linux default configurations
+
+
+def _write_probe(tmp_path: Path, body: str) -> Path:
+    probe = tmp_path / "liveness_probe.py"
+    probe.write_text(body)
+    return probe
+
+
+@pytest.mark.parametrize("verdict", [True, False])
+def test_liveness_probe_decides_dead_pid_with_agent_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, verdict: bool
+) -> None:
+    """A configured probe can prove an authoritative holder dead (or alive)."""
+    from gptme_coordination.worktree_guard import _is_holder_alive
+
+    probe = _write_probe(
+        tmp_path,
+        "def is_holder_alive(marker):\n"
+        f"    assert marker['agent_id'] == 'bob-autonomous-x'\n"
+        f"    return {verdict}\n",
+    )
+    monkeypatch.setenv("AGENT_WORKTREE_LIVENESS_PROBE", str(probe))
+    marker = {"pid": _DEAD_PID, "agent_id": "bob-autonomous-x"}
+    assert _is_holder_alive(marker) is verdict
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "def is_holder_alive(marker):\n    raise RuntimeError('boom')\n",
+        "def is_holder_alive(marker):\n    return None\n",
+        "def is_holder_alive(marker):\n    return 'dead'\n",
+        "raise ImportError('broken module')\n",
+        "x = 1\n",  # no is_holder_alive defined
+    ],
+)
+def test_liveness_probe_without_verdict_stays_fail_safe_alive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str
+) -> None:
+    """A broken or undecided probe must never steal a worktree."""
+    from gptme_coordination.worktree_guard import _is_holder_alive
+
+    monkeypatch.setenv(
+        "AGENT_WORKTREE_LIVENESS_PROBE", str(_write_probe(tmp_path, body))
+    )
+    assert _is_holder_alive({"pid": _DEAD_PID, "agent_id": "bob-autonomous-x"}) is True
+
+
+@pytest.mark.parametrize("value", ["relative/probe.py", "/nonexistent/probe.py"])
+def test_liveness_probe_unusable_path_stays_fail_safe_alive(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    from gptme_coordination.worktree_guard import _is_holder_alive
+
+    monkeypatch.setenv("AGENT_WORKTREE_LIVENESS_PROBE", value)
+    assert _is_holder_alive({"pid": _DEAD_PID, "agent_id": "bob-autonomous-x"}) is True
+
+
+def test_liveness_probe_not_consulted_when_pid_alive_or_no_agent_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The probe only refines the dead-PID-with-agent-id case."""
+    from gptme_coordination.worktree_guard import _is_holder_alive
+
+    calls = tmp_path / "calls"
+    probe = _write_probe(
+        tmp_path,
+        "from pathlib import Path\n"
+        "def is_holder_alive(marker):\n"
+        f"    Path({str(calls)!r}).write_text('called')\n"
+        "    return False\n",
+    )
+    monkeypatch.setenv("AGENT_WORKTREE_LIVENESS_PROBE", str(probe))
+    assert _is_holder_alive({"pid": os.getpid(), "agent_id": "bob-autonomous-x"})
+    assert _is_holder_alive({"pid": _DEAD_PID, "agent_id": ""}) is False
+    assert not calls.exists()
 
 
 def test_sequential_items_from_same_executor_do_not_collide(
