@@ -119,6 +119,15 @@ More helpers live in `gptme_usage.harness_models`, including
 `cc_dispatch_model_id("opus-5-5") -> "claude-opus-5-5"`; floating aliases map
 to a pinned, validated version).
 
+`gptme_usage.stale` measures realized stale capacity at each quota reset: feed
+it periodic `QuotaReading(account, observed_at, utilization, resets_in_seconds)`
+rows and `windows_at_reset()` returns one `ResetWindow` per ended window, with
+`stale = 1 - final utilization`. A window whose newest reading is too far
+before its reset is reported unobserved (`stale=None`) instead of guessed, and
+`summarize()` counts it against coverage, never toward the target. Label
+readings by the account whose quota resets, not by the credential slot that
+read them.
+
 ## Roadmap
 
 - Move per-backend quota checks behind a `gptme-usage check <backend>` console
