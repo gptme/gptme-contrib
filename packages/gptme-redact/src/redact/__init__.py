@@ -424,11 +424,12 @@ _PATTERNS: list[Pattern] = [
     ),
     # PostgreSQL connection strings — the password is embedded in the URL between
     # the username and the @host. Leak grants full database access. The
-    # `postgres(ql)?://` prefix is distinctive; the pattern requires a password
+    # `postgres(ql)?://` prefix is distinctive (an optional SQLAlchemy driver
+    # suffix such as `+psycopg2` is allowed); the pattern requires a password
     # segment (`:password@`) so passwordless URLs are not matched.
     Pattern(
         re.compile(
-            r"postgres(?:ql)?://[A-Za-z0-9._~!$&'()*+,;=%-]+:[^@\s]+@"
+            r"postgres(?:ql)?(?:\+[A-Za-z0-9_]+)?://[A-Za-z0-9._~!$&'()*+,;=%-]+:[^@\s]+@"
             r"(?:\[[A-Za-z0-9:.%_-]+\]|[a-zA-Z0-9_.-]+)?"
             r"(?::[0-9]+)?(?:/[a-zA-Z0-9_-]*)?"
         ),
@@ -452,8 +453,10 @@ _PATTERNS: list[Pattern] = [
     # Telegram bot tokens — `{bot_id}:{hash}` where bot_id is 8–10 digits and
     # hash is ~35 base64url chars (HMAC-SHA256). The colon separator and the
     # digit prefix make this shape distinctive; no other pattern matches it.
+    # A digit lookbehind (not ``\b``) so the Bot API URL form
+    # ``https://api.telegram.org/bot<id>:<hash>/`` is caught too.
     Pattern(
-        re.compile(r"\b\d{8,10}:[A-Za-z0-9_-]{30,40}\b"),
+        re.compile(r"(?<!\d)\d{8,10}:[A-Za-z0-9_-]{30,40}\b"),
         Severity.CRITICAL,
         "telegram_bot_token",
     ),
@@ -461,7 +464,8 @@ _PATTERNS: list[Pattern] = [
         re.compile(
             r"-----BEGIN (?P<key_label>(?:RSA |EC |OPENSSH |DSA |PGP |ENCRYPTED )?PRIVATE KEY(?: BLOCK)?)-----"
             r".*?"
-            r"-----END (?P=key_label)-----",
+            # Truncated tool output may lack the END line; mask to EOF then.
+            r"(?:-----END (?P=key_label)-----|\Z)",
             re.DOTALL,
         ),
         Severity.CRITICAL,

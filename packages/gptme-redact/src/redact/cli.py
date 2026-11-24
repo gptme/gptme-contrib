@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+import tempfile
+from pathlib import Path
 from typing import BinaryIO
 
 from . import (
@@ -124,6 +127,15 @@ def _main_redact(argv: list[str] | None = None) -> int:
         return 1
 
     text = _read_input(args.file)
+    if "\x00" in text:
+        # BOM-less UTF-16 of ASCII decodes as "valid" UTF-8 with a NUL between
+        # every character, which splits every secret past all patterns. Refuse
+        # rather than report a NUL-interleaved (or binary) artifact as clean.
+        print(
+            "error: input contains NUL bytes (binary or UTF-16?); refusing artifact",
+            file=sys.stderr,
+        )
+        return 2
     literals = (
         collect_secret_literals(args.literal)
         if not args.no_env_secrets
@@ -188,12 +200,28 @@ def _main_redact(argv: list[str] | None = None) -> int:
             return 2
         out = result.redacted
         if args.out:
-            with open(args.out, "w", encoding="utf-8", newline="") as fh:
-                fh.write(out)
+            _write_atomic(Path(args.out), out)
         else:
             sys.stdout.write(out)
 
     return 2 if result.blocked else 0
+
+
+def _write_atomic(path: Path, text: str) -> None:
+    """Write *text* to *path* via a sibling temp file and rename.
+
+    ``open(path, "w")`` truncates before encoding, so an encode or disk error
+    would destroy the existing file (e.g. ``redact - --out f < f``).
+    """
+    data = text.encode("utf-8")
+    fd, tmp = tempfile.mkstemp(dir=path.parent or Path("."), prefix=f".{path.name}.")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 def print_report(result: Result) -> None:
