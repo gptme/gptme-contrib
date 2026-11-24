@@ -866,6 +866,18 @@ def compute_run_analytics(records: list[SessionRecord]) -> dict:
         if r.outcome == "noop":
             noop_by_type[rt]["noop"] += 1
 
+    # NOOP rate by work source: the dispatcher that started the session
+    # (dispatch_cause.kind, e.g. a fanout tick, a monitoring slot, an event).
+    noop_by_source: dict[str, dict[str, int]] = {}
+    for r in records:
+        cause = r.dispatch_cause or {}
+        src = str(cause.get("kind") or "unknown")
+        entry = noop_by_source.setdefault(src, {"total": 0, "noop": 0})
+        entry["total"] += 1
+        if r.outcome == "noop":
+            entry["noop"] += 1
+    noop_total = sum(1 for r in records if r.outcome == "noop")
+
     # Short run breakdown (<2min with duration data)
     short_runs: dict[str, int] = {}
     for r in records:
@@ -904,6 +916,14 @@ def compute_run_analytics(records: list[SessionRecord]) -> dict:
             }
             for rt, v in sorted(noop_by_type.items())
         },
+        "noop_share": noop_total / total,
+        "noop_by_dispatch_source": {
+            src: {
+                **v,
+                "rate": v["noop"] / v["total"],
+            }
+            for src, v in sorted(noop_by_source.items())
+        },
         "short_runs": short_runs,
         "daily_counts": dict(sorted(daily_counts.items())),
         "model_outcome": {
@@ -936,12 +956,23 @@ def format_run_analytics(analytics: dict, out: TextIO = sys.stdout) -> None:
             out.write(f"  {bucket:>7s}  {count:3d}  ({pct:4.1f}%)  {bar}\n")
         out.write("\n")
 
+    if "noop_share" in analytics:
+        noops = sum(v["noop"] for v in analytics.get("noop_by_dispatch_source", {}).values())
+        out.write(f"NOOP share: {noops}/{total} ({analytics['noop_share']:.0%})\n\n")
+
     # NOOP rate by run type
     noop = analytics.get("noop_by_run_type", {})
     if noop:
         out.write("NOOP rate by run type:\n")
         for rt, v in noop.items():
             out.write(f"  {rt:15s}  {v['noop']:3d}/{v['total']:3d}  ({v['rate']:.0%})\n")
+        out.write("\n")
+
+    by_source = analytics.get("noop_by_dispatch_source", {})
+    if by_source:
+        out.write("NOOP rate by dispatch source:\n")
+        for src, v in by_source.items():
+            out.write(f"  {src:15s}  {v['noop']:3d}/{v['total']:3d}  ({v['rate']:.0%})\n")
         out.write("\n")
 
     # Short runs
