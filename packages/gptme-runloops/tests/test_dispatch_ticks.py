@@ -1,6 +1,7 @@
 import json
 from datetime import datetime, timedelta, timezone
 
+import pytest
 from click.testing import CliRunner
 from gptme_runloops.cli import main
 from gptme_runloops.dispatch_ticks import (
@@ -105,3 +106,12 @@ def test_cli_prints_coverage_json(tmp_path):
     assert result.exit_code == 0, result.output
     out = json.loads(result.output)
     assert out["measured"] == 1 and out["covered"] == 0 and out["share"] == 0.0
+
+
+def test_append_tick_rejects_naive_now(tmp_path):
+    path = tmp_path / "ticks.jsonl"
+    with pytest.raises(ValueError, match="timezone-aware"):
+        append_tick(
+            path, granted=1, bindable=1, pacing=None, now=datetime(2026, 11, 24, 9)
+        )
+    assert not path.exists()

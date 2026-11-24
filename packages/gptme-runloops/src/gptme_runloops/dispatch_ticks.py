@@ -81,7 +81,13 @@ def append_tick(
     extra: dict | None = None,
     now: datetime | None = None,
 ) -> dict:
-    """Append one tick row to ``path`` and return the row written."""
+    """Append one tick row to ``path`` and return the row written.
+
+    A naive ``now`` is rejected: ``read_ticks`` skips offset-less rows, so it
+    would write a tick the metric can never count.
+    """
+    if now is not None and now.tzinfo is None:
+        raise ValueError("append_tick: now must be timezone-aware")
     ts = (now or datetime.now(timezone.utc)).isoformat(timespec="seconds")
     row = {
         **(extra or {}),
