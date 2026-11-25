@@ -734,11 +734,14 @@ def test_summarize_preserves_injections_with_non_finite_top_score(tmp_path, bad)
 
 @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
 @pytest.mark.parametrize("source", ["extra", "hit"])
-def test_log_injection_rejects_non_finite_metadata_without_appending(tmp_path, bad, source):
-    """Invalid metadata must not corrupt an existing strict-JSON log."""
+def test_log_injection_sanitizes_non_finite_metadata(tmp_path, bad, source):
+    """Non-finite metadata becomes null; the injection itself is still logged.
+
+    Dropping the record would silently lose the injection from every count in
+    ``summarize_injections``, so sanitising is the contract.
+    """
     log = tmp_path / "injections.jsonl"
     assert log_injection(log, "valid", _hits(0.5), backend="tfidf", harness="test")
-    before = log.read_text()
     hits = _hits(0.5)
     extra = None
     if source == "extra":
@@ -746,6 +749,15 @@ def test_log_injection_rejects_non_finite_metadata_without_appending(tmp_path, b
     else:
         hits[0]["state"] = bad
 
-    assert log_injection(log, "invalid", hits, backend="tfidf", harness="test", extra=extra) is None
-    assert log.read_text() == before
-    assert _strict_json(before)["top_score"] == 0.5
+    record = log_injection(log, "invalid", hits, backend="tfidf", harness="test", extra=extra)
+    assert record is not None
+    lines = log.read_text().splitlines()
+    assert len(lines) == 2
+    written = _strict_json(lines[-1])
+    assert written["top_score"] == 0.5
+    if source == "extra":
+        assert written["metrics"] == {"latency_ms": None}
+        assert record["metrics"] == {"latency_ms": None}
+    else:
+        assert written["hits"][0]["state"] is None
+        assert record["hits"][0]["state"] is None
