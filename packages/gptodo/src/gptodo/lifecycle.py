@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator, Literal
 
-from gptodo.frontmatter_compat import frontmatter
+from gptodo.frontmatter_compat import frontmatter, render_update
 from gptodo.gate import check_gate_change, stamp_deadline_push
 from gptodo.utils import (
     advance_wait,
@@ -619,7 +619,8 @@ def mutate_task(
     """
     path = Path(path).resolve()
     with mutation_lock(path):
-        prior = frontmatter.load(path)
+        raw_text = path.read_text(encoding="utf-8")
+        prior = frontmatter.loads(raw_text)
         old = normalize_state(str(prior.metadata.get("state") or "backlog"), warn=False)
         if expected_state is not None and old != normalize_state(expected_state, warn=False):
             raise StaleTaskError(f"Expected state {expected_state}, found {old}: {path}")
@@ -651,7 +652,7 @@ def mutate_task(
         effective = normalize_state(str(post.metadata.get("state") or old), warn=False)
         result = MutationResult(old, requested, effective, fields, post, changed and not dry_run)
         if result.written:
-            _write_atomic(path, frontmatter.dumps(post))
+            _write_atomic(path, render_update(raw_text, prior, post))
     if (
         not dry_run
         and completion_effects
