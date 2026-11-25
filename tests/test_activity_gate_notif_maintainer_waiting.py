@@ -467,6 +467,30 @@ def test_human_merge_marker_suppresses_author_notification() -> None:
         assert _emitted_notifications(result.stdout) == [], result.stdout
 
 
+def test_human_merge_marker_survives_large_comment_payload(
+    tmp_path, monkeypatch
+) -> None:
+    """Compact JSON keeps the marker and trailing comments on one grep line.
+
+    Exceed the pipe buffer without exceeding jq's per-argument size limit:
+    grep must consume the whole line, so pipefail must not skip the head lookup.
+    """
+    log = tmp_path / "pulls-lookups.log"
+    monkeypatch.setenv("TEST_PULLS_LOOKUP_LOG", str(log))
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    result = _run_gate(
+        tmp_path,
+        state_dir,
+        waiting_body=PM_HUMAN_MERGE_BODY,
+        comment_count=700,
+    )
+    assert result.returncode in (0, 1), result.stderr
+    assert _emitted_notifications(result.stdout) == [], result.stdout
+    assert log.exists(), "The head-scoped marker must fetch the PR head"
+    assert log.read_text().count(f"/pulls/{NOTIF_NUMBER}") == 1
+
+
 def test_head_sha_looked_up_only_for_human_merge_marker(monkeypatch) -> None:
     """pulls/N is a charged core call (its ETag never validates); only the
     head-scoped marker needs the head, so a plain handoff must not fetch it."""
