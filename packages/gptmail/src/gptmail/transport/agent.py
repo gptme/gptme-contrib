@@ -359,15 +359,18 @@ class AgentTransport:
         # Check the exact rendered bytes before either publication boundary.
         try:
             allowed = guard_outbound(message, self.channel, self._root.parent, require_scanner=True)
-            if not allowed:
-                raise ValueError("Outbound agent message blocked by secret policy")
-            filename = self._make_filename(self._self, subject)
-            # Preserve the sender's logical ID when a receiver chooses a local
-            # filename. Scan the final bytes too: filename sanitization can
-            # produce text that was not present verbatim in the original.
-            identity = yaml.safe_dump({"message_id": filename}, allow_unicode=True)
-            message = "---\n" + identity + message[4:]
-            allowed = guard_outbound(message, self.channel, self._root.parent, require_scanner=True)
+            # A block is reported after the try: raising it here would be
+            # re-labelled as a scanner failure by the generic handler below.
+            if allowed:
+                filename = self._make_filename(self._self, subject)
+                # Preserve the sender's logical ID when a receiver chooses a local
+                # filename. Scan the final bytes too: filename sanitization can
+                # produce text that was not present verbatim in the original.
+                identity = yaml.safe_dump({"message_id": filename}, allow_unicode=True)
+                message = "---\n" + identity + message[4:]
+                allowed = guard_outbound(
+                    message, self.channel, self._root.parent, require_scanner=True
+                )
         except SecretScannerUnavailable:
             # No scan ran, so this is a missing dependency, not a secret finding.
             raise ValueError(
