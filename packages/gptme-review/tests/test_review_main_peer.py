@@ -35,6 +35,9 @@ def _peer_io(calls: list, *, pr_state: str = "OPEN"):
                 "title": "fix: return 2",
                 "body": "",
             }
+        if cmd[:1] == ["api"] and cmd[1].endswith("/comments"):
+            # Marker read (gh api --paginate --slurp): no existing comments.
+            return []
         if cmd[:1] == ["api"] and cmd[1].startswith("repos/") and "/" in cmd[1][6:]:
             return {"private": False, "visibility": "public"}
         return None
