@@ -445,16 +445,18 @@ def classify_failure_reason(
             or "403" in error_text
         ):
             return FAILURE_REASON_AUTH
-        # An empty provider stream is usually the terminal symptom of a
-        # provider-side failure, so it only classifies once quota, 429,
-        # overload, rate-limit and auth causes have been ruled out.
-        if _mentions_empty_provider_stream(lower):
-            return FAILURE_REASON_MODEL_STREAM_CRASH
     # has_assistant_turn is definitive: if the trajectory has a response, model ran.
     # input_tokens==0 alone can't override it — token accounting can be missing on CC.
     no_model_tokens = not has_assistant_turn and (input_tokens == 0 or input_tokens is None)
     if exit_code != 0 and no_model_tokens and duration_seconds < 120:
         return FAILURE_REASON_PRE_RESPONSE
+    # An empty provider stream is usually the terminal symptom of a
+    # provider-side failure, so it only classifies once quota, 429, overload,
+    # rate-limit and auth causes have been ruled out. It also yields to the
+    # pre-response bucket above: a fast empty stream before any token was
+    # accounted is a pre-response API failure, not a model-stream crash.
+    if error_text and _mentions_empty_provider_stream(error_text.lower()):
+        return FAILURE_REASON_MODEL_STREAM_CRASH
     return FAILURE_REASON_NONZERO
 
 

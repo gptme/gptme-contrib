@@ -1159,6 +1159,23 @@ def test_classify_empty_provider_stream_as_model_stream_crash():
     assert reason == FAILURE_REASON_MODEL_STREAM_CRASH
 
 
+@pytest.mark.parametrize("input_tokens", [0, None])
+def test_empty_provider_stream_before_any_tokens_stays_pre_response(input_tokens: int | None):
+    """A fast empty stream before any token is accounted is a pre-response API failure.
+
+    It must keep entering the pre_response startup-loss bucket; only an empty
+    stream after the request was accounted is a model_stream_crash.
+    """
+    reason = classify_failure_reason(
+        exit_code=1,
+        duration_seconds=20,
+        input_tokens=input_tokens,
+        has_assistant_turn=False,
+        error_text="ERROR Provider stream for openai/gpt-5 ended without any output",
+    )
+    assert reason == FAILURE_REASON_PRE_RESPONSE
+
+
 @pytest.mark.parametrize(
     ("provider_error", "expected"),
     [
