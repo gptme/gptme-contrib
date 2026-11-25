@@ -11,11 +11,11 @@ Tracks:
 """
 
 import json
-import os
-import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+
+from bobutils.safe_write import safe_write
 
 
 @dataclass
@@ -351,16 +351,7 @@ def _write_json_atomic(path: Path, data: object) -> None:
     """Write JSON via a temp file and rename, so a failed write (disk full,
     crash) leaves the previous file intact instead of truncated JSON."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(data, f, indent=2)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, path)
-    except BaseException:
-        Path(tmp).unlink(missing_ok=True)
-        raise
+    safe_write(path, json.dumps(data, indent=2))
 
 
 def main():

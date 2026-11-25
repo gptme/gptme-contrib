@@ -1,5 +1,8 @@
 """Tests for the lesson evolution tracking module."""
 
+import os
+import stat
+
 import pytest
 from gptme_lessons_extras.evolution import (
     EvolutionTracker,
@@ -373,20 +376,17 @@ def test_initialize_refuses_to_wipe_existing_history(tmp_path):
 def test_failed_write_keeps_previous_file(tmp_path, monkeypatch, target):
     # #2362 E4: files were rewritten in place, so a failed write left invalid
     # JSON and every later load raised.
-    import json
-
-    from gptme_lessons_extras import evolution
     from gptme_lessons_extras.evolution import EvolutionTracker
 
     t = EvolutionTracker(history_dir=tmp_path / "hist")
     t.initialize_lesson("bob-tools-git", "bob", "v1 body")
     t.suggest_refinement("bob-tools-git", "alice", "clarity", "first")
 
-    def dump_then_enospc(obj, fp, **kw):
-        fp.write(json.dumps(obj, **kw)[:20])  # partial write, then disk full
+    def enospc(fd):
         raise OSError(28, "No space left on device")
 
-    monkeypatch.setattr(evolution.json, "dump", dump_then_enospc)
+    files_before = sorted((tmp_path / "hist").rglob("*"))
+    monkeypatch.setattr(os, "fsync", enospc)
     with pytest.raises(OSError):
         if target == "history":
             t.track_change("bob-tools-git", "gordon", "add example", "v2 body")
@@ -398,4 +398,25 @@ def test_failed_write_keeps_previous_file(tmp_path, monkeypatch, target):
     assert h is not None
     assert [v.version for v in h.versions] == [1]
     assert [r.suggestion for r in t.load_refinements("bob-tools-git")] == ["first"]
-    assert not list((tmp_path / "hist").rglob("*.tmp"))
+    assert sorted((tmp_path / "hist").rglob("*")) == files_before  # no temp file
+
+
+def test_rewrite_keeps_file_mode(tmp_path):
+    # A temp file is created 0600; the rename must not carry that to the history,
+    # which other agents sharing the directory need to read.
+    from gptme_lessons_extras.evolution import EvolutionTracker
+
+    t = EvolutionTracker(history_dir=tmp_path / "hist")
+    t.initialize_lesson("bob-tools-git", "bob", "v1 body")
+    t.suggest_refinement("bob-tools-git", "alice", "clarity", "first")
+    paths = [
+        tmp_path / "hist" / "bob-tools-git.json",
+        tmp_path / "hist" / "refinements" / "bob-tools-git.json",
+    ]
+    assert [stat.S_IMODE(p.stat().st_mode) for p in paths] == [0o644, 0o644]
+
+    for p in paths:
+        p.chmod(0o664)
+    t.track_change("bob-tools-git", "alice", "tighten rule", "v2 body")
+    t.update_refinement_status("bob-tools-git", 0, "accepted")
+    assert [stat.S_IMODE(p.stat().st_mode) for p in paths] == [0o664, 0o664]

@@ -97,7 +97,7 @@ def _atomic_write(path: Path, data: bytes, *, mode: int) -> None:
        Same-directory placement is required for ``os.replace`` to be atomic
        on POSIX (``rename(2)`` only works within the same filesystem, and
        temp files in ``/tmp`` could live on a different mount point).
-    3. Write data and atomically rename temp → real target.
+    3. Write data, fsync, and atomically rename temp → real target.
     """
     # Step 1: resolve symlinks
     try:
@@ -125,6 +125,8 @@ def _atomic_write(path: Path, data: bytes, *, mode: int) -> None:
         os.chmod(tmp_name, effective_mode)
         with os.fdopen(fd, "wb") as f:
             f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
         # Step 3: atomic replace — lands on real target, not the symlink
         os.replace(tmp_name, real)
     except BaseException:
