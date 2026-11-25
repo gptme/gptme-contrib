@@ -76,6 +76,18 @@ def test_iter_source_files_survives_undecodable_name(tmp_path):
     assert build_index(d).has("a")
 
 
+# Deleting the last tracked source must not fall back to rglob and pick up
+# files git ignores.
+def test_deleting_last_tracked_source_does_not_index_ignored_files(tmp_path):
+    d = _repo(tmp_path / "repo")
+    (d / ".gitignore").write_text("generated.py\n")
+    (d / "a.py").write_text("def a():\n    pass\n")
+    _git(d, "add", ".")
+    (d / "generated.py").write_text("def generated():\n    pass\n")
+    (d / "a.py").unlink()
+    assert core._iter_source_files(d) == []
+
+
 # --- Finding 3: untracked (not ignored) files are invisible, cache never invalidates ---
 def test_untracked_new_file_is_indexed(tmp_path):
     d = _repo(tmp_path / "repo")

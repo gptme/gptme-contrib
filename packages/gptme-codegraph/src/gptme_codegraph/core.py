@@ -334,7 +334,6 @@ def _iter_source_files(directory: Path) -> list[Path]:
     git_dir = directory / ".git"
     if git_dir.exists() and git_dir.is_dir():
         try:
-            all_files: set[Path] = set()
             # -z: NUL-separated, unquoted paths (non-ASCII names stay intact).
             # --others --exclude-standard: include new files not yet added.
             result = subprocess.run(
@@ -355,14 +354,16 @@ def _iter_source_files(directory: Path) -> list[Path]:
             if result.returncode == 0:
                 # Raw bytes: os.fsdecode maps names that are not valid in the
                 # filesystem encoding to the same str Path/os.listdir would.
-                all_files.update(
+                listed = {
                     directory / os.fsdecode(p) for p in result.stdout.split(b"\0") if p
-                )
-            # The index can still list files deleted from the worktree.
-            all_files = {fp for fp in all_files if fp.is_file()}
-            if all_files:
+                }
+                # The index can still list files deleted from the worktree.
+                # An empty result is authoritative: falling back to rglob
+                # would pick up files git ignores.
                 return sorted(
-                    fp for fp in all_files if not _is_noise_path(fp, directory)
+                    fp
+                    for fp in listed
+                    if fp.is_file() and not _is_noise_path(fp, directory)
                 )
         except (subprocess.TimeoutExpired, FileNotFoundError):
             pass

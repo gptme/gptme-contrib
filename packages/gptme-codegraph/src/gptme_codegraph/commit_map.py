@@ -139,7 +139,8 @@ def _source_digest(directory: Path) -> tuple[str | None, int]:
     for path in tracked:
         try:
             rel_path = path.relative_to(repo_root).as_posix()
-            digest.update(rel_path.encode("utf-8"))
+            # fsencode round-trips names that are not valid UTF-8.
+            digest.update(os.fsencode(rel_path))
             digest.update(b"\0")
             digest.update(path.read_bytes())
             digest.update(b"\0")
@@ -174,7 +175,7 @@ def _stat_fingerprint(directory: Path) -> tuple[str | None, int]:
             fingerprint_line = (
                 f"{rel_path}\0{stat_info.st_mtime_ns}\0{stat_info.st_size}"
             )
-            digest.update(fingerprint_line.encode("utf-8"))
+            digest.update(os.fsencode(fingerprint_line))
             digest.update(b"\0")
             count += 1
         except OSError:

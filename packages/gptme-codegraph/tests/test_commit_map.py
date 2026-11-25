@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 from gptme_codegraph import commit_map
 
 
@@ -570,3 +571,23 @@ def test_stat_fingerprint_covers_the_builder_source_set(tmp_path):
     after, count_after = commit_map._stat_fingerprint(tmp_path)
     assert after != before
     assert count_after == 2
+
+
+def test_generate_map_survives_undecodable_name(tmp_path, monkeypatch):
+    """A non-UTF-8 file name must not crash fingerprinting or the cached map."""
+    monkeypatch.setattr(commit_map, "_CACHE_DIR", tmp_path / "cache")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git_run(repo, "init", "-q")
+    bad = repo / os.fsdecode(b"bad\xff.py")
+    try:
+        bad.write_text("def bad():\n    return 1\n")
+    except (OSError, UnicodeEncodeError):
+        pytest.skip("filesystem rejects non-UTF-8 names")
+
+    assert commit_map._source_digest(repo)[1] == 1
+    assert commit_map._stat_fingerprint(repo)[1] == 1
+    first = commit_map.generate_map(repo)
+    second = commit_map.generate_map(repo)
+    assert second["source_digest"] == first["source_digest"]
+    assert second["files"] == first["files"]
