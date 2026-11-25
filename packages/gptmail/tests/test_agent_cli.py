@@ -24,7 +24,7 @@ from click.testing import CliRunner
 from gptmail import agent_cli
 from gptmail.agent_cli import agent
 from gptmail.communication_utils.state.tracking import ConversationTracker, MessageState
-from gptmail.transport.agent import meta_of
+from gptmail.transport.agent import meta_of, stamp_frontmatter_flags
 
 pytestmark = pytest.mark.usefixtures("clean_agent_scanner")
 
@@ -513,6 +513,47 @@ def test_ack_stamps_when_subject_contains_replied(workspace: Path) -> None:
     assert fm["subject"] == "Auto-replied: x"
     assert fm["replied"] is True
     assert name not in CliRunner().invoke(agent, ["pending"]).output
+
+
+def test_ack_stamps_when_quoted_subject_continues_with_replied(workspace: Path) -> None:
+    # A double-quoted scalar may continue on a line that looks like a key. The
+    # stamp must edit parsed YAML, not raw lines, or it rewrites the subject
+    # and never adds the real key.
+    inbox = workspace / "messages" / "inbox"
+    name = "20260613-000000-000000-bob-continued.md"
+    (inbox / name).write_text(
+        "---\nfrom: bob\nto: alice\ntimestamp: 2026-06-13T00:00:00Z\n"
+        'subject: "Status\nreplied: soon"\nread: false\n---\n\nfyi\n'
+    )
+    result = CliRunner().invoke(agent, ["ack", name])
+    assert result.exit_code == 0, result.output
+    fm = _frontmatter(inbox / name)
+    assert fm["subject"] == "Status replied: soon"
+    assert fm["replied"] is True
+    assert fm["read"] is True
+    assert (inbox / name).read_text().endswith("\n\nfyi\n")
+    assert name not in CliRunner().invoke(agent, ["pending"]).output
+
+
+def test_read_stamps_when_quoted_subject_continues_with_read(workspace: Path) -> None:
+    inbox = workspace / "messages" / "inbox"
+    name = "20260613-000000-000000-bob-continued-read.md"
+    (inbox / name).write_text(
+        "---\nfrom: bob\nto: alice\ntimestamp: 2026-06-13T00:00:00Z\n"
+        'subject: "Status\nread: true\nlater"\nread: false\n---\n\nfyi\n'
+    )
+    result = CliRunner().invoke(agent, ["read", name])
+    assert result.exit_code == 0, result.output
+    fm = _frontmatter(inbox / name)
+    assert fm["subject"] == "Status read: true later"
+    assert fm["read"] is True
+
+
+def test_stamp_keeps_trailing_comment_on_rewritten_key() -> None:
+    # The stamp rewrites only the value, so a comment after it survives.
+    content = "---\nfrom: bob\nread: false  # initial state\nreplied:\n---\n\nfyi\n"
+    stamped = stamp_frontmatter_flags(content, {"read": True, "replied": True})
+    assert stamped == "---\nfrom: bob\nread: true  # initial state\nreplied: true\n---\n\nfyi\n"
 
 
 def test_ack_fails_when_stamp_cannot_land(workspace: Path) -> None:
@@ -2791,3 +2832,14 @@ def test_watch_rejects_sender_supplied_arrival_time(workspace, monkeypatch):
     result = CliRunner().invoke(agent, ["watch", "--thread", root, "--once", "--timeout", "2s"])
     assert result.exit_code == agent_cli.WATCH_TIMEOUT_EXIT, result.output
     assert result.stdout == ""
+
+
+@pytest.mark.parametrize("brk", [" ", " ", "\x85", "\r"])
+def test_stamp_survives_yaml_line_breaks_that_split_does_not_count(brk: str) -> None:
+    # PyYAML counts these as line breaks; a "\n"-split line index then lands one
+    # line late and corrupts the frontmatter.
+    content = f'---\nfrom: bob\nsubject: "a{brk}b"\nread: false\n---\n\nfyi\n'
+    stamped = stamp_frontmatter_flags(content, {"read": True})
+    assert stamped == f'---\nfrom: bob\nsubject: "a{brk}b"\nread: true\n---\n\nfyi\n'
+    assert stamped is not None
+    assert yaml.safe_load(stamped.split("---")[1])["read"] is True
