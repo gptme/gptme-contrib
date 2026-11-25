@@ -62,6 +62,7 @@ from .planned_calls import (
     load_pending_planned_calls,
     planned_call_guidance,
 )
+from .playback import TwilioPlayback
 from .sounds import (
     CANCEL_CUE_MULAW,
     DISPATCH_CUE_MULAW,
@@ -193,11 +194,7 @@ def _http_post_sync(url: str, payload: bytes, api_key: str) -> None:
         logger.warning("Transcript promotion failed (network): %s", exc)
 
 
-# Brief pause so any queued farewell audio still reaches the caller.
-# The old 5.0s delay was a problem because it kept the call accepting audio
-# long after the model said goodbye. The real termination now happens via the
-# Twilio REST API (calls.update(status='completed')), so the WebSocket close
-# delay only needs to be long enough for buffered audio to drain.
+# Legacy local/browser transports have no playback acknowledgement.
 _HANGUP_FAREWELL_DELAY_SECONDS = 0.5
 _CALL_END_DRAIN_TIMEOUT_SECONDS = 1.5
 _CALL_END_IDLE_TIMEOUT_SECONDS = 0.25
@@ -2710,6 +2707,7 @@ class VoiceServer:
         handoff_id: str | None = None
         g711_passthrough = self.openai_g711_passthrough
         stop_received = False
+        playback: TwilioPlayback | None = None
 
         try:
             async for message in websocket.iter_text():
@@ -2779,6 +2777,8 @@ class VoiceServer:
                     if handoff_id:
                         metadata["handoff_id"] = handoff_id
 
+                    playback = TwilioPlayback(websocket, stream_sid)
+
                     # Callbacks — closures capture stream_sid and transcript from this scope.
                     # Use a factory to bind stream_sid by value so the async coroutine
                     # is detected and awaited by _call_callback.
@@ -2789,7 +2789,12 @@ class VoiceServer:
                                 if g711_passthrough
                                 else audio_converter.openai_to_twilio(audio)
                             )
-                            await self._send_to_twilio(websocket, _stream_sid, payload)
+                            assert playback is not None
+                            async with playback.send_lock:
+                                playback.audio_sent()
+                                await self._send_to_twilio(
+                                    websocket, _stream_sid, payload
+                                )
 
                         return _on_audio
 
@@ -2799,6 +2804,8 @@ class VoiceServer:
                                 "Caller speech detected; clearing Twilio playback buffer for %s",
                                 _stream_sid,
                             )
+                            assert playback is not None
+                            playback.cancel_hangup()
                             await self._send_twilio_clear(websocket, _stream_sid)
 
                         return _on_speech_started
@@ -2811,6 +2818,7 @@ class VoiceServer:
                             websocket=websocket,
                             source="twilio",
                             call_sid=call_sid,
+                            playback=playback,
                         )
                     )
 
@@ -2924,6 +2932,8 @@ class VoiceServer:
                         realtime_client.on_ai_transcript = on_ai_transcript
                         realtime_client.on_user_transcript = on_user_transcript
                         realtime_client.on_speech_started = on_speech_started
+                        realtime_client.on_response_start = playback.response_started
+                        realtime_client.on_response_end = playback.response_finished
                     else:
                         # Cold path: build session from scratch. Callback guidance
                         # offers the brief instead of using the outbound opener.
@@ -2987,13 +2997,18 @@ class VoiceServer:
                             on_ai_transcript=on_ai_transcript,
                             on_user_transcript=on_user_transcript,
                             on_speech_started=on_speech_started,
+                            on_response_start=playback.response_started,
+                            on_response_end=playback.response_finished,
                         )
 
                     # Wire tool bridge BEFORE connect/activate so on_function_call
                     # is set when the initial greeting response fires.
                     def _make_twilio_cue_callback(_ws, _sid: str, _mulaw: bytes):
                         async def _cb() -> None:
-                            await self._send_to_twilio(_ws, _sid, _mulaw)
+                            assert playback is not None
+                            async with playback.send_lock:
+                                playback.audio_sent()
+                                await self._send_to_twilio(_ws, _sid, _mulaw)
 
                         return _cb
 
@@ -3071,6 +3086,10 @@ class VoiceServer:
                                 pcm_data = audio_converter.twilio_to_openai(mulaw_data)
                                 await realtime_client.send_audio(pcm_data)
 
+                elif event == "mark":
+                    if playback is not None:
+                        playback.acknowledge(data.get("mark", {}).get("name", ""))
+
                 elif event == "stop":
                     # Real call end — revoke so a reconnect after hangup cannot
                     # re-attach motion tools with the stolen start parameters.
@@ -3095,6 +3114,13 @@ class VoiceServer:
         except Exception as e:
             logger.exception("Error handling Twilio connection: %s", e)
         finally:
+            if playback is not None:
+                playback.stopped = True
+                playback.cancel_hangup()
+                if playback.hangup_task is not None:
+                    # Stop/disconnect also cancels an in-flight REST wait.
+                    playback.hangup_task.cancel()
+                    await asyncio.gather(playback.hangup_task, return_exceptions=True)
             if realtime_client:
                 await self._disconnect_realtime_client(realtime_client)
             if call_sid and call_sid in self._connections:
@@ -3204,11 +3230,16 @@ class VoiceServer:
         websocket,
         source: str,
         call_sid: str | None,
+        playback: TwilioPlayback | None = None,
     ):
         hangup_task: asyncio.Task[None] | None = None
 
         def _request_hangup(trigger: str, reason: str | None) -> None:
             nonlocal hangup_task
+            if playback is not None and (
+                playback.interrupted or playback.terminating or playback.stopped
+            ):
+                return
             if hangup_task is not None and not hangup_task.done():
                 logger.info(
                     "Ignoring duplicate hangup request: source=%s trigger=%s call_sid=%s",
@@ -3223,8 +3254,11 @@ class VoiceServer:
                     source=f"{source}:{trigger}",
                     reason=reason,
                     call_sid=call_sid,
+                    playback=playback,
                 )
             )
+            if playback is not None:
+                playback.hangup_task = hangup_task
 
         async def _on_hangup(reason: str | None) -> None:
             _request_hangup("tool", reason)
@@ -3541,11 +3575,13 @@ class VoiceServer:
         source: str,
         reason: str | None,
         call_sid: str | None,
+        playback: TwilioPlayback | None = None,
     ) -> None:
-        """Close the call-side WebSocket after a short delay.
+        """Terminate after response generation and transport playback complete.
 
-        Runs from a background task spawned by the tool bridge. The delay lets
-        the model finish its farewell utterance before the socket drops. When
+        Runs from a background task registered by the tool bridge or transcript
+        fallback. Twilio marks acknowledge playback; local/browser clients use
+        the legacy short delay because they have no acknowledgement. When
         the socket closes, the ``handle_*_websocket`` loop exits its
         ``async for`` and falls through to the ``finally`` block, which runs
         the normal ``_on_call_end`` teardown (post-call hook, transcript
@@ -3562,6 +3598,12 @@ class VoiceServer:
             call_sid,
             reason or "<none>",
         )
+        if playback is not None:
+            await playback.wait_until_played()
+            playback.terminating = True
+        else:
+            await asyncio.sleep(_HANGUP_FAREWELL_DELAY_SECONDS)
+
         # Hangup is a real call end even if Twilio never sends ``stop``.
         if "twilio" in source:
             self._revoke_twilio_body_grants_for_call(call_sid)
@@ -3571,10 +3613,8 @@ class VoiceServer:
                 self._authenticated_stream_calls.discard(call_sid)
                 self._cancel_stream_auth_idle_discard(call_sid)
 
-        # Fire-and-forget Twilio REST API call termination (authoritative kill).
-        # Do this BEFORE the farewell delay so the call stops accepting audio
-        # from the caller immediately — the farewell utterance was already sent
-        # by the model before it called the hangup tool.
+        # Only now perform the authoritative kill. Generated/sent audio is not
+        # evidence that Twilio has played it to the caller.
         twilio_account_sid = _get_config_env("TWILIO_ACCOUNT_SID")
         twilio_auth_token = _get_config_env("TWILIO_AUTH_TOKEN")
         if call_sid and twilio_account_sid and twilio_auth_token and "twilio" in source:
@@ -3593,12 +3633,6 @@ class VoiceServer:
                     call_sid,
                     exc,
                 )
-
-        # Brief delay so any buffered farewell audio still plays.
-        try:
-            await asyncio.sleep(_HANGUP_FAREWELL_DELAY_SECONDS)
-        except asyncio.CancelledError:
-            raise
 
         # Close the WebSocket to stop the media stream.
         try:

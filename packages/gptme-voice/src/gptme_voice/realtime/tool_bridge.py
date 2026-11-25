@@ -1286,9 +1286,9 @@ class GptmeToolBridge:
                         "the call will end when the caller hangs up."
                     ),
                 }
-            # Fire the teardown in the background so the model still gets a
-            # synchronous function-call response and can finish speaking.
-            asyncio.ensure_future(self.on_hangup(reason))
+            # Register the background teardown before returning. Deferring this
+            # callback races with caller speech cancelling a pending hangup.
+            await self.on_hangup(reason)
             return {
                 "status": "hanging_up",
                 "message": "Ending the call shortly.",

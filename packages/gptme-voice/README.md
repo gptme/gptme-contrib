@@ -136,6 +136,22 @@ gptme-voice-call +12025550123 --dry-run      # print the TwiML, don't dial
 Options: `--from-number`, `--public-base-url`, `--workspace`, `--context-file`,
 `--call-type` (default `general`), `--dry-run`.
 
+### Farewell playback
+
+A successful `hangup` tool call and the transcript fallback share the same
+termination path. The server lets the current response finish, then waits for
+Twilio to echo a playback `mark` before completing the call through REST and
+closing the WebSocket. There is no fixed pause after a successful acknowledgement.
+Caller speech cancels a pending farewell hangup before clearing queued audio;
+marks returned by `clear` do not prove playback. Stop/disconnect cancels pending
+teardown, including late provider events during transcript draining.
+
+A missing response-completion event or mark is bounded by a 30-second total
+wait. The server then logs playback as **unconfirmed** and terminates anyway,
+so a broken acknowledgement cannot leave the call open indefinitely. This is a
+failure fallback, not a guarantee of audio delivery. Local/browser transports
+retain their short delay because they do not acknowledge playback.
+
 ### Missed-call callbacks
 
 If an outbound call goes unanswered and the operator calls back, the callback

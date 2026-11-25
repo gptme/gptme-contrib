@@ -234,8 +234,8 @@ def _load_project_instructions(
         "- Do not say 'I'll end the call now', 'one moment while I end the call', or "
         "similar without calling the hangup tool in the same turn. Saying it without "
         "calling the tool is the failure mode.\n"
-        "- Say a brief farewell first if you want; then call the tool. The 5-second "
-        "farewell delay gives your goodbye time to play before the line drops.\n"
+        "- Say a brief farewell first if you want; then call the tool in the same "
+        "response. The server waits for farewell playback before ending a phone call.\n"
         "- If you have already said goodbye verbally and the caller is still on the "
         "line, that means you forgot to call the tool. Call it now.\n\n"
     )
@@ -336,6 +336,8 @@ class OpenAIRealtimeClient:
         session_config: SessionConfig | None = None,
         on_audio: Callable[[bytes], None] | None = None,
         on_audio_end: Callable[[], None] | None = None,
+        on_response_start: Callable[[], None] | None = None,
+        on_response_end: Callable[[], None] | None = None,
         on_transcript: Callable[[str], None] | None = None,
         on_ai_transcript: Callable[[str], None] | None = None,
         on_user_transcript: Callable[[str], None]
@@ -356,6 +358,8 @@ class OpenAIRealtimeClient:
         self.session_config = session_config or SessionConfig()
         self.on_audio = on_audio
         self.on_audio_end = on_audio_end
+        self.on_response_start = on_response_start
+        self.on_response_end = on_response_end
         self.on_transcript = on_transcript
         self.on_ai_transcript = on_ai_transcript
         # Backward-compat: wrap a legacy 1-arg callback so the call site can
@@ -876,6 +880,14 @@ class OpenAIRealtimeClient:
         spoken answer should wait for the injected subagent result instead.
         """
         if (
+            name == "hangup"
+            and isinstance(result, dict)
+            and result.get("status") == "hanging_up"
+        ):
+            # The current response can finish its farewell. Do not generate a
+            # second response after agreeing to terminate the call.
+            return False
+        if (
             name == "subagent"
             and isinstance(result, dict)
             and result.get("status") == "dispatched"
@@ -1254,9 +1266,13 @@ class OpenAIRealtimeClient:
         # Response lifecycle — mute mic while responding
         elif event_type == "response.created":
             self._responding = True
+            if self.on_response_start:
+                await self._call_callback(self.on_response_start)
             logger.debug("Response started (mic muted)")
         elif event_type == "response.done":
             self._responding = False
+            if self.on_response_end:
+                await self._call_callback(self.on_response_end)
             status = event.get("response", {}).get("status", "")
             logger.debug(f"Response done: {status} (mic unmuted)")
 
