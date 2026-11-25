@@ -603,6 +603,7 @@ def parse_llm_response(content: str, response_type: Type[T], task: TaskType) -> 
     # braces, so slicing first "{" to last "}" glues unrelated text together.
     # Decode each top-level object and keep the last one that fits the type.
     text = _THINK_BLOCK_RE.sub("", content)
+    expected_keys = set(getattr(response_type, "__dataclass_fields__", {}))
     decoder = json.JSONDecoder()
     parsed: T | None = None
     pos = text.find("{")
@@ -616,7 +617,12 @@ def parse_llm_response(content: str, response_type: Type[T], task: TaskType) -> 
             try:
                 parsed = response_type.from_dict(data)
             except (KeyError, ValueError, TypeError, AttributeError):
-                pass
+                # An object carrying answer fields is the model's (malformed)
+                # answer, not prose. It supersedes an earlier accepted object:
+                # keeping the stale one would return an approval the model
+                # explicitly revised away.
+                if expected_keys & data.keys():
+                    parsed = None
         pos = text.find("{", end)
     if parsed is not None:
         return parsed

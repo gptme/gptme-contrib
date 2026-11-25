@@ -896,19 +896,35 @@ def _parse_review(llm_module: types.ModuleType, content: str) -> Any:
     )
 
 
+# A complete, answer-shaped object, so the assertion depends on stripping the
+# think block rather than on the scan rejecting a partial draft.
+_THINK_DRAFT_JSON = """{
+  "criteria_results": {"professional_tone": {"notes": "draft", "passed": false}},
+  "recommendation": "reject",
+  "improvements": ["rewrite the opener"],
+  "reasoning": "draft verdict"
+}"""
+
+
 def test_parse_skips_json_inside_think_block(llm_module: types.ModuleType) -> None:
-    """A draft object in <think> must not be glued to the real answer.
+    """A draft object in a <think> block must not be glued to the real answer.
 
     Slicing first "{" to last "}" produced "Extra data" and a default reject,
-    which parked an approved blog promotion at 0/3.
+    which parked an approved blog promotion at 0/3. The draft is a complete
+    ReviewResponse placed *after* the answer, so the test fails if
+    `_THINK_BLOCK_RE` stops stripping think blocks (the draft would win as the
+    last matching object).
     """
     content = (
-        '<think>\nShape: {"recommendation": "reject"}. Check criteria.\n</think>\n'
-        + _REVIEW_JSON
+        _REVIEW_JSON
+        + "\n\nThinking about a revision:\n<think>\n"
+        + _THINK_DRAFT_JSON
+        + "\n</think>\n"
     )
     result = _parse_review(llm_module, content)
     assert result.recommendation == "approve"
     assert set(result.criteria_results) == {"professional_tone"}
+    assert result.criteria_results["professional_tone"].passed is True
 
 
 def test_parse_skips_stray_braces_in_prose(llm_module: types.ModuleType) -> None:
@@ -921,6 +937,25 @@ def test_parse_prefers_last_matching_object(llm_module: types.ModuleType) -> Non
     first = _REVIEW_JSON.replace('"approve"', '"reject"')
     result = _parse_review(llm_module, first + "\nRevised:\n" + _REVIEW_JSON)
     assert result.recommendation == "approve"
+
+
+def test_parse_malformed_revision_does_not_resurrect_earlier_answer(
+    llm_module: types.ModuleType,
+) -> None:
+    """A broken revision supersedes the earlier answer instead of being skipped.
+
+    The revision below is answer-shaped but missing "reasoning", so
+    `ReviewResponse.from_dict` raises. Keeping the earlier approval would report
+    an approval the model explicitly revised away.
+    """
+    malformed = """{
+  "criteria_results": {},
+  "recommendation": "reject",
+  "improvements": []
+}"""
+    result = _parse_review(llm_module, _REVIEW_JSON + "\nRevised:\n" + malformed)
+    assert result.recommendation == "reject"
+    assert result.criteria_results == {}
 
 
 def test_parse_falls_back_to_default_without_matching_object(
