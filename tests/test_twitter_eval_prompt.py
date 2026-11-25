@@ -1012,3 +1012,17 @@ def test_parse_preserves_think_tags_in_json_strings(
         content, llm_module.TweetResponse, llm_module.TaskType.RESPONSE
     )
     assert result == response
+
+
+@pytest.mark.parametrize(
+    "revision",
+    [
+        '{"recommendation": "reject", "reasoning": "Unsupported claim"}',
+        '{"recommendation": "reject"}',
+    ],
+)
+def test_parse_partial_rejection_supersedes_approval(
+    llm_module: types.ModuleType, revision: str
+) -> None:
+    result = _parse_review(llm_module, _REVIEW_JSON + "\nRevised:\n" + revision)
+    assert result == llm_module.ReviewResponse.default()

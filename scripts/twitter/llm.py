@@ -604,9 +604,9 @@ def parse_llm_response(content: str, response_type: Type[T], task: TaskType) -> 
     # Decode each top-level object and keep the last one that fits the type.
     text = content
     expected_keys = set(getattr(response_type, "__dataclass_fields__", {}))
-    # A majority of the type's fields marks an object as the model's answer
-    # rather than prose that happens to contain a familiar key.
-    answer_overlap = len(expected_keys) // 2 + 1
+    # Reasoning alone can be prose; any task-specific field is an answer
+    # attempt, even when most required fields are missing.
+    answer_keys = expected_keys - {"reasoning"}
     decoder = json.JSONDecoder()
     parsed: T | None = None
     pos = 0
@@ -632,11 +632,9 @@ def parse_llm_response(content: str, response_type: Type[T], task: TaskType) -> 
             try:
                 parsed = response_type.from_dict(data)
             except (KeyError, ValueError, TypeError, AttributeError):
-                # An object carrying most of the answer fields is the model's
-                # (malformed) answer, not prose. It supersedes an earlier
-                # accepted object: keeping the stale one would return an
-                # approval the model explicitly revised away.
-                if len(expected_keys & data.keys()) >= answer_overlap:
+                # A partial answer supersedes an earlier accepted object:
+                # keeping the stale one could resurrect a revised approval.
+                if answer_keys & data.keys():
                     parsed = None
         pos = end
     if parsed is not None:
