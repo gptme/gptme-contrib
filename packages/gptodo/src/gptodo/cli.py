@@ -2297,7 +2297,12 @@ def check_waiting(fix: bool, verbose: bool):
           type: pr_ci
           ref: "gptme/gptme#1217"
     """
-    from gptodo.waiting import WaitType, check_condition, parse_waiting_for
+    from gptodo.waiting import (
+        WaitType,
+        check_condition,
+        clear_resolved_conditions,
+        parse_waiting_for,
+    )
 
     console = Console()
 
@@ -2356,11 +2361,7 @@ def check_waiting(fix: bool, verbose: bool):
             console.print(f"[green]✓ {task.id}[/]: {status_str}")
             if fix:
                 # Clear waiting_for from task
-                post = frontmatter.load(task.path)
-                post.metadata.pop("waiting_for", None)
-                post.metadata.pop("waiting_since", None)
-                with open(task.path, "w") as f:
-                    f.write(frontmatter.dumps(post))
+                clear_resolved_conditions(task.path)
                 changes_made.append(task.id)
                 console.print("  [cyan]→ Cleared waiting_for[/]")
         else:
@@ -2413,7 +2414,12 @@ def watch(interval: int, fix: bool, once: bool, verbose: bool):
     import signal
     import time
 
-    from gptodo.waiting import WaitType, check_condition, parse_waiting_for
+    from gptodo.waiting import (
+        WaitType,
+        check_condition,
+        clear_resolved_conditions,
+        parse_waiting_for,
+    )
 
     console = Console()
     repo_root = find_repo_root(Path.cwd())
@@ -2472,11 +2478,7 @@ def watch(interval: int, fix: bool, once: bool, verbose: bool):
             if all_resolved:
                 resolved_count += 1
                 if fix:
-                    post = frontmatter.load(task.path)
-                    post.metadata.pop("waiting_for", None)
-                    post.metadata.pop("waiting_since", None)
-                    with open(task.path, "w") as f:
-                        f.write(frontmatter.dumps(post))
+                    clear_resolved_conditions(task.path)
                     changes.append((task.id, task_changes))
             else:
                 pending_count += 1
