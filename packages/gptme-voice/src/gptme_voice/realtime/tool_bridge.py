@@ -760,10 +760,10 @@ class GptmeToolBridge:
         on_completed: Callable[[int, float], None] | None = None,
     ) -> ToolResult:
         """Execute a gptme subagent and return the result."""
-        with tempfile.NamedTemporaryFile(
-            prefix="gptme-voice-", suffix=".md", delete=False
-        ) as tf:
-            response_file = Path(tf.name)
+        # gptme stages saves beside their destination and rejects shared-writable
+        # parents such as /tmp. Keep the response in a private directory.
+        response_directory = tempfile.TemporaryDirectory(prefix="gptme-voice-")
+        response_file = Path(response_directory.name) / "response.md"
         transcript_tail_file: Path | None = None
         augmented_task = task + _RESPONSE_SUFFIX.format(response_file=response_file)
 
@@ -999,7 +999,7 @@ class GptmeToolBridge:
         finally:
             if process is not None:
                 process.close(kill_tree=not completed_successfully)
-            response_file.unlink(missing_ok=True)
+            response_directory.cleanup()
             if transcript_tail_file is not None:
                 transcript_tail_file.unlink(missing_ok=True)
 
