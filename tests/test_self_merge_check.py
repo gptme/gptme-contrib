@@ -3347,7 +3347,7 @@ def test_contrib_agent_literal_skips_docs_only() -> None:
         {
             "path": "packages/gptme-coordination/README.md",
             "status": "modified",
-            "patch": "@@ -1,1 +1,2 @@\n+uv run coordination work-claim bob task:x\n",
+            "patch": "@@ -1,1 +1,2 @@\n+uv run coordination work-claim alice task:x\n",
         },
         {
             "path": "packages/gptme-forum/src/gptme_forum/forum.py",
@@ -3365,6 +3365,45 @@ def test_contrib_agent_literal_skips_docs_only() -> None:
     reasons = self_merge_check.contrib_agent_literal_reasons(file_shapes)
     assert len(reasons) == 1 and '"sven"' in reasons[0]
     assert "alice" not in reasons[0] and "README" not in reasons[0]
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "packages/gptme-example/README.md",
+        "packages/gptme-example/CHANGELOG.md",
+        "CONTRIBUTING.md",
+        "docs/protocols/heartbeat.md",
+        "plugins/gptme-example/docs/DESIGN.rst",
+    ],
+)
+def test_contrib_agent_literal_human_docs_are_exempt(path: str) -> None:
+    reasons = self_merge_check.contrib_agent_literal_reasons(
+        [{"path": path, "patch": "+uv run coordination work-claim bob task:x\n"}]
+    )
+    assert reasons == []
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "skills/example/SKILL.md",
+        "skills/example/README.md",
+        "skills/example/docs/reference.md",
+        "lessons/workflow/example.md",
+        "plugins/gptme-example/lessons/tools/usage.md",
+        "packages/gptme-example/AGENTS.md",
+        "packages/gptme-example/docs/CLAUDE.md",
+        "packages/gptme-example/prompts/system.txt",
+        "scripts/github_resolver/prompts/issue-resolver.md",
+        "packages/gptme-example/src/gptme_example/README.md",
+    ],
+)
+def test_contrib_agent_literal_agent_loaded_prose_still_routes(path: str) -> None:
+    reasons = self_merge_check.contrib_agent_literal_reasons(
+        [{"path": path, "patch": "+You are Bob, Erik's agent.\n"}]
+    )
+    assert len(reasons) == 1 and '"bob"' in reasons[0]
 
 
 @pytest.mark.parametrize(
