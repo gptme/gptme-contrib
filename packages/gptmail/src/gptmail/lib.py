@@ -767,13 +767,21 @@ class AgentEmail:
         Returns:
             True if the recipient is in the allowlist, False otherwise.
         """
+        # Validate before the wildcard shortcut: it bypasses trust policy, not
+        # recipient syntax or the prohibition on option-shaped addresses.
+        if not recipient:
+            return False
+        addresses = [addr for _, addr in getaddresses([recipient])]
+        # msmtp splits comma-separated recipients. Reject ambiguous quoted
+        # commas and empty/unparseable elements rather than discarding them.
+        # Leading "-" would be an msmtp option without our argv terminator.
+        if not addresses or any(
+            not addr or "," in addr or addr.startswith("-") for addr in addresses
+        ):
+            return False
+
         if env_allowlist is None:
             env_allowlist = os.getenv("EMAIL_SEND_ALLOWLIST", "")
-        # msmtp takes the recipient as a positional argument, so an address that
-        # starts with "-" is read as an option (--logfile=, -C, --passwordeval=).
-        # Refuse it whatever the allowlist says.
-        if any(addr.startswith("-") for _, addr in getaddresses([recipient or ""])):
-            return False
         if env_allowlist == "*":
             return True
         elif env_allowlist:
@@ -789,19 +797,7 @@ class AgentEmail:
             if self.own_email:
                 allowlisted.append(self.own_email.lower())
 
-        if not recipient:
-            return False
-
-        # msmtp delivers to every comma-separated address in its recipient
-        # argument, so each address in a list must be allowlisted on its own.
-        # Unparseable input fails closed.
-        addresses = [addr for _, addr in getaddresses([recipient])]
-        # A quoted address can retain a comma that msmtp subsequently splits
-        # into multiple envelope recipients. Do not authorize that ambiguity,
-        # or silently discard empty/unparseable list elements.
-        if not addresses or any(not addr or "," in addr for addr in addresses):
-            return False
-
+        # Every address in a list must be allowlisted on its own.
         allowed_lower = [allowed.lower() for allowed in allowlisted]
 
         def _allowed(address: str) -> bool:

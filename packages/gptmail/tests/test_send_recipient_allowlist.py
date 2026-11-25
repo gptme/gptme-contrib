@@ -88,6 +88,11 @@ def test_option_shaped_recipient_blocked(
     assert not agent._is_allowlisted_recipient(recipient)
 
 
+@pytest.mark.parametrize("recipient", ["", "alice@example.com, -C /tmp/x", "ok@example.com, <>"])
+def test_wildcard_does_not_bypass_recipient_validation(agent: AgentEmail, recipient: str):
+    assert not agent._is_allowlisted_recipient(recipient, env_allowlist="*")
+
+
 # ---------------------------------------------------------------------------
 # Integration: send() blocks non-allowlisted recipient
 # ---------------------------------------------------------------------------
