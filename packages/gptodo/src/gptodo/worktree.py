@@ -9,6 +9,7 @@ Implements Issue #246: worktree workflow for isolated agent execution.
 
 import logging
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -158,6 +159,8 @@ def list_worktrees(workspace: Path | None = None) -> list[dict]:
             current_worktree["bare"] = True
         elif line == "detached":
             current_worktree["detached"] = True
+        elif line == "locked" or line.startswith("locked "):
+            current_worktree["locked"] = line[7:] if len(line) > 6 else True
 
     if current_worktree:
         worktrees.append(current_worktree)
@@ -355,15 +358,81 @@ def get_worktree_status(worktree_path: Path, base_branch: str = "origin/master")
     return status
 
 
-# FIX #4 & #5: Add base_branch parameter and fix unsafe lstrip
+# A worktree is only cleaned up after this many days without a tracked file
+# changing. Ancestry alone is not evidence that nobody is working in it.
+DEFAULT_CLEANUP_IDLE_DAYS = 7.0
+
+
+def _merged_branch_names(workspace: Path, base_branch: str) -> set[str] | None:
+    """Return branch names merged into ``base_branch``, or None if unknown."""
+    result = _run_git(["branch", "--merged", base_branch], cwd=workspace)
+    if result.returncode != 0:
+        return None
+
+    # `git branch` marks the current branch with "* " and a branch checked out
+    # in a linked worktree with "+ ". Both prefixes must be stripped or every
+    # gptodo worktree looks unmerged.
+    merged: set[str] = set()
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if line.startswith(("* ", "+ ")):
+            line = line[2:]
+        if line:
+            merged.add(line)
+    return merged
+
+
+def _newest_tracked_mtime(worktree_path: Path) -> float | None:
+    """Return the newest mtime among a worktree's tracked files.
+
+    ``None`` means the worktree could not be inspected, which callers must
+    treat as "possibly active" rather than "idle".
+    """
+    result = _run_git(["ls-files", "-z"], cwd=worktree_path)
+    if result.returncode != 0:
+        return None
+
+    newest: float | None = None
+    for name in result.stdout.split("\0"):
+        if not name:
+            continue
+        try:
+            mtime = (worktree_path / name).stat().st_mtime
+        except OSError:
+            continue
+        if newest is None or mtime > newest:
+            newest = mtime
+    return newest
+
+
+def _worktree_is_clean(worktree_path: Path) -> bool:
+    """True when the worktree has no modified, staged or untracked files."""
+    result = _run_git(["status", "--porcelain"], cwd=worktree_path)
+    return result.returncode == 0 and not result.stdout.strip()
+
+
 def cleanup_merged_worktrees(
-    workspace: Path | None = None, base_branch: str = "origin/master"
+    workspace: Path | None = None,
+    base_branch: str = "origin/master",
+    idle_days: float = DEFAULT_CLEANUP_IDLE_DAYS,
 ) -> int:
-    """Remove worktrees whose branches have been merged.
+    """Remove worktrees that are merged *and* provably inactive.
+
+    A branch being reachable from ``base_branch`` is not evidence that the
+    worktree is unused: a worktree freshly created from the base branch points
+    at an ancestor of it, so ``git branch --merged`` reports it as merged while
+    an agent may be actively working in it (that regression deleted a live
+    worktree from gptme/gptme-contrib#2474). Cleanup therefore requires all of:
+
+    * the branch is merged into ``base_branch``;
+    * the worktree has no uncommitted, staged or untracked files;
+    * the worktree is not locked with ``git worktree lock``;
+    * no tracked file has changed within ``idle_days``.
 
     Args:
         workspace: Root workspace directory
         base_branch: Base branch to check merge status against (default: origin/master)
+        idle_days: Required quiet period in days for tracked files
 
     Returns:
         Count of worktrees cleaned up
@@ -375,7 +444,14 @@ def cleanup_merged_worktrees(
     if not worktrees_dir.exists():
         return 0
 
+    merged_branches = _merged_branch_names(workspace, base_branch)
+    if merged_branches is None:
+        logger.error("Failed to list merged branches; skipping cleanup")
+        return 0
+
+    idle_cutoff = time.time() - idle_days * 86400
     count = 0
+
     for worktree in list_worktrees(workspace):
         path = Path(worktree.get("path", ""))
         branch = worktree.get("branch", "")
@@ -392,22 +468,29 @@ def cleanup_merged_worktrees(
         if branch.startswith("refs/heads/"):
             branch = branch[11:]
 
-        # Check if branch is merged into base_branch (FIX: use parameter instead of hard-coded)
-        result = _run_git(["branch", "--merged", base_branch], cwd=workspace)
-        # FIX #5: Use explicit prefix handling instead of unsafe lstrip
-        # (lstrip("* ") strips ANY combination of * and spaces, corrupting branch names like "**main")
-        merged_branches = []
-        for b in result.stdout.splitlines():
-            b = b.strip()
-            if b.startswith("* "):
-                b = b[2:]  # Remove literal "* " prefix
-            merged_branches.append(b)
+        if branch not in merged_branches:
+            continue
 
-        if result.returncode == 0 and branch in merged_branches:
-            logger.info(f"Removing merged worktree: {path} (branch: {branch})")
-            if remove_worktree(path, workspace=workspace):
-                # Also delete the branch
-                _run_git(["branch", "-d", branch], cwd=workspace)
-                count += 1
+        if worktree.get("locked"):
+            logger.info(f"Skipping locked worktree: {path} (branch: {branch})")
+            continue
+
+        if not _worktree_is_clean(path):
+            logger.info(f"Skipping dirty worktree: {path} (branch: {branch})")
+            continue
+
+        newest_mtime = _newest_tracked_mtime(path)
+        if newest_mtime is None:
+            logger.info(f"Skipping unreadable worktree: {path} (branch: {branch})")
+            continue
+        if newest_mtime > idle_cutoff:
+            logger.info(f"Skipping recently active worktree: {path} (branch: {branch})")
+            continue
+
+        logger.info(f"Removing merged and idle worktree: {path} (branch: {branch})")
+        if remove_worktree(path, workspace=workspace):
+            # Also delete the branch
+            _run_git(["branch", "-d", branch], cwd=workspace)
+            count += 1
 
     return count
