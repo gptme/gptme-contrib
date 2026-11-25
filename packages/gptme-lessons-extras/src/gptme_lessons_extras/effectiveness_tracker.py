@@ -146,11 +146,6 @@ class EffectivenessTracker:
         )
 
         if incremental:
-            mark = self.state.last_processed
-            if mark and not self.state.processed_logs:
-                # State written before processed_logs existed only has the
-                # high-water mark; record the names up to it as processed.
-                self.state.processed_logs = [d.name for d in dirs if d.name <= mark]
             processed = set(self.state.processed_logs)
             dirs = [d for d in dirs if d.name not in processed]
 
@@ -293,9 +288,12 @@ class EffectivenessTracker:
         Returns:
             Updated TrackerState
         """
-        if not incremental:
-            # A full run recounts every log, so start from empty counters
-            # instead of adding to the persisted totals.
+        if not incremental or (
+            self.state.last_processed and not self.state.processed_logs
+        ):
+            # Legacy watermarks cannot identify which earlier-sorting logs were
+            # counted. Rebuild from available logs once, just like --full,
+            # rather than guessing membership or adding to the old counters.
             self.state = TrackerState()
         log_dirs = self._get_log_dirs(incremental=incremental)
 

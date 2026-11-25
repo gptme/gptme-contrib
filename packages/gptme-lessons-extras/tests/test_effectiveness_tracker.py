@@ -270,18 +270,29 @@ def test_full_run_does_not_double_count(tmp_path: Path) -> None:
     assert stats.sessions_included == ["2025-10-02-one"]
 
 
-def test_legacy_state_keeps_high_water_mark(tmp_path: Path) -> None:
-    # State from before processed_logs: logs up to last_processed were counted.
+def test_legacy_state_rebuilds_without_skipping_earlier_log(tmp_path: Path) -> None:
     logs, state = tmp_path / "logs", tmp_path / "state.json"
-    _write_log(logs, "2025-10-01-old")
-    _write_log(logs, "2025-10-03-new")
-    state.write_text(
-        json.dumps({"last_processed": "2025-10-01-old", "processed_count": 1})
-    )
+    old = "2025-10-02-zesty-blue-fish"
+    new = "2025-10-02-amber-red-owl"
+    _write_log(logs, old)
+    EffectivenessTracker(logs_dir=logs, state_file=state).analyze()
+    # Simulate the pre-upgrade state, which has counters but no processed set.
+    legacy = json.loads(state.read_text())
+    del legacy["processed_logs"]
+    state.write_text(json.dumps(legacy))
+    _write_log(logs, new)
 
     s = EffectivenessTracker(logs_dir=logs, state_file=state).analyze()
     assert s.processed_count == 2
-    assert sorted(s.processed_logs) == ["2025-10-01-old", "2025-10-03-new"]
-    # The seeded names stay processed on the next run
+    assert s.total_sessions == 2
+    assert sorted(s.processed_logs) == [new, old]
+    stats = s.lesson_stats["lessons/workflow/a.md"]
+    assert stats.total_inclusions == 2
+    assert sorted(stats.sessions_included) == [new, old]
+    assert stats.keywords_matched == {"git": 2}
+
+    # The rebuilt state persists exact membership, not a guessed watermark.
     s = EffectivenessTracker(logs_dir=logs, state_file=state).analyze()
     assert s.processed_count == 2
+    assert s.total_sessions == 2
+    assert s.lesson_stats["lessons/workflow/a.md"].total_inclusions == 2
