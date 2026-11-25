@@ -201,3 +201,41 @@ def test_store_invented_marker_is_never_serialized() -> None:
     record = SessionRecord.from_dict({"session_id": "x", "_store_invented": {"a": 1}})
     assert record._store_invented == {}
     assert "_store_invented" not in record.to_dict()
+
+
+def test_two_rewrites_of_the_same_records_keep_one_id_less_row(tmp_path: Path) -> None:
+    """A second rewrite of the same in-memory list must replace, not append (#2338).
+
+    ``rewrite()`` writes the record's canonical form, so the bytes on disk
+    differ from the legacy row. An identity derived from those bytes would
+    change under the first rewrite and the second one would append a copy.
+    """
+    store = SessionStore(sessions_dir=tmp_path)
+    store.path.write_text(json.dumps({"model": "opus"}) + "\n", encoding="utf-8")
+
+    records = store.load_all()
+    store.rewrite(records)
+    store.rewrite(records)
+
+    rows = [json.loads(line) for line in store.path.read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == 1
+    assert rows[0]["model"] == "opus"
+    assert "session_id" not in rows[0]
+
+
+def test_mutate_rewrite_twice_without_reload_keeps_one_id_less_row(tmp_path: Path) -> None:
+    """Stamp, rewrite, then stamp again on the same loaded objects (the repro)."""
+    store = SessionStore(sessions_dir=tmp_path)
+    store.path.write_text(json.dumps({"model": "opus"}) + "\n", encoding="utf-8")
+
+    records = store.load_all()
+    records[0].attempt_kind = "repetition"
+    store.rewrite(records)
+    records[0].category = "code"
+    store.rewrite(records)
+
+    rows = [json.loads(line) for line in store.path.read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == 1
+    assert rows[0]["attempt_kind"] == "repetition"
+    assert rows[0]["category"] == "code"
+    assert "session_id" not in rows[0]
