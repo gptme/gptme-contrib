@@ -418,24 +418,26 @@ def test_scalar_keywords_value_is_one_keyword_not_characters(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("yaml_value", "expected"),
-    [
-        ("404", {"404"}),
-        ("2024", {"2024"}),
-        ("1.5", {"1.5"}),
-        ("true", {"True"}),
-        ("false", {"False"}),
-        ("0", {"0"}),
-        ("2024-01-01", {"2024-01-01"}),
-    ],
+    "yaml_value",
+    ["404", "1.5", "true", "0", "2024-01-01", "0755", "12:30", "1_000"],
 )
-def test_non_string_scalar_keywords_value_is_one_keyword(
-    tmp_path, yaml_value, expected
-):
-    # YAML parses these as int/float/bool/date, not str; they must be one
-    # keyword rather than raising TypeError and silently yielding no keywords.
+def test_non_string_scalar_keywords_value_yields_no_keyword(tmp_path, yaml_value):
+    # PyYAML's YAML 1.1 resolvers turn these into int/float/bool/date (0755 is
+    # octal 493, 12:30 is sexagesimal 750), so str() would not reproduce what
+    # the author wrote. gptme's lesson parser drops non-string keywords, so
+    # they never match; similarity must see the same keywords the matcher does.
     from gptme_lessons_extras.similarity import extract_keywords
 
     lesson = tmp_path / "lesson.md"
     lesson.write_text(f"---\nmatch:\n  keywords: {yaml_value}\n---\n# L\n")
-    assert extract_keywords(lesson) == expected
+    assert extract_keywords(lesson) == set()
+
+
+def test_non_string_and_blank_list_keywords_are_dropped(tmp_path):
+    from gptme_lessons_extras.similarity import extract_keywords
+
+    lesson = tmp_path / "lesson.md"
+    lesson.write_text(
+        "---\nmatch:\n  keywords: [0755, git rebase, true, '  ', '0755']\n---\n# L\n"
+    )
+    assert extract_keywords(lesson) == {"git rebase", "0755"}

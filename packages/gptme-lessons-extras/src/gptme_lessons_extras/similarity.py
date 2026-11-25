@@ -99,13 +99,16 @@ def extract_keywords(lesson_path: Path) -> Set[str]:
             metadata = cast(dict[str, Any], post.metadata)
             if "match" in metadata and "keywords" in metadata["match"]:
                 keywords = metadata["match"]["keywords"]
-                if keywords is None:
+                # Mirror gptme's lesson parser: a str is one keyword (set() of
+                # a str would yield characters), and only non-empty strings
+                # count. YAML-resolved int/float/bool/date values never match
+                # in gptme, and str() would not reproduce their source text
+                # (0755 resolves to 493).
+                if isinstance(keywords, str):
+                    keywords = [keywords]
+                elif not isinstance(keywords, list):
                     return set()
-                # Any non-collection value (str, or a YAML int/float/bool/date)
-                # is one keyword; set() of a str would yield characters.
-                if not isinstance(keywords, list | tuple | set | frozenset):
-                    return {str(keywords)}
-                return {str(k) for k in keywords}
+                return {k for k in keywords if isinstance(k, str) and k.strip()}
     except Exception:
         pass
     return set()
