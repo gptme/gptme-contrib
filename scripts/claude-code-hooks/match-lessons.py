@@ -30,8 +30,10 @@ Register in `.claude/settings.json`. Prefer the workspace venv interpreter
 Install gptme-rag in that venv. Run with --self-check (no stdin required)
 for a non-zero exit if the matcher import or lesson-directory resolution fails.
 Normal hook calls remain fail-open, with dependency_missing receipts on import
-failure rather than reporting an ordinary no_match. Independent keyword-memory
-matching continues, and receipts measure any context it emits.
+failure rather than reporting an ordinary no_match. Budget timeouts keep their
+hook_budget_timeout reason and annotate dependency_missing: true on import failure.
+Independent keyword-memory matching continues, and receipts measure any context
+it emits.
 
 The hook auto-discovers your workspace root (the directory containing gptme.toml)
 and reads lesson dirs from [lessons] dirs in that config file.
@@ -1768,7 +1770,7 @@ def emit_empty(
         )
         sys.stdout.flush()
     if session_id:
-        if not _GPTME_RAG_AVAILABLE:
+        if not _GPTME_RAG_AVAILABLE and reason != "hook_budget_timeout":
             reason = "dependency_missing"
         _write_emission_receipt(session_id, event_name, 0, "empty", reason)
 
@@ -2688,11 +2690,10 @@ def self_check() -> int:
     return 0
 
 
-if __name__ == "__main__":
-    if "--self-check" in sys.argv[1:]:
-        sys.exit(self_check())
+def _run_with_budget(budget_seconds: float) -> None:
+    """Run ``main()`` under the wall-clock budget; a timeout degrades to empty."""
     try:
-        _arm_hook_budget(HOOK_BUDGET_SECONDS)
+        _arm_hook_budget(budget_seconds)
         main()
     except TimeoutError:
         # Stop the re-firing alarm before any recovery work can be interrupted.
@@ -2704,12 +2705,28 @@ if __name__ == "__main__":
         # still readable here. A PreToolUse timeout must emit no payload, not
         # a UserPromptSubmit-shaped one.
         event = "UserPromptSubmit"
+        session_id = None
         try:
-            cached_input = _STDIN_CACHE or ""
-            event = json.loads(cached_input).get("hook_event_name") or event
+            cached = json.loads(_STDIN_CACHE or "")
+            event = cached.get("hook_event_name") or event
+            session_id = cached.get("session_id") or None
         except (json.JSONDecodeError, TypeError, ValueError, AttributeError):
             pass
-        emit_empty(event)
+        # Discard metadata from the abandoned emission decision. In particular,
+        # session_bytes counts reservations, not successfully emitted bytes;
+        # the conservative debit remains, but is not this empty output's size.
+        _RECEIPT_FIELDS.clear()
+        if not _GPTME_RAG_AVAILABLE:
+            _RECEIPT_FIELDS["dependency_missing"] = True
+        # Record the timeout as a measured-zero receipt: without one, a hook
+        # that ran out of budget is indistinguishable from one that never ran.
+        emit_empty(event, session_id, "hook_budget_timeout")
         sys.exit(0)
     finally:
         _disarm_hook_budget()
+
+
+if __name__ == "__main__":
+    if "--self-check" in sys.argv[1:]:
+        sys.exit(self_check())
+    _run_with_budget(HOOK_BUDGET_SECONDS)
