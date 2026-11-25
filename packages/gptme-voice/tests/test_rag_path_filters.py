@@ -91,6 +91,27 @@ async def test_default_recaps_stay_recent_journals_only(corpus: Path) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("injected", [False, True])
+@pytest.mark.parametrize(
+    "filters", [{"include_paths": ["scripts/"]}, {"exclude_paths": ["journal/"]}]
+)
+async def test_filtered_recaps_require_topic_terms(
+    corpus: Path, injected: bool, filters: dict[str, list[str]]
+) -> None:
+    def search_impl(query: str, n_results: int) -> list[dict[str, str]]:
+        pytest.fail("A filtered query without topic terms must not call the backend")
+
+    rag = VoiceRag(
+        str(corpus), enabled=True, search_impl=search_impl if injected else None
+    )
+    result = await rag.search("what have you been doing today", **filters)
+    assert result["status"] == "error"
+    assert result["results"] == []
+    assert "topic" in result["error"].lower()
+    assert result["coverage"]["mode"] == "filtered"
+
+
+@pytest.mark.asyncio
 @pytest.mark.usefixtures("lexical")
 async def test_exclude_journals_uses_configured_sources(corpus: Path) -> None:
     result = await VoiceRag(str(corpus), enabled=True).search(

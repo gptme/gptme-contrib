@@ -210,8 +210,10 @@ Configure narrow, reviewed sources rather than a whole-workspace glob.
 
 Filtered topic queries use `gptme-rag[lexical]` (scikit-learn) and return
 matching passages; without that optional backend they return an explicit
-error. Default recaps retain their recency fallback. Searches read at most
-80 selected files of at most 200KB each under the existing timeout, with
+error. Filtered queries with no topic terms (for example, “what have you been
+doing today”) also return an error: name a topic or omit the filters for a
+recent-journal recap. Default recaps retain their recency fallback. Searches
+read at most 80 selected files of at most 200KB each under the existing timeout, with
 configured sources first in filtered searches. Journal sources keep their
 recency window; configured sources can be older. The returned `coverage`
 describes source patterns, active filters and limits: an empty result is

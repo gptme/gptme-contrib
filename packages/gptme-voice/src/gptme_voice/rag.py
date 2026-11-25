@@ -476,6 +476,19 @@ class VoiceRag:
             "file_limit": _MAX_FILES,
             "max_file_bytes": _MAX_FILE_BYTES,
         }
+        terms = topic_terms(query)
+        if filtered and not terms:
+            return {
+                "status": "error",
+                "query": query,
+                "backend": "none",
+                "coverage": coverage,
+                "results": [],
+                "error": (
+                    "Filtered search requires topic terms. Name a topic or omit path "
+                    "filters for a recent-journal recap."
+                ),
+            }
         n_results = max(1, min(int(n_results), 8))
         if self._search_impl is not None:
             results = self._search_impl(query, n_results)
@@ -522,7 +535,6 @@ class VoiceRag:
                 "message": "Selected sources could not be read; this is not proof of absence.",
             }
 
-        terms = topic_terms(query)
         backend = "recency"
         ranked = list(docs)
         if terms:
