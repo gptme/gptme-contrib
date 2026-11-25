@@ -54,9 +54,12 @@ _COMMIT_RE = re.compile(
 # through `| tail -3`), the "[branch hash] msg" line is gone and _COMMIT_RE
 # matches nothing, even though the commit landed.
 _COMMIT_CMD_RE = re.compile(r"\bgit(?:\s+-C\s+\S+)?\s+commit\b|\bgit-safe-commit\b")
-_COMMIT_SUBJECT_RE = re.compile(r"""-m\s+(?:"((?:[^"\\]|\\.)*)"|'([^']*)')""")
+# `-m` alone or as the last of combined short flags (`-am`, `-qm`, `-aqm`).
+# The lookbehind keeps `--amend`-style long options from matching.
+_COMMIT_M_FLAG = r"(?<![\w-])-[A-Za-z]*m"
+_COMMIT_SUBJECT_RE = re.compile(_COMMIT_M_FLAG + r"""\s+(?:"((?:[^"\\]|\\.)*)"|'([^']*)')""")
 _COMMIT_HEREDOC_SUBJECT_RE = re.compile(
-    r"""-m\s+"\$\(cat\s+<<-?\s*'?(\w+)'?\s*\n(.*?)\n\1\b""", re.S
+    _COMMIT_M_FLAG + r"""\s+"\$\(cat\s+<<-?\s*'?(\w+)'?\s*\n(.*?)\n\1\b""", re.S
 )
 _GIT_PUSH_CMD_RE = re.compile(r"\bgit(?:\s+-C\s+\S+)?\s+push\b")
 _QUIET_PUSH_RE = re.compile(r"\bgit(?:\s+-C\s+\S+)?\s+push\b[^;&|\n]*(?:\s-q\b|--quiet\b)")
@@ -143,19 +146,21 @@ def _command_flag_value(cmd: str, flag: str) -> str | None:
 def _commit_subject(cmd: str) -> str | None:
     match = _COMMIT_HEREDOC_SUBJECT_RE.search(cmd)
     if match:
-        return match.group(2).strip().splitlines()[0].strip() or None
+        return (match.group(2).strip().splitlines() or [""])[0].strip() or None
     match = _COMMIT_SUBJECT_RE.search(cmd)
     if not match:
         return None
     value = match.group(1) if match.group(1) is not None else match.group(2)
-    return value.replace('\\"', '"').splitlines()[0].strip() or None
+    return (value.replace('\\"', '"').splitlines() or [""])[0].strip() or None
 
 
 # Same as _COMMIT_SUBJECT_RE but also accepts the long forms
 # ("--message=...", "--message ..."), which the commit-command scan uses to
 # decide whether a widened match can be checked against a stated subject.
 _COMMIT_SUBJECT_LONG_RE = re.compile(
-    r"""(?:-m|--message)\s+(?:"((?:[^"\\]|\\.)*)"|'([^']*)')""" r"""|--message=("[^"]*"|'[^']*')"""
+    r"(?:" + _COMMIT_M_FLAG + r"|--message)"
+    r"""\s+(?:"((?:[^"\\]|\\.)*)"|'([^']*)')"""
+    r"""|--message=("[^"]*"|'[^']*')"""
 )
 
 
@@ -165,20 +170,27 @@ def _stated_commit_subjects(cmd: str) -> list[str]:
     A command can commit more than once ("git commit -m a && git commit -m b"),
     so all stated subjects are returned, not just the first.
     """
-    subjects: list[str] = []
+    found: list[tuple[int, str]] = []
+    heredocs = list(_COMMIT_HEREDOC_SUBJECT_RE.finditer(cmd))
     for match in _COMMIT_SUBJECT_LONG_RE.finditer(cmd):
+        # The quoted-body match of a heredoc message ("$(cat <<'EOF' ...") is
+        # not a subject; the heredoc match below states the real one.
+        if any(h.start() <= match.start() < h.end() for h in heredocs):
+            continue
         value = next((g for g in match.groups() if g is not None), "")
         if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
             value = value[1:-1]
-        subject = value.replace('\\"', '"').splitlines()[0].strip()
+        subject = (value.replace('\\"', '"').splitlines() or [""])[0].strip()
         if subject:
-            subjects.append(subject)
-    if not subjects:
-        heredoc = _COMMIT_HEREDOC_SUBJECT_RE.search(cmd)
-        if heredoc:
-            subject = heredoc.group(2).strip().splitlines()[0].strip()
-            if subject:
-                subjects.append(subject)
+            found.append((match.start(), subject))
+    for heredoc in heredocs:
+        body = heredoc.group(2).strip()
+        if not body:  # empty heredoc message states no subject
+            continue
+        subject = body.splitlines()[0].strip()
+        if subject:
+            found.append((heredoc.start(), subject))
+    subjects = [subject for _, subject in sorted(found)]
     return subjects
 
 
