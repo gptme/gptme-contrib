@@ -175,6 +175,23 @@ class TestSearchDocumentGeneration:
                 "old"
             ]
 
+    def test_legacy_document_writer_invalidates_generation(self):
+        conn = _conn()
+        save_search_documents(conn, "/proj", [_doc("pkg.mod.old")])
+        old_document = conn.execute(
+            "SELECT * FROM search_documents WHERE directory = ?", ("/proj",)
+        ).fetchone()
+        save_search_documents(conn, "/proj", [_doc("pkg.mod.new")], "g2")
+        # The old helper only deletes/inserts documents; it knows nothing
+        # about the generation table installed by the upgraded server.
+        conn.execute("DELETE FROM search_documents WHERE directory = ?", ("/proj",))
+        conn.execute(
+            "INSERT INTO search_documents VALUES (?, ?, ?, ?, ?, ?, ?)", old_document
+        )
+        conn.commit()
+        assert load_search_documents(conn, "/proj", "g2") == []
+        assert [d.name for d in load_search_documents(conn, "/proj")] == ["old"]
+
     def test_matching_generation_loads(self):
         conn = _conn()
         save_search_documents(conn, "/proj", [_doc("pkg.mod.f")], generation="g1")
