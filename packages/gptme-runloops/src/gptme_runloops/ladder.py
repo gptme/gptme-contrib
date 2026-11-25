@@ -96,12 +96,17 @@ class LadderResult(Generic[T]):
         )
 
     def summary(self) -> str:
-        """One log line: ``produced_by=X own-prs=1/3 miners=0/0 ...`` (filed/emitted)."""
+        """One log line with filed/emitted counts, source notes and errors.
+
+        The producer uses repr: ``None`` means no producer, ``'none'`` is a name.
+        """
         counts = " ".join(
-            f"{k}={v.filed}/{v.emitted}" + (f" error={v.error!r}" if v.error else "")
+            f"{k}={v.filed}/{v.emitted}"
+            + (f" error={v.error!r}" if v.error else "")
+            + (f" note={v.note!r}" if v.note else "")
             for k, v in self.rungs.items()
         )
-        return f"produced_by={self.produced_by or 'none'} {counts}".rstrip()
+        return f"produced_by={self.produced_by!r} {counts}".rstrip()
 
 
 def run_ladder(

@@ -59,7 +59,10 @@ def test_all_empty_records_zero_per_rung_and_idles_on_purpose():
     assert list(res.rungs) == ["own-prs", "judgment-waits"]
     assert res.rungs["judgment-waits"].note.startswith("unavailable")
     assert filed_calls == []  # never called with an empty list
-    assert res.summary() == "produced_by=none own-prs=0/0 judgment-waits=0/0"
+    assert res.summary() == (
+        "produced_by=None own-prs=0/0 judgment-waits=0/0"
+        " note='unavailable: producer not built'"
+    )
 
 
 def test_dedupe_shortfall_falls_through_to_next_rung():
@@ -179,7 +182,9 @@ def test_rung_named_none_is_not_confused_with_the_no_producer_sentinel():
     )
     assert res.produced_by == "none"
     assert res.filed == ["a", "b"]
-    assert res.summary().startswith("produced_by=none none=1/1 miners=1/1")
+    assert res.summary().startswith("produced_by='none' none=1/1 miners=1/1")
+    empty = run_ladder([_rung("none", [])], 1, _file_all)
+    assert empty.summary() == "produced_by=None none=0/0"
 
 
 def test_failed_sources_do_not_look_like_a_clean_idle_tick():
