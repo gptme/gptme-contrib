@@ -3048,6 +3048,7 @@ def test_budget_timeout_still_records_a_receipt(
     receipts = tmp_path / "cc-session-budget-timeout-lessons-receipts.jsonl"
     rows = [json.loads(line) for line in receipts.read_text().splitlines()]
     assert rows[-1]["reason"] == "hook_budget_timeout"
+    assert rows[-1].get("dependency_missing", False) is (not rag_available)
     assert rows[-1]["outcome"] == "empty"
     assert rows[-1]["hook"] == event
     assert rows[-1]["bytes"] == 0
@@ -3075,8 +3076,12 @@ def test_timeout_after_budget_reservation_omits_abandoned_fields(
         raise TimeoutError("hook budget")
 
     monkeypatch.setattr(hook, "_log_lesson_events", timeout_after_reservation)
-    with pytest.raises(SystemExit) as exc_info:
-        hook._run_with_budget(5)
+    previous = signal.getsignal(signal.SIGALRM)
+    try:
+        with pytest.raises(SystemExit) as exc_info:
+            hook._run_with_budget(5)
+    finally:
+        signal.signal(signal.SIGALRM, previous)
     assert exc_info.value.code == 0
     output = json.loads(capsys.readouterr().out)
     assert "additionalContext" not in output["hookSpecificOutput"]
