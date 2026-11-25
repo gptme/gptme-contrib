@@ -1,7 +1,7 @@
 import json
-import logging
 from datetime import datetime, timezone
 
+import pytest
 from click.testing import CliRunner
 from gptme_voice.realtime.call import main as call_main
 from gptme_voice.realtime.twilio_integration import (
@@ -186,7 +186,19 @@ def test_create_outbound_call_writes_missed_call_context(tmp_path):
     assert note["context"]["text"] == "standup brief"
 
 
-def test_create_outbound_call_writes_note_from_context_file_only(tmp_path):
+@pytest.mark.parametrize("workspace_form", ["plain", "parent", "symlink"])
+def test_create_outbound_call_writes_note_from_context_file_only(
+    tmp_path, workspace_form
+):
+    workspace = tmp_path
+    if workspace_form == "parent":
+        child = tmp_path / "child"
+        child.mkdir()
+        workspace = child / ".."
+    elif workspace_form == "symlink":
+        workspace = tmp_path / "alias"
+        workspace.symlink_to(tmp_path, target_is_directory=True)
+
     class FakeCalls:
         def create(self, **kwargs):
             class Response:
@@ -208,7 +220,7 @@ def test_create_outbound_call_writes_note_from_context_file_only(tmp_path):
         "+46701234567",
         settings,
         client_cls=FakeClient,
-        workspace=str(tmp_path),
+        workspace=str(workspace),
         call_type="general",
         context_file="state/prepared-context.json",
     )
@@ -223,11 +235,19 @@ def test_create_outbound_call_writes_note_from_context_file_only(tmp_path):
     assert "context" not in note
 
 
-def test_create_outbound_call_warns_when_context_file_outside_workspace(
-    tmp_path, caplog
+@pytest.mark.parametrize(
+    "context_file", ["../outside.json", "/etc/passwd", "escape/note.json"]
+)
+def test_create_outbound_call_rejects_outside_context_file_before_dialling(
+    tmp_path, context_file
 ):
+    (tmp_path / "escape").symlink_to(tmp_path.parent, target_is_directory=True)
+    placed = []
+
     class FakeCalls:
         def create(self, **kwargs):
+            placed.append(kwargs)
+
             class Response:
                 sid = "CA" + "c" * 32
 
@@ -243,22 +263,80 @@ def test_create_outbound_call_warns_when_context_file_outside_workspace(
         from_number="+15551234567",
         stream_url="wss://voice.example/twilio",
     )
-    with caplog.at_level(logging.WARNING):
-        sid = create_outbound_call(
+    with pytest.raises(ValueError, match="outside workspace"):
+        create_outbound_call(
             "+46701234567",
             settings,
             client_cls=FakeClient,
             workspace=str(tmp_path),
-            context_file="../outside.json",
+            context_file=context_file,
         )
 
-    assert sid == "CA" + "c" * 32
+    assert placed == []
     note_path = tmp_path / "state" / "voice-calls" / "missed-call-context.json"
     assert not note_path.exists()
-    assert "Failed to persist missed-call context" in caplog.text
 
 
-def test_call_cli_passes_context_file_to_outbound_call(monkeypatch, tmp_path):
+@pytest.mark.parametrize("workspace", [None, ""])
+def test_create_outbound_call_requires_workspace_for_context_file(workspace):
+    def unexpected_client(*args):
+        pytest.fail("Twilio client must not be constructed for invalid context")
+
+    settings = OutboundCallSettings(
+        account_sid="AC123",
+        auth_token="secret",
+        from_number="+15551234567",
+        stream_url="wss://voice.example/twilio",
+    )
+    with pytest.raises(ValueError, match="workspace is required"):
+        create_outbound_call(
+            "+46701234567",
+            settings,
+            client_cls=unexpected_client,
+            workspace=workspace,
+            context_file="state/prepared-context.json",
+        )
+
+
+@pytest.mark.parametrize("explicit_workspace", [True, False])
+@pytest.mark.parametrize("context_file", ["../outside.json", "/etc/passwd", ""])
+def test_call_cli_rejects_outside_context_file(
+    monkeypatch, tmp_path, explicit_workspace, context_file
+):
+    monkeypatch.chdir(tmp_path)
+    constructed = []
+
+    class FakeClient:
+        def __init__(self, *args):
+            constructed.append(args)
+            pytest.fail("Twilio client must not be constructed for invalid context")
+
+    monkeypatch.setattr("twilio.rest.Client", FakeClient)
+    monkeypatch.setattr(
+        "gptme_voice.realtime.call.resolve_outbound_call_settings",
+        lambda **_: OutboundCallSettings(
+            account_sid="AC123",
+            auth_token="secret",
+            from_number="+15551234567",
+            stream_url="wss://voice.example/twilio",
+        ),
+    )
+
+    args = ["+46701234567", "--context-file", context_file]
+    if explicit_workspace:
+        args.extend(["--workspace", str(tmp_path)])
+    result = CliRunner().invoke(call_main, args)
+
+    assert result.exit_code == 1, result.output
+    assert "outside workspace" in result.output
+    assert constructed == []
+
+
+@pytest.mark.parametrize("explicit_workspace", [True, False])
+def test_call_cli_passes_context_file_to_outbound_call(
+    monkeypatch, tmp_path, explicit_workspace
+):
+    monkeypatch.chdir(tmp_path)
     captured = {}
 
     monkeypatch.setattr(
@@ -278,18 +356,16 @@ def test_call_cli_passes_context_file_to_outbound_call(monkeypatch, tmp_path):
 
     monkeypatch.setattr("gptme_voice.realtime.call.create_outbound_call", fake_create)
 
-    result = CliRunner().invoke(
-        call_main,
-        [
-            "+46701234567",
-            "--workspace",
-            str(tmp_path),
-            "--context-file",
-            "state/prepared-context.json",
-            "--call-type",
-            "general",
-        ],
-    )
+    args = [
+        "+46701234567",
+        "--context-file",
+        "state/prepared-context.json",
+        "--call-type",
+        "general",
+    ]
+    if explicit_workspace:
+        args.extend(["--workspace", str(tmp_path)])
+    result = CliRunner().invoke(call_main, args)
 
     assert result.exit_code == 0, result.output
     assert captured["to_number"] == "+46701234567"
