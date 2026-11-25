@@ -3523,7 +3523,11 @@ def build_cross_file_call_graph(
         if not candidates:
             return name
         if owner:
-            owned = [c for c in candidates if c.parent_class == owner]
+            # Rust generic impls record ``Foo<T>`` as the class.
+            bare = owner.split("<")[0]
+            owned = [
+                c for c in candidates if (c.parent_class or "").split("<")[0] == bare
+            ]
             candidates = owned or candidates
         if len(candidates) == 1:
             return candidates[0].qualified_id()

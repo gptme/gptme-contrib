@@ -253,13 +253,14 @@ def test_python_bare_call_in_method_prefers_top_level(tmp_path: Path):
     assert callees["mod::B.process"] == {"mod::validate"}
 
 
+@pytest.mark.parametrize("generics", ["", "<T>"])
 @pytest.mark.parametrize("path", ["Self::new", "B::new"])
-def test_rust_type_path_resolves_to_that_type(tmp_path: Path, path: str):
+def test_rust_type_path_resolves_to_that_type(tmp_path: Path, path: str, generics: str):
     pytest.importorskip("tree_sitter_rust")
     source = (
-        "struct A;\nstruct B;\nimpl A { fn new() {} }\n"
-        f"impl B {{ fn new() {{}} fn make() {{ {path}(); }} }}\n"
+        "struct A;\nstruct B<T>(T);\nimpl A { fn new() {} }\n"
+        f"impl{generics} B{generics} {{ fn new() {{}} fn make() {{ {path}(); }} }}\n"
     )
     callees = _graph(tmp_path, {"lib.rs": source})
 
-    assert callees["lib::B.make"] == {"lib::B.new"}
+    assert callees[f"lib::B{generics}.make"] == {f"lib::B{generics}.new"}
