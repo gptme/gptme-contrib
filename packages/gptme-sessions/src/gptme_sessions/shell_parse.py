@@ -148,6 +148,20 @@ def _ts_heredoc_write_paths(cmd: str) -> list[str]:
     return paths
 
 
+# Node types that are command arguments (bare, quoted, or expanded).
+_TS_ARG_TYPES = frozenset(
+    {
+        "word",
+        "string",
+        "raw_string",
+        "concatenation",
+        "simple_expansion",
+        "expansion",
+        "command_substitution",
+        "number",
+    }
+)
+
 # git global options that consume the following token as their value.
 _GIT_VALUE_OPTS = frozenset({"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path"})
 
@@ -162,7 +176,12 @@ def _ts_git_subcommand(cmd_node: Any) -> str | None:
     anchoring while also tolerating value-taking options such as
     ``git -c user.name=x commit``.
     """
-    words = [str(c.text.decode()) for c in cmd_node.children if c.type == "word"]
+    # Every argument counts, not just bare words: a quoted option value
+    # (`git -C "a b" commit`) is a string node, and dropping it made `-C`
+    # consume the subcommand as its value.
+    words = [
+        str(c.text.decode(errors="replace")) for c in cmd_node.children if c.type in _TS_ARG_TYPES
+    ]
     i = 0
     while i < len(words):
         word = words[i]
@@ -321,6 +340,44 @@ def _first_group(m: re.Match[str]) -> str:
     return next(g for g in m.groups() if g is not None)
 
 
+def _subshell_spans(cmd: str) -> list[tuple[int, int]]:
+    """(open, close) offsets of each balanced ``( … )`` the shell runs as a subshell.
+
+    Parens inside single quotes are literal; a ``$( … )`` inside double quotes
+    is still a command substitution, so it opens a span and resets quoting
+    until its ``)``, after which the enclosing double quote resumes.
+    """
+    spans: list[tuple[int, int]] = []
+    stack: list[tuple[int, str | None]] = []  # (open offset, quote to restore)
+    quote: str | None = None
+    i = 0
+    while i < len(cmd):
+        ch = cmd[i]
+        if quote == "'":
+            if ch == "'":
+                quote = None
+        elif quote == '"':
+            if ch == "\\":
+                i += 1
+            elif ch == '"':
+                quote = None
+            elif ch == "$" and cmd.startswith("(", i + 1):
+                i += 1
+                stack.append((i, quote))
+                quote = None
+        elif ch == "\\":
+            i += 1
+        elif ch in "'\"":
+            quote = ch
+        elif ch == "(":
+            stack.append((i, None))
+        elif ch == ")" and stack:
+            start, quote = stack.pop()
+            spans.append((start, i))
+        i += 1
+    return spans
+
+
 def command_repo_dir(cmd: str, cwd: str | None = None) -> str | None:
     """Directory a command's ``git commit``/``git push`` runs in.
 
@@ -334,7 +391,15 @@ def command_repo_dir(cmd: str, cwd: str | None = None) -> str | None:
     line_start = cmd.rfind("\n", 0, git.start()) + 1 if git else 0
     stmt_start = max(cmd.rfind(c, line_start, end) for c in ";&|") + 1
     explicit = _GIT_C_RE.search(cmd, max(stmt_start, line_start), end)
-    steps = [_first_group(m) for m in _CD_RE.finditer(cmd, 0, git.start() if git else end)]
+    git_start = git.start() if git else end
+    # A `cd` inside a subshell that closed before the git call, `(cd x && make)`
+    # or `$(cd x; pwd)`, does not move the parent shell.
+    closed = [(a, b) for a, b in _subshell_spans(cmd) if b < git_start]
+    steps = [
+        _first_group(m)
+        for m in _CD_RE.finditer(cmd, 0, git_start)
+        if not any(a < m.end() <= b for a, b in closed)
+    ]
     if explicit:
         steps.append(_first_group(explicit))
     if not steps:
