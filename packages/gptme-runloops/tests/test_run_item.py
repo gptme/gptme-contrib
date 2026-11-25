@@ -4105,6 +4105,25 @@ class TestInspectGptmeFailure:
         result = _inspect_gptme_failure(_make_plan_stub(session_id), tmp_dir=tmp_path)
         assert result is None
 
+    def test_long_tool_output_fragment_is_not_infra(self, tmp_path) -> None:
+        traj = tmp_path / "long-tool-output.jsonl"
+        traj.write_text(
+            json.dumps(
+                {
+                    "role": "system",
+                    "content": "x" * 5000 + " Authentication failed",
+                    "tool_use_id": "ordinary-tool-output",
+                }
+            )
+            + "\n"
+        )
+        assert (
+            _inspect_gptme_failure(
+                _make_plan_stub("long-tool"), trajectory=str(traj), tmp_dir=tmp_path
+            )
+            is None
+        )
+
     def test_returns_model_unavailable_on_exit77_trajectory(self, tmp_path) -> None:
         session_id = "gptme-session-333"
         traj = tmp_path / "gptme-session.jsonl"

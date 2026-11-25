@@ -2393,7 +2393,12 @@ def _inspect_gptme_failure(
             tail = fh.read(4096)
     except OSError:
         return None
-    result = _classify_backend_error_text(tail, "gptme")
+    # This input is known to be a trajectory, even when the entire tail is
+    # one incomplete record. Never let an unparseable tool-output fragment
+    # fall back to the free-form provider-error scan.
+    records = _parse_jsonl_records(tail)
+    evidence = _terminal_error_evidence(records or [])
+    result = _classify_backend_error_text(evidence, "gptme") if evidence else None
     if result:
         _log(f"ERROR: gptme infra failure detected: {result}")
     return result
