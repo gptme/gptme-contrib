@@ -1,4 +1,5 @@
 from datetime import datetime
+import random
 from pathlib import Path
 
 import pytest
@@ -1503,10 +1504,13 @@ def test_search_path_prefilter_pages_metadata(tmp_path, monkeypatch, count, filt
     # Path matching normalizes this spelling, but Chroma's source predicate must not.
     wanted_source = f"{inside}//wanted.txt"
     if count:
+        rng = random.Random(count)
         indexer.collection.add(
             ids=[str(i) for i in range(count)],
             documents=["pelican habitat"] * count,
-            embeddings=[[0.1] * 384 for _ in range(count)],
+            # Distinct vectors: identical ones degenerate Chroma's HNSW graph,
+            # so a filtered query can miss its only allowed record (flaky).
+            embeddings=[[rng.random() for _ in range(384)] for _ in range(count)],
             metadatas=[
                 {"source": wanted_source if i == count - 1 else str(tmp_path / f"{i}.txt")}
                 for i in range(count)
