@@ -289,3 +289,55 @@ def test_intent_to_add_is_preserved(repo, create_pr, fail_push):
     assert create_pr.create_lesson_pr(lesson) is not fail_push
     assert git(repo, "diff", "--raw") == before
     assert lesson.read_text() == LESSON
+
+
+@pytest.mark.parametrize("fail_push", [False, True])
+@pytest.mark.parametrize("intent_path", ["a", "[a]"])
+def test_glob_characters_in_path_are_literal(repo, create_pr, fail_push, intent_path):
+    # Filenames with glob characters make an invalid branch name, but a parent
+    # directory is not part of it: unescaped, "[a]" also matches sibling "a".
+    tools = repo / "lessons" / "tools"
+    for name in ("a", "[a]"):
+        (tools / name).mkdir()
+        (tools / name / "nested.md").write_text(LESSON)
+    git(
+        repo,
+        "--literal-pathspecs",
+        "add",
+        "-N",
+        f"lessons/tools/{intent_path}/nested.md",
+    )
+    status = ("status", "--porcelain", "--untracked-files=all")
+    before = git(repo, *status)
+    if fail_push:
+        git(repo, "remote", "set-url", "origin", str(repo.parent / "missing.git"))
+
+    ok = create_pr.create_lesson_pr(tools / "[a]" / "nested.md")
+
+    assert ok is not fail_push
+    assert git(repo, *status) == before
+    if not fail_push:
+        files = git(repo, "show", "--name-only", "--format=", "lesson/tools-nested")
+        assert files.splitlines() == ["lessons/tools/[a]/nested.md"]
+
+
+@pytest.mark.parametrize("landed", [False, True])
+def test_interrupted_push_reports_whether_branch_reached_origin(
+    repo, create_pr, monkeypatch, capsys, landed
+):
+    run = subprocess.run
+
+    def interrupt_push(args, *positional, **kwargs):
+        if args[:2] == ["git", "push"]:
+            if landed:  # Ctrl-C arrives after the remote ref was updated
+                run(args, *positional, **kwargs)
+            raise KeyboardInterrupt
+        return run(args, *positional, **kwargs)
+
+    monkeypatch.setattr(create_pr.subprocess, "run", interrupt_push)
+    with pytest.raises(KeyboardInterrupt):
+        create_pr.create_lesson_pr(repo / "lessons" / "tools" / "git-careful.md")
+
+    hint = "gh pr create --head lesson/tools-git-careful"
+    assert (hint in capsys.readouterr().out) is landed
+    assert git(repo, "branch", "--list", "lesson/*") == ""

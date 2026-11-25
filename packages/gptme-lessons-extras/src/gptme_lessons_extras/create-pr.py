@@ -7,6 +7,7 @@ Usage:
 """
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -84,6 +85,33 @@ def validate_lesson(lesson_path: Path) -> tuple[bool, list[str]]:
     return len(errors) == 0, errors
 
 
+def _literal_pathspec(path: Path) -> str:
+    """Stop git from reading `[`, `*` or `?` in a path as a glob."""
+    return f":(literal){path.as_posix()}"
+
+
+def _origin_has_commit(repo_root: Path, branch_name: str, commit: str) -> bool:
+    """Whether the branch on origin is at commit; False if it cannot be checked."""
+    ref = f"refs/heads/{branch_name}"
+    try:
+        push_url = subprocess.check_output(
+            ["git", "remote", "get-url", "--push", "origin"],
+            text=True,
+            cwd=repo_root,
+        ).strip()
+        refs = subprocess.check_output(
+            ["git", "ls-remote", push_url, ref],
+            text=True,
+            cwd=repo_root,
+            stderr=subprocess.DEVNULL,
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+            timeout=15,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return False
+    return f"{commit}\t{ref}" in refs.splitlines()
+
+
 def _undo_lesson_branch(
     repo_root: Path,
     original_ref: str,
@@ -101,13 +129,14 @@ def _undo_lesson_branch(
     the lesson's original index entry. Keep the published commit on success;
     delete the retry-blocking branch on failure. Stop at the first failed step.
     """
+    pathspec = _literal_pathspec(relative_path)
     for args in (
         # Drop the lesson commit; the index and working tree stay as they are
         ["reset", "--soft", start_sha],
-        ["reset", "-q", start_sha, "--", str(relative_path)],
+        ["reset", "-q", start_sha, "--", pathspec],
         ["checkout", original_ref],
-        ["reset", "-q", original_index, "--", str(relative_path)],
-        *([["add", "-N", "--", str(relative_path)]] if intent_to_add else []),
+        ["reset", "-q", original_index, "--", pathspec],
+        *([["add", "-N", "--", pathspec]] if intent_to_add else []),
         ["branch", "-f", branch_name, lesson_commit]
         if lesson_commit
         else ["branch", "-D", branch_name],
@@ -217,7 +246,8 @@ def create_lesson_pr(
         print("🔍 Dry run - would create PR but not actually doing it")
         return True
 
-    start_sha = current_branch = ""
+    pathspec = _literal_pathspec(relative_path)
+    start_sha = current_branch = lesson_commit = ""
     branch_created = pushed = False
     try:
         # Store current branch (or the commit itself when HEAD is detached)
@@ -256,7 +286,7 @@ def create_lesson_pr(
                     "--name-only",
                     "--diff-filter=A",
                     "--",
-                    str(relative_path),
+                    pathspec,
                 ],
                 text=True,
                 cwd=repo_root,
@@ -272,7 +302,7 @@ def create_lesson_pr(
         # Add the lesson file
         print(f"➕ Adding file: {relative_path}")
         subprocess.run(
-            ["git", "add", str(relative_path)],
+            ["git", "add", "--", pathspec],
             check=True,
             cwd=repo_root,
         )
@@ -281,10 +311,13 @@ def create_lesson_pr(
         commit_msg = f"feat(lessons): add {title}"
         print(f"💾 Committing: {commit_msg}")
         subprocess.run(
-            ["git", "commit", "-m", commit_msg, "--", str(relative_path)],
+            ["git", "commit", "-m", commit_msg, "--", pathspec],
             check=True,
             cwd=repo_root,
         )
+        lesson_commit = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], text=True, cwd=repo_root
+        ).strip()
 
         # Push branch
         print(f"🚀 Pushing branch: {branch_name}")
@@ -368,6 +401,9 @@ def create_lesson_pr(
                 original_index,
                 intent_to_add,
             )
+        # An interrupt or dropped connection can follow the remote ref update
+        if lesson_commit and not pushed:
+            pushed = _origin_has_commit(repo_root, branch_name, lesson_commit)
         if pushed:
             print(
                 f"ℹ️  {branch_name} is already on origin. Open the PR with "
@@ -379,9 +415,6 @@ def create_lesson_pr(
         return False
 
     # Preserve both the published branch and the user's local lesson edits.
-    lesson_commit = subprocess.check_output(
-        ["git", "rev-parse", "HEAD"], text=True, cwd=repo_root
-    ).strip()
     print(f"🔙 Returning to branch: {current_branch}")
     _undo_lesson_branch(
         repo_root,
