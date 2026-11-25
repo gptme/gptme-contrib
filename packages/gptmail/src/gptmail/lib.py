@@ -1142,9 +1142,9 @@ class AgentEmail:
                     f"Message-ID: {message_id}",
                     "Content-Type: text/html; charset=utf-8",
                 ]
-                if "In-Reply-To" in headers:
+                if headers.get("In-Reply-To"):
                     header_lines.append(f"In-Reply-To: {headers['In-Reply-To']}")
-                if "References" in headers:
+                if headers.get("References"):
                     header_lines.append(f"References: {headers['References']}")
 
                 raw_message = "\r\n".join(header_lines) + "\r\n\r\n" + body
@@ -1161,9 +1161,9 @@ class AgentEmail:
                     msg["Subject"] = Header(subject, "utf-8").encode()
                 msg["Date"] = date_value
                 msg["Message-ID"] = message_id
-                if "In-Reply-To" in headers:
+                if headers.get("In-Reply-To"):
                     msg["In-Reply-To"] = headers["In-Reply-To"]
-                if "References" in headers:
+                if headers.get("References"):
                     msg["References"] = headers["References"]
 
                 plain_text = body
