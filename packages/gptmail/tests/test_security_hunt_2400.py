@@ -305,6 +305,24 @@ def test_display_sender_uses_real_address() -> None:
     assert gptmail_cli._display_sender_address("Friend <f@example.com>") == "f@example.com"
 
 
+@pytest.mark.parametrize(
+    "from_header",
+    [
+        '"friend@example.com <friend@example.com>" <attacker@evil.example>',
+        "Friend <friend@example.com> <attacker@evil.example>",
+        "attacker@evil.example, friend@example.com",
+    ],
+)
+def test_allowlist_gate_uses_real_sender(mail: AgentEmail, from_header: str) -> None:
+    mail.receive(
+        "Message-ID: <gate@example.com>\n"
+        f"From: {from_header}\n"
+        "To: bob@example.com\n"
+        "Subject: hi\n\nbody\n"
+    )
+    assert mail.get_unreplied_emails() == []
+
+
 def test_thread_view_shows_real_sender(mail: AgentEmail, monkeypatch: pytest.MonkeyPatch) -> None:
     message_id = "<forged-display@example.com>"
     (mail.email_dir / "inbox" / mail._format_filename(message_id)).write_text(
