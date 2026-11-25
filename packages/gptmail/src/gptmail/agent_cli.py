@@ -1763,7 +1763,11 @@ def _fetch_from_agent(
     ),
 )
 @click.option("--json", "json_output", is_flag=True, help="Emit machine-readable JSON.")
-@click.option("--dry-run", is_flag=True, help="Show what would be fetched without writing files.")
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="List candidates without fetching files or verifying message binding.",
+)
 def pull(
     as_recipient: str | None,
     from_agent: str | None,
@@ -1780,6 +1784,10 @@ def pull(
     deduplicates them into the local inbox by filename. Intended for human recipients who cannot
     receive inbound SSH push delivery — run on a cron/launchd schedule (e.g.
     every 30 minutes) to surface messages without manual polling.
+
+    Dry-run counts are candidates from peer-supplied listings, not verified
+    deliveries. Sender/recipient binding is checked only after the real fetch;
+    dry-run JSON includes ``binding_verified: false`` to mark that distinction.
 
     Machine-readable output (for scripted callers and notification daemons):
 
@@ -1806,6 +1814,9 @@ def pull(
     new_files: list[Path] = []
     agents_polled: list[str] = []
     failed_agents: list[str] = []
+
+    if dry_run and not json_output:
+        click.echo("[dry-run] Listing candidates only; message binding is not verified.")
 
     for agent_name, agent_cfg in agents.items():
         if agent_name == self_name:
@@ -1852,7 +1863,7 @@ def pull(
                     if not json_output:
                         subject = str(row.get("subject", "(no subject)"))
                         click.echo(
-                            f"[dry-run] would fetch from {agent_name}: {subject}  ({filename})"
+                            f"[dry-run] candidate from {agent_name}: {subject}  ({filename})"
                         )
             continue
 
@@ -1911,6 +1922,8 @@ def pull(
             "agents_polled": agents_polled,
             "failed_agents": failed_agents,
         }
+        if dry_run:
+            payload["binding_verified"] = False
         click.echo(json.dumps(payload))
 
 

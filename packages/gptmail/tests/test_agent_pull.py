@@ -481,6 +481,38 @@ def test_pull_dry_run_does_not_write(pull_workspace: Path) -> None:
     assert not (local_inbox / name).exists(), "dry-run must not write files"
 
 
+@pytest.mark.parametrize("json_output", [False, True])
+def test_pull_dry_run_marks_binding_unverified(
+    pull_workspace: Path, monkeypatch: pytest.MonkeyPatch, json_output: bool
+) -> None:
+    """A listing-only preview must not promise that hostile bytes will be imported."""
+    name = _write_outbox_msg(
+        pull_workspace / "gordon" / "messages" / "outbox",
+        sender="carol",
+        recipient="erik",
+        subject="Forged sender",
+    )
+
+    def _no_transfer(*args, **kwargs):
+        pytest.fail("dry-run must not SCP files to verify binding")
+
+    monkeypatch.setattr(agent_cli.subprocess, "run", _no_transfer)
+    args = ["pull", "--dry-run"] + (["--json"] if json_output else [])
+    result = CliRunner().invoke(agent, args)
+
+    assert result.exit_code == 0, result.output
+    if json_output:
+        payload = json.loads(result.stdout)
+        assert payload["binding_verified"] is False
+        assert payload["new_count"] == 1
+        assert payload["files"] == [name]
+    else:
+        assert "message binding is not verified" in result.output
+        assert "candidate from gordon" in result.output
+        assert "would fetch" not in result.output
+    assert not list((pull_workspace / "erik" / "messages" / "inbox").iterdir())
+
+
 def test_pull_dry_run_json_is_machine_readable(pull_workspace: Path) -> None:
     """``--dry-run --json`` emits JSON only and lists prospective messages."""
     gordon_outbox = pull_workspace / "gordon" / "messages" / "outbox"
@@ -497,6 +529,7 @@ def test_pull_dry_run_json_is_machine_readable(pull_workspace: Path) -> None:
         "files": [name],
         "agents_polled": ["gordon"],
         "failed_agents": [],
+        "binding_verified": False,
     }
     local_inbox = pull_workspace / "erik" / "messages" / "inbox"
     assert not (local_inbox / name).exists()
