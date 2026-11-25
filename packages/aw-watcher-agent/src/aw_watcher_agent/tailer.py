@@ -37,6 +37,11 @@ _EXIT_CODE_RE = re.compile(r"exited with code (\d+)")
 # emitted call, so emitting at once would make the 0 ms stub permanent
 # (gptme/gptme-contrib#2366, AC1). Past the window it is treated as a genuine
 # orphan, so one lost output cannot block the rest of the file forever.
+#
+# Accepted limit: the window runs from the call's start, so a call that is
+# still running after it (with a later call already paired) also becomes a
+# stub. The transcript alone cannot tell "slow" from "lost" at that point:
+# neither writes anything until an output arrives.
 ORPHAN_GRACE = timedelta(minutes=10)
 
 
