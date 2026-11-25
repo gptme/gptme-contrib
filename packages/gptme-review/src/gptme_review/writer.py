@@ -3874,6 +3874,14 @@ _TEST_FILE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Rust keeps unit tests inline (``#[cfg(test)]`` modules in ``src/``), so an
+# added test attribute counts as a test even when no path looks like one.
+# Horizontal whitespace only: ``\s`` matches newlines, which let an added
+# empty line bridge onto the next context line's existing ``#[test]``.
+_ADDED_INLINE_TEST_RE = re.compile(
+    r"^\+(?!\+\+)[ \t]*#\[(?:cfg\(test\)|(?:tokio::)?test\b)", re.MULTILINE
+)
+
 
 _VISUAL_PATH_RE = re.compile(
     r"\.(tsx|css|scss|less|svelte)$|/(tui|webui|ui|frontend|components)/",
@@ -4106,7 +4114,7 @@ def _check_visual_screenshot(
 
 
 def _check_fix_without_test(
-    pr_title: str, touched_files: Collection[str]
+    pr_title: str, touched_files: Collection[str], diff: str = ""
 ) -> list[dict]:
     """Rule 7 — fix(...) PR with zero test files is advisory P2.
 
@@ -4119,6 +4127,11 @@ def _check_fix_without_test(
         return []
     if any(_TEST_FILE_RE.search(f) for f in touched_files):
         return []
+    # Attributes in documentation examples or other languages are not Rust tests.
+    for section in split_file_sections(diff):
+        if section.path is not None and section.path.endswith(".rs"):
+            if _ADDED_INLINE_TEST_RE.search(section.text):
+                return []
     anchor = next(iter(touched_files), "")
     return [
         _static_finding(
@@ -4172,7 +4185,7 @@ def static_preflight_findings(
     results.extend(_check_cited_shas(pr_body, repo, touched_files, diff))
     results.extend(_check_unrelated_ci_claim(pr_body, repo, number, touched_files))
     results.extend(_check_visual_screenshot(pr_body, diff, touched_files))
-    results.extend(_check_fix_without_test(pr_title, touched_files))
+    results.extend(_check_fix_without_test(pr_title, touched_files, diff))
     results.extend(host.extra_static_checks(diff, touched_files))
     return results
 

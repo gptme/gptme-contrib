@@ -876,6 +876,96 @@ def test_rule_7_recognises_breaking_change_fix_titles(alice_io, title, flagged):
     assert w._check_fix_without_test(title, ["src/a.py", "tests/test_a.py"]) == []
 
 
+@pytest.mark.parametrize("attribute", ["#[test]", "#[tokio::test]", "#[cfg(test)]"])
+def test_rule_7_accepts_inline_rust_unit_tests(alice_io, attribute):
+    """Rust keeps unit tests in ``#[cfg(test)]`` modules inside ``src/``.
+
+    A fix that adds ``#[test]`` functions there carries a regression test
+    even though no touched path looks like a test file
+    (ActivityWatch/aw-notify-rs#49 got the advisory anyway).
+    """
+    w = writer.bind_io(alice_io)
+    diff = (
+        "diff --git a/src/main.rs b/src/main.rs\n"
+        "--- a/src/main.rs\n"
+        "+++ b/src/main.rs\n"
+        "@@ -1,2 +1,6 @@\n"
+        f"+    {attribute}\n"
+        "+    fn threshold_alerts_rearm_on_new_day() {}\n"
+    )
+    assert w._check_fix_without_test("fix(alerts): re-arm", ["src/main.rs"], diff) == []
+    # An existing, unchanged test attribute is context, not a new test.
+    context_only = diff.replace(f"+    {attribute}", f"     {attribute}")
+    assert w._check_fix_without_test(
+        "fix(alerts): re-arm", ["src/main.rs"], context_only
+    )
+
+
+def test_rule_7_accepts_inline_rust_tests_in_git_quoted_paths(alice_io):
+    w = writer.bind_io(alice_io)
+    diff = (
+        'diff --git "a/src/caf\\303\\251.rs" "b/src/caf\\303\\251.rs"\n'
+        '--- "a/src/caf\\303\\251.rs"\n'
+        '+++ "b/src/caf\\303\\251.rs"\n'
+        "@@ -0,0 +1,2 @@\n"
+        "+#[test]\n"
+        "+fn regression() {}\n"
+    )
+    assert w._check_fix_without_test("fix: regression", ["src/café.rs"], diff) == []
+
+
+@pytest.mark.parametrize("example_path", ["docs/guide.md", "src/app.py"])
+@pytest.mark.parametrize("example_first", [False, True])
+def test_rule_7_ignores_rust_attributes_outside_rust_files(
+    alice_io, example_path, example_first
+):
+    w = writer.bind_io(alice_io)
+    rust_diff = (
+        "diff --git a/src/main.rs b/src/main.rs\n"
+        "--- a/src/main.rs\n"
+        "+++ b/src/main.rs\n"
+        "@@ -1 +1 @@\n"
+        "-fn helper() {}\n"
+        "+fn helper() { fixed(); }\n"
+    )
+    example_diff = (
+        f"diff --git a/{example_path} b/{example_path}\n"
+        f"--- a/{example_path}\n"
+        f"+++ b/{example_path}\n"
+        "@@ -0,0 +1,4 @@\n"
+        "+```rust\n"
+        "+#[test]\n"
+        "+fn example() {}\n"
+        "+```\n"
+    )
+    diff = example_diff + rust_diff if example_first else rust_diff + example_diff
+    findings = w._check_fix_without_test(
+        "fix(helper): handle input", ["src/main.rs", example_path], diff
+    )
+    assert [f["title"] for f in findings] == ["fix PR has no regression test"]
+
+
+def test_rule_7_context_test_attribute_is_not_bridged_by_a_blank_line(alice_io):
+    """An added blank line must not reach the next context line's ``#[test]``.
+
+    ``\\s`` matches newlines, so ``^\\+\\s*#\\[`` could consume the line break of
+    an added empty line and match a test attribute that was already there. That
+    suppressed rule 7 without any regression test being added.
+    """
+    w = writer.bind_io(alice_io)
+    diff = (
+        "diff --git a/src/main.rs b/src/main.rs\n"
+        "--- a/src/main.rs\n"
+        "+++ b/src/main.rs\n"
+        "@@ -1,2 +1,3 @@\n"
+        "+    fn helper() {}\n"
+        "+\n"
+        "     #[test]\n"
+    )
+    findings = w._check_fix_without_test("fix(alerts): re-arm", ["src/main.rs"], diff)
+    assert [f["title"] for f in findings] == ["fix PR has no regression test"]
+
+
 def test_visual_rule_keys_sections_by_new_path_not_header_split(alice_io):
     """A path containing `` b/ `` must still be keyed correctly (rule 1c).
 
