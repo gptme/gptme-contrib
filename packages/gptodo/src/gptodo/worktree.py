@@ -399,10 +399,8 @@ def cleanup_merged_worktrees(
         merged_branches = []
         for b in result.stdout.splitlines():
             b = b.strip()
-            # "* " marks the current branch, "+ " one checked out in a linked
-            # worktree (every gptodo worktree branch).
-            if b.startswith(("* ", "+ ")):
-                b = b[2:]
+            if b.startswith("* "):
+                b = b[2:]  # Remove literal "* " prefix
             merged_branches.append(b)
 
         if result.returncode == 0 and branch in merged_branches:

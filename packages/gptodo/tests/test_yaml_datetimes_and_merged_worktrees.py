@@ -7,7 +7,7 @@ YAML turns an unquoted ISO timestamp into a ``datetime`` (and a bare date into a
 from __future__ import annotations
 
 import subprocess
-from datetime import UTC, date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import yaml
@@ -31,7 +31,7 @@ def test_check_time_accepts_yaml_datetime_ref() -> None:
     ref = yaml.safe_load("ref: 2020-01-01T00:00:00Z")["ref"]
     assert isinstance(ref, datetime)
     assert check_time(ref) == (True, None)
-    resolved, error = check_time(datetime(2999, 1, 1, tzinfo=UTC))
+    resolved, error = check_time(datetime(2999, 1, 1, tzinfo=timezone.utc))
     assert not resolved
     assert error is not None and error.startswith("Waiting until")
 
@@ -47,7 +47,7 @@ def _git(cwd: Path, *args: str) -> str:
     ).stdout
 
 
-def test_cleanup_merged_worktrees_sees_branches_checked_out_in_worktrees(
+def test_cleanup_merged_worktrees_preserves_fresh_worktrees(
     tmp_path: Path,
 ) -> None:
     repo = tmp_path / "repo"
@@ -70,6 +70,7 @@ def test_cleanup_merged_worktrees_sees_branches_checked_out_in_worktrees(
     # `git branch --merged` prints a branch checked out elsewhere as "+ feature".
     assert "+ feature" in _git(repo, "branch", "--merged", "master")
 
-    assert cleanup_merged_worktrees(repo, base_branch="master") == 1
-    assert not wt.exists()
-    assert "feature" not in _git(repo, "branch", "--list", "feature")
+    # A fresh clean worktree is reachable from master, but may be in active use.
+    assert cleanup_merged_worktrees(repo, base_branch="master") == 0
+    assert wt.exists()
+    assert "feature" in _git(repo, "branch", "--list", "feature")
