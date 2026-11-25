@@ -266,6 +266,27 @@ def _load_codex_main_pacing() -> tuple[float, int, float, int] | None:
         return None
 
 
+def _load_codex_credits() -> int | None:
+    """Purchased credit balance from the codex usage cache (None = unknown).
+
+    When the weekly plan allowance is spent, Codex keeps serving against this
+    balance (codex /status: "Weekly limit: 0% left ... Credits: N credits"), so
+    a weekly-exhausted pool with credits left is NOT a hard stop. Absent/None
+    means the cache predates credit parsing, NOT zero.
+    """
+    age = _file_age_seconds(CODEX_USAGE_CACHE_FILE)
+    if age is None or age > CODEX_USAGE_MAX_AGE_SECONDS:
+        return None
+    try:
+        data = json.loads(CODEX_USAGE_CACHE_FILE.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    credits = data.get("credits") if isinstance(data, dict) else None
+    if isinstance(credits, bool) or not isinstance(credits, int | float):
+        return None
+    return int(credits)
+
+
 def _shared_codex_pool_quota(backend: str, model: str) -> BackendQuota | None:
     """Build a pacing-aware quota row from the scraped codex /status usage cache,
     or None when the cache is stale/missing (caller decides the fallback).
@@ -292,7 +313,13 @@ def _shared_codex_pool_quota(backend: str, model: str) -> BackendQuota | None:
         ]
     )
     util = max(fh_util, wk_util)
-    available = util < 0.98
+    credits = _load_codex_credits()
+    # Weekly exhaustion is a hard stop ONLY with no credit balance left. Codex
+    # keeps serving past the plan allowance against purchased credits, and the
+    # gptme openai-subscription route shares this pool — so blocking both on the
+    # weekly gauge alone starves the fleet of a working model for days.
+    on_credits = util >= 0.98 and credits is not None and credits > 0
+    available = util < 0.98 or on_credits
     if fh_util >= wk_util:
         reset = fh_reset
         reason = f"5h: {fh_util:.0%}, 7d: {wk_util:.0%}"
@@ -301,6 +328,10 @@ def _shared_codex_pool_quota(backend: str, model: str) -> BackendQuota | None:
         reason = f"7d: {wk_util:.0%}, 5h: {fh_util:.0%}"
     if not available:
         reason = f"BLOCKED — {reason}"
+        if credits is not None and credits <= 0:
+            reason += " — no credits remaining"
+    elif on_credits:
+        reason += f" | on credits: {credits:,} remaining"
     return BackendQuota(
         backend=backend,
         model=model,
@@ -314,6 +345,10 @@ def _shared_codex_pool_quota(backend: str, model: str) -> BackendQuota | None:
         pacing_target=target,
         pacing_gap=gap,
         pacing_status=("blocked" if not available else pacing_status),
+        metadata={
+            "credits": credits,
+            "on_credits": on_credits,
+        },
     )
 
 
