@@ -1532,8 +1532,9 @@ def _pr_diff_patch_id(repo: str, base_ref: str, sha: str) -> str | None:
     indentation change in Python). Line numbers are still ignored, which is what
     lets the same change survive a base that moved.
 
-    None on any failure, an empty diff, or a binary file, whose diff text names
-    the file without its content.
+    None on any failure, an empty/binary diff, header-only file sections or
+    mode/rename/copy changes. Those require a fresh review rather than relying
+    on patch-id's handling of extended headers across Git versions.
     """
     raw = run_gh_checked(
         [
@@ -1545,6 +1546,16 @@ def _pr_diff_patch_id(repo: str, base_ref: str, sha: str) -> str | None:
         timeout=60,
     )
     if not raw or "Binary files " in raw or "GIT binary patch" in raw:
+        return None
+    sections = re.split(r"(?m)^diff --git ", raw)
+    if len(sections) < 2 or any(
+        not re.search(r"(?m)^@@ ", section)
+        or re.search(
+            r"(?m)^(?:old mode |new mode |rename from |rename to |copy from |copy to )",
+            section,
+        )
+        for section in sections[1:]
+    ):
         return None
     try:
         proc = subprocess.run(
@@ -1962,10 +1973,13 @@ def fetch_ai_review_status(
         }
 
     advisory = len(_ai_review_advisory_fps(marker))
-    detail = (
-        f"AI review {score}/5 at current head {str(marker.get('sha'))[:12]}, "
-        "findings disposed"
+    reviewed_sha = str(marker.get("sha"))
+    provenance = (
+        f"at current head {head_sha[:12]}"
+        if _sha_matches_head(reviewed_sha, head_sha)
+        else f"carried from {reviewed_sha[:12]} to head {head_sha[:12]} via identical patch-id"
     )
+    detail = f"AI review {score}/5 {provenance}, findings disposed"
     if advisory:
         # Surface the demotion where operators read the merge decision: an
         # advisory finding is still visible, it just is not a blocker.
@@ -3735,7 +3749,7 @@ def greptile_satisfies_ai_review(
         return None
     return (
         f"AI review substituted: Greptile {greptile_score}/5 with no unresolved "
-        f"threads at the current head (AI review refusal: {refusal})"
+        f"threads covering the current head (AI review refusal: {refusal})"
     )
 
 
@@ -4291,8 +4305,14 @@ def evaluate_pr(
                 f"Greptile score {greptile_score}/5 below floor {min_score}/5"
             )
         else:
+            provenance = (
+                f"at current head {(result.head_sha or '')[:12]}"
+                if _sha_matches_head(greptile_reviewed_sha or "", result.head_sha or "")
+                else f"carried from {(greptile_reviewed_sha or '')[:12]} "
+                f"to head {(result.head_sha or '')[:12]} via identical patch-id"
+            )
             result.warnings.append(
-                f"Greptile reviewed (score {score_str}) at current head — floor satisfied"
+                f"Greptile reviewed (score {score_str}) {provenance} — floor satisfied"
             )
     else:
         # Branch 2/3: Greptile stale or dark → AI review is the gate (see block below)

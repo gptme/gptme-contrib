@@ -105,6 +105,33 @@ def test_binary_diff_fails_closed(diffs: Any) -> None:
     assert not smc._review_carries_to_head("o/r", "master", OLD, NEW)
 
 
+@pytest.mark.parametrize(
+    "extra",
+    [
+        "diff --git a/x b/y\nsimilarity index 100%\nrename from x\nrename to y\n",
+        "diff --git a/x b/x\nold mode 100644\nnew mode 100755\n",
+        "diff --git a/__init__.py b/__init__.py\nnew file mode 100644\nindex 0000000..e69de29\n",
+        "diff --git a/__init__.py b/__init__.py\ndeleted file mode 100644\nindex e69de29..0000000\n",
+    ],
+    ids=["rename", "executable", "empty-add", "empty-delete"],
+)
+def test_header_only_change_does_not_carry(diffs: Any, extra: str) -> None:
+    diffs[OLD] = _diff("    y = 2")
+    diffs[NEW] = _rebased(diffs[OLD]) + extra
+    assert smc._pr_diff_patch_id("o/r", "master", NEW) is None
+    assert not smc._review_carries_to_head("o/r", "master", OLD, NEW)
+
+
+def test_mode_change_with_content_does_not_carry(diffs: Any) -> None:
+    diffs[OLD] = _diff("    y = 2")
+    diffs[NEW] = _rebased(diffs[OLD]).replace(
+        "index 3333333..4444444 100644\n",
+        "old mode 100644\nnew mode 100755\nindex 3333333..4444444\n",
+    )
+    assert smc._pr_diff_patch_id("o/r", "master", NEW) is None
+    assert not smc._review_carries_to_head("o/r", "master", OLD, NEW)
+
+
 def test_missing_base_ref_is_exact_only(diffs: Any) -> None:
     diffs[OLD] = diffs[NEW] = _diff("    y = 2")
     assert not smc._review_carries_to_head("o/r", "", OLD, NEW)
@@ -138,3 +165,36 @@ def test_stale_ai_marker_on_rebased_head_is_accepted(
     assert status[""]["refusal"] == "stale"
     # With it, staleness is no longer the refusal; any other gate still applies.
     assert status["master"].get("refusal") != "stale"
+
+
+@pytest.mark.parametrize("reviewed", [OLD, NEW], ids=["carried", "exact"])
+def test_accepted_review_reports_provenance(diffs: Any, reviewed: str) -> None:
+    diffs[OLD] = _diff("    y = 2")
+    diffs[NEW] = _rebased(diffs[OLD])
+    status = smc.fetch_ai_review_status(
+        "o/r",
+        1,
+        head_sha=NEW,
+        expected_author="TimeToBuildBob",
+        marker_result={
+            "sha": reviewed[:12],
+            "score": 5,
+            "consensus": {
+                "requested": 3,
+                "answered": 3,
+                "jobs_requested": 3,
+                "jobs_answered": 3,
+                "min_agreement": 2,
+                "min_agreement_requested": 2,
+            },
+        },
+        review_data=([], []),
+        base_ref="master",
+    )
+    assert status["accepted"], status
+    if reviewed == OLD:
+        assert f"carried from {OLD[:12]} to head {NEW[:12]}" in status["detail"]
+        assert "via identical patch-id" in status["detail"]
+        assert "at current head" not in status["detail"]
+    else:
+        assert f"at current head {NEW[:12]}" in status["detail"]
