@@ -5,6 +5,7 @@ import os
 import time
 from pathlib import Path
 
+import pytest
 from gptme_lessons_extras.discovery import LessonDiscovery
 
 LESSON_TEMPLATE = """---
@@ -243,6 +244,48 @@ def test_discovery_ignores_non_string_yaml_keywords(tmp_path: Path) -> None:
     assert discovery.extract_features(lesson).keywords == {"rebase"}
     [rec] = discovery.recommend(keywords=["rebase"], top_k=1)
     assert rec.keyword_score > 0.0
+
+
+def test_discovery_normalizes_scalar_keyword_without_character_matches(
+    tmp_path: Path,
+) -> None:
+    lessons_dir = tmp_path / "lessons"
+    lesson = lessons_dir / "git" / "scalar.md"
+    lesson.parent.mkdir(parents=True)
+    lesson.write_text(
+        '---\nmatch:\n  keywords: " Rebase conflict "\n---\n' + _KEYWORD_BODY
+    )
+    discovery = LessonDiscovery(
+        lessons_dir=lessons_dir, history_dir=tmp_path / "history"
+    )
+
+    assert discovery.extract_features(lesson).keywords == {"rebase conflict"}
+    [match] = discovery.recommend(keywords=["rebase conflict"], top_k=1)
+    [letter] = discovery.recommend(keywords=["r"], top_k=1)
+    assert match.keyword_score > 0.0
+    assert letter.keyword_score == 0.0
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        "match: null",
+        "match: rebase",
+        "match:\n  keywords: null",
+        "match:\n  keywords: 404",
+        "match:\n  keywords: {rebase: conflict}",
+        "match: [",
+        "keywords: [rebase]",
+    ],
+)
+def test_discovery_ignores_invalid_or_unsupported_keyword_fields(
+    tmp_path: Path, metadata: str
+) -> None:
+    lesson = tmp_path / "invalid.md"
+    lesson.write_text("---\n" + metadata + "\n---\n" + _KEYWORD_BODY)
+    discovery = LessonDiscovery(lessons_dir=tmp_path)
+
+    assert discovery.extract_features(lesson).keywords == set()
 
 
 def test_recommend_scores_block_list_keyword_match(tmp_path: Path) -> None:

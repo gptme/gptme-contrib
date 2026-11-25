@@ -16,7 +16,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Set, Tuple
 
-from gptme_lessons_extras.similarity import NON_LESSON_FILES, extract_keywords
+import frontmatter
+
+from gptme_lessons_extras.similarity import NON_LESSON_FILES
 
 # Try importing sklearn, but provide fallback
 try:
@@ -95,9 +97,17 @@ class LessonDiscovery:
 
         # Extract frontmatter keywords. Parse the YAML rather than regex-match
         # it: block lists (the template's format) and quoted items must work.
+        try:
+            metadata = frontmatter.loads(content).metadata
+            match = metadata.get("match", {})
+            raw_keywords = match.get("keywords", []) if isinstance(match, dict) else []
+        except Exception:
+            raw_keywords = []
+        if isinstance(raw_keywords, str):
+            raw_keywords = [raw_keywords]
         keywords: Set[str] = {
             k.strip().lower()
-            for k in extract_keywords(lesson_path)
+            for k in (raw_keywords if isinstance(raw_keywords, list) else [])
             if isinstance(k, str) and k.strip()
         }
 
