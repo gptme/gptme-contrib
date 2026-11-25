@@ -210,7 +210,8 @@ def test_load_env_file_stores_bare_value(tmp_path: Path, monkeypatch: pytest.Mon
         ("mx.google.com; spf=fail smtp.mailfrom=x; dmarc=fail (p=NONE) header.from=x", True),
         ("mx.google.com; dkim=pass; spf=pass; dmarc=pass", False),
         ("mx.google.com; spf=fail smtp.mailfrom=x", True),
-        ("mx.google.com; dkim=pass header.i=@x; spf=fail; dmarc=none", False),
+        ("mx.google.com; dkim=pass header.i=@x; spf=fail; dmarc=none", True),
+        ("mx.google.com; dkim=pass header.d=example.com; spf=fail; dmarc=pass", False),
         ("", False),
     ],
 )
@@ -316,3 +317,43 @@ def test_thread_view_shows_real_sender(mail: AgentEmail, monkeypatch: pytest.Mon
     assert result.exit_code == 0, result.output
     assert "attacker@evil.example" in result.output
     assert "boss@corp.example" not in result.output
+
+
+@pytest.mark.parametrize("spf", ["fail", "softfail"])
+def test_unrelated_dkim_pass_does_not_excuse_spf_failure(spf: str) -> None:
+    assert authentication_failed(
+        f"mx.example; spf={spf} smtp.mailfrom=example.com; "
+        "dkim=pass header.d=evil.example; dmarc=none"
+    )
+
+
+def test_all_mail_synced_before_inbox_does_not_hide_genuine_mail(
+    mail: AgentEmail, tmp_path: Path
+) -> None:
+    message_id = "<all-mail@example.com>"
+    for folder in ("archive", "inbox"):
+        maildir = tmp_path / folder
+        (maildir / "new").mkdir(parents=True)
+        _maildir_msg(maildir / "new" / "same", message_id=message_id, body="genuine")
+        mail.external_maildir_folders[folder] = maildir
+        mail.sync_from_maildir(folder)
+    assert [e.message_id for e in mail.get_unreplied_emails()] == [message_id]
+    filename = mail._format_filename(message_id)
+    assert (mail.email_dir / "inbox" / filename).read_text() == (
+        mail.email_dir / "archive" / filename
+    ).read_text()
+
+
+def test_archive_identical_all_mail_copy_preserves_original(mail: AgentEmail) -> None:
+    message_id = "<overlap@example.com>"
+    filename = mail._format_filename(message_id)
+    content = f"Message-ID: {message_id}\n\nSAME\n"
+    archived = mail.email_dir / "archive" / filename
+    inbox = mail.email_dir / "inbox" / filename
+    archived.write_text(content)
+    inbox.write_text(content)
+    original_inode = archived.stat().st_ino
+    mail.archive(message_id)
+    assert not inbox.exists()
+    assert archived.read_text() == content
+    assert archived.stat().st_ino == original_inode

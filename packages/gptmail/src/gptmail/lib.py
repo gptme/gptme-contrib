@@ -174,17 +174,19 @@ _AUTH_RESULT_RE = re.compile(r"\b(spf|dkim|dmarc)\s*=\s*([a-z]+)", re.IGNORECASE
 def authentication_failed(auth_results: str) -> bool:
     """Whether an ``Authentication-Results`` value shows a forged/unauthenticated From.
 
-    True on ``dmarc=fail``, or on ``spf=fail`` without any ``dkim=pass`` (a
-    domain with no DMARC record, where forwarding cannot explain the failure).
-    Only failures are acted on: a sender can add its own header claiming
-    ``pass``, so a pass is never treated as proof of anything.
+    True on ``dmarc=fail``, or on ``spf=fail/softfail`` without ``dmarc=pass``.
+    A bare DKIM pass does not establish alignment with From; only the receiving
+    MTA's DMARC pass can excuse SPF failure (for example after forwarding).
+    This is a negative filter, not proof that the sender is authenticated.
     """
     verdicts: dict[str, set[str]] = {}
     for method, result in _AUTH_RESULT_RE.findall(auth_results or ""):
         verdicts.setdefault(method.lower(), set()).add(result.lower())
     if "fail" in verdicts.get("dmarc", set()):
         return True
-    return "fail" in verdicts.get("spf", set()) and "pass" not in verdicts.get("dkim", set())
+    return bool({"fail", "softfail"} & verdicts.get("spf", set())) and "pass" not in verdicts.get(
+        "dmarc", set()
+    )
 
 
 _HEADER_LINE_BREAK_RE = re.compile(r"[\r\n]+")
@@ -1413,6 +1415,11 @@ class AgentEmail:
             if source_path.exists():
                 archive_path = self.email_dir / "archive" / filename
                 if archive_path.exists():
+                    if archive_path.read_bytes() == source_path.read_bytes():
+                        # All Mail and Inbox can hold the same stored message.
+                        source_path.unlink()
+                        print(f"Message {message_id} archived (identical copy already present)")
+                        return
                     # rename() would silently replace the archived original.
                     raise ValueError(
                         f"Message {message_id} already exists in archive; refusing to overwrite"
@@ -2171,9 +2178,8 @@ class AgentEmail:
         save_dir = self.email_dir / folder
         save_dir.mkdir(parents=True, exist_ok=True)
         existing_files = {f.name for f in save_dir.glob("*.md")}
-        # Filenames already stored in any *other* folder. A synced mail that
-        # reuses one of these Message-IDs would shadow the sent/archived
-        # original in read_message and thread views, so it is not imported.
+        # A filename in another folder may be an All Mail/Inbox overlap, or
+        # an impostor reusing a Message-ID. Compare content before importing.
         other_folder_files: dict[str, str] = {}
         for other in self._MESSAGE_FOLDERS:
             if other == folder:
@@ -2229,15 +2235,6 @@ class AgentEmail:
                         skipped += 1
                         # Mark as processed so we don't re-check next time
                         processed_files.add(maildir_filename)
-                        continue
-
-                    if filename in other_folder_files:
-                        skipped += 1
-                        processed_files.add(maildir_filename)
-                        print(
-                            f"Skipping message whose Message-ID is already stored in "
-                            f"{other_folder_files[filename]}/: {message_id[:50]}..."
-                        )
                         continue
 
                     # Check for duplicates by content/metadata (prevents Gmail Message-ID reassignment duplicates)
@@ -2303,6 +2300,20 @@ class AgentEmail:
 
                     # Combine into markdown format
                     content = "\n".join(headers) + "\n\n" + body
+
+                    if filename in other_folder_files:
+                        # Only byte-equivalent stored content may overlap. A
+                        # different body/header block must not shadow originals.
+                        originals = [
+                            self.email_dir / other / filename
+                            for other in self._MESSAGE_FOLDERS
+                            if other != folder and (self.email_dir / other / filename).is_file()
+                        ]
+                        if any(path.read_text() != content for path in originals):
+                            skipped += 1
+                            processed_files.add(maildir_filename)
+                            print(f"Skipping conflicting Message-ID: {message_id[:50]}...")
+                            continue
 
                     # Ensure the directory exists
                     save_dir.mkdir(parents=True, exist_ok=True)
