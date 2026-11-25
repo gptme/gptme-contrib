@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import posixpath
 import sqlite3
 import subprocess
 import sys
@@ -3340,30 +3341,119 @@ def _resolve_imported_symbol(
     return None
 
 
-def _import_module_for_call(call: str, file_imports: list[ImportInfo]) -> str | None:
-    """Return the module a call's leading name was imported from, if any.
+def _import_modules_for_call(call: str, file_imports: list[ImportInfo]) -> list[str]:
+    """Return the modules a call's leading name may have been imported from.
 
     ``from beta import helper; helper()`` and ``import beta; beta.helper()``
-    both give ``"beta"``. Relative imports keep their leading dots stripped.
+    both give ``["beta"]``. Module strings are returned as written in the
+    source, most specific first.
     """
     head = call.split(".")[0]
     dotted = "." in call
-    for imp in file_imports:
+    # ``import pkg.alpha`` and ``import pkg.beta`` both bind ``pkg``.
+    for imp in sorted(file_imports, key=lambda i: not call.startswith(f"{i.module}.")):
         if not imp.module:
             continue
         if imp.is_from and local_binding(imp) == head:
-            # ``from pkg import sub; sub.f()`` names a module itself.
-            module = f"{imp.module}.{imp.name}" if dotted else imp.module
-        elif (
+            if not dotted:
+                return [imp.module]
+            # ``from pkg import sub; sub.f()``: ``sub`` is either a submodule
+            # or an object defined in ``pkg``.
+            separator = "" if imp.module.endswith(".") else "."
+            return [f"{imp.module}{separator}{imp.name}", imp.module]
+        if (
             not imp.is_from
             and dotted
             and head in (local_binding(imp), imp.module.split(".")[0])
         ):
-            module = imp.module
+            return [imp.module]
+    return []
+
+
+_JS_LANGS = ("javascript", "typescript", "tsx")
+# Languages where a bare call in a method means the class's own method first.
+_IMPLICIT_THIS_LANGS = ("java", "csharp", "cpp", "kotlin", "ruby", "swift")
+# File stems that stand for their directory when imported.
+_PACKAGE_STEMS = {"python": "__init__", "rust": "mod"} | dict.fromkeys(
+    _JS_LANGS, "index"
+)
+
+
+def _import_matches(
+    candidates: list[Symbol], module: str, importer: Path, directory: Path
+) -> list[Symbol]:
+    """Return the candidates defined in ``module`` as imported by ``importer``.
+
+    ``module`` is the source-level import string, so its syntax depends on the
+    importer's language: ``./beta`` (JS/TS), ``..beta`` (Python),
+    ``crate::beta`` (Rust), ``github.com/org/repo/beta`` (Go, a directory).
+    """
+    lang = _detect_language(importer)
+
+    def relative_parts(path: Path) -> list[str]:
+        if path.is_relative_to(directory):
+            path = path.relative_to(directory)
+        return list(path.with_suffix("").parts)
+
+    def file_parts(symbol: Symbol) -> list[str]:
+        parts = relative_parts(Path(symbol.file))
+        stem = _PACKAGE_STEMS.get(_detect_language(Path(symbol.file)) or "")
+        return parts[:-1] if parts and parts[-1] == stem else parts
+
+    here = relative_parts(importer)[:-1]
+    target: list[str] | None = None  # set for relative imports: exact match
+    if lang in _JS_LANGS and module.startswith("."):
+        joined = posixpath.normpath(posixpath.join(*here, module))
+        target = [] if joined == "." else joined.split("/")
+    elif lang == "python" and module.startswith("."):
+        rest = module.lstrip(".")
+        up = len(module) - len(rest) - 1
+        if up > len(here):
+            return []
+        target = here[: len(here) - up] + (rest.split(".") if rest else [])
+
+    if lang in _JS_LANGS and _LANG_MAP.get(Path(module).suffix) in _JS_LANGS:
+        # ``./beta.js`` names ``beta.ts``; ``./user.service`` keeps its dot.
+        suffix = Path(module).suffix[1:]
+        if target:
+            target[-1] = target[-1].removesuffix(f".{suffix}")
         else:
-            continue
-        return module.lstrip(".") or None
-    return None
+            module = module.removesuffix(f".{suffix}")
+
+    if target is not None:
+        if lang in _JS_LANGS and target and target[-1] == "index":
+            target.pop()
+        return [c for c in candidates if file_parts(c) == target]
+
+    if "::" in module:
+        wanted = module.split("::")
+    elif "/" in module or "\\" in module:
+        wanted = module.replace("\\", "/").split("/")
+    else:
+        wanted = module.split(".")
+    while wanted and wanted[0] in ("", "crate", "self", "super", "@", "~"):
+        wanted = wanted[1:]
+    if not wanted:
+        return []
+
+    if lang == "go":
+        # The import path ends in the package directory, prefixed by the
+        # repository path: the longest shared tail wins.
+        def shared_tail(symbol: Symbol) -> int:
+            package = relative_parts(Path(symbol.file))[:-1]
+            count = 0
+            for ours, theirs in zip(reversed(package), reversed(wanted)):
+                if ours != theirs:
+                    break
+                count += 1
+            return count
+
+        best = max(map(shared_tail, candidates), default=0)
+        return [c for c in candidates if best and shared_tail(c) == best]
+
+    matches = [c for c in candidates if file_parts(c)[-len(wanted) :] == wanted]
+    # An exact module beats a deeper one that only ends the same way.
+    return sorted(matches, key=lambda c: len(file_parts(c)))
 
 
 def build_cross_file_call_graph(
@@ -3405,11 +3495,17 @@ def build_cross_file_call_graph(
     for sym in sorted(all_symbols, key=lambda s: s.qualified_id()):
         defs_by_name[sym.name].append(sym)
 
-    def _qid_for(name: str, file_path: str, module_hint: str | None) -> str:
+    def _qid_for(
+        name: str,
+        file_path: str,
+        modules: list[str],
+        caller_class: str | None = None,
+    ) -> str:
         """Pick the definition a call to ``name`` from ``file_path`` refers to.
 
-        Order: the only definition; a definition in the imported module
-        (``module_hint``); a same-file definition (top-level first); otherwise
+        Order: the only definition; the caller's own method (implicit-``this``
+        languages); a definition in an imported module (``modules``); a
+        same-file definition (top-level, then the caller's class); otherwise
         the first definition in qualified-ID order.
         """
         candidates = defs_by_name.get(name)
@@ -3417,18 +3513,22 @@ def build_cross_file_call_graph(
             return name
         if len(candidates) == 1:
             return candidates[0].qualified_id()
-        if module_hint:
-            imported = [
-                c
-                for c in candidates
-                if c.module_path and _module_matches(module_hint, c.module_path)
-            ]
-            if imported:
-                return imported[0].qualified_id()
         same_file = [c for c in candidates if c.file == file_path]
+        own = [c for c in same_file if caller_class and c.parent_class == caller_class]
+        if own and _detect_language(Path(file_path)) in _IMPLICIT_THIS_LANGS:
+            return own[0].qualified_id()
+        for module in modules:
+            imported = _import_matches(candidates, module, Path(file_path), directory)
+            if imported:
+                # An import names a top-level symbol, not a method.
+                return min(
+                    imported, key=lambda c: c.parent_class is not None
+                ).qualified_id()
         if same_file:
-            same_file.sort(key=lambda c: c.parent_class is not None)
-            return same_file[0].qualified_id()
+            return min(
+                same_file,
+                key=lambda c: (c.parent_class is not None, c not in own),
+            ).qualified_id()
         return candidates[0].qualified_id()
 
     # All qualified IDs — used for precise Rust path-qualified resolution.
@@ -3446,8 +3546,8 @@ def build_cross_file_call_graph(
             for call in sym.calls:
                 if call in known_names:
                     # Bare call: an imported name or a same-file definition.
-                    hint = _import_module_for_call(call, imports)
-                    qid_calls.add(_qid_for(call, file_path, hint))
+                    modules = _import_modules_for_call(call, imports)
+                    qid_calls.add(_qid_for(call, file_path, modules, sym.parent_class))
                 else:
                     # Try import resolution for both dotted (``mod.func``)
                     # and plain (``alias_local``) calls. Plain calls matter for
@@ -3455,8 +3555,8 @@ def build_cross_file_call_graph(
                     # in ``known_names`` but resolution maps it back to ``f``.
                     resolved = _resolve_imported_symbol(call, imports, directory)
                     if resolved and resolved in known_names:
-                        hint = _import_module_for_call(call, imports)
-                        qid_calls.add(_qid_for(resolved, file_path, hint))
+                        modules = _import_modules_for_call(call, imports)
+                        qid_calls.add(_qid_for(resolved, file_path, modules))
                     elif "::" in call:
                         # Rust path-qualified call: ``crate::module::fn()`` or
                         # ``super::util::parse()`` — no explicit ``use`` import.
@@ -3473,7 +3573,8 @@ def build_cross_file_call_graph(
                         if candidate_qid and candidate_qid in known_qids:
                             qid_calls.add(candidate_qid)
                         elif last_segment in known_names:
-                            qid_calls.add(_qid_for(last_segment, file_path, None))
+                            path = "::".join(parts[:-1])
+                            qid_calls.add(_qid_for(last_segment, file_path, [path]))
                     # else: external builtin/library — ignore
             qid = sym.qualified_id()
             callees.setdefault(qid, set()).update(qid_calls)
