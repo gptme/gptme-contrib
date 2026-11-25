@@ -268,3 +268,56 @@ def test_codex_inner_exec_command_yield_is_not_reported_as_landed():
         )
     )
     assert landings(out) == []
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("first_status", [0, 128, "128", "running"])
+def test_codex_multiple_results_cannot_hide_failure_or_running(first_status, reverse):
+    """A successful sibling result cannot prove the whole exec cell landed."""
+    ex = CodexExtractor("r")
+    ex.feed(exec_call("c1", "git commit -m 'fix: x'; git push"))
+    first: dict[str, str | int] = {
+        "output": "running hooks" if first_status == "running" else "fatal: index.lock"
+    }
+    if first_status == "running":
+        first["session_id"] = 7
+    else:
+        first["exit_code"] = first_status
+    blocks = [first, {"exit_code": 0, "output": "Everything up-to-date"}]
+    if reverse:
+        blocks.reverse()
+    out = ex.feed(
+        codex(
+            "response_item",
+            {
+                "type": "custom_tool_call_output",
+                "call_id": "c1",
+                "output": [{"type": "input_text", "text": json.dumps(b)} for b in blocks],
+            },
+        )
+    )
+    expected = ["commit", "push"] if first_status == 0 else ["error"]
+    assert landings(out) == ([] if first_status == "running" else expected)
+
+
+@pytest.mark.parametrize("tool", ["exec", "exec_command"])
+def test_codex_relative_workdir_resolves_against_session_cwd(two_repos, tool):
+    ex = CodexExtractor("r")
+    ex.feed(codex("turn_context", {"cwd": str(two_repos["brain"])}))
+    if tool == "exec":
+        call = exec_call("c1", "git commit -m 'fix: x'", workdir="../wt")
+    else:
+        call = codex(
+            "response_item",
+            {
+                "type": "function_call",
+                "name": tool,
+                "call_id": "c1",
+                "arguments": json.dumps({"cmd": "git commit -m 'fix: x'", "workdir": "../wt"}),
+            },
+        )
+    ex.feed(call)
+    (commit,) = ex.feed(exec_output("c1", 0, "[master 6528ea53] fix: x\n"))
+    assert commit.kind == "commit"
+    assert commit.detail.get("dir") == str(two_repos["wt"])
+    assert commit.detail.get("repo") == "gptme/gptme-contrib"

@@ -347,14 +347,14 @@ def _codex_output(out: Any) -> tuple[int | None, bool, str]:
     code: int | None = None
     inner_running = False
     texts = []
-    raw_blocks: list[str] = []
     for block in blocks:
+        block_code: int | None = None
+        block_text = block
         try:
             data = json.loads(block)
         except ValueError:
             data = None
         if isinstance(data, dict) and ("exit_code" in data or "output" in data):
-            raw_blocks.append(block)
             raw_code = data.get("exit_code")
             # The legacy ``shell`` tool nests the status under ``metadata``:
             # {"output": ..., "metadata": {"exit_code": 1}}. Reading only the
@@ -368,27 +368,25 @@ def _codex_output(out: Any) -> tuple[int | None, bool, str]:
                 # going (slow hooks) even though the outer cell completed.
                 inner_running = True
             if isinstance(raw_code, int):
-                code = raw_code
+                block_code = raw_code
             elif isinstance(raw_code, str) and re.fullmatch(r"-?\d+", raw_code.strip()):
                 # Codex serialises the code as a string in some rollouts. Not
                 # reading it made a failed push look like a landed one, because
                 # the exit regex only scanned the output payload.
-                code = int(raw_code.strip())
+                block_code = int(raw_code.strip())
             if isinstance(data.get("output"), str):
-                texts.append(data["output"])
-            elif code is None:
-                # No usable payload: keep the raw block so the exit regex and
-                # the caller still see whatever the block actually said.
-                texts.append(block)
-        else:
-            texts.append(block)
+                block_text = data["output"]
+        if block_code is None:
+            # Legacy text/metadata formats still carry their status in the raw
+            # block. Read each result separately so a sibling cannot mask it.
+            m = _CODEX_EXIT_RE.search(block_text) or _CODEX_EXIT_RE.search(block)
+            block_code = int(m.group(1)) if m else None
+        if block_code is not None and code in (None, 0):
+            code = block_code
+        texts.append(block_text)
     text = "\n".join(texts)
-    if code is None:
-        # Scan the payloads first, then the raw blocks: a legacy shell result
-        # that names its code only in nested metadata must still be read.
-        m = _CODEX_EXIT_RE.search(text) or _CODEX_EXIT_RE.search("\n".join(raw_blocks))
-        code = int(m.group(1)) if m else None
-    running = code is None and (inner_running or text.lstrip().startswith("Script running"))
+    # A completed sibling says nothing about a command that is still running.
+    running = inner_running or text.lstrip().startswith("Script running")
     return code, running, text
 
 
@@ -428,8 +426,14 @@ class CodexExtractor(Extractor):
             ev, _ = self._tool(ts, name, self._command(text), call_id)
             workdir = self._workdir(text)
             if call_id in self._pending and workdir:
-                # exec_command's own workdir, not the session cwd, is where git ran.
-                self._pending[call_id] = (*self._pending[call_id][:3], workdir)
+                # Relative workdirs belong to the turn cwd, never the follower's
+                # process cwd. Without a turn cwd we cannot resolve them safely.
+                if not os.path.isabs(workdir):
+                    workdir = (
+                        os.path.normpath(os.path.join(self.cwd, workdir)) if self.cwd else None
+                    )
+                if workdir:
+                    self._pending[call_id] = (*self._pending[call_id][:3], workdir)
             if name == "apply_patch":
                 m = _CODEX_PATCH_PATH_RE.search(text)
                 if m:
