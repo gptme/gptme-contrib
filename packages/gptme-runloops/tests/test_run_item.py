@@ -3938,6 +3938,18 @@ class TestClassifyBackendErrorText:
             )
             assert _classify_backend_error_text(record, "gptme") is None
 
+    def test_non_system_error_metadata_is_not_terminal(self) -> None:
+        for role in ("tool", "assistant", "user"):
+            for metadata in ({"error": True}, {"error_class": "auth_error"}):
+                record = json.dumps(
+                    {
+                        "role": role,
+                        "content": "Authentication failed",
+                        "metadata": metadata,
+                    }
+                )
+                assert _classify_backend_error_text(record, "gptme") is None
+
     def test_gptme_trajectory_assistant_prose_not_infra(self) -> None:
         record = json.dumps(
             {

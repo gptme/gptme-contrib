@@ -2276,7 +2276,7 @@ def _terminal_error_evidence(records: list[dict]) -> str:
         metadata = record.get("metadata")
         error_class: str | None = None
         is_terminal = record.get("role") == "error"
-        if isinstance(metadata, dict):
+        if record.get("role") == "system" and isinstance(metadata, dict):
             if metadata.get("error") is True:
                 is_terminal = True
             candidate = metadata.get("error_class")
