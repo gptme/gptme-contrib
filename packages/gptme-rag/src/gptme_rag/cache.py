@@ -296,12 +296,19 @@ class SmartRAGCache:
                 self.stats["total_size_bytes"] -= old_entry.size_bytes()
                 del self.cache[key]
 
+            # Reject an oversized result before it can evict unrelated queries.
+            # An existing value for this key was removed above: it is superseded.
+            entry_size = entry.size_bytes()
+            if entry_size > self.max_memory_bytes:
+                self.stats["evictions"] += 1
+                self.stats["memory_evictions"] += 1
+                return
+
             # Add new entry
             self.cache[key] = entry
-            self.stats["total_size_bytes"] += entry.size_bytes()
+            self.stats["total_size_bytes"] += entry_size
 
-            # Evict old entries if over memory limit. An entry that alone
-            # exceeds the limit is evicted too rather than held over budget.
+            # Evict old entries if over memory limit.
             while self.stats["total_size_bytes"] > self.max_memory_bytes and self.cache:
                 # Remove least recently used (FIFO from OrderedDict)
                 old_key, old_entry = self.cache.popitem(last=False)

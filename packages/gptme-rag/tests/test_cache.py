@@ -3,6 +3,8 @@
 import time
 from datetime import datetime, timedelta
 
+import pytest
+
 from gptme_rag.cache import CacheEntry, CacheKey, SmartRAGCache
 
 
@@ -531,6 +533,39 @@ def test_memory_limit_counts_cached_document_contents():
     held = sum(len(c) for e in cache.cache.values() for c in e.document_contents)
     assert held <= 1_000_000, f"cache holds {held} bytes of content, limit 1_000_000"
     assert cache.get_stats()["entries"] >= 1
+
+
+@pytest.mark.parametrize("replace_existing", [False, True])
+def test_oversized_entry_preserves_other_entries_and_size_accounting(replace_existing):
+    """Reject huge results without flushing warm queries or retaining stale replacements."""
+    cache = SmartRAGCache(ttl_seconds=60, max_memory_bytes=10_000)
+    warm_key = CacheKey.from_search("warm")
+    expired_key = CacheKey.from_search("expired")
+    huge_key = warm_key if replace_existing else CacheKey.from_search("huge")
+    warm = _ttl_entry()
+    expired = _ttl_entry(age_s=120)
+    cache.put(warm_key, warm)
+    cache.put(expired_key, expired)
+
+    cache.put(huge_key, _ttl_entry(content="z" * 50_000))
+
+    expected_keys = [expired_key] if replace_existing else [warm_key, expired_key]
+    assert list(cache.cache) == expected_keys
+    assert cache.get(huge_key) is None
+    if not replace_existing:
+        assert cache.get(warm_key) is warm
+    stats = cache.get_stats()
+    assert stats["total_size_bytes"] == sum(e.size_bytes() for e in cache.cache.values())
+    assert stats["memory_evictions"] == 1
+
+    # Expiry after rejection must subtract each retained entry exactly once.
+    assert cache.get(expired_key) is None
+    assert cache.get(expired_key) is None
+    stats = cache.get_stats()
+    assert stats["ttl_evictions"] == 1
+    assert stats["total_size_bytes"] == (0 if replace_existing else warm.size_bytes())
+    cache.clear()
+    assert cache.get_stats()["total_size_bytes"] == 0
 
 
 def test_entry_larger_than_memory_limit_is_not_held():
