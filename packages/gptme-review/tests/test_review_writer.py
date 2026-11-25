@@ -882,6 +882,19 @@ def test_rule_7_accepts_inline_rust_unit_tests(alice_io, attribute):
     )
 
 
+def test_rule_7_accepts_inline_rust_tests_in_git_quoted_paths(alice_io):
+    w = writer.bind_io(alice_io)
+    diff = (
+        'diff --git "a/src/caf\\303\\251.rs" "b/src/caf\\303\\251.rs"\n'
+        '--- "a/src/caf\\303\\251.rs"\n'
+        '+++ "b/src/caf\\303\\251.rs"\n'
+        "@@ -0,0 +1,2 @@\n"
+        "+#[test]\n"
+        "+fn regression() {}\n"
+    )
+    assert w._check_fix_without_test("fix: regression", ["src/café.rs"], diff) == []
+
+
 @pytest.mark.parametrize("example_path", ["docs/guide.md", "src/app.py"])
 @pytest.mark.parametrize("example_first", [False, True])
 def test_rule_7_ignores_rust_attributes_outside_rust_files(

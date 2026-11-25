@@ -4084,11 +4084,9 @@ def _check_fix_without_test(
     if any(_TEST_FILE_RE.search(f) for f in touched_files):
         return []
     # Attributes in documentation examples or other languages are not Rust tests.
-    for section in re.split(r"(?m)^diff --git ", diff)[1:]:
-        lines = section.splitlines()
-        path = _diff_section_path(lines)
-        if path is not None and path.endswith(".rs"):
-            if _ADDED_INLINE_TEST_RE.search("\n".join(lines)):
+    for section in split_file_sections(diff):
+        if section.path is not None and section.path.endswith(".rs"):
+            if _ADDED_INLINE_TEST_RE.search(section.text):
                 return []
     anchor = next(iter(touched_files), "")
     return [
