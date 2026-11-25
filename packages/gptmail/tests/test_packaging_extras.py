@@ -47,14 +47,19 @@ def test_no_dependency_names_bare_redact() -> None:
     assert "redact" not in names, "PyPI redact is an unrelated project"
 
 
-def test_secrets_extra_names_the_scanner_distribution() -> None:
+@pytest.mark.parametrize("extra", ["secrets", "test"])
+def test_extras_require_scanner_on_supported_python(extra: str) -> None:
     extras = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))["project"][
         "optional-dependencies"
     ]
-    assert _names(extras["secrets"]) == {"gptme-redact"}
+    assert "gptme-redact" in _names(extras[extra])
     # gptmail supports 3.10 but the scanner needs 3.11; an unmarked requirement
     # would make `gptmail[secrets,...]` uninstallable on 3.10.
-    (req,) = (Requirement(r) for r in extras["secrets"])
+    (req,) = (
+        Requirement(r)
+        for r in extras[extra]
+        if canonicalize_name(Requirement(r).name) == "gptme-redact"
+    )
     assert req.marker is not None
     assert req.marker.evaluate({"python_version": "3.10"}) is False
     assert req.marker.evaluate({"python_version": "3.11"}) is True

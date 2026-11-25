@@ -1513,6 +1513,7 @@ secrets = [
     { name = "gptme-redact" },
 ]
 test = [
+    { name = "gptme-redact" },
     { name = "mypy" },
     { name = "packaging" },
     { name = "pytest" },
@@ -1525,6 +1526,7 @@ requires-dist = [
     { name = "click", specifier = ">=8.0" },
     { name = "flask", marker = "extra == 'oauth'", specifier = ">=2.0" },
     { name = "gptme-redact", marker = "python_full_version >= '3.11' and extra == 'secrets'", editable = "packages/gptme-redact" },
+    { name = "gptme-redact", marker = "python_full_version >= '3.11' and extra == 'test'", editable = "packages/gptme-redact" },
     { name = "markdown", specifier = ">=3.4" },
     { name = "mcp", marker = "extra == 'bridge'", specifier = ">=1.2,<2" },
     { name = "mypy", marker = "extra == 'test'", specifier = ">=1.0" },
