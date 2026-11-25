@@ -3921,6 +3921,100 @@ class TestClassifyBackendErrorText:
             == "my_backend_quota"
         )
 
+    def test_gptme_trajectory_tool_output_not_infra(self) -> None:
+        # gptme/gptme-contrib#2507: a failed tool command or printed source
+        # code in the trajectory must not earn a provider infra classification
+        # (and its free re-arm). These are the issue's reproduction cases.
+        for text in (
+            "fatal: Authentication failed for 'https://github.com/example/repo'",
+            "class RateLimitError(Exception): pass",
+        ):
+            record = json.dumps(
+                {
+                    "role": "system",
+                    "content": text,
+                    "tool_use_id": "ordinary-tool-output",
+                }
+            )
+            assert _classify_backend_error_text(record, "gptme") is None
+
+    def test_gptme_trajectory_assistant_prose_not_infra(self) -> None:
+        record = json.dumps(
+            {
+                "role": "assistant",
+                "content": "The shell hit status 429 Too Many Requests, so the "
+                "fetch failed; task failed for unrelated reasons.",
+            }
+        )
+        assert _classify_backend_error_text(record, "gptme") is None
+
+    def test_gptme_trajectory_terminal_error_detected(self) -> None:
+        # The structured terminal-error record gptme writes is real evidence.
+        record = json.dumps(
+            {
+                "role": "system",
+                "content": "error: rate_limit\nError code: 429 - rate limit reached",
+                "metadata": {
+                    "error": True,
+                    "error_class": "rate_limit",
+                    "exit_code": 75,
+                },
+            }
+        )
+        assert _classify_backend_error_text(record, "gptme") == "gptme_rate_limit"
+
+    def test_gptme_trajectory_terminal_error_beats_tool_output(self) -> None:
+        # Tool output must not outrank the terminal event: a genuine auth death
+        # stays auth even when earlier tool output mentions a rate limit.
+        tool = json.dumps(
+            {"role": "tool", "content": "rate limit hit; Authentication failed"}
+        )
+        terminal = json.dumps(
+            {
+                "role": "system",
+                "content": "error: auth_error\nError code: 401 - invalid credentials",
+                "metadata": {
+                    "error": True,
+                    "error_class": "auth_error",
+                    "exit_code": 76,
+                },
+            }
+        )
+        assert (
+            _classify_backend_error_text(f"{tool}\n{terminal}", "gptme") == "gptme_auth"
+        )
+
+    def test_gptme_trajectory_partial_leading_line_tolerated(self) -> None:
+        # The reader takes the last 4 KiB, so the first line is often a
+        # fragment cut mid-record. That must not hide a real terminal error.
+        partial = '{"role": "assistant", "content": "long assis'
+        terminal = json.dumps(
+            {
+                "role": "system",
+                "content": "error: model_unavailable\nError code: 503",
+                "metadata": {
+                    "error": True,
+                    "error_class": "model_unavailable",
+                    "exit_code": 77,
+                },
+            }
+        )
+        assert (
+            _classify_backend_error_text(f"{partial}\n{terminal}", "gptme")
+            == "gptme_model_unavailable"
+        )
+
+    def test_grok_free_form_log_still_classifies(self) -> None:
+        # The separate Grok Build path reads a free-form session log, not a
+        # trajectory; its marker scan is unchanged.
+        assert (
+            _classify_backend_error_text(
+                "API error (status 402 Payment Required): usage balance exhausted",
+                "grok-build",
+            )
+            == "grok_build_quota"
+        )
+
 
 class TestInspectGrokFailure:
     """Integration-level tests for _inspect_grok_failure."""
@@ -3987,6 +4081,25 @@ class TestInspectGptmeFailure:
         session_id = "gptme-session-222"
         traj = tmp_path / "gptme-clean.jsonl"
         traj.write_text('{"role": "assistant", "content": "Done."}\n')
+        ref = tmp_path / f"gptme-traj-{session_id}.path"
+        ref.write_text(str(traj))
+        result = _inspect_gptme_failure(_make_plan_stub(session_id), tmp_dir=tmp_path)
+        assert result is None
+
+    def test_returns_none_for_tool_output_failure_evidence(self, tmp_path) -> None:
+        # A tool command that failed on its own credentials is ordinary work
+        # failure; it must not be read as a provider infra failure.
+        session_id = "gptme-session-444"
+        traj = tmp_path / "gptme-tool-output.jsonl"
+        records = [
+            {
+                "role": "tool",
+                "content": "fatal: Authentication failed for "
+                "https://github.com/example/repo",
+            },
+            {"role": "tool", "content": "class RateLimitError(Exception): pass"},
+        ]
+        traj.write_text("".join(json.dumps(record) + "\n" for record in records))
         ref = tmp_path / f"gptme-traj-{session_id}.path"
         ref.write_text(str(traj))
         result = _inspect_gptme_failure(_make_plan_stub(session_id), tmp_dir=tmp_path)

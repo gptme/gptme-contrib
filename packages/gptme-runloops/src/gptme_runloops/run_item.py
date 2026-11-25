@@ -2233,17 +2233,89 @@ BACKEND_MODEL_UNAVAIL_MARKERS: tuple[str, ...] = (
 )
 
 
+def _parse_jsonl_records(text: str) -> list[dict] | None:
+    """Return the JSON objects in a JSONL ``text`` tail, or ``None`` if it is not JSONL.
+
+    A gptme trajectory is one JSON object per line. Callers read only the last
+    few KiB, so the first line is usually a fragment cut mid-record; that
+    leading fragment is tolerated (and dropped). Any later unparseable line
+    means the text is a free-form log, not a trajectory.
+    """
+    lines = [line for line in text.splitlines() if line.strip()]
+    if not lines:
+        return None
+    records: list[dict] = []
+    for index, line in enumerate(lines):
+        try:
+            record = json.loads(line)
+        except ValueError:
+            if index == 0:
+                continue
+            return None
+        if not isinstance(record, dict):
+            return None
+        records.append(record)
+    return records or None
+
+
+def _terminal_error_evidence(records: list[dict]) -> str:
+    """Text from the trajectory records that are gptme's own terminal-error events.
+
+    gptme writes one structured record when a session dies on a classified
+    provider failure (``gptme/cli/main.py::_write_terminal_error_to_log``):
+    ``role: "system"`` with ``metadata.error`` / ``metadata.error_class`` and an
+    ``"error: <class>\\n<message>"`` content prefix. Legacy ``role: "error"``
+    records carry the same evidence in ``content``.
+
+    Tool output, user prompts and assistant prose are deliberately excluded: a
+    failed shell command printing ``Authentication failed`` or source code
+    defining ``RateLimitError`` is ordinary work failure, not provider infra.
+    """
+    parts: list[str] = []
+    for record in records:
+        metadata = record.get("metadata")
+        error_class: str | None = None
+        is_terminal = record.get("role") == "error"
+        if isinstance(metadata, dict):
+            if metadata.get("error") is True:
+                is_terminal = True
+            candidate = metadata.get("error_class")
+            if isinstance(candidate, str) and candidate:
+                error_class = candidate
+                is_terminal = True
+        if not is_terminal:
+            continue
+        content = record.get("content")
+        if isinstance(content, str) and content:
+            parts.append(content)
+        if error_class:
+            parts.append(f"error: {error_class}")
+    return "\n".join(parts)
+
+
 def _classify_backend_error_text(text: str, backend: str) -> str | None:
-    """Classify an infra error from free-form backend log / trajectory text.
+    """Classify an infra error from backend log / trajectory text.
 
     Returns ``"<backend>_quota"``, ``"<backend>_auth"``, ``"<backend>_rate_limit"``,
     or ``"<backend>_model_unavailable"`` when a known infrastructure error is found;
     ``None`` when the text carries no recognisable infra signal.
 
+    A structured JSONL trajectory (the gptme path) is classified only from
+    gptme's own terminal-error records; ordinary tool output and prose in the
+    same trajectory are not provider-failure evidence. Free-form text — the
+    Grok Build session log and callers passing a raw message — keeps the marker
+    scan.
+
     ``backend`` is the raw backend name (``"grok-build"``, ``"gptme"``);
     hyphens are replaced with underscores in the returned key so the result
     is valid as a JSONL field fragment.
     """
+    if backend.replace("-", "_") == "gptme":
+        records = _parse_jsonl_records(text)
+        if records is not None:
+            text = _terminal_error_evidence(records)
+            if not text:
+                return None
     lower = text.lower()
     backend_slug = backend.replace("-", "_")
     # Quota/payment takes priority (more specific than auth).
