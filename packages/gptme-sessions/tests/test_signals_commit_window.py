@@ -219,3 +219,13 @@ def test_combined_short_flags_state_the_subject() -> None:
         signals = extract_signals(msgs)
         assert len(signals["git_commits"]) == 1, flag
         assert "8e8df11cb9" in signals["git_commits"][0]
+
+
+def test_combined_short_flags_state_the_heredoc_subject() -> None:
+    """`git commit -am "$(cat <<'EOF' ...)"` states the heredoc subject, not the `$(cat` opener."""
+    from gptme_sessions.signals import _commit_subject, _stated_commit_subjects
+
+    for flag in ("-m", "-am", "-qm", "-aqm"):
+        cmd = f"git commit {flag} \"$(cat <<'EOF'\nfeat: x\n\nbody line\nEOF\n)\""
+        assert _commit_subject(cmd) == "feat: x", flag
+        assert _stated_commit_subjects(cmd) == ["feat: x"], flag

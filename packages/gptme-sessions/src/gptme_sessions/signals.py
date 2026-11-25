@@ -59,7 +59,7 @@ _COMMIT_CMD_RE = re.compile(r"\bgit(?:\s+-C\s+\S+)?\s+commit\b|\bgit-safe-commit
 _COMMIT_M_FLAG = r"(?<![\w-])-[A-Za-z]*m"
 _COMMIT_SUBJECT_RE = re.compile(_COMMIT_M_FLAG + r"""\s+(?:"((?:[^"\\]|\\.)*)"|'([^']*)')""")
 _COMMIT_HEREDOC_SUBJECT_RE = re.compile(
-    r"""-m\s+"\$\(cat\s+<<-?\s*'?(\w+)'?\s*\n(.*?)\n\1\b""", re.S
+    _COMMIT_M_FLAG + r"""\s+"\$\(cat\s+<<-?\s*'?(\w+)'?\s*\n(.*?)\n\1\b""", re.S
 )
 _GIT_PUSH_CMD_RE = re.compile(r"\bgit(?:\s+-C\s+\S+)?\s+push\b")
 _QUIET_PUSH_RE = re.compile(r"\bgit(?:\s+-C\s+\S+)?\s+push\b[^;&|\n]*(?:\s-q\b|--quiet\b)")
@@ -160,20 +160,24 @@ def _stated_commit_subjects(cmd: str) -> list[str]:
     A command can commit more than once ("git commit -m a && git commit -m b"),
     so all stated subjects are returned, not just the first.
     """
-    subjects: list[str] = []
+    found: list[tuple[int, str]] = []
+    heredocs = list(_COMMIT_HEREDOC_SUBJECT_RE.finditer(cmd))
     for match in _COMMIT_SUBJECT_LONG_RE.finditer(cmd):
+        # The quoted-body match of a heredoc message ("$(cat <<'EOF' ...") is
+        # not a subject; the heredoc match below states the real one.
+        if any(h.start() <= match.start() < h.end() for h in heredocs):
+            continue
         value = next((g for g in match.groups() if g is not None), "")
         if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
             value = value[1:-1]
         subject = value.replace('\\"', '"').splitlines()[0].strip()
         if subject:
-            subjects.append(subject)
-    if not subjects:
-        heredoc = _COMMIT_HEREDOC_SUBJECT_RE.search(cmd)
-        if heredoc:
-            subject = heredoc.group(2).strip().splitlines()[0].strip()
-            if subject:
-                subjects.append(subject)
+            found.append((match.start(), subject))
+    for heredoc in heredocs:
+        subject = heredoc.group(2).strip().splitlines()[0].strip()
+        if subject:
+            found.append((heredoc.start(), subject))
+    subjects = [subject for _, subject in sorted(found)]
     return subjects
 
 
