@@ -39,6 +39,18 @@ export function sessionIdFor(convName) {
 }
 
 /**
+ * Conversation name for one sender.
+ *
+ * The workspace is part of the name: `sessionExists` scans every project
+ * directory, so without it a sender who is moved to a different agent
+ * workspace would resume the conversation stored under the old one.
+ */
+export function sessionName(agent, workspace, sender) {
+    const slug = (value) => value.replace(/[^a-zA-Z0-9]/g, '-');
+    return `whatsapp-${slug(agent)}-${slug(workspace)}-${slug(sender)}`;
+}
+
+/**
  * Whether Claude Code already stored session `sessionId`.
  *
  * Sessions live at `<config>/projects/<escaped cwd>/<id>.jsonl`. Scanning every

@@ -27,7 +27,7 @@ const { Client, LocalAuth } = pkg;
 import qrcode from 'qrcode-terminal';
 import { spawn } from 'child_process';
 import { existsSync } from 'fs';
-import { sessionArgs } from './claude-session.js';
+import { sessionArgs, sessionName } from './claude-session.js';
 import { createKeyedQueue } from './serial-queue.js';
 
 // Config from env
@@ -156,7 +156,7 @@ async function callClaudeCode(sender, message) {
 
     // Per-sender session (maintains history). --resume needs an existing
     // session, so the first message creates it under a deterministic UUID.
-    const convId = `whatsapp-${AGENT_NAME}-${sender.replace(/[^a-zA-Z0-9]/g, '-')}`;
+    const convId = sessionName(AGENT_NAME, WORKSPACE, sender);
     args.push(...sessionArgs(convId));
 
     return spawnAndCapture(CLAUDE_CMD, args, (output) => {
