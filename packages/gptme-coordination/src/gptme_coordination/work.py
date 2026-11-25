@@ -16,6 +16,7 @@ by agents asserting another agent's identity.
 
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -173,14 +174,14 @@ class WorkClaimManager:
 
     def _migrate_work_schema(self) -> None:
         """Apply work-table migrations owned by the work manager."""
-        try:
-            self.db.conn.execute("ALTER TABLE work ADD COLUMN completed_at TEXT")
-        except Exception:
-            pass  # Column already exists.
-        try:
-            self.db.conn.execute("ALTER TABLE work ADD COLUMN abandoned_at TEXT")
-        except Exception:
-            pass  # Column already exists.
+        for column in ("completed_at", "abandoned_at"):
+            try:
+                self.db.conn.execute(f"ALTER TABLE work ADD COLUMN {column} TEXT")
+            except sqlite3.OperationalError as exc:
+                # Anything else (e.g. a lock) would leave the column missing and
+                # make every later write to it fail.
+                if "duplicate column name" not in str(exc).lower():
+                    raise
 
     @staticmethod
     def compute_hmac(
@@ -509,12 +510,16 @@ class WorkClaimManager:
             counts[f"completed_older_than_{completed_age_hours}h"] = result.rowcount
 
         if abandoned_age_hours is not None and abandoned_age_hours > 0:
-            # claimed_at covers rows abandoned before abandoned_at existed.
+            # Age by the later timestamp. Older package versions sharing the DB
+            # never write abandoned_at, so it can be missing, or stale from an
+            # earlier claim of the same task.
             result = conn.execute(
                 """DELETE FROM work
                 WHERE status = 'abandoned'
-                  AND COALESCE(abandoned_at, claimed_at)
-                      < datetime('now', ? || ' hours')""",
+                  AND MAX(
+                        COALESCE(abandoned_at, claimed_at),
+                        COALESCE(claimed_at, abandoned_at)
+                      ) < datetime('now', ? || ' hours')""",
                 (str(-abandoned_age_hours),),
             )
             counts[f"abandoned_older_than_{abandoned_age_hours}h"] = result.rowcount

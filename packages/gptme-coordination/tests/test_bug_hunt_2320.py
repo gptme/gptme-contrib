@@ -2,6 +2,7 @@
 
 import json
 import os
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -9,7 +10,7 @@ import pytest
 from gptme_coordination import worktree_guard
 from gptme_coordination.db import CoordinationDB
 from gptme_coordination.messages import MessageBus
-from gptme_coordination.work import WorkClaimManager
+from gptme_coordination.work import WORK_SCHEMA, WorkClaimManager
 
 
 @pytest.fixture
@@ -44,13 +45,51 @@ def test_vacuum_falls_back_to_claimed_at_for_old_rows(db: CoordinationDB) -> Non
     assert work.get("task") is None
 
 
-def test_existing_database_gains_abandoned_at(db: CoordinationDB) -> None:
+def test_vacuum_ignores_abandon_time_left_by_an_earlier_claim(
+    db: CoordinationDB,
+) -> None:
+    """An older package version re-abandons a task without stamping abandoned_at."""
+    work = WorkClaimManager(db)
+    work.claim("agent-a", "task")
+    work.abandon("agent-a", "task")
+    db.conn.execute("UPDATE work SET abandoned_at = datetime('now', '-3 hours')")
+    work.claim("agent-b", "task")
+    db.conn.execute("UPDATE work SET status = 'abandoned', claimer = NULL")
+
+    work.vacuum_expired(abandoned_age_hours=1)
+    assert work.get("task") is not None
+
+
+def _create_work_table_without_abandoned_at(db: CoordinationDB) -> None:
     db.conn.execute(
         "CREATE TABLE work (task_id TEXT PRIMARY KEY, claimer TEXT, "
         "epoch INTEGER NOT NULL DEFAULT 0, claimed_at TEXT, expires_at TEXT, "
         "status TEXT NOT NULL DEFAULT 'available', result TEXT, metadata TEXT, "
         "completed_at TEXT, hmac TEXT)"
     )
+
+
+def test_existing_database_gains_abandoned_at(db: CoordinationDB) -> None:
+    _create_work_table_without_abandoned_at(db)
+    work = WorkClaimManager(db)
+    work.claim("agent-a", "task")
+    assert work.abandon("agent-a", "task")
+
+
+def test_locked_database_does_not_skip_the_migration(db: CoordinationDB) -> None:
+    _create_work_table_without_abandoned_at(db)
+    # The table's indexes already exist, so the ALTER is the first write.
+    db.conn.executescript(WORK_SCHEMA)
+    db.conn.execute("PRAGMA busy_timeout=0")
+    other = sqlite3.connect(db.db_path, isolation_level=None)
+    try:
+        other.execute("BEGIN IMMEDIATE")
+        with pytest.raises(sqlite3.OperationalError, match="locked"):
+            WorkClaimManager(db)
+    finally:
+        other.close()
+    # Once the lock clears the migration runs, and a second pass is a no-op.
+    WorkClaimManager(db)
     work = WorkClaimManager(db)
     work.claim("agent-a", "task")
     assert work.abandon("agent-a", "task")
