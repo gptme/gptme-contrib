@@ -84,6 +84,7 @@ def export_lesson(
     output_dir: Path,
     agent_origin: str = "agent",
     force: bool = False,
+    lessons_root: Path | None = None,
 ) -> bool:
     """Export a single lesson to interchange format.
 
@@ -92,10 +93,24 @@ def export_lesson(
         output_dir: Directory to write exported lesson
         agent_origin: Which agent created this
         force: Overwrite existing exports
+        lessons_root: Lessons directory the category path is taken relative
+            to. Defaults to the lesson's grandparent (one category level).
 
     Returns:
-        True if successful, False otherwise
+        True if exported or already exported, False on failure
     """
+    status = _export_lesson(lesson_path, output_dir, agent_origin, force, lessons_root)
+    return status != "failed"
+
+
+def _export_lesson(
+    lesson_path: Path,
+    output_dir: Path,
+    agent_origin: str,
+    force: bool,
+    lessons_root: Path | None,
+) -> str:
+    """Export one lesson; return "success", "skipped" or "failed"."""
     try:
         # Read lesson
         content = lesson_path.read_text()
@@ -105,12 +120,33 @@ def export_lesson(
 
         if frontmatter is None:
             print(f"Warning: No frontmatter in {lesson_path}, skipping")
-            return False
+            return "failed"
+
+        # Preserve the full category structure: tools/shell/quoting.md
+        root = lessons_root if lessons_root is not None else lesson_path.parent.parent
+        relative_path = lesson_path.relative_to(root)
+        output_path = output_dir / relative_path
+
+        # Check if exists
+        if output_path.exists() and not force:
+            print(
+                f"Skipping {lesson_path.name} (already exported, use --force to overwrite)"
+            )
+            return "skipped"
+
+        # Escape category separators (and literal percent signs), so tools/shell
+        # cannot collide with tools-shell or tools%2Fshell. Nothing else is
+        # encoded, so other single-level category ids stay unchanged.
+        id_path = lesson_path
+        if relative_path.parent != Path("."):
+            category = relative_path.parent.as_posix()
+            category = category.replace("%", "%25").replace("/", "%2F")
+            id_path = Path(category) / relative_path.name
 
         # Add network metadata
         frontmatter = add_network_metadata(
             frontmatter=frontmatter,
-            lesson_path=str(lesson_path),
+            lesson_path=str(id_path),
             agent_origin=agent_origin,
         )
 
@@ -121,32 +157,44 @@ def export_lesson(
 {markdown}
 """
 
-        # Write to output directory
-        # Preserve category structure: workflow/autonomous-run.md
-        relative_path = lesson_path.relative_to(lesson_path.parent.parent)
-        output_path = output_dir / relative_path
-
-        # Create parent directories
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-
-        # Check if exists
-        if output_path.exists() and not force:
-            print(
-                f"Skipping {lesson_path.name} (already exported, use --force to overwrite)"
-            )
-            return True
-
         # Write
+        output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(export_content)
 
         lesson_id = frontmatter["network"]["lesson_id"]
         print(f"✓ Exported: {lesson_path.name} → {lesson_id}")
 
-        return True
+        return "success"
 
     except Exception as e:
         print(f"Error exporting {lesson_path}: {e}")
-        return False
+        return "failed"
+
+
+def _locate_single_lesson(lesson: Path, lessons_dir: Path) -> tuple[Path, Path | None]:
+    """Pick the path and lessons root for a single-file export.
+
+    Returns a root of None for a lesson outside ``lessons_dir``, which then
+    exports relative to its grandparent.
+    """
+    # abspath keeps symlinks, so a linked lesson stays in the category it is
+    # filed under. It also collapses ".." textually, which names another file
+    # if the ".." follows a symlink.
+    as_written = Path(os.path.abspath(lesson))
+    if not (as_written.exists() and as_written.samefile(lesson)):
+        as_written = lesson.resolve()
+
+    real_root = lessons_dir.resolve()
+    for path, root in (
+        (as_written, Path(os.path.abspath(lessons_dir))),
+        # Same directory spelled through a different symlink
+        (lesson.parent.resolve() / lesson.name, real_root),
+        # A link from elsewhere to a lesson inside the root
+        (lesson.resolve(), real_root),
+    ):
+        if path.is_relative_to(root):
+            return path, root
+    return as_written, None
 
 
 def export_all_lessons(
@@ -183,17 +231,10 @@ def export_all_lessons(
 
     # Export each lesson
     for lesson_path in sorted(lesson_files):
-        success = export_lesson(
-            lesson_path=lesson_path,
-            output_dir=output_dir,
-            agent_origin=agent_origin,
-            force=force,
+        status = _export_lesson(
+            lesson_path, output_dir, agent_origin, force, lessons_root=lessons_dir
         )
-
-        if success:
-            counts["success"] += 1
-        else:
-            counts["failed"] += 1
+        counts[status] += 1
 
     return counts
 
@@ -241,11 +282,13 @@ def main(lessons_dir: Path, output: Path, lesson: Path | None, agent: str, force
 
     if lesson:
         # Export single lesson
+        lesson_path, lessons_root = _locate_single_lesson(lesson, lessons_dir)
         success = export_lesson(
-            lesson_path=lesson,
+            lesson_path=lesson_path,
             output_dir=output,
             agent_origin=agent,
             force=force,
+            lessons_root=lessons_root,
         )
 
         sys.exit(0 if success else 1)

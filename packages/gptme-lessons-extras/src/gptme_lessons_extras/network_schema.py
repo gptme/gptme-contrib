@@ -6,8 +6,23 @@ Design: knowledge/technical-designs/agent-network-protocol.md
 """
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
+
+
+def parse_timestamp(value: object) -> datetime:
+    """Parse a network timestamp.
+
+    Accepts an ISO 8601 string, or the ``datetime``/``date`` that YAML loads
+    for an unquoted timestamp. Raises TypeError or ValueError otherwise.
+    """
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, date):
+        return datetime(value.year, value.month, value.day)
+    if isinstance(value, str):
+        return datetime.fromisoformat(value)
+    raise TypeError(f"expected ISO 8601 timestamp, got {type(value).__name__}")
 
 
 @dataclass
@@ -58,8 +73,8 @@ class NetworkMetadata:
         return cls(
             lesson_id=data["lesson_id"],
             agent_origin=data["agent_origin"],
-            created=datetime.fromisoformat(data["created"]),
-            updated=datetime.fromisoformat(data["updated"]),
+            created=parse_timestamp(data["created"]),
+            updated=parse_timestamp(data["updated"]),
             confidence=data["confidence"],
             success_rate=data.get("success_rate"),
             adoption_count=data.get("adoption_count", 0),
@@ -156,7 +171,7 @@ def validate_network_metadata(metadata: dict) -> tuple[bool, list[str]]:
     for field in ["created", "updated"]:
         if field in metadata:
             try:
-                datetime.fromisoformat(metadata[field])
+                parse_timestamp(metadata[field])
             except (TypeError, ValueError):
                 errors.append(
                     f"{field} must be ISO 8601 timestamp, got {metadata[field]}"
