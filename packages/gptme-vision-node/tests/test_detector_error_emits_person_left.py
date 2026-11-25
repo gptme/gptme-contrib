@@ -56,3 +56,25 @@ def test_motion_failure_does_not_hide_successful_person_absence():
     )
     events = [event for _ in range(4) for event in pipeline.step()]
     assert [event.kind for event in events] == [PERSON_APPEARED, PERSON_LEFT]
+
+
+def test_person_failure_breaks_consecutive_absence_streak():
+    class InterruptedAbsence:
+        def __init__(self):
+            self.n = 0
+
+        def detect(self, frame):
+            self.n += 1
+            if self.n == 1:
+                return [Detection("person", (0, 0, 10, 10), 1.0)]
+            if self.n == 4:
+                raise RuntimeError("person detector unavailable")
+            return []
+
+    pipeline = VisionPipeline(
+        Frames(), [InterruptedAbsence()], absent_frames_for_left=3
+    )
+    events = [event for _ in range(5) for event in pipeline.step()]
+    assert [event.kind for event in events] == [PERSON_APPEARED]
+    assert pipeline.step() == []
+    assert [event.kind for event in pipeline.step()] == [PERSON_LEFT]

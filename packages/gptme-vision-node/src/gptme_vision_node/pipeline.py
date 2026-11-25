@@ -113,9 +113,11 @@ class VisionPipeline:
             if not self._person_present:
                 self._person_present = True
                 events.append(VisionEvent(PERSON_APPEARED, persons))
-        elif self._person_present and not person_detector_failed:
-            # A failing person detector is not evidence of absence; failures
-            # from motion-only detectors must not suppress valid absence.
+        elif person_detector_failed:
+            # Unavailable person detection breaks the consecutive-empty streak;
+            # failures from motion-only detectors do not affect absence.
+            self._frames_without_person = 0
+        elif self._person_present:
             self._frames_without_person += 1
             if self._frames_without_person >= self.absent_frames_for_left:
                 self._person_present = False

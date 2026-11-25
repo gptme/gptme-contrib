@@ -43,3 +43,52 @@ async def test_person_left_survives_backlog() -> None:
     assert PERSON_APPEARED in delivered
     assert PERSON_LEFT in delivered, f"delivered={delivered}"
     await bridge.stop()
+
+
+@pytest.mark.asyncio
+async def test_latest_presence_survives_sustained_backlog() -> None:
+    bridge = VisionBridge(_Source(), [])
+    gate = asyncio.Event()
+    delivered: list[str] = []
+
+    async def slow_send(message: str) -> None:
+        await gate.wait()
+        delivered.append(json.loads(message)["event"])
+
+    bridge._loop = asyncio.get_running_loop()
+    bridge._send_message = slow_send
+    for i in range(17):
+        kind = PERSON_APPEARED if i % 2 == 0 else PERSON_LEFT
+        bridge._schedule_event(VisionEvent(kind))
+    assert len(bridge._pending_sends) <= 16
+    gate.set()
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert delivered[-1] == PERSON_APPEARED
+    await bridge.stop()
+
+
+@pytest.mark.asyncio
+async def test_stop_discards_deferred_presence() -> None:
+    bridge = VisionBridge(_Source(), [])
+    gate = asyncio.Event()
+    delivered: list[str] = []
+
+    async def slow_send(message: str) -> None:
+        await gate.wait()
+        delivered.append(json.loads(message)["event"])
+
+    bridge._loop = asyncio.get_running_loop()
+    bridge._send_message = slow_send
+    for _ in range(17):
+        bridge._schedule_event(VisionEvent(PERSON_APPEARED))
+    await asyncio.sleep(0)
+    await bridge.stop()
+    bridge._loop = asyncio.get_running_loop()
+    bridge._send_message = slow_send
+    gate.set()
+    bridge._schedule_event(VisionEvent(PERSON_LEFT))
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert delivered == [PERSON_LEFT]
+    await bridge.stop()

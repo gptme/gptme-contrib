@@ -78,6 +78,7 @@ class VisionBridge:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._send_message: SendMessage | None = None
         self._pending_sends: set[asyncio.Task[None]] = set()
+        self._deferred_presence: VisionEvent | None = None
 
     def _on_event(self, event: VisionEvent) -> None:
         """Forward a pipeline-thread event to the asyncio WebSocket loop."""
@@ -90,19 +91,24 @@ class VisionBridge:
         send_message = self._send_message
         if send_message is None:
             return
-        # Motion is dropped first under backlog: presence changes are
-        # edge-triggered and never re-sent, so losing one leaves the host with
-        # a permanently wrong view of whether someone is there. They still
-        # get a (larger) bound so a dead transport cannot grow the queue.
+        # Coalesce overflow into the latest presence state, then send it only
+        # after older events drain so they cannot overwrite it at the host.
+        if event.kind != MOTION and self._deferred_presence is not None:
+            self._deferred_presence = event
+            return
+        # Motion is expendable; presence changes must survive a bounded backlog.
         limit = (
             _MAX_PENDING_EVENT_SENDS
             if event.kind == MOTION
             else _MAX_PENDING_STATE_SENDS
         )
         if len(self._pending_sends) >= limit:
-            logger.warning(
-                "dropping %s event while transport is backlogged", event.kind
-            )
+            if event.kind != MOTION:
+                self._deferred_presence = event
+            else:
+                logger.warning(
+                    "dropping %s event while transport is backlogged", event.kind
+                )
             return
         message = json.dumps(
             {
@@ -120,6 +126,10 @@ class VisionBridge:
 
     def _event_send_done(self, task: asyncio.Task[None]) -> None:
         self._pending_sends.discard(task)
+        if not self._pending_sends and self._deferred_presence is not None:
+            event = self._deferred_presence
+            self._deferred_presence = None
+            self._schedule_event(event)
         if task.cancelled():
             return
         try:
@@ -192,6 +202,7 @@ class VisionBridge:
         """
         self._send_message = None
         self._loop = None
+        self._deferred_presence = None
         join = asyncio.create_task(asyncio.to_thread(self.pipeline.stop, timeout))
         try:
             await _await_even_if_cancelled(join)
