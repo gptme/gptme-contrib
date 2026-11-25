@@ -36,11 +36,11 @@ jobs:
 """
 
 
-# BASE without the secret-bearing step: a workflow with no secret reference may
-# still receive step-body repairs.
+# No explicit secret and an explicitly disabled implicit token: only this
+# credential-free case may receive step-body repairs.
 PLAIN = BASE.replace(
     "        env:\n          TOKEN: ${{ secrets.CODECOV_TOKEN }}\n", ""
-)
+).replace("permissions:\n  contents: read", "permissions: {}")
 
 
 def check(head: str, base: str = BASE, path: str = PATH) -> list[str]:
@@ -215,6 +215,76 @@ def test_workflow_env_secret_freezes_every_step() -> None:
     assert check(head, base=base) == [
         "job `test`: a step changed in a secret-scoped job"
     ]
+
+
+def test_inherited_secrets_freeze_steps_in_other_jobs() -> None:
+    base = PLAIN + (
+        "  call:\n"
+        "    needs: test\n"
+        "    uses: ./.github/workflows/build.yml\n"
+        "    secrets: inherit\n"
+    )
+    head = base.replace("run: make lint", "run: echo poisoned-artifact")
+    assert SECRET_STEP in check(head, base=base)
+    assert (
+        check(base.replace("timeout-minutes: 10", "timeout-minutes: 20"), base=base)
+        == []
+    )
+
+
+@pytest.mark.parametrize(
+    "permissions",
+    [
+        "",  # Unspecified repository defaults are not proof of no token.
+        "permissions: read-all\n",
+        "permissions: write-all\n",
+        "permissions:\n  contents: read\n",
+        "permissions:\n  contents: write\n",
+        "permissions:\n  id-token: write\n",
+    ],
+)
+def test_implicit_token_freezes_step_bodies(permissions: str) -> None:
+    base = PLAIN.replace("permissions: {}\n", permissions)
+    head = base.replace("run: make lint", "run: echo '${{ github.token }}'")
+    assert SECRET_STEP in check(head, base=base)
+    # No step body change: ref and timeout repairs remain possible.
+    assert (
+        check(base.replace("actions/checkout@v4", "actions/checkout@v5"), base=base)
+        == []
+    )
+
+
+def test_job_permissions_override_disabled_workflow_token() -> None:
+    base = PLAIN.replace(
+        "    runs-on: ubuntu-24.04\n",
+        "    permissions:\n      contents: write\n    runs-on: ubuntu-24.04\n",
+    )
+    assert SECRET_STEP in check(
+        base.replace("run: make lint", "run: git push"), base=base
+    )
+
+
+def test_job_can_explicitly_disable_inherited_token_permissions() -> None:
+    base = PLAIN.replace("permissions: {}\n", "").replace(
+        "    runs-on: ubuntu-24.04\n",
+        "    permissions: {}\n    runs-on: ubuntu-24.04\n",
+    )
+    assert (
+        check(base.replace("run: make lint", "run: make lint --fix"), base=base) == []
+    )
+
+
+def test_token_in_another_job_freezes_credential_free_job() -> None:
+    base = PLAIN + (
+        "  check:\n"
+        "    needs: test\n"
+        "    permissions:\n      contents: write\n"
+        "    runs-on: ubuntu-24.04\n"
+        "    steps:\n      - run: make check\n"
+    )
+    assert SECRET_STEP in check(
+        base.replace("run: make lint", "run: echo poison"), base=base
+    )
 
 
 MATRIX_BASE = BASE.replace(

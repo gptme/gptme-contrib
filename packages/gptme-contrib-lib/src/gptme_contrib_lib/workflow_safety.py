@@ -21,8 +21,12 @@ files written by credential actions, and it reaches other jobs through
 ``needs`` outputs, artifacts and caches. So once *any* job (or the workflow
 ``env``) references ``secrets``/``vars``, every step body in the workflow must
 be unchanged, positionally, and only a step's ``@ref`` pin and
-``timeout-minutes`` may differ. A workflow with no secret reference keeps the
-useful case: step bodies there are repairable.
+``timeout-minutes`` may differ. Reusable jobs with ``secrets: inherit`` are
+secret-bearing too. The implicit ``GITHUB_TOKEN`` also counts, even without a
+reference or an explicit checkout token input: step bodies are repairable only
+when every job explicitly disables token permissions (``permissions: {}``, at
+job or workflow level) and no job inherits or references secrets/vars. Missing,
+read-only, write-capable and unknown permissions all freeze step bodies.
 
 Everything fails closed: a missing YAML parser, unparseable YAML or a
 non-mapping document is a violation, never a pass. PyYAML is imported lazily so
@@ -152,7 +156,7 @@ def _step_actions(job: Any) -> list[str | None]:
 
 
 def _guarded_step(step: Any) -> Any:
-    """A step as compared inside the frozen prefix: ``@ref`` and timeout may move."""
+    """A frozen step: only ``@ref`` and timeout may move."""
     if not isinstance(step, dict):
         return step
     out = {k: v for k, v in step.items() if k not in _STEP_REPAIR_KEYS}
@@ -166,8 +170,8 @@ def _secret_step_violations(
 ) -> list[str]:
     """Steps in a secret-bearing workflow must be unchanged (see the module docstring).
 
-    ``scope_wide`` is true once any job or the workflow ``env`` references a
-    secret, because a secret can travel to any step or job (env files, outputs,
+    ``scope_wide`` is true once any job has credentials or the workflow ``env``
+    references a secret, which can travel to any step or job (env files, outputs,
     artifacts, caches). Neither side's step body may then differ; only a
     ``@ref`` pin and ``timeout-minutes`` survive ``_guarded_step``.
     """
@@ -179,6 +183,24 @@ def _secret_step_violations(
     if [_guarded_step(s) for s in old_steps] != [_guarded_step(s) for s in new_steps]:
         return [f"job `{job_id}`: a step changed in a secret-scoped job"]
     return []
+
+
+def _job_has_credentials(doc: dict[str, Any], job: Any) -> bool:
+    """Only explicit empty effective permissions prove token scopes disabled.
+
+    Job permissions replace workflow permissions; omitted permissions inherit
+    repository defaults, which cannot be established from these two documents.
+    Even a read-only token can expose private repository contents. Inherited
+    secrets are a structural declaration, not an expression reference.
+    """
+    if not isinstance(job, dict):
+        return True
+    permissions = job.get("permissions", doc.get("permissions"))
+    return (
+        permissions != {}
+        or job.get("secrets") == "inherit"
+        or bool(_context_refs({"job": job}))
+    )
 
 
 def _jobs(doc: dict[str, Any]) -> dict[str, Any] | None:
@@ -219,12 +241,11 @@ def ci_repair_violations(path: str, base_text: str, head_text: str) -> list[str]
         return violations + ["`jobs` is missing or not a mapping"]
     if set(base_jobs) != set(head_jobs):
         violations.append("job set changed")
-    # A secret anywhere can reach any job: through `needs` outputs, an artifact
-    # or a cache, not only down the same job's step list. Fail closed: once any
-    # job (or the workflow env) references a secret, freeze every step body.
+    # Credentials anywhere can reach any job through outputs/artifacts/caches.
+    # Include inherited secrets and implicit tokens, not only expression refs.
     secret_scope = workflow_env_secrets or any(
-        _context_refs({"job": job})
-        for jobs in (base_jobs, head_jobs)
+        _job_has_credentials(doc, job)
+        for doc, jobs in ((base, base_jobs), (head, head_jobs))
         for job in jobs.values()
     )
     for job_id in sorted(set(base_jobs) & set(head_jobs), key=str):
