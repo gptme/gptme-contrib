@@ -117,7 +117,10 @@ def _bound_entries(entries: list[tuple[Path, str]], budget: int) -> list[tuple[P
 
     bounded: dict[int, str] = {}
     remaining = list(range(len(entries)))
-    remaining_budget = budget
+    # Set aside room for the aggregate marker, and for the header of the entry
+    # carrying it, before handing out any budget. Both the short-entry pass and
+    # the greedy pass below would otherwise be free to spend it.
+    remaining_budget = budget - _AGGREGATE_MARKER_RESERVE - max_overhead
     while remaining:
         share = remaining_budget // len(remaining)
         small = [i for i in remaining if len(entries[i][1]) + overhead[i] <= share]
@@ -135,26 +138,23 @@ def _bound_entries(entries: list[tuple[Path, str]], budget: int) -> list[tuple[P
         else:
             # Degenerate: not even a truncation marker fits an equal share.
             # Keep whole entries greedily while they fit, then account for the
-            # omitted tail with one aggregate marker (bounded by what is left).
+            # omitted tail with one aggregate marker in the room set aside above.
             dropped: list[int] = []
             for i in remaining:
                 content = entries[i][1]
-                if len(content) + overhead[i] + _AGGREGATE_MARKER_RESERVE <= remaining_budget:
+                if len(content) + overhead[i] <= remaining_budget:
                     bounded[i] = content
                     remaining_budget -= len(content) + overhead[i]
                 else:
                     dropped.append(i)
-            if dropped and remaining_budget > 0:
+            # A negative balance means the budget cannot even hold the marker:
+            # emit nothing rather than a clipped fragment.
+            if dropped and remaining_budget >= 0:
                 omitted_chars = sum(len(entries[i][1]) for i in dropped)
-                marker = (
+                bounded[dropped[0]] = (
                     f"\n\n[... {len(dropped):,} entries, {omitted_chars:,} characters "
                     f"omitted from this summary prompt budget ...]"
                 )
-                # The carrier entry is still rendered with its header and
-                # separator, so those count against what the marker may use.
-                room = max(0, remaining_budget - overhead[dropped[0]])
-                if room:
-                    bounded[dropped[0]] = marker[:room]
         break
 
     bounded_entries = [(entries[i][0], bounded[i]) for i in range(len(entries)) if i in bounded]

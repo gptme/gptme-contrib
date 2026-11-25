@@ -1649,3 +1649,36 @@ def test_summarize_daily_prompt_stays_bounded(n_entries: int):
     # ~4 chars/token: keep a wide margin under the 1M-token window.
     assert len(prompt) < 900_000
     assert "truncated:" in prompt or "omitted from this summary prompt budget" in prompt
+
+
+@pytest.mark.parametrize(
+    "sizes",
+    [
+        [500] * 60,  # all oversized: truncation, then omission
+        [1] * 30 + [10_000],  # short entries use most of the budget first
+    ],
+)
+def test_bound_entries_never_loses_or_clips_markers(sizes: list[int]):
+    """Across a budget sweep, partial output is always announced in full.
+
+    Filenames differ in length because header overhead is charged per entry.
+    """
+    from pathlib import Path
+
+    from gptme_activity_summary.cc_backend import _bound_entries
+
+    entries = [(Path("s" * (1 + i % 40) + f"{i}.md"), "z" * size) for i, size in enumerate(sizes)]
+    originals = dict(entries)
+    for budget in range(200, 20_000):
+        bounded = _bound_entries(entries, budget)
+        rendered = "\n\n---\n\n".join(
+            f"### Entry: {path.name}\n\n{content}" for path, content in bounded
+        )
+        assert len(rendered) <= budget, f"budget={budget}"
+        for path, content in bounded:
+            if content != originals[path]:
+                assert content.endswith("budget ...]"), f"budget={budget}: {content!r}"
+        if len(bounded) < len(entries):
+            assert any(
+                " entries, " in content for _, content in bounded
+            ), f"budget={budget}: entries omitted without a marker"
