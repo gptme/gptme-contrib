@@ -1046,12 +1046,15 @@ class AgentEmail:
         with FileLock(lock_path(f"draft:{filename}"), timeout=SEND_LOCK_TIMEOUT):
             if sent_path.exists():
                 raise ValueError(f"Already sent: {message_id}")
-            in_reply_to = ""
-            if draft_path.exists():
-                headers, _ = self._markdown_to_email(draft_path.read_text())
-                in_reply_to = headers.get("In-Reply-To", "").strip()
+            if not draft_path.exists():
+                raise ValueError(f"Draft not found: {message_id}")
+            # Draft editors do not take the send lock. Use this same snapshot
+            # for the lock key, delivery, sent archive, and reply bookkeeping.
+            content = draft_path.read_text()
+            headers, _ = self._markdown_to_email(content)
+            in_reply_to = headers.get("In-Reply-To", "").strip()
             if not in_reply_to:
-                self._send_unlocked(message_id)
+                self._send_unlocked(message_id, content)
                 return
             with FileLock(lock_path(f"reply:{in_reply_to.strip('<>')}"), timeout=SEND_LOCK_TIMEOUT):
                 if not force and self._is_completed(in_reply_to):
@@ -1059,7 +1062,7 @@ class AgentEmail:
                         f"Original message {in_reply_to} is already replied to or marked "
                         "no-reply-needed; refusing duplicate reply (use force to override)"
                     )
-                self._send_unlocked(message_id)
+                self._send_unlocked(message_id, content)
 
     def _guard_email_outbound(self, text: str) -> None:
         """Apply existing secret policy without exposing scanner exception payloads."""
@@ -1070,8 +1073,8 @@ class AgentEmail:
         if not allowed:
             raise ValueError("Outbound redact gate blocked a secret")
 
-    def _send_unlocked(self, message_id: str) -> None:
-        """Deliver a draft and archive it; callers must hold the send lock."""
+    def _send_unlocked(self, message_id: str, content: str) -> None:
+        """Deliver the checked snapshot; callers must hold the send locks."""
         filename = self._format_filename(message_id)
         draft_path = self.email_dir / "drafts" / filename
         sent_path = self.email_dir / "sent" / filename
@@ -1079,8 +1082,6 @@ class AgentEmail:
         if not draft_path.exists():
             raise ValueError(f"Draft not found: {message_id}")
 
-        # Read content before moving
-        content = draft_path.read_text()
         self._guard_email_outbound(content)
 
         # Actually send via msmtp first
@@ -1286,8 +1287,14 @@ class AgentEmail:
             print(f"Error sending {message_id}: {e}")
             raise
 
-        # Move markdown file to sent folder (only after successful sending)
-        draft_path.rename(sent_path)
+        # Move markdown file to sent folder (only after successful sending).
+        # Keep the file open so a concurrent archive() move cannot cause us to
+        # recreate sent/. Store what was delivered, not a later draft edit.
+        with draft_path.open("r+") as sent_file:
+            draft_path.rename(sent_path)
+            sent_file.seek(0)
+            sent_file.write(content)
+            sent_file.truncate()
         self._record_local_send(sent_path)
 
         # Append send audit metadata so allowlist bypasses leave a forensic trace.

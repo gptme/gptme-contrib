@@ -182,3 +182,44 @@ def test_reply_lock_follows_the_draft_read_under_lock(
     assert key("reply:new@example.com") in locked
     assert key("reply:orig@example.com") not in locked
     assert len(deliveries) == 1
+
+
+@pytest.mark.parametrize("original", [None, "<orig@example.com>"])
+def test_send_uses_one_draft_snapshot(
+    agent: AgentEmail, deliveries: list, monkeypatch: pytest.MonkeyPatch, original: str | None
+) -> None:
+    """An unlocked edit after the lock-key read cannot change what is delivered."""
+    from email import message_from_bytes
+
+    msg = _draft(agent, "snapshot", original)
+    draft = agent.email_dir / "drafts" / "snapshot.md"
+    snapshot = draft.read_text()
+    agent._mark_no_reply_needed("<completed@example.com>")
+    real_read = Path.read_text
+    reads = 0
+
+    def edit_after_read(path: Path, *args: Any, **kwargs: Any) -> str:
+        nonlocal reads
+        content = real_read(path, *args, **kwargs)
+        if path == draft:
+            reads += 1
+            if reads == 1:
+                draft.write_text(
+                    "To: erik@example.com\nSubject: edited\n"
+                    "In-Reply-To: <completed@example.com>\n\nEdited body\n"
+                )
+        return content
+
+    monkeypatch.setattr(Path, "read_text", edit_after_read)
+    agent.send(msg)
+
+    assert len(deliveries) == 1
+    delivered = message_from_bytes(deliveries[0])
+    assert delivered.get("In-Reply-To") == original
+    assert delivered["Subject"] == "Re: hi"
+    assert reads == 1
+    archived = (agent.email_dir / "sent" / "snapshot.md").read_text()
+    assert archived.startswith(snapshot)
+    assert "Edited body" not in archived
+    if original:
+        assert agent._is_completed(original)
