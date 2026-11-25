@@ -288,7 +288,9 @@ def test_follower_does_not_guess_between_concurrent_sessions(repo):
     now[0] += 6
     events = f._with_git([], False)
     assert events[0].session == "" and events[0].harness == "git"
-    assert {e.session for e in events[1:]} == {"s1", "s2"}
+    # Attribution stays unknown, but exact commit identity still prevents two
+    # shell reports from turning one reflog commit into three landing events.
+    assert len(events) == 1
 
 
 def test_repo_discovery_retries_transient_git_failure(repo, monkeypatch):

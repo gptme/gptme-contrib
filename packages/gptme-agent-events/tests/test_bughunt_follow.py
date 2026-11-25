@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -99,6 +100,81 @@ def repo(tmp_path):
     git("init", "-q", "--bare", str(remote), cwd=tmp_path)
     git("remote", "add", "origin", str(remote), cwd=r)
     return r.resolve()
+
+
+def test_ambiguous_commit_prefix_does_not_hide_distinct_commit(repo):
+    """An ambiguous shell abbreviation is not proof of commit identity."""
+    tree = git("mktree", cwd=repo)
+    seen: dict[str, tuple[str, bytes]] = {}
+    for i in range(100_000):
+        body = (
+            f"tree {tree}\nauthor t <t@example.com> 100 +0000\n"
+            f"committer t <t@example.com> 100 +0000\n\ncollision {i}\n"
+        ).encode()
+        sha = hashlib.sha1(f"commit {len(body)}\0".encode() + body).hexdigest()
+        prefix = sha[:7]
+        if prefix in seen:
+            other_sha, other_body = seen[prefix]
+            for data in (other_body, body):
+                subprocess.run(
+                    ["git", "hash-object", "-w", "-t", "commit", "--stdin"],
+                    input=data,
+                    cwd=repo,
+                    env=ENV,
+                    check=True,
+                    capture_output=True,
+                )
+            break
+        seen[prefix] = (sha, body)
+    else:
+        pytest.fail("deterministic collision search exhausted")
+
+    now = [100.0]
+    watcher = GitWatcher()
+    watcher.watch(str(repo))
+    follower = Follower([], git=watcher, clock=lambda: now[0])
+
+    def event(value):
+        return AgentEvent(
+            kind="commit",
+            ts=iso(NOW),
+            harness="claude-code",
+            session="s",
+            detail={"dir": str(repo), "sha": value},
+        )
+
+    events = follower._with_git([event(prefix)], False)
+    now[0] += 6
+    events += follower._with_git([], False)
+    events += follower._with_git([event(sha), event(other_sha)], False)
+    now[0] += 6
+    events += follower._with_git([], False)
+    assert [e.detail["sha"] for e in events] == [prefix, sha, other_sha]
+
+
+def test_duplicate_shell_commits_in_same_batch_are_emitted_once(repo):
+    now = [100.0]
+    watcher = GitWatcher()
+    watcher.watch(str(repo))
+    follower = Follower([], git=watcher, clock=lambda: now[0])
+    sha = commit(repo, "one commit")
+    (repo / ".git" / "logs" / "HEAD").write_bytes(b"")
+    events = follower._with_git(
+        [
+            AgentEvent(
+                kind="commit",
+                ts=iso(NOW),
+                harness="claude-code",
+                session="s",
+                detail={"dir": str(repo), "sha": value},
+            )
+            for value in (sha[:7], sha)
+        ],
+        False,
+    )
+    now[0] += 6
+    events += follower._with_git([], False)
+    assert len(events) == 1
 
 
 # -- R1-1 ---------------------------------------------------------------------

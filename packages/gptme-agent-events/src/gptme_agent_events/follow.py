@@ -42,7 +42,7 @@ from pathlib import Path
 
 from .event import AgentEvent
 from .extractors import EXTRACTORS, Extractor
-from .gitwatch import GitWatcher
+from .gitwatch import GitWatcher, _git
 
 HARNESSES = tuple(EXTRACTORS)
 
@@ -422,8 +422,8 @@ class Follower:
                 # A commit hash is stronger evidence than proximity. Push output
                 # has no hash: only use a unique result in a short polling window.
                 if e.kind == "commit" and sha:
-                    git_sha = str(e.detail["sha"])
-                    if not (git_sha.startswith(sha) or sha.startswith(git_sha)):
+                    git_sha = self._commit_sha(common, e)
+                    if git_sha is None or git_sha != self._commit_sha(common, shell):
                         continue
                 else:
                     if e.session and shell.session != e.session:
@@ -452,29 +452,39 @@ class Follower:
                 pending.append((seen, common, e))
                 continue
             e.harness = self._session_harness.get(e.session, e.harness)
-            if e.kind == "commit" and e.detail.get("sha"):
-                self._git_emitted.append((now, common, str(e.detail["sha"])))
+            resolved = self._commit_sha(common, e)
+            if resolved is not None:
+                self._git_emitted.append((now, common, resolved))
             kept.append(e)
         self._git_pending = pending
         # If no reflog exists (e.g. core.logAllRefUpdates=false), retain the
         # shell evidence rather than silently losing the event altogether.
         waiting = []
         for seen, common, e in self._git_shell:
+            if self._emitted(common, e):
+                continue
             if now - seen >= 5:
-                if e.kind == "commit" and e.detail.get("sha"):
-                    self._git_emitted.append((now, common, str(e.detail["sha"])))
+                resolved = self._commit_sha(common, e)
+                if resolved is not None:
+                    self._git_emitted.append((now, common, resolved))
                 kept.append(e)
             else:
                 waiting.append((seen, common, e))
         self._git_shell = waiting
         return kept
 
+    def _commit_sha(self, common: Path, e: AgentEvent) -> str | None:
+        """Resolve only unambiguous commit hashes, never arbitrary revision syntax."""
+        sha = str(e.detail.get("sha") or "") if e.kind == "commit" else ""
+        if not 7 <= len(sha) <= 64 or any(c not in "0123456789abcdefABCDEF" for c in sha):
+            return None
+        return _git(["--git-dir", str(common), "rev-parse", "--verify", f"{sha}^{{commit}}"])
+
     def _emitted(self, common: Path, e: AgentEvent) -> bool:
         """Whether commit ``e`` was already reported for the repo at ``common``."""
-        sha = str(e.detail.get("sha") or "") if e.kind == "commit" else ""
-        return bool(sha) and any(
-            repo == common and (done.startswith(sha) or sha.startswith(done))
-            for _, repo, done in self._git_emitted
+        sha = self._commit_sha(common, e)
+        return sha is not None and any(
+            repo == common and done == sha for _, repo, done in self._git_emitted
         )
 
     def run(self, interval: float = 0.5) -> Iterator[AgentEvent]:
