@@ -51,6 +51,24 @@ def _truncation_marker(omitted: int, total: int) -> str:
 # the bounded output never exceeds the budget because of marker text.
 _MARKER_RESERVE = len(_truncation_marker(10**12, 10**12))
 
+# How each entry is rendered into the daily prompt. Shared with
+# ``summarize_daily_with_cc`` so the budget accounting cannot drift from the
+# actual join: the header and separator count against the budget too.
+_ENTRY_HEADER_TEMPLATE = "### Entry: {name}\n\n"
+_ENTRY_SEPARATOR = "\n\n---\n\n"
+
+
+def _entry_overhead(path: Path) -> int:
+    """Rendered characters an entry costs beyond its own content."""
+    return len(_ENTRY_HEADER_TEMPLATE.format(name=path.name)) + len(_ENTRY_SEPARATOR)
+
+
+# Upper bound on the aggregate marker emitted when entries have to be omitted.
+_AGGREGATE_MARKER_RESERVE = len(
+    f"\n\n[... {10**6:,} entries, {10**12:,} characters omitted "
+    f"from this summary prompt budget ...]"
+)
+
 
 def _bound_text(text: str, budget: int, label: str) -> str:
     """Truncate ``text`` to at most ``budget`` characters with a marker."""
@@ -70,7 +88,11 @@ def _bound_text(text: str, budget: int, label: str) -> str:
 
 
 def _bound_entries(entries: list[tuple[Path, str]], budget: int) -> list[tuple[Path, str]]:
-    """Bound combined entry text to at most ``budget`` characters.
+    """Bound the rendered combined entry text to at most ``budget`` characters.
+
+    The budget covers the rendered size — the ``### Entry:`` header and the
+    separator count too, not just the journal text — so the assembled prompt
+    stays under the ceiling however many entries the day produced.
 
     Short entries are kept whole; leftover budget is redistributed across the
     remaining (oversized) entries so no capacity is wasted. Every oversized
@@ -79,13 +101,15 @@ def _bound_entries(entries: list[tuple[Path, str]], budget: int) -> list[tuple[P
     is partial rather than silently missing.
 
     The per-entry share can shrink below the marker length when the entry count
-    is very large (``budget / _MARKER_RESERVE`` entries, ~5k at 600k). Markers
-    are then dropped in favour of keeping whole entries greedily, so the
-    combined output never exceeds ``budget`` — the earlier fallback appended a
-    full marker per entry and could produce a prompt twice the budget with no
-    journal content at all.
+    is very large (``budget / _MARKER_RESERVE`` entries, ~5k at 600k). No
+    per-entry representation fits then: whole entries are kept greedily and the
+    remainder is omitted from the returned list, accounted for by one aggregate
+    marker. Omitting them is deliberate — returning an empty body would read as
+    a journal entry that genuinely had nothing in it.
     """
-    total = sum(len(content) for _, content in entries)
+    overhead = [_entry_overhead(path) for path, _ in entries]
+    max_overhead = max(overhead, default=0)
+    total = sum(len(content) + oh for (_, content), oh in zip(entries, overhead))
     if total <= budget:
         return entries
 
@@ -94,36 +118,32 @@ def _bound_entries(entries: list[tuple[Path, str]], budget: int) -> list[tuple[P
     remaining_budget = budget
     while remaining:
         share = remaining_budget // len(remaining)
-        small = [i for i in remaining if len(entries[i][1]) <= share]
+        small = [i for i in remaining if len(entries[i][1]) + overhead[i] <= share]
         if small:
             for i in small:
-                content = entries[i][1]
-                bounded[i] = content
-                remaining_budget -= len(content)
+                bounded[i] = entries[i][1]
+                remaining_budget -= len(entries[i][1]) + overhead[i]
                 remaining.remove(i)
             continue
-        if share > _MARKER_RESERVE:
-            keep = share - _MARKER_RESERVE
+        if share - max_overhead > _MARKER_RESERVE:
+            keep = share - max_overhead - _MARKER_RESERVE
             for i in remaining:
                 content = entries[i][1]
                 bounded[i] = content[:keep] + _truncation_marker(len(content) - keep, len(content))
         else:
             # Degenerate: not even a truncation marker fits an equal share.
             # Keep whole entries greedily while they fit, then account for the
-            # dropped tail with one compact marker (bounded by what is left).
+            # omitted tail with one aggregate marker (bounded by what is left).
             dropped: list[int] = []
-            for i in list(remaining):
+            for i in remaining:
                 content = entries[i][1]
-                if len(content) + _MARKER_RESERVE <= remaining_budget:
+                if len(content) + overhead[i] + _AGGREGATE_MARKER_RESERVE <= remaining_budget:
                     bounded[i] = content
-                    remaining_budget -= len(content)
-                    remaining.remove(i)
+                    remaining_budget -= len(content) + overhead[i]
                 else:
                     dropped.append(i)
-            omitted_chars = sum(len(entries[i][1]) for i in dropped)
-            for i in dropped:
-                bounded[i] = ""
             if dropped and remaining_budget > 0:
+                omitted_chars = sum(len(entries[i][1]) for i in dropped)
                 marker = (
                     f"\n\n[... {len(dropped):,} entries, {omitted_chars:,} characters "
                     f"omitted from this summary prompt budget ...]"
@@ -131,13 +151,14 @@ def _bound_entries(entries: list[tuple[Path, str]], budget: int) -> list[tuple[P
                 bounded[dropped[0]] = marker[:remaining_budget]
         break
 
+    bounded_entries = [(entries[i][0], bounded[i]) for i in range(len(entries)) if i in bounded]
     logger.warning(
         "Daily entries total %d chars; bounded to %d (budget %d)",
         total,
-        sum(len(bounded[i]) for i in range(len(entries))),
+        sum(len(content) + _entry_overhead(path) for path, content in bounded_entries),
         budget,
     )
-    return [(entries[i][0], bounded[i]) for i in range(len(entries))]
+    return bounded_entries
 
 
 # Truly permanent subscription failures — quota resets require waiting until
@@ -767,8 +788,11 @@ def summarize_daily_with_cc(
     # Combine all entries for the day, bounded so a high-volume journal day
     # cannot overflow the model's context window.
     bounded_entries = _bound_entries(entries, DAILY_ENTRY_CHAR_BUDGET)
-    combined_content = "\n\n---\n\n".join(
-        [f"### Entry: {filepath.name}\n\n{content}" for filepath, content in bounded_entries]
+    combined_content = _ENTRY_SEPARATOR.join(
+        [
+            _ENTRY_HEADER_TEMPLATE.format(name=filepath.name) + content
+            for filepath, content in bounded_entries
+        ]
     )
 
     context_section = ""

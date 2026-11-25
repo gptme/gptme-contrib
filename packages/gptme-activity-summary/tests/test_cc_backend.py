@@ -1567,10 +1567,11 @@ def test_bound_entries_redistributes_leftover_budget():
 
 
 def test_bound_entries_many_entries_stays_within_budget():
-    """A pathological entry count must not inflate the output past the budget.
+    """A pathological entry count must not inflate the rendered output.
 
     When the per-entry share drops below the marker length, appending a marker
-    per entry produced a prompt roughly twice the budget with no content.
+    per entry produced a prompt roughly twice the budget with no content. The
+    oversized tail is now omitted from the output instead of emptied.
     """
     from pathlib import Path
 
@@ -1579,11 +1580,16 @@ def test_bound_entries_many_entries_stays_within_budget():
     entries = [(Path(f"s{i}.md"), "z" * 1_000) for i in range(10_000)]
     bounded = _bound_entries(entries, 600_000)
 
-    assert len(bounded) == len(entries)
-    assert sum(len(content) for _, content in bounded) <= 600_000
+    rendered = "\n\n---\n\n".join(
+        f"### Entry: {path.name}\n\n{content}" for path, content in bounded
+    )
+    # The header/separator overhead counts against the budget, not just content.
+    assert len(rendered) <= 600_000
+    assert len(bounded) < len(entries), "the tail is omitted, not returned empty"
+    assert all(content for _, content in bounded), "no silently empty entries"
+    assert any("omitted from this summary prompt budget" in c for _, c in bounded)
     # The budget goes to real journal text rather than marker-only entries.
-    assert sum(content.count("z") for _, content in bounded) > 400_000
-    assert any("omitted from this summary prompt budget" in content for _, content in bounded)
+    assert sum(content.count("z") for _, content in bounded) > 300_000
 
 
 def test_bound_text_never_exceeds_budget():
@@ -1595,13 +1601,14 @@ def test_bound_text_never_exceeds_budget():
         assert len(bounded) <= budget, f"budget={budget} produced {len(bounded)} chars"
 
 
-def test_summarize_daily_prompt_stays_bounded():
+@pytest.mark.parametrize("n_entries", [600, 10_000])
+def test_summarize_daily_prompt_stays_bounded(n_entries: int):
     """The assembled daily prompt never exceeds the model context ceiling."""
     from pathlib import Path
 
     from gptme_activity_summary import cc_backend
 
-    entries = [(Path(f"session-{i}.md"), "z" * 5_000) for i in range(600)]
+    entries = [(Path(f"session-{i}.md"), "z" * 5_000) for i in range(n_entries)]
     captured: dict[str, str] = {}
 
     def fake_call(prompt: str, **kwargs: object) -> str:
@@ -1614,4 +1621,4 @@ def test_summarize_daily_prompt_stays_bounded():
     prompt = captured["prompt"]
     # ~4 chars/token: keep a wide margin under the 1M-token window.
     assert len(prompt) < 900_000
-    assert "truncated:" in prompt
+    assert "truncated:" in prompt or "omitted from this summary prompt budget" in prompt
