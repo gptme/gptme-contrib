@@ -363,6 +363,35 @@ def test_needs_consensus_upgrade_on_clean_first_pass() -> None:
     assert needs_consensus_upgrade({"sha": "abc", "score": 5, "findings": []}, "abcdef")
 
 
+def test_needs_consensus_upgrade_false_when_single_pass_is_complete() -> None:
+    """The gate accepts a complete single pass, so there is nothing to upgrade."""
+    marker = {
+        "sha": "abc",
+        "score": 5,
+        "findings": [],
+        "consensus": {
+            "requested": 1,
+            "answered": 1,
+            "jobs_requested": 1,
+            "jobs_answered": 1,
+            "min_agreement": 1,
+            "min_agreement_requested": 1,
+        },
+    }
+    assert needs_consensus_upgrade(marker, "abcdef") is False
+
+
+def test_needs_consensus_upgrade_true_when_single_pass_lacks_job_counts() -> None:
+    """Unreadable counts are not evidence; the upgrade is how they get earned."""
+    marker = {
+        "sha": "abc",
+        "score": 5,
+        "findings": [],
+        "consensus": {"requested": 1, "answered": 1, "min_agreement": 1},
+    }
+    assert needs_consensus_upgrade(marker, "abcdef") is True
+
+
 def test_needs_consensus_upgrade_false_when_requested_two() -> None:
     marker = {
         "sha": "abc",
