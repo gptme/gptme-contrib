@@ -7,8 +7,9 @@ index is also the wrong tool for that query: it took ~60s here and ranked
 ``ABOUT.md`` above today's journals.
 
 This module exposes a synchronous-feeling realtime function that searches a
-*recency-scoped* journal corpus through gptme-rag (lexical TF-IDF first,
-dense Indexer fallback) and returns in well under the voice tool budget.
+*recency-scoped* journal corpus through gptme-rag lexical TF-IDF. Explicit
+path filters can also select operator-configured sources without loading the
+persistent embedding index.
 """
 
 from __future__ import annotations
@@ -98,13 +99,15 @@ def rag_tool_schema() -> dict[str, Any]:
         "type": "function",
         "name": TOOL_NAME,
         "description": (
-            "Fast local retrieval over recent journals and session notes via "
+            "Fast local retrieval over recent journals or explicitly configured sources via "
             "gptme-rag. Use this for recap questions such as 'what have you "
             "been doing in the last hour?', 'what did you work on today?', or "
             "any recent-activity lookup. Returns in a few seconds. Prefer this "
             "over the subagent for recap queries — the subagent timed out on "
             "exactly this question. Do not use it for hangup, handoff, or "
-            "broad investigations."
+            "broad investigations. For brief or implementation lookups use include_paths "
+            'and/or exclude_paths (e.g. exclude_paths=["journal/"]). '
+            "Check coverage: an empty result does not establish that a file is absent."
         ),
         "parameters": {
             "type": "object",
@@ -114,6 +117,25 @@ def rag_tool_schema() -> dict[str, Any]:
                     "description": (
                         "Natural-language lookup, e.g. 'what have you been "
                         "doing in the last hour'."
+                    ),
+                },
+                "include_paths": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Workspace-relative exact files or directory prefixes, e.g. "
+                        "['scripts/runs/voice/', 'knowledge/']. OR within this list. "
+                        "No globs, absolute paths or traversal. Narrows the configured "
+                        "corpus; cannot grant access to other files."
+                    ),
+                },
+                "exclude_paths": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Workspace-relative exact files or directory prefixes to omit, "
+                        "e.g. ['journal/']. Exclusion wins over inclusion. Supplying "
+                        "either nonempty filter enables configured non-journal sources."
                     ),
                 },
                 "n_results": {
@@ -135,6 +157,9 @@ def rag_instruction_preamble() -> str:
         "subagent for these — it times out on open-ended recap lookups.\n"
         "- Summarise the returned snippets conversationally. Mention the "
         "journal timestamps when they help.\n"
+        "- For brief/mechanism lookups use include_paths (exact files or directory "
+        "prefixes) and exclude_paths=['journal/']. Filters narrow the declared corpus. "
+        "Read coverage; no matches is not proof that a brief/file does not exist.\n"
         "- Use the subagent only if workspace_search returns empty or the "
         "caller asks for a specific file, PR, or task the snippets do not "
         "cover.\n\n"
@@ -166,8 +191,43 @@ def is_last_hour_query(query: str) -> bool:
     return bool(_LAST_HOUR_RE.search(query))
 
 
+def _path_filters(raw: object, *, globs: bool = False) -> tuple[str, ...]:
+    """Validate rooted relative selectors without ever treating them as read paths."""
+    if raw is None:
+        return ()
+    if not isinstance(raw, list) or len(raw) > 32:
+        raise ValueError("Path filters must be arrays of at most 32 relative paths")
+    paths = []
+    for value in raw:
+        if (
+            not isinstance(value, str)
+            or not value.strip()
+            or len(value) > 512
+            or value.startswith("/")
+            or "\\" in value
+            or any(part in {"", ".", ".."} for part in value.rstrip("/").split("/"))
+            or (not globs and any(c in value for c in "*?[]"))
+        ):
+            raise ValueError(
+                "Use workspace-relative exact files or directory prefixes; no traversal or globs"
+            )
+        paths.append(value.rstrip("/"))
+    return tuple(paths)
+
+
+def _selected(
+    source: str, includes: tuple[str, ...], excludes: tuple[str, ...]
+) -> bool:
+    def matches(prefix: str) -> bool:
+        return source == prefix or source.startswith(prefix + "/")
+
+    return (not includes or any(map(matches, includes))) and not any(
+        map(matches, excludes)
+    )
+
+
 class VoiceRag:
-    """Recency-scoped gptme-rag search used by the live voice tool surface."""
+    """Bounded gptme-rag lookup; filters only narrow operator-approved sources."""
 
     def __init__(
         self,
@@ -204,12 +264,34 @@ class VoiceRag:
             else recency_hours
         )
         self._search_impl = search_impl
+        try:
+            self.source_paths = _path_filters(
+                [
+                    p
+                    for p in os.environ.get("GPTME_VOICE_RAG_SOURCE_PATHS", "").split(
+                        os.pathsep
+                    )
+                    if p
+                ],
+                globs=True,
+            )
+        except ValueError:
+            logger.warning(
+                "Invalid GPTME_VOICE_RAG_SOURCE_PATHS; extra sources disabled"
+            )
+            self.source_paths = ()
 
     @classmethod
     def from_env(cls, workspace: str | None) -> VoiceRag:
         return cls(workspace)
 
-    def collect_recent_files(self, now: float | None = None) -> list[Path]:
+    def collect_recent_files(
+        self,
+        now: float | None = None,
+        *,
+        include_paths: tuple[str, ...] = (),
+        exclude_paths: tuple[str, ...] = (),
+    ) -> list[Path]:
         """Newest-first journal files inside the recency window."""
         if self.workspace is None:
             return []
@@ -241,6 +323,10 @@ class VoiceRag:
             if not day_dir.is_dir():
                 continue
             for path in day_dir.glob("*.md"):
+                if not self._safe_source(path):
+                    continue
+                if not _selected(self._relpath(path), include_paths, exclude_paths):
+                    continue
                 resolved = path.resolve()
                 if resolved in seen:
                     continue
@@ -261,6 +347,47 @@ class VoiceRag:
         found.sort(key=lambda item: item[0], reverse=True)
         return [path for _, path in found[:_MAX_FILES]]
 
+    def _safe_source(self, path: Path) -> bool:
+        """Reject symlinks (including parents), escapes and non-files before reading."""
+        if self.workspace is None:
+            return False
+        try:
+            root = self.workspace.resolve()
+            relative = path.absolute().relative_to(self.workspace.absolute())
+            candidate = root / relative
+            return candidate.resolve() == candidate and candidate.is_file()
+        except (OSError, ValueError, RuntimeError):
+            return False
+
+    def _collect_filtered_files(
+        self, includes: tuple[str, ...], excludes: tuple[str, ...]
+    ) -> list[Path]:
+        recent = self.collect_recent_files(
+            include_paths=includes, exclude_paths=excludes
+        )
+        if self.workspace is None:
+            return recent
+        paths: list[Path] = []
+        seen: set[Path] = set()
+        for pattern in self.source_paths:
+            for path in self.workspace.glob(pattern):
+                if (
+                    path in seen
+                    or not self._safe_source(path)
+                    or not _selected(self._relpath(path), includes, excludes)
+                ):
+                    continue
+                try:
+                    if path.stat().st_size > _MAX_FILE_BYTES:
+                        continue
+                except OSError:
+                    continue
+                seen.add(path)
+                paths.append(path)
+                if len(paths) >= _MAX_FILES:
+                    return paths[:_MAX_FILES]
+        return (paths + [p for p in recent if p not in seen])[:_MAX_FILES]
+
     def _load_documents(self, paths: list[Path]) -> list[Any]:
         try:
             from gptme_rag.indexing.document import Document
@@ -272,8 +399,14 @@ class VoiceRag:
 
         docs = []
         for path in paths:
+            if not self._safe_source(path):
+                continue
             try:
-                content = path.read_text(encoding="utf-8", errors="replace")
+                with path.open("rb") as stream:
+                    raw = stream.read(_MAX_FILE_BYTES + 1)
+                if len(raw) > _MAX_FILE_BYTES:
+                    continue
+                content = raw.decode("utf-8", errors="replace")
             except OSError as exc:
                 logger.debug("skip unreadable %s: %s", path, exc)
                 continue
@@ -308,36 +441,73 @@ class VoiceRag:
         except ValueError:
             return str(path)
 
-    def _search_lexical(self, query: str, docs: list[Any], n_results: int) -> list[Any]:
+    def _search_lexical(
+        self,
+        query: str,
+        docs: list[Any],
+        n_results: int,
+        *,
+        require_match: bool = False,
+    ) -> list[Any]:
         from gptme_rag.lexical import TfidfIndex
 
         index = TfidfIndex(
-            stop_words="english", ngram_range=(1, 2), relevance_floor=0.0
+            stop_words="english",
+            ngram_range=(1, 2),
+            relevance_floor=1e-12 if require_match else 0.0,
         )
         index.index(docs)
         return [hit.document for hit in index.search(query, n_results=n_results)]
 
-    def _search_sync(self, query: str, n_results: int) -> dict[str, Any]:
+    def _search_sync(
+        self,
+        query: str,
+        n_results: int,
+        includes: tuple[str, ...] = (),
+        excludes: tuple[str, ...] = (),
+    ) -> dict[str, Any]:
+        filtered = bool(includes or excludes)
+        coverage: dict[str, Any] = {
+            "mode": "filtered" if filtered else "recent_journals",
+            "journal_recency_hours": self.recency_hours,
+            "source_paths": list(self.source_paths) if filtered else [],
+            "include_paths": list(includes),
+            "exclude_paths": list(excludes),
+            "file_limit": _MAX_FILES,
+            "max_file_bytes": _MAX_FILE_BYTES,
+        }
         n_results = max(1, min(int(n_results), 8))
         if self._search_impl is not None:
             results = self._search_impl(query, n_results)
+            results = [
+                r
+                for r in results
+                if _selected(str(r.get("source", "")), includes, excludes)
+            ]
             return {
                 "status": "ok" if results else "empty",
                 "query": query,
                 "backend": "injected",
+                "coverage": coverage,
                 "results": results[:n_results],
             }
 
-        paths = self.collect_recent_files()
+        paths = (
+            self._collect_filtered_files(includes, excludes)
+            if filtered
+            else self.collect_recent_files()
+        )
+        coverage["selected_files"] = len(paths)
         if not paths:
             return {
                 "status": "empty",
                 "query": query,
                 "backend": "none",
+                "coverage": coverage,
                 "results": [],
                 "message": (
-                    "No recent journal files found. Try a more specific query "
-                    "or the subagent."
+                    "No files matched the bounded corpus and path filters. This is not proof "
+                    "that a file or brief does not exist. Check coverage or use the subagent."
                 ),
             }
 
@@ -347,8 +517,9 @@ class VoiceRag:
                 "status": "empty",
                 "query": query,
                 "backend": "none",
+                "coverage": coverage,
                 "results": [],
-                "message": "Recent journals could not be read.",
+                "message": "Selected sources could not be read; this is not proof of absence.",
             }
 
         terms = topic_terms(query)
@@ -356,14 +527,27 @@ class VoiceRag:
         ranked = list(docs)
         if terms:
             try:
-                lexical = self._search_lexical(terms, docs, n_results=len(docs))
-                if lexical:
+                if filtered:
+                    lexical = self._search_lexical(
+                        terms, docs, n_results=len(docs), require_match=True
+                    )
+                else:
+                    lexical = self._search_lexical(terms, docs, n_results=len(docs))
+                if filtered or lexical:
                     ranked = lexical
                     backend = "lexical"
                 # else: lexical returned no matches — keep the recency order and
                 # the "recency" backend label rather than mislabeling the fallback.
             except Exception as exc:  # noqa: BLE001 - lexical is optional
                 logger.info("lexical search unavailable (%s); using recency order", exc)
+                if filtered:
+                    return {
+                        "status": "error",
+                        "query": query,
+                        "results": [],
+                        "coverage": coverage,
+                        "error": "Filtered lexical search unavailable; cannot establish topic matches.",
+                    }
                 backend = "recency"
 
         # Explicit last-hour queries keep last-hour files at the front even after
@@ -371,7 +555,7 @@ class VoiceRag:
         # get the right result from recency order alone — sorting everything
         # written in the last hour to the front would push morning work out of the
         # top-N for a user asking about their whole day.
-        if is_last_hour_query(query):
+        if not filtered and is_last_hour_query(query):
             hour_cutoff = time.time() - 3600
 
             def _recency_bucket(doc: Any) -> int:
@@ -385,31 +569,52 @@ class VoiceRag:
 
             ranked.sort(key=_recency_bucket)
 
-        results = [_format_result(doc) for doc in ranked[:n_results]]
+        results = [
+            _format_result(doc, terms if filtered else "") for doc in ranked[:n_results]
+        ]
         payload: dict[str, Any] = {
             "status": "ok" if results else "empty",
             "query": query,
             "backend": backend,
+            "coverage": coverage,
             "results": results,
         }
         if not results:
             payload["message"] = (
-                "No matches in recent journals. Try a more specific query or the subagent."
+                "No topic matches in the selected bounded corpus. This is not proof "
+                "that a file or brief does not exist. Check coverage or use the subagent."
             )
         return payload
 
-    async def search(self, query: str, n_results: int = _MAX_RESULTS) -> dict[str, Any]:
+    async def search(
+        self,
+        query: str,
+        n_results: int = _MAX_RESULTS,
+        *,
+        include_paths: list[str] | None = None,
+        exclude_paths: list[str] | None = None,
+    ) -> dict[str, Any]:
         if not self.enabled:
             return {"error": "workspace_search is not enabled on this server."}
         if not query.strip():
             return {"error": "No query provided"}
 
+        try:
+            includes = _path_filters(include_paths)
+            excludes = _path_filters(exclude_paths)
+        except ValueError as exc:
+            return {"error": str(exc)}
         started = time.perf_counter()
         try:
             loop = asyncio.get_running_loop()
             payload = await asyncio.wait_for(
                 loop.run_in_executor(
-                    _SEARCH_EXECUTOR, self._search_sync, query.strip(), n_results
+                    _SEARCH_EXECUTOR,
+                    self._search_sync,
+                    query.strip(),
+                    n_results,
+                    includes,
+                    excludes,
                 ),
                 timeout=self.timeout_seconds,
             )
@@ -436,15 +641,25 @@ class VoiceRag:
         return payload
 
 
-def _format_result(doc: Any) -> dict[str, Any]:
+def _format_result(doc: Any, terms: str = "") -> dict[str, Any]:
     source = ""
     if getattr(doc, "metadata", None):
         source = str(doc.metadata.get("source") or "")
     if not source and getattr(doc, "source_path", None) is not None:
         source = str(doc.source_path)
     content = (getattr(doc, "content", None) or "").strip()
-    snippet = content[:_MAX_SNIPPET]
-    if len(content) > _MAX_SNIPPET:
+    start = 0
+    if terms:
+        # Whole-file lexical ranking needs a matching passage, not just a header.
+        for term in sorted(set(re.findall(r"\w+", terms)), key=len, reverse=True):
+            offset = content.lower().find(term.lower())
+            if offset >= 0:
+                start = max(0, offset - 80)
+                break
+    snippet = content[start : start + _MAX_SNIPPET]
+    if start:
+        snippet = "…" + snippet
+    if len(content) > start + _MAX_SNIPPET:
         snippet = snippet.rstrip() + "…"
     mtime = None
     last_modified = getattr(doc, "last_modified", None)

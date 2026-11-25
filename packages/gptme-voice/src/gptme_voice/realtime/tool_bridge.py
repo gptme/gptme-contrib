@@ -1206,7 +1206,12 @@ class GptmeToolBridge:
                 n_results_int = int(n_results)
             except (TypeError, ValueError):
                 n_results_int = 5
-            return await self.rag.search(query.strip(), n_results=n_results_int)
+            return await self.rag.search(
+                query.strip(),
+                n_results=n_results_int,
+                include_paths=arguments.get("include_paths"),
+                exclude_paths=arguments.get("exclude_paths"),
+            )
 
         if name.startswith("body_"):
             return await self._handle_body_call(name, arguments)
