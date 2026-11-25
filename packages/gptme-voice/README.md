@@ -298,16 +298,18 @@ Voice transports share short, quiet cues (PCM for local/browser clients and
 | Single low tone, 200 ms | A subagent hit its timeout. Other failures are reported through the tool result/spoken response. |
 | Falling pair, 160 ms | An explicit cancellation request successfully cancelled at least one pending subagent. Cancel-all produces one tone. |
 
-Direct activity includes workspace search, camera look, handoff and body
-actuators. Status polling (`subagent_status`, `body_status`), unknown functions
-and hangup are silent. Success arrives through the ordinary result/spoken
-response; it has no separate tone, avoiding two sounds for a fast lookup.
-Validation failures can follow an activity tone because it acknowledges an
-attempt. No polling loop or per-progress-line tones are added.
+Direct activity includes workspace search, camera look, handoff, planned-call
+fulfillment and body actuators. Status polling (`subagent_status`,
+`body_status`), unknown functions and hangup are silent. Success arrives through
+the ordinary result/spoken response; it has no separate tone, avoiding two
+sounds for a fast lookup. Validation failures and "not available on this
+session" results (for example a body actuator with no adapter) can follow an
+activity tone because it acknowledges an attempt. No polling loop or
+per-progress-line tones are added.
 
 Cancellation sound follows confirmed cancellation, not merely a request: already
-finished/missing tasks, concurrent repeat requests, suppressed cancellation and
-connection cleanup stay silent. Cues are best-effort, bounded and do not block
+finished/missing tasks, concurrent repeat requests (reported as `cancelling`),
+suppressed cancellation and connection cleanup stay silent. Cues are best-effort, bounded and do not block
 tool execution, clear speech buffers, close sockets or start replacement lookups.
 They are queued through the existing audio transport; local tests establish
 payload/order and level limits, while handset audibility needs a natural call.

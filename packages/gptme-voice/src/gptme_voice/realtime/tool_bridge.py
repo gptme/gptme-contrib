@@ -698,9 +698,16 @@ class GptmeToolBridge:
                     }
                 )
             if self.on_result:
-                await self.on_result(
-                    f"Subagent task {task_id} was cancelled before it finished."
-                )
+                try:
+                    await self.on_result(
+                        f"Subagent task {task_id} was cancelled before it finished."
+                    )
+                except Exception:
+                    # A closing provider socket must not replace the
+                    # CancelledError: the cancellation did take effect.
+                    logger.exception(
+                        "Failed to report cancellation of task %s", task_id
+                    )
             self._pending_tasks.pop(task_id, None)
             raise
 
@@ -1052,11 +1059,11 @@ class GptmeToolBridge:
     async def _cancel_task(self, task_id: str, entry: PendingTask) -> dict:
         # Claim cancellation before yielding: concurrent requests must not
         # interrupt cleanup twice or announce the same cancellation twice.
-        if (
-            entry.cancel_requested
-            or entry.task.done()
-            or entry.completed_at is not None
-        ):
+        # Check the claim first: the cancelled task records completed_at while
+        # its first request is still waiting for cleanup.
+        if entry.cancel_requested and not entry.task.done():
+            return {"task_id": task_id, "cancelled": False, "cancelling": True}
+        if entry.task.done() or entry.completed_at is not None:
             return {"task_id": task_id, "cancelled": False}
         entry.cancel_requested = True
         entry.task.cancel()
@@ -1082,6 +1089,7 @@ class GptmeToolBridge:
                 "workspace_search",
                 "look",
                 "handoff_to_agent",
+                "fulfill_planned_call",
                 "body_takeoff",
                 "body_land",
                 "body_move",
@@ -1160,12 +1168,15 @@ class GptmeToolBridge:
                         ),
                     }
                 result = await self._cancel_task(task_id_arg, entry)
-                if result["cancelled"] and self.on_cancel:
-                    self._dispatch_cue(self.on_cancel, cue_name="cancel")
-                return {
-                    "status": "cancelled" if result["cancelled"] else "not_pending",
-                    **result,
-                }
+                if result["cancelled"]:
+                    status = "cancelled"
+                    if self.on_cancel:
+                        self._dispatch_cue(self.on_cancel, cue_name="cancel")
+                elif result.get("cancelling"):
+                    status = "cancelling"
+                else:
+                    status = "not_pending"
+                return {"status": status, **result}
 
             # No task_id — cancel all pending
             targets = [
@@ -1178,18 +1189,25 @@ class GptmeToolBridge:
                     "status": "no_pending",
                     "message": "No subagent tasks are currently running.",
                 }
-            cancelled = []
-            for tid, entry in targets:
-                result = await self._cancel_task(tid, entry)
-                if result["cancelled"]:
-                    cancelled.append(result)
+            results = [await self._cancel_task(tid, entry) for tid, entry in targets]
+            cancelled = [result for result in results if result["cancelled"]]
+            cancelling = [r["task_id"] for r in results if r.get("cancelling")]
             if cancelled and self.on_cancel:
                 self._dispatch_cue(self.on_cancel, cue_name="cancel")
-            return {
-                "status": "cancelled_all" if cancelled else "no_pending",
+            response: dict = {
+                "status": "cancelled_all",
                 "cancelled_count": len(cancelled),
                 "cancelled": cancelled,
             }
+            if cancelling:
+                response["cancelling"] = cancelling
+            if not cancelled:
+                if cancelling:
+                    response["status"] = "cancelling"
+                else:
+                    response["status"] = "no_pending"
+                    response["message"] = "No running subagent task was cancelled."
+            return response
 
         if name == "hangup":
             reason = arguments.get("reason") or None
