@@ -6235,7 +6235,11 @@ def add(
     except yaml.YAMLError:
         plain_ok = False
     if not plain_ok:
-        assigned_yaml = json.dumps(assigned_yaml)
+        # Not json.dumps: it writes non-BMP characters as surrogate pairs,
+        # which YAML loads back as two lone surrogates.
+        assigned_yaml = yaml.safe_dump(
+            assigned_yaml, default_style='"', allow_unicode=True, width=sys.maxsize
+        ).rstrip("\n")
     lines.append(f"assigned_to: {assigned_yaml}")
     if "tags" in frontmatter_data:
         lines.append(f"tags: {json.dumps(frontmatter_data['tags'])}")

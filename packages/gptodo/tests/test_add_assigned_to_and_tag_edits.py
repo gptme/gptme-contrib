@@ -9,6 +9,7 @@ import frontmatter
 import pytest
 from click.testing import CliRunner
 
+from gptodo import frontmatter_compat
 from gptodo.cli import cli
 from gptodo.lifecycle import transform_post
 
@@ -22,7 +23,10 @@ def workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return tmp_path
 
 
-@pytest.mark.parametrize("value", ["x: y", "#ops", "yes", "[team]", "bob@cluster1"])
+@pytest.mark.parametrize(
+    "value",
+    ["x: y", "#ops", "yes", "[team]", "bob@cluster1", "#\U0001f680ops", "a\u2028b", "a\n---\nb"],
+)
 def test_add_round_trips_assigned_to(workspace: Path, value: str) -> None:
     result = CliRunner().invoke(cli, ["add", "Assigned task", "--assigned-to", value], input="")
     assert result.exit_code == 0, result.output
@@ -53,3 +57,7 @@ def test_first_waiting_since_uses_iso_format_from_yaml_datetime() -> None:
         [("set", "state", "waiting"), ("set", "waiting_for", "x")],
     )
     assert post.metadata["first_waiting_since"] == since.isoformat()
+    # Both fields reach disk with the same "T" separator.
+    written = frontmatter_compat.frontmatter.dumps(post)
+    assert f"waiting_since: {since.isoformat()}\n" in written
+    assert f"first_waiting_since: '{since.isoformat()}'\n" in written
