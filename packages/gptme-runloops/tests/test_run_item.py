@@ -4145,6 +4145,41 @@ class TestInspectGptmeFailure:
             == "gptme_auth"
         )
 
+    def test_unicode_line_separator_does_not_hide_terminal_error(
+        self, tmp_path
+    ) -> None:
+        traj = tmp_path / "unicode-terminal-error.jsonl"
+        traj.write_text(
+            json.dumps({"role": "assistant", "content": "a\u2028b"}, ensure_ascii=False)
+            + "\n"
+            + json.dumps({"role": "error", "content": "error: auth_error"})
+            + "\n"
+        )
+        assert (
+            _inspect_gptme_failure(
+                _make_plan_stub("unicode-error"), trajectory=str(traj), tmp_dir=tmp_path
+            )
+            == "gptme_auth"
+        )
+
+    def test_json_terminal_error_body_is_not_filtered_twice(self, tmp_path) -> None:
+        traj = tmp_path / "json-terminal-error.jsonl"
+        traj.write_text(
+            json.dumps(
+                {
+                    "role": "error",
+                    "content": json.dumps({"message": "status 402 Payment Required"}),
+                }
+            )
+            + "\n"
+        )
+        assert (
+            _inspect_gptme_failure(
+                _make_plan_stub("json-error"), trajectory=str(traj), tmp_dir=tmp_path
+            )
+            == "gptme_quota"
+        )
+
     def test_returns_model_unavailable_on_exit77_trajectory(self, tmp_path) -> None:
         session_id = "gptme-session-333"
         traj = tmp_path / "gptme-session.jsonl"

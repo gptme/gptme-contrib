@@ -2241,7 +2241,7 @@ def _parse_jsonl_records(text: str) -> list[dict] | None:
     leading fragment is tolerated (and dropped). Any later unparseable line
     means the text is a free-form log, not a trajectory.
     """
-    lines = [line for line in text.splitlines() if line.strip()]
+    lines = [line for line in text.split("\n") if line.strip()]
     if not lines:
         return None
     records: list[dict] = []
@@ -2316,6 +2316,11 @@ def _classify_backend_error_text(text: str, backend: str) -> str | None:
             text = _terminal_error_evidence(records)
             if not text:
                 return None
+    return _classify_backend_error_markers(text, backend)
+
+
+def _classify_backend_error_markers(text: str, backend: str) -> str | None:
+    """Scan already-selected evidence without interpreting it as a trajectory."""
     lower = text.lower()
     backend_slug = backend.replace("-", "_")
     # Quota/payment takes priority (more specific than auth).
@@ -2410,7 +2415,7 @@ def _inspect_gptme_failure(
     # fall back to the free-form provider-error scan.
     records = _parse_jsonl_records(tail)
     evidence = _terminal_error_evidence(records or [])
-    result = _classify_backend_error_text(evidence, "gptme") if evidence else None
+    result = _classify_backend_error_markers(evidence, "gptme") if evidence else None
     if result:
         _log(f"ERROR: gptme infra failure detected: {result}")
     return result
