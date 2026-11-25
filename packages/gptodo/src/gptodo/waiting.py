@@ -25,7 +25,7 @@ Or as a list of conditions:
 import json
 import subprocess
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from enum import Enum
 from pathlib import Path
 
@@ -277,11 +277,13 @@ def check_comment(ref: str, pattern: str) -> tuple[bool, str | None]:
         return False, f"Error checking comments: {e}"
 
 
-def check_time(ref: str) -> tuple[bool, str | None]:
+def check_time(ref: str | date) -> tuple[bool, str | None]:
     """Check if the specified time has passed.
 
     Args:
-        ref: ISO 8601 timestamp (timezone-aware or naive)
+        ref: ISO 8601 timestamp (timezone-aware or naive). YAML loads an
+            unquoted timestamp as a ``datetime`` and a bare date as a ``date``;
+            both are accepted (a date means midnight, local time).
 
     Returns:
         (resolved, error) - resolved=True if time has passed
@@ -291,7 +293,12 @@ def check_time(ref: str) -> tuple[bool, str | None]:
         - Timezone-naive timestamps are compared against local time
     """
     try:
-        target_time = datetime.fromisoformat(ref.replace("Z", "+00:00"))
+        if isinstance(ref, datetime):
+            target_time = ref
+        elif isinstance(ref, date):
+            target_time = datetime.combine(ref, datetime.min.time())
+        else:
+            target_time = datetime.fromisoformat(ref.replace("Z", "+00:00"))
 
         # Handle both timezone-aware and naive datetimes
         if target_time.tzinfo is not None:
