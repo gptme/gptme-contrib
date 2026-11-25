@@ -380,6 +380,88 @@ def test_missing_parser_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
     assert check(BASE) == ["YAML parser unavailable"]
 
 
+@pytest.mark.parametrize(
+    ("key", "old", "new"),
+    [
+        # A downstream `if: needs.test.outputs.allow == 'true'` trusts this.
+        ("outputs", "${{ steps.check.outputs.allow }}", "'true'"),
+        ("name", "test", "required-check"),  # status check name
+        ("some-future-key", "a", "b"),  # unknown keys fail closed
+    ],
+)
+def test_only_repair_job_keys_may_change(key: str, old: str, new: str) -> None:
+    base = BASE.replace(
+        "    timeout-minutes: 10\n",
+        f'    timeout-minutes: 10\n    {key}: "{old}"\n',
+    )
+    head = base.replace(f'{key}: "{old}"', f'{key}: "{new}"')
+    assert head != base
+    assert check(head, base=base) == [f"job `test`: `{key}` changed"]
+
+
+def test_job_key_added_with_a_null_value_is_a_change() -> None:
+    head = BASE.replace("    steps:\n", "    permissions:\n    steps:\n")
+    assert "job `test`: `permissions` changed" in check(head)
+
+
+@pytest.mark.parametrize("key", ["name", "run-name", "some-future-key"])
+def test_unknown_top_level_changes_are_caught(key: str) -> None:
+    head = f"{key}: other\n" + BASE.replace("name: Test\n", "")
+    assert f"top-level `{key}` changed" in check(head)
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        "x: &loop [*loop]\n",
+        "x: &loop\n  self: *loop\n",
+        "x: &loop !!pairs [k: *loop]\n",
+        "x: &loop\n  <<: *loop\n",
+        # Alias expansion: nine lines that traverse as 9**8 nodes.
+        "a0: &a0 [y, y, y, y, y, y, y, y, y]\n"
+        + "".join(
+            f"a{i}: &a{i} [{', '.join([f'*a{i - 1}'] * 9)}]\n" for i in range(1, 9)
+        ),
+        "x: " + "[" * 200 + "]" * 200 + "\n",
+        "x: " + "[" * 5000 + "]" * 5000 + "\n",
+        "x: !!float ''\n",
+        "x: !!bool nope\n",
+        "x: !!timestamp nope\n",
+    ],
+    ids=[
+        "list-cycle",
+        "map-cycle",
+        "pairs-cycle",
+        "merge-cycle",
+        "alias-expansion",
+        "deep",
+        "parser-recursion",
+        "bad-float",
+        "bad-bool",
+        "bad-timestamp",
+    ],
+)
+def test_hostile_documents_are_violations_not_crashes(extra: str) -> None:
+    assert check(BASE + extra) != []
+    assert check(BASE, base=BASE + extra) != []
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "${{ format('}}{0}', toJSON(secrets)) }}",
+        "${{ format('it''s }} {0}', secrets['ADMIN_PAT']) }}",
+        "${{ toJSON(SECRETS) }}",
+        "${{ Secrets.ADMIN_PAT }}",
+    ],
+)
+def test_disguised_secret_references_are_caught(expression: str) -> None:
+    head = PLAIN.replace("run: make lint", f'run: |\n          echo "{expression}"')
+    violations = check(head, base=PLAIN)
+    assert "secrets/vars references changed" in violations
+    assert SECRET_STEP in violations
+
+
 class _Classifier:
     def is_sensitive_path(self, path: str) -> bool:
         return False

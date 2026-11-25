@@ -6,11 +6,12 @@ So this compares the *parsed* base and head documents of one modified workflow
 and lists every invariant the edit breaks. An empty list means the edit only
 touches what a repair may touch (step bodies, timeouts, action ``@ref`` pins).
 
-What must stay equal: triggers, top-level ``permissions``/``env``/``defaults``/
-``concurrency``, the job set, each job's trust-bearing keys (including
-``strategy``, whose matrix can retarget ``runs-on``/``environment`` through
-``${{ matrix.* }}``, and job ``env``/``defaults``/``concurrency``/``with``), every
+What must stay equal: every top-level key other than ``jobs``, the job set,
+every job key other than ``steps`` and ``timeout-minutes``, every
 ``secrets.*``/``vars.*`` reference, and the ``owner/repo`` of each ``uses:``.
+Keys are compared by default because the ones that move trust are not obvious:
+``strategy.matrix`` can retarget ``runs-on``, ``outputs`` can force a downstream
+``if:`` gate open and ``name`` renames a status check.
 Release, publish, deploy, signing and pages workflows or jobs are always out.
 
 Secret-bearing workflows are frozen too, because an unchanged reference set
@@ -28,9 +29,10 @@ when every job explicitly disables token permissions (``permissions: {}``, at
 job or workflow level) and no job inherits or references secrets/vars. Missing,
 read-only, write-capable and unknown permissions all freeze step bodies.
 
-Everything fails closed: a missing YAML parser, unparseable YAML or a
-non-mapping document is a violation, never a pass. PyYAML is imported lazily so
-``gptme_contrib_lib`` keeps no hard dependency on it.
+Everything fails closed: a missing YAML parser, unparseable YAML, a non-mapping
+document or one that is not a small tree (alias cycles or expansion, deep
+nesting, merge keys) is a violation, never a pass or a crash. PyYAML is imported
+lazily so ``gptme_contrib_lib`` keeps no hard dependency on it.
 """
 
 from __future__ import annotations
@@ -38,34 +40,28 @@ from __future__ import annotations
 import re
 from typing import Any
 
-_TOP_LEVEL_KEYS = ("on", "permissions", "env", "defaults", "concurrency")
-_JOB_KEYS = (
-    "permissions",
-    "runs-on",
-    "environment",
-    "secrets",
-    "container",
-    "services",
-    "if",
-    "needs",
-    "uses",
-    "with",
-    "strategy",
-    "env",
-    "defaults",
-    "concurrency",
-    "continue-on-error",
-)
+# The only job keys a repair may change; `steps` has its own checks below. Every
+# other key, including ones this module has never heard of, must stay equal.
+_JOB_REPAIR_KEYS = ("steps", "timeout-minutes")
 # A repair may still change these inside a frozen (secret-visible) step.
 _STEP_REPAIR_KEYS = ("timeout-minutes",)
 _FORBIDDEN_EVENTS = ("pull_request_target", "workflow_run")
+# Real workflows are small shallow trees. These bounds trip on alias cycles,
+# alias expansion and pathological nesting, which would hang or crash the
+# recursive walks and comparisons below.
+_MAX_DEPTH = 64
+_MAX_NODES = 100_000
+_MISSING = object()  # an absent key differs from an explicit null
 _PRIVILEGED_NAME_RE = re.compile(r"(?i)(release|publish|deploy|sign|pages)")
 # `secrets.X`, `secrets['X']` / `secrets["X"]`, a computed `secrets[expr]`, or the
 # whole context (`toJSON(secrets)`). Literal indexes normalize to the dotted form.
+# The runner resolves context names case-insensitively, so match them that way.
 _CONTEXT_REF_RE = re.compile(
-    r"\b(secrets|vars)\b(?:\s*\.\s*([A-Za-z_][A-Za-z0-9_-]*)|\s*\[\s*([^\]]*?)\s*\])?"
+    r"\b(secrets|vars)\b(?:\s*\.\s*([A-Za-z_][A-Za-z0-9_-]*)|\s*\[\s*([^\]]*?)\s*\])?",
+    re.IGNORECASE,
 )
-_EXPRESSION_RE = re.compile(r"\$\{\{(.*?)\}\}", re.DOTALL)
+# A `}}` inside a quoted string does not close the expression.
+_EXPRESSION_RE = re.compile(r"\$\{\{((?:'[^']*'|[^'}]|\}(?!\}))*)\}\}")
 _QUOTED_NAME_RE = re.compile(r"""^(['"])([A-Za-z_][A-Za-z0-9_-]*)\1$""")
 
 
@@ -78,7 +74,10 @@ def _load(text: str, side: str) -> tuple[dict[str, Any] | None, str | None]:
     # Actions uses YAML 1.2 boolean spelling: `on`, `off`, `yes`, `no` are
     # strings, including in trigger filters. Do not mutate SafeLoader globally.
     class WorkflowLoader(yaml.SafeLoader):
-        pass
+        def flatten_mapping(self, node: Any) -> None:
+            # Actions has no merge keys, and merging expands aliases during
+            # construction. Unflattened, a `<<` key fails the load.
+            pass
 
     WorkflowLoader.yaml_implicit_resolvers = {
         key: [
@@ -95,12 +94,36 @@ def _load(text: str, side: str) -> tuple[dict[str, Any] | None, str | None]:
     )
     try:
         doc = yaml.load(text, Loader=WorkflowLoader)
-    except yaml.YAMLError as exc:
+    except Exception as exc:
+        # Besides YAMLError, SafeLoader raises bare ValueError, KeyError,
+        # IndexError, AttributeError and RecursionError on hostile input.
         return None, f"{side} workflow is not valid YAML ({type(exc).__name__})"
     if not isinstance(doc, dict):
         return None, f"{side} workflow is not a mapping"
+    if not _is_small_tree(doc):
+        return None, f"{side} workflow is recursive, too large or too deeply nested"
 
     return doc, None
+
+
+def _is_small_tree(doc: Any) -> bool:
+    """Whether *doc*, with every alias expanded, stays within the bounds."""
+    pending, seen = [(doc, 0)], 1
+    while pending:
+        node, depth = pending.pop()
+        if isinstance(node, dict):
+            children = [*node.keys(), *node.values()]
+        elif isinstance(node, list):
+            children = node
+        elif isinstance(node, set | tuple):
+            return False  # `!!set`/`!!pairs`: not workflow syntax, not walked below
+        else:
+            continue
+        seen += len(children)
+        if depth >= _MAX_DEPTH or seen > _MAX_NODES:
+            return False
+        pending += [(child, depth + 1) for child in children]
+    return True
 
 
 def _strings(node: Any) -> list[str]:
@@ -121,6 +144,7 @@ def _context_refs(doc: dict[str, Any]) -> set[str]:
         expressions = _EXPRESSION_RE.findall(text)
         for chunk, in_expression in [(text, False)] + [(e, True) for e in expressions]:
             for context, dotted, index in _CONTEXT_REF_RE.findall(chunk):
+                context = context.lower()
                 if dotted:
                     refs.add(f"{context}.{dotted}")
                 elif not in_expression:
@@ -155,6 +179,17 @@ def _action_repo(uses: Any) -> str | None:
     if uses.startswith(("./", "docker://")):
         return uses  # local action or image: the whole value must stay equal
     return uses.split("@", 1)[0]
+
+
+def _changed_keys(
+    old: dict[Any, Any], new: dict[Any, Any], allowed: tuple[str, ...]
+) -> list[Any]:
+    """Keys outside *allowed* that were added, removed or given a new value."""
+    return [
+        key
+        for key in sorted((old.keys() | new.keys()) - set(allowed), key=str)
+        if old.get(key, _MISSING) != new.get(key, _MISSING)
+    ]
 
 
 def _step_actions(job: Any) -> list[str | None]:
@@ -243,9 +278,8 @@ def ci_repair_violations(path: str, base_text: str, head_text: str) -> list[str]
         for event in _FORBIDDEN_EVENTS:
             if event in events:
                 violations.append(f"{side} workflow triggers on {event}")
-    for key in _TOP_LEVEL_KEYS:
-        if base.get(key) != head.get(key):
-            violations.append(f"top-level `{key}` changed")
+    for key in _changed_keys(base, head, ("jobs",)):
+        violations.append(f"top-level `{key}` changed")
     if _context_refs(base) != _context_refs(head):
         violations.append("secrets/vars references changed")
     workflow_env_secrets = bool(
@@ -272,9 +306,8 @@ def ci_repair_violations(path: str, base_text: str, head_text: str) -> list[str]
         if not isinstance(old, dict) or not isinstance(new, dict):
             violations.append(f"job `{job_id}` is not a mapping")
             continue
-        for key in _JOB_KEYS:
-            if old.get(key) != new.get(key):
-                violations.append(f"job `{job_id}`: `{key}` changed")
+        for key in _changed_keys(old, new, _JOB_REPAIR_KEYS):
+            violations.append(f"job `{job_id}`: `{key}` changed")
         if _step_actions(old) != _step_actions(new):
             violations.append(f"job `{job_id}`: action set changed (only @ref may)")
         violations += _secret_step_violations(job_id, old, new, secret_scope)
