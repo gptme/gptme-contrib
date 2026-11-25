@@ -129,3 +129,22 @@ def test_move_onto_path_with_pending_deletion(tmp_path):
 
     assert str(b) in indexer.sources, "pending deletion removed the moved-in file"
     assert str(a) not in indexer.sources
+
+
+def test_failed_atomic_save_clears_destination_cache(tmp_path, indexer, monkeypatch):
+    """Deleting replaced chunks must invalidate search even if the new file is unreadable."""
+    target = (tmp_path / "notes.md").resolve()
+    target.write_text("old cached bananas")
+    indexer.index_file(target)
+    docs, _, _ = indexer.search("old cached bananas", n_results=1)
+    assert docs and docs[0].metadata["source"] == str(target)
+
+    temp = tmp_path / "notes.md.tmp"
+    temp.write_bytes(b"\xff\xfe")
+    os.replace(temp, target)
+    monkeypatch.setattr("gptme_rag.indexing.watcher.time.sleep", lambda _: None)
+    IndexEventHandler(indexer, pattern="**/*.md").on_moved(FileMovedEvent(str(temp), str(target)))
+
+    assert _contents_for(indexer, target) == []
+    docs, _, _ = indexer.search("old cached bananas", n_results=1)
+    assert docs == [], "failed replacement left deleted content in the search cache"

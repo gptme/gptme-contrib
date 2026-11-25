@@ -241,6 +241,8 @@ class IndexEventHandler(FileSystemEventHandler):
                 # content, so drop the old chunks before indexing the new ones.
                 try:
                     self.indexer.delete_documents({"source": str(dest_path)})
+                    # Invalidate even if the replacement cannot be read/indexed.
+                    self.indexer.cache.clear()
                 except Exception as e:
                     logger.warning(f"Error removing replaced content for {dest_path}: {e}")
 
