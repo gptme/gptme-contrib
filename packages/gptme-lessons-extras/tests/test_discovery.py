@@ -233,7 +233,7 @@ def test_discovery_ignores_non_string_yaml_keywords(tmp_path: Path) -> None:
     lesson = lessons_dir / "git" / "rebase.md"
     lesson.parent.mkdir(parents=True)
     lesson.write_text(
-        '---\nmatch:\n  keywords: [404, yes, null, "Rebase", "  "]\n---\n'
+        '---\nmatch:\n  keywords: [404, true, null, "Rebase", "  "]\n---\n'
         + _KEYWORD_BODY
     )
     discovery = LessonDiscovery(
