@@ -238,7 +238,7 @@ def parse_claude_code_session(path: Path) -> SessionDocument | None:
     if not messages:
         return None
 
-    date = first_ts or datetime.now()
+    date = first_ts or _ts_from_path(path) or datetime.now()
 
     full_text = "\n\n".join(messages)
     title = slug or path.stem

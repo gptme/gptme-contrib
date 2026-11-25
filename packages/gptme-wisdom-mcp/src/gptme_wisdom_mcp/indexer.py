@@ -85,10 +85,10 @@ class SessionIndex:
     def add(self, doc: SessionDocument) -> bool:
         """Add or refresh a session document. Returns True if the index changed.
 
-        A new path is inserted. A known path is re-indexed when its parsed
-        title, content or summary differ from the stored row, so a session
-        indexed while it was still being written picks up later turns on the
-        next run. An unchanged document returns False.
+        A new path is inserted. A known path is re-indexed when any parsed
+        field differs from the stored row, so a session indexed while it was
+        still being written picks up later turns on the next run. An unchanged
+        document returns False.
 
         Skips documents from /tmp/worktrees/ paths to avoid indexing duplicates.
         """
@@ -119,7 +119,8 @@ class SessionIndex:
             if not self.conn.in_transaction:
                 self.conn.execute("BEGIN IMMEDIATE")
             existing = self.conn.execute(
-                "SELECT id, title, content, summary FROM sessions WHERE path = ?",
+                "SELECT id, source, date, title, content, summary, metadata "
+                "FROM sessions WHERE path = ?",
                 (doc.path,),
             ).fetchone()
             if existing is None:
@@ -133,11 +134,7 @@ class SessionIndex:
                 row_id = cursor.lastrowid
             else:
                 row_id = existing["id"]
-                if (existing["title"], existing["content"], existing["summary"]) == (
-                    doc.title,
-                    doc.content,
-                    doc.summary,
-                ):
+                if tuple(existing)[1:] == values:
                     return False
                 # A contentless FTS5 table can only drop a row when given the
                 # exact values that were indexed; the sessions row holds them.

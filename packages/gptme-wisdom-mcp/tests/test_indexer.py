@@ -44,6 +44,37 @@ def _cc_line(kind: str, text: str, ts: str) -> str:
     )
 
 
+def _assert_fts_matches_rows(idx) -> None:
+    """The FTS index holds exactly the tokens of the stored rows.
+
+    FTS5 'integrity-check' cannot show this: a content='' table has nothing to
+    compare against. Compare every token instance with a freshly built index.
+    """
+    idx.conn.executescript(
+        """
+        CREATE VIRTUAL TABLE temp.fresh USING fts5(
+            title, content, summary, content='', tokenize='porter unicode61'
+        );
+        INSERT INTO temp.fresh (rowid, title, content, summary)
+            SELECT id, title, content, summary FROM sessions;
+        CREATE VIRTUAL TABLE temp.live_terms
+            USING fts5vocab('main', 'sessions_fts', 'instance');
+        CREATE VIRTUAL TABLE temp.fresh_terms
+            USING fts5vocab('temp', 'fresh', 'instance');
+        """
+    )
+    live = sorted(map(tuple, idx.conn.execute("SELECT * FROM temp.live_terms")))
+    fresh = sorted(map(tuple, idx.conn.execute("SELECT * FROM temp.fresh_terms")))
+    idx.conn.executescript(
+        """
+        DROP TABLE temp.live_terms;
+        DROP TABLE temp.fresh_terms;
+        DROP TABLE temp.fresh;
+        """
+    )
+    assert live == fresh
+
+
 def test_grown_session_is_reindexed(tmp_path: Path):
     """A session indexed mid-write picks up later turns on the next run (cron)."""
     from gptme_wisdom_mcp.indexer import SessionIndex, index_all_sessions
@@ -90,10 +121,48 @@ def test_changed_document_drops_stale_terms(tmp_path: Path):
         assert idx.add(doc("final mentions narwhal")) is True
         assert idx.search("walrus") == []
         assert len(idx.search("narwhal")) == 1
-        # The FTS index stays consistent with the stored rows
-        idx.conn.execute(
-            "INSERT INTO sessions_fts (sessions_fts, rank) VALUES ('integrity-check', 1)"
+        _assert_fts_matches_rows(idx)
+
+
+def test_date_or_metadata_change_alone_is_reindexed(tmp_path: Path):
+    """A re-parse with identical text still refreshes date and metadata."""
+    from gptme_wisdom_mcp.indexer import SessionIndex
+    from gptme_wisdom_mcp.parsers import SessionDocument
+
+    def doc(day: int, metadata: dict) -> SessionDocument:
+        return SessionDocument(
+            source="journal",
+            path="/journal/session.md",
+            date=datetime(2026, 1, day),
+            title="Session",
+            content="walrus",
+            summary="summary",
+            metadata=metadata,
         )
+
+    with SessionIndex(tmp_path / "s.db") as idx:
+        assert idx.add(doc(1, {})) is True
+        assert idx.add(doc(1, {"model": "m"})) is True
+        assert idx.add(doc(2, {"model": "m"})) is True
+        assert idx.add(doc(2, {"model": "m"})) is False
+        row = idx.conn.execute("SELECT date, metadata FROM sessions").fetchone()
+        assert tuple(row) == ("2026-01-02T00:00:00", '{"model": "m"}')
+        assert len(idx.search("walrus")) == 1
+        _assert_fts_matches_rows(idx)
+
+
+def test_session_without_timestamps_is_not_reindexed_every_run(tmp_path: Path):
+    """The date fallback must be stable, or every cron run rewrites the row."""
+    from gptme_wisdom_mcp.indexer import SessionIndex, index_all_sessions
+
+    projects = tmp_path / "projects"
+    f = projects / "-home-u-repo" / "abc.jsonl"
+    f.parent.mkdir(parents=True)
+    line = {"type": "user", "message": {"role": "user", "content": "start the migration"}}
+    f.write_text(json.dumps(line) + "\n")
+    with SessionIndex(tmp_path / "s.db") as idx:
+        assert index_all_sessions(idx, cc_projects_dir=projects)["claude_code"] == 1
+        assert index_all_sessions(idx, cc_projects_dir=projects)["claude_code"] == 0
 
 
 def test_overlapping_updates_do_not_delete_stale_fts_values(tmp_path: Path):
@@ -144,9 +213,7 @@ def test_overlapping_updates_do_not_delete_stale_fts_values(tmp_path: Path):
         assert first.add(doc("dolphin")) is True
         assert first.search("narwhal") == []
         assert len(first.search("dolphin")) == 1
-        first.conn.execute(
-            "INSERT INTO sessions_fts (sessions_fts, rank) VALUES ('integrity-check', 1)"
-        )
+        _assert_fts_matches_rows(first)
 
 
 def test_add_joins_a_transaction_already_open_on_the_connection(tmp_path: Path):
