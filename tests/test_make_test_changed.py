@@ -55,14 +55,14 @@ def repo(tmp_path: Path) -> Path:
     return tmp_path
 
 
-def _run_changed(repo: Path, *paths: str) -> str:
+def _run_changed(repo: Path, *paths: str, make_command: str = "echo") -> str:
     for p in paths:
         (repo / p).write_text("changed\n")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-qm", "change")
     # MAKE=echo prints the recursive invocations instead of running real tests.
     out = subprocess.run(
-        ["make", "-s", "test-changed-packages", "BASE=HEAD~1", "MAKE=echo"],
+        ["make", "-s", "test-changed-packages", "BASE=HEAD~1", f"MAKE={make_command}"],
         cwd=repo,
         env=_git_env(),
         check=True,
@@ -104,6 +104,24 @@ def test_fallback_tests_packages_and_plugins(repo: Path, path: str) -> None:
         out = _run_changed(repo, path)
     assert "test-packages" in out
     assert "test-plugins" in out
+
+
+@pytest.mark.parametrize("shared_config", [False, True])
+def test_fallback_runs_plugins_even_when_packages_fail(
+    repo: Path, shared_config: bool
+) -> None:
+    runner = repo / "run-tests.sh"
+    runner.write_text(
+        "#!/bin/sh\n" 'echo "$1" >> invocations.log\n' '[ "$1" != test-packages ]\n'
+    )
+    runner.chmod(0o755)
+    paths = ("pyproject.toml",) if shared_config else ("README.md",)
+    with pytest.raises(subprocess.CalledProcessError):
+        _run_changed(repo, *paths, make_command="./run-tests.sh")
+    assert (repo / "invocations.log").read_text().splitlines() == [
+        "test-packages",
+        "test-plugins",
+    ]
 
 
 @pytest.mark.parametrize("repository_selectors", [False, True])
