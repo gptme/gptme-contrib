@@ -128,6 +128,9 @@ class _SlotBreaker:
         self._opened_at: float | None = None
         self._probe_pending: bool = False
         self._probe_started_at: float | None = None
+        # Timeout origin can be rebased after a clock step; attempt identity
+        # must stay at the original grant to reject pre-probe outcomes.
+        self._probe_timeout_started_at: float | None = None
         self._probe_requires_timestamp: bool = False
         # Grant time of the probe that last closed the breaker. Verdicts from
         # attempts that started before it predate the recovery and are stale.
@@ -157,19 +160,25 @@ class _SlotBreaker:
                 return True
         # A backward correction must not immediately dispatch a second probe.
         # Persist the corrected window so reloads can still reach its timeout.
-        if self._probe_started_at is not None and self._probe_started_at > now:
-            self._probe_started_at = now
+        if self._probe_timeout_started_at is None:
+            self._probe_timeout_started_at = self._probe_started_at
+        if (
+            self._probe_timeout_started_at is not None
+            and self._probe_timeout_started_at > now
+        ):
+            self._probe_timeout_started_at = now
         # HALF_OPEN: exactly one probe allowed — consume the slot on first call
         if self._probe_pending or (
             # The granted probe never reported (killed worker, finished item,
             # dropped dispatch). Re-grant only once it is past probe_timeout so
             # the slot cannot stay dark forever, without letting a slow probe
             # overlap its replacement; a late verdict is then stale.
-            self._probe_started_at is not None
-            and now - self._probe_started_at >= self.probe_timeout
+            self._probe_timeout_started_at is not None
+            and now - self._probe_timeout_started_at >= self.probe_timeout
         ):
             self._probe_pending = False
             self._probe_started_at = now
+            self._probe_timeout_started_at = now
             return False
         return True
 
@@ -179,6 +188,7 @@ class _SlotBreaker:
             self._state = CircuitState.OPEN
             self._opened_at = now
             self._probe_started_at = None
+            self._probe_timeout_started_at = None
             self._probe_requires_timestamp = False
         else:
             self._failure_count += 1
@@ -194,6 +204,7 @@ class _SlotBreaker:
         self._opened_at = None
         self._probe_pending = False
         self._probe_started_at = None
+        self._probe_timeout_started_at = None
         self._probe_requires_timestamp = False
 
 
@@ -284,6 +295,16 @@ def _load_breaker(
         )
         if b._probe_started_at is not None and not math.isfinite(b._probe_started_at):
             b._probe_started_at = None
+        timeout_started_at = slot_state.get("probe_timeout_started_at")
+        b._probe_timeout_started_at = (
+            float(timeout_started_at)
+            if timeout_started_at is not None
+            else b._probe_started_at
+        )
+        if b._probe_timeout_started_at is not None and not math.isfinite(
+            b._probe_timeout_started_at
+        ):
+            b._probe_timeout_started_at = b._probe_started_at
         if b._state == CircuitState.HALF_OPEN and b._probe_started_at is None:
             # Legacy or corrupt state cannot identify an in-flight probe.
             # Treat the next call as a fresh grant, never as its outcome.
@@ -302,6 +323,7 @@ def _load_breaker(
         b._opened_at = None
         b._probe_pending = False
         b._probe_started_at = None
+        b._probe_timeout_started_at = None
         b._probe_requires_timestamp = False
         b._recovered_at = None
     return b
@@ -315,6 +337,7 @@ def _save_breaker(b: _SlotBreaker) -> dict[str, Any]:
         "opened_at": b._opened_at,
         "probe_pending": b._probe_pending,
         "probe_started_at": b._probe_started_at,
+        "probe_timeout_started_at": b._probe_timeout_started_at,
         "probe_requires_timestamp": b._probe_requires_timestamp,
         "recovered_at": b._recovered_at,
     }
@@ -401,6 +424,12 @@ def _apply_verdict(
         if not suppress and b.state == CircuitState.HALF_OPEN:
             b._probe_requires_timestamp = verdict_started_at is not None
         return suppress
+
+    # A recovery watermark in a previous clock epoch cannot order newly
+    # started attempts. Drop it rather than ignoring real failures until the
+    # wall clock catches up (possibly days later).
+    if b._recovered_at is not None and b._recovered_at > now:
+        b._recovered_at = None
 
     if verdict == NEUTRAL:
         # Check-only: advance the cooldown clock but record nothing.

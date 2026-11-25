@@ -49,7 +49,9 @@ def test_probe_rollback_preserves_one_probe_and_its_identity(
     corrected = now[0]
     assert decide_respawn(state_file=sf, slot="bob") == (True, "HALF_OPEN")
     # Persist the corrected window so each reload does not restart it again.
-    assert json.loads(sf.read_text())["bob"]["probe_started_at"] == corrected
+    saved = json.loads(sf.read_text())["bob"]
+    assert saved["probe_started_at"] == grant
+    assert saved["probe_timeout_started_at"] == corrected
     now[0] += 1
     assert decide_respawn(state_file=sf, slot="bob") == (True, "HALF_OPEN")
     if verdict is not None:
@@ -64,3 +66,43 @@ def test_probe_rollback_preserves_one_probe_and_its_identity(
         assert decide_respawn(state_file=sf, slot="bob") == (True, "HALF_OPEN")
         now[0] += 1
         assert decide_respawn(state_file=sf, slot="bob") == (False, "HALF_OPEN")
+
+
+def test_rollback_does_not_admit_a_pre_probe_verdict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = [100_000.0]
+    monkeypatch.setattr(time, "time", lambda: now[0])
+    sf = tmp_path / "breaker.json"
+    decide_respawn(state_file=sf, slot="bob", verdict=AUTH_DEATH, threshold=1)
+    now[0] = 100_300.0
+    assert decide_respawn(state_file=sf, slot="bob") == (False, "HALF_OPEN")
+    now[0] = 99_900.0
+    assert decide_respawn(state_file=sf, slot="bob") == (True, "HALF_OPEN")
+    now[0] = 99_960.0
+    assert decide_respawn(
+        state_file=sf, slot="bob", verdict=PRODUCTIVE, verdict_started_at=99_950.0
+    ) == (True, "HALF_OPEN")
+
+
+def test_recovery_watermark_does_not_disable_failures_after_rollback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = [100_000.0]
+    monkeypatch.setattr(time, "time", lambda: now[0])
+    sf = tmp_path / "breaker.json"
+    decide_respawn(state_file=sf, slot="bob", verdict=AUTH_DEATH, threshold=1)
+    now[0] = 100_300.0
+    assert decide_respawn(state_file=sf, slot="bob") == (False, "HALF_OPEN")
+    now[0] += 1
+    assert decide_respawn(
+        state_file=sf, slot="bob", verdict=PRODUCTIVE, verdict_started_at=100_300.0
+    ) == (False, "CLOSED")
+    now[0] = 13_900.0
+    for started in (13_901.0, 13_902.0, 13_903.0):
+        now[0] = started + 1
+        result = decide_respawn(
+            state_file=sf, slot="bob", verdict=AUTH_DEATH, verdict_started_at=started
+        )
+    assert result == (True, "OPEN")
+    assert json.loads(sf.read_text())["bob"]["failure_count"] == 3
