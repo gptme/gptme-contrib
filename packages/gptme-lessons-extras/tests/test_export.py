@@ -185,6 +185,77 @@ def test_export_ids_distinguish_nested_dashed_and_escaped_categories(tmp_path: P
     assert ids[1] == "bob-tools-shell-x"  # Existing single-level slug is stable.
 
 
+def _export_single(lesson: Path, lessons: Path, output: Path) -> str:
+    """Run the single-file CLI and return the exported lesson_id."""
+    args = ["--lessons-dir", str(lessons), "--lesson", str(lesson)]
+    result = CliRunner().invoke(main, [*args, "-o", str(output), "--agent", "bob"])
+    assert result.exit_code == 0, result.output
+    (exported,) = output.rglob("*.md")
+    metadata, _ = parse_lesson_frontmatter(exported.read_text())
+    assert metadata is not None
+    return metadata["network"]["lesson_id"]
+
+
+def test_single_cli_export_of_lesson_outside_lessons_dir(tmp_path: Path):
+    lessons = tmp_path / "workspace" / "lessons"
+    lessons.mkdir(parents=True)
+    lesson = tmp_path / "other" / "lessons" / "workflow" / "x.md"
+    lesson.parent.mkdir(parents=True)
+    lesson.write_text(MINIMAL_LESSON)
+    # A ".." in the argument must not escape the output directory
+    spelled = lessons / ".." / ".." / "other" / "lessons" / "workflow" / "x.md"
+    output = tmp_path / "out"
+
+    assert _export_single(spelled, lessons, output) == "bob-workflow-x"
+    assert (output / "workflow" / "x.md").is_file()
+
+
+@pytest.mark.parametrize("linked", ["file", "category", "lessons_dir", "alias"])
+def test_single_cli_export_through_symlinks(tmp_path: Path, linked: str):
+    lessons = tmp_path / "lessons"
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    category = lessons / "tools" / "shell"
+    if linked == "category":
+        category.parent.mkdir(parents=True)
+        category.symlink_to(shared, target_is_directory=True)
+    else:
+        category.mkdir(parents=True)
+    lesson = category / "x.md"
+    lessons_arg = lessons
+    if linked == "file":
+        (shared / "target.md").write_text(MINIMAL_LESSON)
+        lesson.symlink_to(shared / "target.md")
+    else:
+        lesson.write_text(MINIMAL_LESSON)
+    if linked == "lessons_dir":
+        lessons_arg = tmp_path / "linked-lessons"
+        lessons_arg.symlink_to(lessons, target_is_directory=True)
+    if linked == "alias":
+        (tmp_path / "current.md").symlink_to(lesson)
+        lesson = tmp_path / "current.md"
+    output = tmp_path / "out"
+
+    assert _export_single(lesson, lessons_arg, output) == "bob-tools%2Fshell-x"
+    assert (output / "tools" / "shell" / "x.md").is_file()
+
+
+@pytest.mark.parametrize("category", ["c++", "my notes", "r\u00e9seau"])
+def test_export_keeps_single_level_ids_with_special_characters(
+    tmp_path: Path, category: str
+):
+    lesson = tmp_path / "lessons" / category / "x.md"
+    lesson.parent.mkdir(parents=True)
+    lesson.write_text(MINIMAL_LESSON)
+    output = tmp_path / "out"
+
+    assert export_lesson(lesson, output, agent_origin="bob")
+
+    metadata, _ = parse_lesson_frontmatter((output / category / "x.md").read_text())
+    assert metadata is not None
+    assert metadata["network"]["lesson_id"] == f"bob-{category}-x"
+
+
 def test_export_keeps_network_metadata_with_unquoted_timestamps(tmp_path: Path):
     lesson = tmp_path / "lessons" / "git" / "a.md"
     lesson.parent.mkdir(parents=True)

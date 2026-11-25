@@ -13,7 +13,6 @@ Usage:
 import os
 import sys
 from pathlib import Path
-from urllib.parse import quote
 
 import click
 import yaml
@@ -136,11 +135,12 @@ def _export_lesson(
             return "skipped"
 
         # Escape category separators (and literal percent signs), so tools/shell
-        # cannot collide with tools-shell or tools%2Fshell. Ordinary single-level
-        # category ids stay unchanged.
+        # cannot collide with tools-shell or tools%2Fshell. Nothing else is
+        # encoded, so other single-level category ids stay unchanged.
         id_path = lesson_path
         if relative_path.parent != Path("."):
-            category = quote(relative_path.parent.as_posix(), safe="")
+            category = relative_path.parent.as_posix()
+            category = category.replace("%", "%25").replace("/", "%2F")
             id_path = Path(category) / relative_path.name
 
         # Add network metadata
@@ -169,6 +169,32 @@ def _export_lesson(
     except Exception as e:
         print(f"Error exporting {lesson_path}: {e}")
         return "failed"
+
+
+def _locate_single_lesson(lesson: Path, lessons_dir: Path) -> tuple[Path, Path | None]:
+    """Pick the path and lessons root for a single-file export.
+
+    Returns a root of None for a lesson outside ``lessons_dir``, which then
+    exports relative to its grandparent.
+    """
+    # abspath keeps symlinks, so a linked lesson stays in the category it is
+    # filed under. It also collapses ".." textually, which names another file
+    # if the ".." follows a symlink.
+    as_written = Path(os.path.abspath(lesson))
+    if not (as_written.exists() and as_written.samefile(lesson)):
+        as_written = lesson.resolve()
+
+    real_root = lessons_dir.resolve()
+    for path, root in (
+        (as_written, Path(os.path.abspath(lessons_dir))),
+        # Same directory spelled through a different symlink
+        (lesson.parent.resolve() / lesson.name, real_root),
+        # A link from elsewhere to a lesson inside the root
+        (lesson.resolve(), real_root),
+    ):
+        if path.is_relative_to(root):
+            return path, root
+    return as_written, None
 
 
 def export_all_lessons(
@@ -256,12 +282,13 @@ def main(lessons_dir: Path, output: Path, lesson: Path | None, agent: str, force
 
     if lesson:
         # Export single lesson
+        lesson_path, lessons_root = _locate_single_lesson(lesson, lessons_dir)
         success = export_lesson(
-            lesson_path=lesson.resolve(),
+            lesson_path=lesson_path,
             output_dir=output,
             agent_origin=agent,
             force=force,
-            lessons_root=lessons_dir.resolve(),
+            lessons_root=lessons_root,
         )
 
         sys.exit(0 if success else 1)
