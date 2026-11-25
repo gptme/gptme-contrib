@@ -576,14 +576,18 @@ def test_extract_error_text_falls_back_to_output_when_no_error_patterns() -> Non
     assert error == output
 
 
-def test_execute_falls_back_to_stdout_when_response_file_empty(tmp_path) -> None:
+@pytest.mark.parametrize("response_file_state", ["empty", "missing"])
+def test_execute_falls_back_to_stdout_without_response_content(
+    response_file_state,
+) -> None:
     async def _exercise() -> None:
         bridge = GptmeToolBridge(workspace="/fake/workspace")
 
-        async def _fake_create_subprocess_exec(*_args, **_kwargs):
-            # Subagent wrote nothing to the response file — mimic by letting
-            # the bridge create an empty tempfile (default behaviour of
-            # NamedTemporaryFile with delete=False) and returning stdout.
+        async def _fake_create_subprocess_exec(*args, **_kwargs):
+            # The bridge does not pre-create the response file: the subagent
+            # either leaves it empty or never writes it. Both use stdout.
+            if response_file_state == "empty":
+                Path(args[-1].rsplit("to the file: ", 1)[1]).touch()
             return _FakeProcess(
                 returncode=0, stdout="voice-friendly summary from stdout"
             )
