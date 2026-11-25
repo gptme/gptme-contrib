@@ -31,10 +31,6 @@ SendMessage = Callable[[str], Awaitable[None]]
 _T = TypeVar("_T")
 
 
-async def _send_event(send_message: SendMessage, message: str) -> None:
-    await send_message(message)
-
-
 async def _await_even_if_cancelled(aw: asyncio.Future[_T]) -> _T:
     """Await *aw* even if the current task is cancelled.
 
@@ -79,6 +75,7 @@ class VisionBridge:
         self._send_message: SendMessage | None = None
         self._pending_sends: set[asyncio.Task[None]] = set()
         self._deferred_presence: VisionEvent | None = None
+        self._delivered_presence: str | None = None
 
     def _on_event(self, event: VisionEvent) -> None:
         """Forward a pipeline-thread event to the asyncio WebSocket loop."""
@@ -121,17 +118,26 @@ class VisionBridge:
             }
         )
         task: asyncio.Task[None] = asyncio.create_task(
-            _send_event(send_message, message)
+            self._send_event(send_message, message, event.kind)
         )
         self._pending_sends.add(task)
         task.add_done_callback(self._event_send_done)
+
+    async def _send_event(
+        self, send_message: SendMessage, message: str, kind: str
+    ) -> None:
+        await send_message(message)
+        if kind != MOTION:
+            self._delivered_presence = kind
 
     def _event_send_done(self, task: asyncio.Task[None]) -> None:
         self._pending_sends.discard(task)
         if not self._pending_sends and self._deferred_presence is not None:
             event = self._deferred_presence
             self._deferred_presence = None
-            self._schedule_event(event)
+            # Coalescing can fold back to the state the host already has.
+            if event.kind != self._delivered_presence:
+                self._schedule_event(event)
         if task.cancelled():
             return
         try:
@@ -162,7 +168,11 @@ class VisionBridge:
             payload: dict[str, object] = {
                 "type": "vision_look_result",
                 "request_id": request_id,
-                "error": "Camera has not produced a frame yet.",
+                "error": (
+                    "Camera stopped producing frames; no current view is available."
+                    if self.pipeline.frames_stale
+                    else "Camera has not produced a frame yet."
+                ),
             }
         else:
             try:
@@ -205,6 +215,7 @@ class VisionBridge:
         self._send_message = None
         self._loop = None
         self._deferred_presence = None
+        self._delivered_presence = None
         join = asyncio.create_task(asyncio.to_thread(self.pipeline.stop, timeout))
         try:
             await _await_even_if_cancelled(join)

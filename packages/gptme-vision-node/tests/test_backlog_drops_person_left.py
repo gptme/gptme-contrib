@@ -129,3 +129,37 @@ async def test_motion_cannot_starve_deferred_presence() -> None:
     assert delivered[-1] == PERSON_LEFT
     assert MOTION not in delivered
     await bridge.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("last_send_fails", [False, True])
+async def test_coalesced_presence_is_not_sent_twice(last_send_fails: bool) -> None:
+    """left -> appeared coalescing must not repeat a delivered appeared, but
+    must still send it when the queued appeared never reached the host."""
+    bridge = VisionBridge(_Source(), [])
+    gate = asyncio.Event()
+    delivered: list[str] = []
+    attempts = 0
+
+    async def slow_send(message: str) -> None:
+        nonlocal attempts
+        index = attempts
+        attempts += 1
+        await gate.wait()
+        if last_send_fails and index == 15:
+            raise ConnectionError("send failed")
+        delivered.append(json.loads(message)["event"])
+
+    bridge._loop = asyncio.get_running_loop()
+    bridge._send_message = slow_send
+    for i in range(16):  # fill the queue; the last queued event is appeared
+        kind = PERSON_APPEARED if i % 2 else PERSON_LEFT
+        bridge._schedule_event(VisionEvent(kind))
+    bridge._schedule_event(VisionEvent(PERSON_LEFT))  # deferred
+    bridge._schedule_event(VisionEvent(PERSON_APPEARED))  # walked back in
+    gate.set()
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert delivered == [PERSON_LEFT, PERSON_APPEARED] * 8
+    assert bridge._deferred_presence is None
+    await bridge.stop()

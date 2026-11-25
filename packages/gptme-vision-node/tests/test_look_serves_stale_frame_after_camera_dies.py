@@ -56,3 +56,34 @@ async def test_look_after_camera_dies_is_not_a_stale_image() -> None:
         "look returned the last frame captured before the camera stopped "
         "producing frames, presented as the current view"
     )
+    assert "stopped producing frames" in payload["error"]
+
+
+class NeverCamera(DyingCamera):
+    """Live source that fails every read from the start."""
+
+    def get_frame(self):
+        self.calls += 1
+        if self.calls > 20:
+            self.failed_reads.set()
+        return None
+
+
+@pytest.mark.asyncio
+async def test_look_before_first_frame_does_not_claim_camera_stopped() -> None:
+    source = NeverCamera()
+    bridge = VisionBridge(source, [], interval_s=0.005)
+    sent: list[str] = []
+
+    async def send(message: str) -> None:
+        sent.append(message)
+
+    bridge.start(asyncio.get_running_loop(), send)
+    try:
+        assert await asyncio.to_thread(source.failed_reads.wait, 2)
+        await bridge.handle_message(
+            {"type": "vision_look_request", "request_id": "r"}, send
+        )
+    finally:
+        await bridge.stop()
+    assert json.loads(sent[-1])["error"] == "Camera has not produced a frame yet."

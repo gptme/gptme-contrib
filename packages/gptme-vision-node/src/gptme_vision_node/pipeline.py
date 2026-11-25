@@ -67,6 +67,8 @@ class VisionPipeline:
         self.absent_frames_for_left = absent_frames_for_left
 
         self.latest_frame: np.ndarray | None = None
+        # True once a cached frame has been dropped because reads keep failing.
+        self.frames_stale = False
         self._latest_frame_lock = threading.Lock()
         self._person_present = False
         self._frames_without_person = 0
@@ -93,6 +95,7 @@ class VisionPipeline:
         with self._latest_frame_lock:
             # Copy: OpenCV VideoCapture.read() can reuse the same buffer.
             self.latest_frame = frame.copy()
+            self.frames_stale = False
 
         detections: list[Detection] = []
         person_detector_failed = False
@@ -155,7 +158,9 @@ class VisionPipeline:
                 logger.exception("pipeline step failed")
             if failed_reads == STALE_AFTER_FAILED_READS:
                 with self._latest_frame_lock:
-                    self.latest_frame = None
+                    if self.latest_frame is not None:
+                        self.latest_frame = None
+                        self.frames_stale = True
             elapsed = time.monotonic() - started
             self._stop.wait(max(0.0, self.interval_s - elapsed))
 
@@ -168,6 +173,7 @@ class VisionPipeline:
         with self._latest_frame_lock:
             # Drop the previous session's snapshot so look cannot describe a stale scene.
             self.latest_frame = None
+            self.frames_stale = False
         for detector in self.detectors:
             reset = getattr(detector, "reset", None)
             if callable(reset):
