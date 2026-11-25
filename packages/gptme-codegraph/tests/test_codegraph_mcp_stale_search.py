@@ -9,6 +9,7 @@ index and the cached search documents from before the edit.
 
 import json
 import os
+import sqlite3
 from pathlib import Path
 
 import gptme_codegraph.core as core
@@ -65,6 +66,32 @@ def test_search_after_restart_ignores_documents_from_old_index(isolated, monkeyp
     _rewrite_from_other_process(src)
     # Simulate a server restart: the in-memory cache is gone, SQLite remains.
     monkeypatch.setattr(mcp_server, "_index_cache", {})
+
+    assert _search(src, "beta renamed") == ["beta_renamed"]
+    assert "alpha_original" not in _search(src, "alpha original")
+
+
+@pytest.mark.parametrize("restart", [False, True])
+def test_search_sees_index_rewritten_by_legacy_writer(isolated, monkeypatch, restart):
+    src = isolated
+    (src / "mod.py").write_text("def alpha_original():\n    return 1\n")
+    assert _search(src, "alpha original") == ["alpha_original"]
+    cache = SqliteIndexCache(str(src))
+    with sqlite3.connect(cache.db_path) as conn:
+        original_token = conn.execute(
+            "SELECT value FROM metadata WHERE key = 'index_generation'"
+        ).fetchone()[0]
+
+    _rewrite_from_other_process(src)
+    with sqlite3.connect(cache.db_path) as conn:
+        # Pre-token writers replace the index and last_updated but leave any
+        # existing index_generation untouched. Reproduce that persisted state.
+        conn.execute(
+            "UPDATE metadata SET value = ? WHERE key = 'index_generation'",
+            (original_token,),
+        )
+    if restart:
+        monkeypatch.setattr(mcp_server, "_index_cache", {})
 
     assert _search(src, "beta renamed") == ["beta_renamed"]
     assert "alpha_original" not in _search(src, "alpha original")

@@ -526,18 +526,21 @@ class SqliteIndexCache:
 
         Every save writes a fresh token, so a reader can tell that another
         process replaced the index even when the file mtimes it checks are
-        unchanged since then. Databases written before tokens existed fall
-        back to the ``last_updated`` timestamp each save also writes.
+        unchanged since then. Include ``last_updated`` even when a token exists:
+        older writers update that timestamp but leave an existing token intact.
+        Databases written before tokens existed use the timestamp alone.
         """
         conn = self._connect()
         self._init_schema()
-        for key in ("index_generation", "last_updated"):
-            row = conn.execute(
-                "SELECT value FROM metadata WHERE key = ?", (key,)
-            ).fetchone()
-            if row:
-                return str(row[0])
-        return None
+        metadata = dict(
+            conn.execute(
+                "SELECT key, value FROM metadata "
+                "WHERE key IN ('index_generation', 'last_updated')"
+            ).fetchall()
+        )
+        token = metadata.get("index_generation")
+        last_updated = metadata.get("last_updated")
+        return f"{token}:{last_updated}" if token else last_updated
 
     def save(self, index: SymbolIndex) -> str:
         """Persist a SymbolIndex to SQLite and return its generation token."""
@@ -600,9 +603,10 @@ class SqliteIndexCache:
                     (fp_str, _file_mtime(fp), self._directory),
                 )
 
+        last_updated = datetime.now(timezone.utc).isoformat()
         conn.execute(
             "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
-            ("last_updated", datetime.now(timezone.utc).isoformat()),
+            ("last_updated", last_updated),
         )
         generation = uuid.uuid4().hex
         conn.execute(
@@ -610,7 +614,7 @@ class SqliteIndexCache:
             ("index_generation", generation),
         )
         conn.commit()
-        return generation
+        return f"{generation}:{last_updated}"
 
     def load(self) -> SymbolIndex | None:
         """Load a persisted SymbolIndex from SQLite, or None if empty or stale."""
