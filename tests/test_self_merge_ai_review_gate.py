@@ -1389,6 +1389,43 @@ def test_current_p2_disposed_or_reviewer_retired_is_accepted(
     assert status["accepted"] is True
 
 
+@pytest.mark.parametrize(
+    "findings", [{"fp": "abcdef222222", "severity": "P2"}, "invalid", 1]
+)
+def test_malformed_p2_findings_refuse_without_crashing(
+    gh_comments: Any, findings: Any
+) -> None:
+    status = _status(gh_comments, [_comment(_marker(score=5, findings=findings))])
+    assert status["refusal"] == "disposition_shortfall"
+
+
+@pytest.mark.parametrize(
+    "marker", [None, _marker(sha="deadbeefcafe", score=4), _marker(score=None)]
+)
+def test_missing_stale_or_abstained_marker_cannot_hide_open_p2(
+    gh_comments: Any, marker: Any
+) -> None:
+    status = _status(
+        gh_comments,
+        [_comment(marker)],
+        review_data=([], [_finding_thread("P2", resolved=False, total=1)]),
+    )
+    assert status["refusal"] == "disposition_shortfall"
+
+
+def test_stale_reviewer_retirement_cannot_hide_an_open_p2(gh_comments: Any) -> None:
+    marker = _marker(sha="deadbeefcafe", score=4, auto_resolved=["abcdef222222"])
+    status = _status(
+        gh_comments,
+        [_comment(marker)],
+        review_data=(
+            [],
+            [_finding_thread("P2", resolved=False, total=1, fp="abcdef222222")],
+        ),
+    )
+    assert status["refusal"] == "disposition_shortfall"
+
+
 def test_unanchored_p0p1_fails_closed(gh_comments: Any) -> None:
     """A score <= 3 with no P0/P1 finding thread at all is unverifiable. The
     finding may be unanchored (only in the summary body) or the reviewer may

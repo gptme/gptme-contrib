@@ -1765,7 +1765,12 @@ def _ai_review_p2_disposition_shortfall(
             )
         if fp:
             disposed.add(fp)
-    for finding in marker.get("findings") or []:
+    findings = marker.get("findings", [])
+    if not isinstance(findings, list):
+        return "marker publishes a findings list we cannot read"
+    for finding in findings:
+        if not isinstance(finding, dict):
+            return "marker publishes a findings entry we cannot read"
         if finding.get("severity") == "P2":
             fp = finding.get("fp")
             if fp not in disposed and fp not in retired:
@@ -1878,6 +1883,14 @@ def fetch_ai_review_status(
             expected_author=expected_author,
             head_sha=head_sha,
         )
+        if not disposition:
+            # A stale marker cannot retire findings on the current head. Only
+            # live thread answers/resolutions can clear this fallback path.
+            disposition = _ai_review_p2_disposition_shortfall(
+                cast("tuple[list[dict[str, Any]], list[dict[str, Any]]]", review_data),
+                {},
+                expected_author,
+            )
         if disposition:
             return {
                 "accepted": False,
