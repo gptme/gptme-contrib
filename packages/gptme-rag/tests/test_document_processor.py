@@ -152,14 +152,35 @@ def test_small_text():
     assert chunks[0]["text"] == text
 
 
-@pytest.mark.parametrize("chunk_size,overlap", [(5, 0), (7, 3), (10, 4), (3, 1)])
-def test_chunks_never_split_multibyte_characters(chunk_size, overlap):
-    """#2356 R4: a token boundary inside a character decoded to U+FFFD."""
+@pytest.mark.parametrize("chunk_size", range(1, 11))
+def test_chunks_never_split_multibyte_characters(chunk_size):
+    """#2356 R4: every token position survives, including repeated characters."""
     text = "日本語のテキスト 🎉🚀 emoji ünïcödé " * 8
-    processor = DocumentProcessor(chunk_size=chunk_size, chunk_overlap=overlap)
-    chunks = [c["text"] for c in processor.process_text(text)]
-    assert len(chunks) > 1
-    for chunk in chunks:
-        assert "�" not in chunk, chunk
-    # Every character of the input is covered by some chunk.
-    assert set(text) <= set("".join(chunks))
+    for overlap in range(chunk_size):
+        processor = DocumentProcessor(chunk_size=chunk_size, chunk_overlap=overlap)
+        tokens = processor.encoding.encode(text)
+        token_bytes = [processor.encoding.decode_single_token_bytes(t) for t in tokens]
+        covered_end = 0
+        previous_start = -1
+        reconstructed = b""
+        chunk_count = 0
+        for chunk in processor.process_text(text):
+            chunk_count += 1
+            # Fail rather than hang if a boundary adjustment stops advancing.
+            assert chunk_count <= len(tokens)
+            metadata = chunk["metadata"]
+            assert "error" not in metadata
+            start, end = metadata["chunk_start"], metadata["chunk_end"]
+            assert previous_start < start <= covered_end
+            assert start < end <= len(tokens)
+            # Strict decoding catches cuts inside UTF-8; metadata must also
+            # describe the exact text emitted, not just a plausible interval.
+            assert chunk["text"] == b"".join(token_bytes[start:end]).decode("utf-8")
+            assert "�" not in chunk["text"]
+            reconstructed += b"".join(token_bytes[max(start, covered_end) : end])
+            covered_end = max(covered_end, end)
+            previous_start = start
+        assert chunk_count > 1
+        assert covered_end == len(tokens)
+        # Strip overlap by position, preserving order and every repetition.
+        assert reconstructed.decode("utf-8") == text
