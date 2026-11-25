@@ -30,7 +30,10 @@ def _timestamp(value: object) -> datetime:
     result = datetime.fromisoformat(value.replace("Z", "+00:00"))
     if result.tzinfo is None:
         raise ValueError("timestamp must include timezone")
-    return result.astimezone(timezone.utc)
+    try:
+        return result.astimezone(timezone.utc)
+    except OverflowError as exc:
+        raise ValueError("timestamp is outside the UTC range") from exc
 
 
 def _path(workspace: str, plan_id: str, *, receipt: bool = False) -> Path:
@@ -293,6 +296,21 @@ def fulfill_planned_call(
             )
         )
     )
+    # Accept only complete affirmative clauses. Unknown trailing speech requires
+    # reconfirmation rather than trusting an ever-growing retraction blacklist.
+    assent_clause = r"(?:yes|yeah|yep|correct|exactly|that['’]s right)"
+    purpose_clause = r"\s+".join(re.escape(word) for word in purpose_words)
+    coverage_clause = (
+        r"(?:that|this) (?:covers|completes|fulfills) "
+        rf"(?:it|everything|(?:the )?{purpose_clause})"
+    )
+    cancellation_clause = (
+        r"(?:no need (?:for )?(?:the )?(?:later|scheduled|planned) call|"
+        r"(?:the )?(?:later|scheduled|planned) call is unnecessary)"
+    )
+    clause = rf"(?:{assent_clause}|{coverage_clause}|{cancellation_clause})"
+    if not re.fullmatch(rf"{clause}(?:[.!?, ]+{clause})*[.! ]*", confirmation):
+        return {"error": "Please reconfirm full coverage and skipping the later call."}
     # Confirmations arrive as ordinary speech, so evaluate sentence by sentence:
     # a caller may answer "Yeah, that covers it." or split coverage from the
     # skip decision into two sentences ("That covers the standup. No need for

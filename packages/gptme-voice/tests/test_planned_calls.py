@@ -188,6 +188,15 @@ def test_stale_future_or_expired_plans_are_not_offered(tmp_path, changes):
     assert load_pending_planned_calls(str(tmp_path), PHONE, now=NOW) == []
 
 
+def test_out_of_range_utc_timestamp_does_not_break_plan_loading(tmp_path):
+    register(tmp_path)
+    path = tmp_path / "state/voice-calls/planned/standup-one.json"
+    plan = json.loads(path.read_text())
+    plan["scheduled_at"] = "0001-01-01T00:00:00+01:00"
+    path.write_text(json.dumps(plan))
+    assert load_pending_planned_calls(str(tmp_path), PHONE, now=NOW) == []
+
+
 def test_missing_corrupt_or_other_caller_plan_is_not_offered(tmp_path):
     assert load_pending_planned_calls(str(tmp_path), PHONE, now=NOW) == []
     register(tmp_path)
@@ -347,6 +356,8 @@ def test_ordinary_phrasing_of_a_combined_confirmation_is_accepted(tmp_path, quot
         "Yes. That only partly covers the daily standup.",
         "Yes. The later call is still needed.",
         "Yes. Actually, call me later.",
+        "Yes. The later call is necessary.",
+        "That covers the daily standup. The later call is necessary.",
     ],
 )
 def test_affirmative_with_a_retraction_does_not_suppress_call(tmp_path, quote):
