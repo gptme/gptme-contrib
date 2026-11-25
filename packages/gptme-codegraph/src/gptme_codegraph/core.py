@@ -3340,6 +3340,32 @@ def _resolve_imported_symbol(
     return None
 
 
+def _import_module_for_call(call: str, file_imports: list[ImportInfo]) -> str | None:
+    """Return the module a call's leading name was imported from, if any.
+
+    ``from beta import helper; helper()`` and ``import beta; beta.helper()``
+    both give ``"beta"``. Relative imports keep their leading dots stripped.
+    """
+    head = call.split(".")[0]
+    dotted = "." in call
+    for imp in file_imports:
+        if not imp.module:
+            continue
+        if imp.is_from and local_binding(imp) == head:
+            # ``from pkg import sub; sub.f()`` names a module itself.
+            module = f"{imp.module}.{imp.name}" if dotted else imp.module
+        elif (
+            not imp.is_from
+            and dotted
+            and head in (local_binding(imp), imp.module.split(".")[0])
+        ):
+            module = imp.module
+        else:
+            continue
+        return module.lstrip(".") or None
+    return None
+
+
 def build_cross_file_call_graph(
     index: SymbolIndex,
     directory: Path,
@@ -3360,7 +3386,8 @@ def build_cross_file_call_graph(
         for entry in entries:
             seen_files.add(entry.file)
 
-    for file_path in seen_files:
+    # Sorted so graph construction does not depend on set iteration order.
+    for file_path in sorted(seen_files):
         fp = Path(file_path)
         if fp.exists():
             result = parse_file(fp)
@@ -3372,15 +3399,38 @@ def build_cross_file_call_graph(
                 file_symbols.setdefault(file_path, []).append(sym)
 
     known_names = {s.name for s in all_symbols}
-    # Build name → qualified ID map for cross-file resolution.
-    # When multiple files define the same bare name, the first entry is
-    # the default (one-to-many names are rare and the index handles them
-    # separately via ``index.lookup()``).
-    name_to_qid: dict[str, str] = {}
-    for sym in all_symbols:
-        qid = sym.qualified_id()
-        if sym.name not in name_to_qid:
-            name_to_qid[sym.name] = qid
+    # Bare name → every definition with that name, in a deterministic order.
+    # Same-named symbols in different files stay separate graph nodes.
+    defs_by_name: dict[str, list[Symbol]] = defaultdict(list)
+    for sym in sorted(all_symbols, key=lambda s: s.qualified_id()):
+        defs_by_name[sym.name].append(sym)
+
+    def _qid_for(name: str, file_path: str, module_hint: str | None) -> str:
+        """Pick the definition a call to ``name`` from ``file_path`` refers to.
+
+        Order: the only definition; a definition in the imported module
+        (``module_hint``); a same-file definition (top-level first); otherwise
+        the first definition in qualified-ID order.
+        """
+        candidates = defs_by_name.get(name)
+        if not candidates:
+            return name
+        if len(candidates) == 1:
+            return candidates[0].qualified_id()
+        if module_hint:
+            imported = [
+                c
+                for c in candidates
+                if c.module_path and _module_matches(module_hint, c.module_path)
+            ]
+            if imported:
+                return imported[0].qualified_id()
+        same_file = [c for c in candidates if c.file == file_path]
+        if same_file:
+            same_file.sort(key=lambda c: c.parent_class is not None)
+            return same_file[0].qualified_id()
+        return candidates[0].qualified_id()
+
     # All qualified IDs — used for precise Rust path-qualified resolution.
     known_qids = {sym.qualified_id() for sym in all_symbols}
 
@@ -3392,11 +3442,12 @@ def build_cross_file_call_graph(
         for sym in symbols:
             if sym.kind == "class":
                 continue
-            resolved_calls: set[str] = set()
+            qid_calls: set[str] = set()
             for call in sym.calls:
                 if call in known_names:
-                    # Local or same-file call
-                    resolved_calls.add(call)
+                    # Bare call: an imported name or a same-file definition.
+                    hint = _import_module_for_call(call, imports)
+                    qid_calls.add(_qid_for(call, file_path, hint))
                 else:
                     # Try import resolution for both dotted (``mod.func``)
                     # and plain (``alias_local``) calls. Plain calls matter for
@@ -3404,7 +3455,8 @@ def build_cross_file_call_graph(
                     # in ``known_names`` but resolution maps it back to ``f``.
                     resolved = _resolve_imported_symbol(call, imports, directory)
                     if resolved and resolved in known_names:
-                        resolved_calls.add(resolved)
+                        hint = _import_module_for_call(call, imports)
+                        qid_calls.add(_qid_for(resolved, file_path, hint))
                     elif "::" in call:
                         # Rust path-qualified call: ``crate::module::fn()`` or
                         # ``super::util::parse()`` — no explicit ``use`` import.
@@ -3419,13 +3471,12 @@ def build_cross_file_call_graph(
                             f"{parts[-2]}::{last_segment}" if len(parts) >= 2 else None
                         )
                         if candidate_qid and candidate_qid in known_qids:
-                            resolved_calls.add(candidate_qid)
+                            qid_calls.add(candidate_qid)
                         elif last_segment in known_names:
-                            resolved_calls.add(last_segment)
+                            qid_calls.add(_qid_for(last_segment, file_path, None))
                     # else: external builtin/library — ignore
-            qid = name_to_qid.get(sym.name, sym.qualified_id())
-            qid_calls = {name_to_qid.get(c, c) for c in resolved_calls}
-            callees[qid] = qid_calls
+            qid = sym.qualified_id()
+            callees.setdefault(qid, set()).update(qid_calls)
             for called in qid_calls:
                 callers[called].add(qid)
 
