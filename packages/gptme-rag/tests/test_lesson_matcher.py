@@ -306,11 +306,10 @@ class TestExtractFrontmatter:
             "nested one",
             "nested two",
         ]
+        # A scalar pattern is one regex, even if it contains commas.
         assert fm["match"]["patterns"] == [
-            "legacy-a",
-            "legacy-b",
-            "nested-a",
-            "nested-b",
+            "legacy-a, legacy-b",
+            "nested-a, nested-b",
         ]
 
     def test_regex_fallback_session_categories_block(self, monkeypatch):

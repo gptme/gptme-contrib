@@ -479,7 +479,31 @@ def extract_frontmatter(content: str) -> tuple[dict[str, Any], str]:
     try:
         import yaml
 
-        fm_yaml = yaml.safe_load(fm_str)
+        class MatchTermLoader(yaml.SafeLoader):
+            def construct_mapping(self, node, deep=False):
+                mapping = super().construct_mapping(node, deep=deep)
+
+                # Keep numeric match terms as written (3.10, 0x1F, 12:30),
+                # not YAML 1.1's coerced values (3.1, 31, 750). Other fields
+                # and non-numeric types retain SafeLoader semantics.
+                def term(item):
+                    if isinstance(item, yaml.ScalarNode) and item.tag in {
+                        "tag:yaml.org,2002:int",
+                        "tag:yaml.org,2002:float",
+                    }:
+                        return item.value
+                    return self.construct_object(item, deep=True)
+
+                for key, value in node.value:
+                    if key.value in {"keywords", "patterns"}:
+                        mapping[key.value] = (
+                            [term(item) for item in value.value]
+                            if isinstance(value, yaml.SequenceNode)
+                            else term(value)
+                        )
+                return mapping
+
+        fm_yaml = yaml.load(fm_str, Loader=MatchTermLoader)
         return (fm_yaml if isinstance(fm_yaml, dict) else {}), body
     except ImportError:
         pass
@@ -557,16 +581,18 @@ def extract_frontmatter(content: str) -> tuple[dict[str, Any], str]:
         + (
             []
             if top_level_patterns
-            else _string_list(
-                _extract_scalar_frontmatter_field(top_level_without_match, "patterns")
+            else _match_terms(
+                _extract_scalar_frontmatter_field(top_level_without_match, "patterns"),
+                split_commas=False,
             )
         )
         + nested_patterns
         + (
             []
             if nested_patterns
-            else _string_list(
-                _extract_scalar_frontmatter_field(match_block, "patterns", allow_indented=True)
+            else _match_terms(
+                _extract_scalar_frontmatter_field(match_block, "patterns", allow_indented=True),
+                split_commas=False,
             )
         )
     )
@@ -810,8 +836,8 @@ def _score_skill_descriptor(lesson: dict[str, Any], prompt_lower: str) -> tuple[
 # Lesson scanning
 # ---------------------------------------------------------------------------
 
-#: On-disk cache schema. Bump when the lesson dict shape changes.
-_CACHE_VERSION = 2
+#: On-disk cache schema. Bump when the lesson dict shape or parsing semantics change.
+_CACHE_VERSION = 3
 
 # resolved path -> (mtime_ns, size, lesson_or_None). None means parsed-but-skipped.
 _parse_cache: dict[str, tuple[int, int, dict[str, Any] | None]] = {}
