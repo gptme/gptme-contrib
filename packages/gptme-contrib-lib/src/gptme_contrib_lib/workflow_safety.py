@@ -54,6 +54,7 @@ _JOB_KEYS = (
     "env",
     "defaults",
     "concurrency",
+    "continue-on-error",
 )
 # A repair may still change these inside a frozen (secret-visible) step.
 _STEP_REPAIR_KEYS = ("timeout-minutes",)
@@ -73,17 +74,32 @@ def _load(text: str, side: str) -> tuple[dict[str, Any] | None, str | None]:
         import yaml
     except ImportError:
         return None, "YAML parser unavailable"
+
+    # Actions uses YAML 1.2 boolean spelling: `on`, `off`, `yes`, `no` are
+    # strings, including in trigger filters. Do not mutate SafeLoader globally.
+    class WorkflowLoader(yaml.SafeLoader):
+        pass
+
+    WorkflowLoader.yaml_implicit_resolvers = {
+        key: [
+            (tag, pattern)
+            for tag, pattern in resolvers
+            if tag != "tag:yaml.org,2002:bool"
+        ]
+        for key, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
+    }
+    WorkflowLoader.add_implicit_resolver(
+        "tag:yaml.org,2002:bool",
+        re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$"),
+        list("tTfF"),
+    )
     try:
-        doc = yaml.safe_load(text)
+        doc = yaml.load(text, Loader=WorkflowLoader)
     except yaml.YAMLError as exc:
         return None, f"{side} workflow is not valid YAML ({type(exc).__name__})"
     if not isinstance(doc, dict):
         return None, f"{side} workflow is not a mapping"
-    # YAML 1.1 reads a bare ``on:`` key as boolean True.
-    if True in doc:
-        if "on" in doc:
-            return None, f"{side} workflow has both `on` and a boolean `on` key"
-        doc = {("on" if k is True else k): v for k, v in doc.items()}
+
     return doc, None
 
 

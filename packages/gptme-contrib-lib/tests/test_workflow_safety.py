@@ -305,6 +305,7 @@ def test_matrix_retargeting_runs_on_is_caught() -> None:
         ("env", "    env:\n      MODE: ci\n"),
         ("defaults", "    defaults:\n      run:\n        shell: bash\n"),
         ("concurrency", "    concurrency: test\n"),
+        ("continue-on-error", "    continue-on-error: true\n"),
     ],
 )
 def test_job_level_trust_keys_are_compared(key: str, block: str) -> None:
@@ -318,6 +319,13 @@ def test_forbidden_event_names_in_trigger_filters_are_not_events() -> None:
     base = BASE.replace("branches: [master]", "branches: [workflow_run]")
     head = base.replace("timeout-minutes: 10", "timeout-minutes: 20")
     assert check(head, base=base) == []
+
+
+@pytest.mark.parametrize(("old", "new"), [("yes", "on"), ("no", "off")])
+def test_yaml11_boolean_words_do_not_hide_trigger_changes(old: str, new: str) -> None:
+    base = BASE.replace("branches: [master]", f"branches: [{old}]")
+    head = base.replace(f"branches: [{old}]", f"branches: [{new}]")
+    assert "top-level `on` changed" in check(head, base=base)
 
 
 def test_runs_on_change_is_caught() -> None:
