@@ -958,6 +958,16 @@ def test_parse_malformed_revision_does_not_resurrect_earlier_answer(
     assert result.criteria_results == {}
 
 
+def test_parse_ignores_prose_object_with_a_single_answer_key(
+    llm_module: types.ModuleType,
+) -> None:
+    """Prose that mentions one field name must not wipe the real answer."""
+    content = _REVIEW_JSON + '\nNote: {"reasoning": "see above"} is not the answer.'
+    result = _parse_review(llm_module, content)
+    assert result.recommendation == "approve"
+    assert set(result.criteria_results) == {"professional_tone"}
+
+
 def test_parse_falls_back_to_default_without_matching_object(
     llm_module: types.ModuleType,
 ) -> None:
