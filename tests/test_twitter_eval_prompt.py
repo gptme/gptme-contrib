@@ -912,7 +912,7 @@ def test_parse_skips_json_inside_think_block(llm_module: types.ModuleType) -> No
     Slicing first "{" to last "}" produced "Extra data" and a default reject,
     which parked an approved blog promotion at 0/3. The draft is a complete
     ReviewResponse placed *after* the answer, so the test fails if
-    `_THINK_BLOCK_RE` stops stripping think blocks (the draft would win as the
+    the parser stops skipping think blocks (the draft would win as the
     last matching object).
     """
     content = (
@@ -992,3 +992,23 @@ def test_parse_syntax_broken_revision_does_not_resurrect_approval(
 ) -> None:
     result = _parse_review(llm_module, _REVIEW_JSON + "\nRevised:\n" + revision)
     assert result == llm_module.ReviewResponse.default()
+
+
+def test_parse_unquoted_revision_does_not_promote_nested_draft(
+    llm_module: types.ModuleType,
+) -> None:
+    revision = '{recommendation: "reject", "draft": ' + _REVIEW_JSON + "}"
+    result = _parse_review(llm_module, _REVIEW_JSON + "\nRevised:\n" + revision)
+    assert result == llm_module.ReviewResponse.default()
+
+
+def test_parse_preserves_think_tags_in_json_strings(
+    llm_module: types.ModuleType,
+) -> None:
+    response = llm_module.TweetResponse.example()
+    response.text = "Explain <think>private reasoning</think> tags"
+    content = llm_module.json.dumps(llm_module.asdict(response))
+    result = llm_module.parse_llm_response(
+        content, llm_module.TweetResponse, llm_module.TaskType.RESPONSE
+    )
+    assert result == response

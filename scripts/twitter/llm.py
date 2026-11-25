@@ -588,7 +588,7 @@ Any analysis or thinking should be included in the "reasoning" field of the JSON
 
 T = TypeVar("T", EvaluationResponse, TweetResponse, ReviewResponse)
 
-_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
+_RESPONSE_TOKEN_RE = re.compile(r"<think>.*?(?:</think>|\Z)|\{", re.DOTALL)
 
 
 def parse_llm_response(content: str, response_type: Type[T], task: TaskType) -> T:
@@ -602,26 +602,32 @@ def parse_llm_response(content: str, response_type: Type[T], task: TaskType) -> 
     # Reasoning models put draft objects in <think> and prose can carry stray
     # braces, so slicing first "{" to last "}" glues unrelated text together.
     # Decode each top-level object and keep the last one that fits the type.
-    text = _THINK_BLOCK_RE.sub("", content)
+    text = content
     expected_keys = set(getattr(response_type, "__dataclass_fields__", {}))
     # A majority of the type's fields marks an object as the model's answer
     # rather than prose that happens to contain a familiar key.
     answer_overlap = len(expected_keys) // 2 + 1
     decoder = json.JSONDecoder()
     parsed: T | None = None
-    pos = text.find("{")
-    while pos >= 0:
+    pos = 0
+    while token := _RESPONSE_TOKEN_RE.search(text, pos):
+        pos = token.end()
+        # Only skip reasoning markup between objects, never inside JSON strings.
+        if token.group() != "{":
+            continue
+        pos = token.start()
         try:
             data, end = decoder.raw_decode(text, pos)
         except json.JSONDecodeError:
-            # A quoted key starts a JSON object, unlike prose such as {review}.
-            # Fail closed on broken JSON: skipping it could keep a stale
-            # approval or promote a nested draft inside a truncated revision.
-            if re.match(r'\s*"', text[pos + 1 :]):
-                parsed = None
-                break
-            pos = text.find("{", pos + 1)
-            continue
+            # Bare placeholders such as {review} are prose, not broken answers.
+            # Anything else fails closed: scanning inside malformed JSON could
+            # keep a stale approval or promote a nested draft from a revision.
+            placeholder = re.match(r"\{\w+\}", text[pos:])
+            if placeholder:
+                pos += placeholder.end()
+                continue
+            parsed = None
+            break
         if isinstance(data, dict):
             try:
                 parsed = response_type.from_dict(data)
@@ -632,7 +638,7 @@ def parse_llm_response(content: str, response_type: Type[T], task: TaskType) -> 
                 # approval the model explicitly revised away.
                 if len(expected_keys & data.keys()) >= answer_overlap:
                     parsed = None
-        pos = text.find("{", end)
+        pos = end
     if parsed is not None:
         return parsed
     console.print(f"[red]Error: Could not parse LLM response for {task.value}")
