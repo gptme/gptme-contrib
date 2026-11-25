@@ -57,6 +57,7 @@ secrets = [
     "gptme-redact>=0.1; python_version >= '3.11'",
 ]
 test = [
+    "gptme-redact>=0.1; python_version >= '3.11'",
     "packaging>=23.0",
     "tomli>=2.0; python_version < '3.11'",
     "pytest>=7.0",

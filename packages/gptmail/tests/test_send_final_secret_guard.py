@@ -273,6 +273,21 @@ def test_html_character_references_are_scanned(recording_send, monkeypatch, body
     assert literal not in captured.out + captured.err
 
 
+@pytest.fixture
+def real_scanner(recording_send, monkeypatch):
+    """Require the scanner on supported Python; never read live secret inventories."""
+    import os
+
+    if sys.version_info < (3, 11):
+        pytest.skip("gptme-redact requires Python 3.11+")
+    monkeypatch.setattr(os, "environ", {"EMAIL_SEND_ALLOWLIST": "recipient@example.com"})
+    monkeypatch.delitem(sys.modules, "redact")  # drop the fixture's fake scanner
+    import redact
+
+    monkeypatch.setattr(redact, "collect_secret_literals", lambda: [])
+    return redact
+
+
 @pytest.mark.parametrize(
     "body",
     [
@@ -281,19 +296,14 @@ def test_html_character_references_are_scanned(recording_send, monkeypatch, body
         "Status: SECRET key ✓ rotated",
     ],
 )
-def test_quoted_printable_escapes_are_not_secret_assignments(recording_send, monkeypatch, body):
+def test_quoted_printable_escapes_are_not_secret_assignments(recording_send, real_scanner, body):
     """A secret-named word before non-ASCII text must stay deliverable.
 
     The text parts are quoted-printable on the wire, so ``key —`` serializes as
     ``key =E2=80=94``. Scanning that encoded form reads it as ``KEY = value``.
     The decoded payloads are what the recipient reads, and they are clean.
     """
-    import os
-
-    monkeypatch.setattr(os, "environ", {"EMAIL_SEND_ALLOWLIST": "recipient@example.com"})
-    monkeypatch.delitem(sys.modules, "redact")  # drop the fixture's fake scanner
-    real_redact = pytest.importorskip("redact")
-    assert not real_redact.redact(body, literals=[]).blocked
+    assert not real_scanner.redact(body, literals=[]).blocked
     agent, draft, calls = recording_send
     draft.write_text(f"To: recipient@example.com\nSubject: Clean\n\n{body}")
     agent.send("fixture")
@@ -302,7 +312,7 @@ def test_quoted_printable_escapes_are_not_secret_assignments(recording_send, mon
 
 
 def test_real_scanner_still_blocks_assignment_in_quoted_printable_body(
-    recording_send, monkeypatch, capsys
+    recording_send, real_scanner, monkeypatch, capsys
 ):
     """Narrowing the raw scan must not let a real secret in the body through.
 
@@ -310,21 +320,34 @@ def test_real_scanner_still_blocks_assignment_in_quoted_printable_body(
     cannot match it; only the rendered, transfer-decoded payload can. Without
     that, this test passed even when the final scan was deleted entirely.
     """
-    import os
-
-    monkeypatch.setattr(os, "environ", {"EMAIL_SEND_ALLOWLIST": "recipient@example.com"})
-    monkeypatch.delitem(sys.modules, "redact")  # drop the fixture's fake scanner
-    real_redact = pytest.importorskip("redact")
     literal = "SYNTHETIC_TOKEN_QP_BODY"
     monkeypatch.setattr(sys.modules["redact"], "collect_secret_literals", lambda: [literal])
     # The em dash makes the text parts quoted-printable on the wire.
     rendered = f"{literal} — rotate"
     draft_body = "SYNTHETIC\\_TOKEN\\_QP\\_BODY — rotate"
-    assert real_redact.redact(rendered, literals=[literal]).blocked
-    assert not real_redact.redact(draft_body, literals=[literal]).blocked
+    assert real_scanner.redact(rendered, literals=[literal]).blocked
+    assert not real_scanner.redact(draft_body, literals=[literal]).blocked
     agent, draft, calls = recording_send
     draft.write_text(f"To: recipient@example.com\nSubject: Clean\n\n{draft_body}")
     with pytest.raises(ValueError, match="Outbound"):
         agent.send("fixture")
     assert not calls
     assert draft.exists()
+
+
+@pytest.mark.parametrize("body", ["Hello", "<html><body>Hello</body></html>"])
+def test_q_encoded_subject_is_not_a_secret_assignment(recording_send, real_scanner, body):
+    """Q-encoded spaces are underscores, not assignment whitespace (review #2329)."""
+    subject = "Rotate API key — x"
+    agent, draft, calls = recording_send
+    draft.write_text(f"To: recipient@example.com\nSubject: {subject}\n\n{body}")
+    agent.send("fixture")
+    assert len(calls) == 1
+    message = BytesParser(policy=policy.default).parsebytes(calls[0][1]["input"])
+    assert str(message["Subject"]) == subject
+    raw_subject = dict(message.raw_items())["Subject"]
+    if body == "Hello":
+        assert "key_=E2=80=94" in raw_subject
+    assert not real_scanner.redact(raw_subject, literals=[]).blocked
+    assert not draft.exists()
+    assert (agent.email_dir / "sent/fixture.md").exists()
