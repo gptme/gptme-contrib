@@ -224,7 +224,9 @@ def test_symlink_swap_between_validation_and_read_is_rejected(
         return safe
 
     monkeypatch.setattr(rag, "_safe_source", swap_after_check)
-    assert rag._load_documents([source]) == []
+    with rag._pinned_root() as root_fd:
+        assert root_fd is not None
+        assert rag._load_documents([source], root_fd) == []
 
 
 @pytest.mark.asyncio
@@ -343,14 +345,55 @@ async def test_filtered_snippet_shows_match_beyond_file_header(corpus: Path) -> 
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("lexical")
-async def test_snippet_anchor_matches_whole_lexical_tokens(corpus: Path) -> None:
+@pytest.mark.parametrize(
+    ("header", "query"),
+    [
+        # Substring of a longer identifier, not a token the ranker saw.
+        ("# implementation_notes", "implementation brief"),
+        # An English stop word: the ranker ignores it, so the snippet must too.
+        ("# system", "system brief"),
+    ],
+)
+async def test_snippet_anchor_matches_ranked_lexical_tokens(
+    corpus: Path, header: str, query: str
+) -> None:
     write(
         corpus,
         "scripts/voice/brief.py",
-        "# implementation_notes\n" + "# filler\n" * 100 + "brief delivery details\n",
+        f"{header}\n" + "# filler\n" * 100 + "brief delivery details\n",
     )
     result = await VoiceRag(str(corpus), enabled=True).search(
-        "implementation brief", include_paths=["scripts/"]
+        query, include_paths=["scripts/"]
     )
     assert result["status"] == "ok"
     assert "brief delivery details" in result["results"][0]["snippet"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("lexical")
+async def test_retargeted_workspace_root_cannot_redirect_reads(
+    corpus: Path,
+    tmp_path_factory: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    other = tmp_path_factory.mktemp("other")
+    write(other, "scripts/voice/brief.py", "brief from an unsearched tree")
+    link = tmp_path_factory.mktemp("links") / "active"
+    link.symlink_to(corpus, target_is_directory=True)
+    rag = VoiceRag(str(link), enabled=True)
+    collect = rag._collect_filtered_files
+
+    def retarget_after_selection(
+        includes: tuple[str, ...], excludes: tuple[str, ...]
+    ) -> list[Path]:
+        paths = collect(includes, excludes)
+        link.unlink()
+        link.symlink_to(other, target_is_directory=True)
+        return paths
+
+    monkeypatch.setattr(rag, "_collect_filtered_files", retarget_after_selection)
+    result = await rag.search("brief", include_paths=["scripts/"])
+    assert link.resolve() == other.resolve()
+    assert result["status"] == "ok"
+    assert "standup-brief.json" in result["results"][0]["snippet"]
+    assert "unsearched" not in result["results"][0]["snippet"]

@@ -21,10 +21,10 @@ import re
 import stat
 import time
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +35,8 @@ _MAX_RESULTS = 5
 _MAX_SNIPPET = 400
 _MAX_FILES = 80
 _MAX_FILE_BYTES = 200_000
+# Shared by ranking and snippet anchoring so both see the same query tokens.
+_LEXICAL_STOP_WORDS = "english"
 
 # asyncio.wait_for cannot cancel a running asyncio.to_thread worker — the
 # underlying OS thread has no cancellation point and keeps running the
@@ -390,19 +392,42 @@ class VoiceRag:
                     return paths[:_MAX_FILES]
         return (paths + [p for p in recent if p not in seen])[:_MAX_FILES]
 
-    def _read_source(self, path: Path) -> tuple[bytes, float, str]:
-        """Read through pinned directory descriptors, never following source symlinks."""
+    @contextmanager
+    def _pinned_root(self) -> Iterator[int | None]:
+        """Hold one workspace directory open across source selection and reads.
+
+        Retargeting a symlinked workspace root mid-search must not redirect reads
+        into a different tree. Yields None when the root cannot be pinned safely.
+        """
+        fd = None
+        if (
+            self.workspace is not None
+            and hasattr(os, "O_NOFOLLOW")
+            and os.open in os.supports_dir_fd
+        ):
+            try:
+                fd = os.open(
+                    self.workspace.resolve(),
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                )
+            except (OSError, RuntimeError) as exc:
+                logger.debug("cannot open workspace root: %s", exc)
+        try:
+            yield fd
+        finally:
+            if fd is not None:
+                os.close(fd)
+
+    def _read_source(self, path: Path, root_fd: int) -> tuple[bytes, float, str]:
+        """Read below the pinned root, never following source symlinks."""
         if self.workspace is None:
             raise OSError("No workspace configured")
-        if not hasattr(os, "O_NOFOLLOW") or os.open not in os.supports_dir_fd:
-            raise OSError("Safe source reads require no-follow directory descriptors")
         relative = path.absolute().relative_to(self.workspace.absolute())
         if any(part in {".", ".."} for part in relative.parts):
             raise OSError("Invalid source path")
         with ExitStack() as stack:
             flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-            directory = os.open(self.workspace.resolve(), flags)
-            stack.callback(os.close, directory)
+            directory = root_fd
             for part in relative.parts[:-1]:
                 directory = os.open(part, flags, dir_fd=directory)
                 stack.callback(os.close, directory)
@@ -417,7 +442,9 @@ class VoiceRag:
                 raise OSError("Source is not a regular file")
             return stream.read(_MAX_FILE_BYTES + 1), info.st_mtime, relative.as_posix()
 
-    def _load_documents(self, paths: list[Path]) -> list[Any]:
+    def _load_documents(self, paths: list[Path], root_fd: int | None) -> list[Any]:
+        if root_fd is None:
+            return []
         try:
             from gptme_rag.indexing.document import Document
         except ImportError:
@@ -431,7 +458,7 @@ class VoiceRag:
             if not self._safe_source(path):
                 continue
             try:
-                raw, modified, rel = self._read_source(path)
+                raw, modified, rel = self._read_source(path, root_fd)
                 if len(raw) > _MAX_FILE_BYTES:
                     continue
                 content = raw.decode("utf-8", errors="replace")
@@ -460,7 +487,7 @@ class VoiceRag:
         if self.workspace is None:
             return str(path)
         try:
-            return str(path.resolve().relative_to(self.workspace.resolve()))
+            return path.absolute().relative_to(self.workspace.absolute()).as_posix()
         except ValueError:
             return str(path)
 
@@ -475,7 +502,7 @@ class VoiceRag:
         from gptme_rag.lexical import TfidfIndex
 
         index = TfidfIndex(
-            stop_words="english",
+            stop_words=_LEXICAL_STOP_WORDS,
             ngram_range=(1, 2),
             relevance_floor=1e-12 if require_match else 0.0,
         )
@@ -528,11 +555,14 @@ class VoiceRag:
                 "results": results[:n_results],
             }
 
-        paths = (
-            self._collect_filtered_files(includes, excludes)
-            if filtered
-            else self.collect_recent_files()
-        )
+        # Open the root before selecting, so reads cannot move to a later target.
+        with self._pinned_root() as root_fd:
+            paths = (
+                self._collect_filtered_files(includes, excludes)
+                if filtered
+                else self.collect_recent_files()
+            )
+            docs = self._load_documents(paths, root_fd)
         coverage["selected_files"] = len(paths)
         if not paths:
             return {
@@ -547,7 +577,6 @@ class VoiceRag:
                 ),
             }
 
-        docs = self._load_documents(paths)
         if not docs:
             return {
                 "status": "empty",
@@ -685,8 +714,12 @@ def _format_result(doc: Any, terms: str = "") -> dict[str, Any]:
     content = (getattr(doc, "content", None) or "").strip()
     start = 0
     if terms:
+        # Only filtered lexical hits pass terms, so scikit-learn is installed.
+        from sklearn.feature_extraction.text import CountVectorizer
+
+        analyze = CountVectorizer(stop_words=_LEXICAL_STOP_WORDS).build_analyzer()
         # Whole-file lexical ranking needs a matching passage, not just a header.
-        for term in sorted(set(re.findall(r"\w+", terms)), key=len, reverse=True):
+        for term in sorted(set(analyze(terms)), key=len, reverse=True):
             match = re.search(r"\b" + re.escape(term) + r"\b", content, re.IGNORECASE)
             if match is not None:
                 start = max(0, match.start() - 80)
