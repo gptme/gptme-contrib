@@ -554,30 +554,36 @@ def run_push_guard(
     # Prefer the explicit ``upstream`` relationship. Without it, only alias
     # ``origin`` for a push to the configured ``fork`` remote, not an arbitrary
     # destination (offline; remote names declare the relationship).
-    def _remote_slug(remote: str, *, push: bool = False) -> str | None:
+    def _remote_slugs(remote: str, *, push: bool = False) -> list[str]:
         import subprocess
 
         try:
             url = subprocess.run(
-                ["git", "remote", "get-url", *(["--push"] if push else []), remote],
+                [
+                    "git",
+                    "remote",
+                    "get-url",
+                    *(["--push", "--all"] if push else []),
+                    remote,
+                ],
                 capture_output=True,
                 text=True,
                 check=True,
                 timeout=5,
             ).stdout.strip()
         except Exception:
-            return None
-        return origin_slug(url)
+            return []
+        return [parsed for line in url.splitlines() if (parsed := origin_slug(line))]
 
     upstream_slug = (
-        _remote_slug("upstream")
+        next(iter(_remote_slugs("upstream")), None)
         if upstream_url is None
         else origin_slug(upstream_url or "")
     )
     base_slug = upstream_slug
-    if not base_slug and _remote_slug("fork", push=True) == slug:
+    if not base_slug and slug in _remote_slugs("fork", push=True):
         base_slug = (
-            _remote_slug("origin")
+            next(iter(_remote_slugs("origin")), None)
             if origin_url is None
             else origin_slug(origin_url or "")
         )

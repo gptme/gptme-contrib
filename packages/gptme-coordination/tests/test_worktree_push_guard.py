@@ -987,8 +987,9 @@ def test_push_guard_aliases_origin_when_no_upstream_remote(tmp_path: Path) -> No
 
 
 @pytest.mark.parametrize("separate_push_url", [False, True])
+@pytest.mark.parametrize("additional_push_url", [False, True])
 def test_push_guard_reads_base_slug_from_origin_remote(
-    tmp_path: Path, separate_push_url: bool
+    tmp_path: Path, separate_push_url: bool, additional_push_url: bool
 ) -> None:
     """With no explicit ``origin_url``, the guard reads the ``origin`` remote."""
     from gptme_coordination.db import CoordinationDB
@@ -1038,12 +1039,25 @@ def test_push_guard_reads_base_slug_from_origin_remote(
             check=True,
         )
 
+    destination = "git@github.com:TimeToBuildBob/aw-server.git"
+    if additional_push_url:
+        # Without --all Git returns only the first URL. Git nevertheless calls
+        # pre-push for every destination, so a later push URL must also alias.
+        subprocess.run(
+            ["git", "remote", "set-url", "--push", "fork", destination], check=True
+        )
+        destination = "git@github.com:backup/aw-server.git"
+        subprocess.run(
+            ["git", "remote", "set-url", "--add", "--push", "fork", destination],
+            check=True,
+        )
+
     db_path = tmp_path / "coord.db"
     rc = run_push_guard(
         ["refs/heads/feat abc123 refs/heads/feat def456"],
         worktree_root=tmp_path / "wt",
         brain_root=tmp_path / "brain",
-        remote_url="git@github.com:TimeToBuildBob/aw-server.git",
+        remote_url=destination,
         session_id="sess-1",
         agent_id="agent-b",
         deny=True,
@@ -1052,8 +1066,9 @@ def test_push_guard_reads_base_slug_from_origin_remote(
     assert rc == 0
     with CoordinationDB(db_path) as db:
         work = WorkClaimManager(db)
+        destination_slug = "backup" if additional_push_url else "timetobuildbob"
         for key in (
-            "pr-branch:timetobuildbob/aw-server#feat",
+            f"pr-branch:{destination_slug}/aw-server#feat",
             "pr-branch:activitywatch/aw-server#feat",
         ):
             claim = work.get(key)
