@@ -1086,6 +1086,19 @@ class AgentEmail:
         """Lock making "is this filename taken?" atomic with writing or moving it."""
         return FileLock(self.locks_dir / "message_store.lock")
 
+    def _conflicts_with_stored(self, filename: str, content: str) -> bool:
+        """Whether storing ``content`` would shadow a different stored message.
+
+        A copy in any message folder may overlap (All Mail/Inbox) only when it
+        is the same stored message.
+        """
+        originals = (self.email_dir / folder / filename for folder in self._MESSAGE_FOLDERS)
+        return any(
+            not _same_stored_message(path.read_text(), content)
+            for path in originals
+            if path.is_file()
+        )
+
     def compose(
         self,
         to: str,
@@ -1538,15 +1551,15 @@ class AgentEmail:
                     if archive_path.exists():
                         archived = archive_path.read_bytes()
                         source = source_path.read_bytes()
-                        if archived == source:
-                            # All Mail and Inbox can hold the same stored message.
+                        archived_text = archived.decode("utf-8", errors="surrogateescape")
+                        source_text = source.decode("utf-8", errors="surrogateescape")
+                        if archived == source or _same_stored_message(source_text, archived_text):
+                            # All Mail and Inbox can hold the same stored message;
+                            # the archived copy has everything the source has.
                             source_path.unlink()
-                            print(f"Message {message_id} archived (identical copy already present)")
+                            print(f"Message {message_id} archived (copy already present)")
                             return
-                        if not _same_stored_message(
-                            archived.decode("utf-8", errors="surrogateescape"),
-                            source.decode("utf-8", errors="surrogateescape"),
-                        ):
+                        if not _same_stored_message(archived_text, source_text):
                             # rename() would silently replace the archived original.
                             raise ValueError(
                                 f"Message {message_id} already exists in archive; "
@@ -2456,18 +2469,7 @@ class AgentEmail:
                             skipped += 1
                             processed_files.add(maildir_filename)
                             continue
-                        # A copy in another folder may be an All Mail/Inbox
-                        # overlap, or an impostor reusing a Message-ID. Only the
-                        # same stored message may overlap.
-                        originals = [
-                            self.email_dir / other / filename
-                            for other in self._MESSAGE_FOLDERS
-                            if (self.email_dir / other / filename).is_file()
-                        ]
-                        if any(
-                            not _same_stored_message(path.read_text(), content)
-                            for path in originals
-                        ):
+                        if self._conflicts_with_stored(filename, content):
                             skipped += 1
                             processed_files.add(maildir_filename)
                             print(f"Skipping conflicting Message-ID: {message_id[:50]}...")
@@ -2668,8 +2670,9 @@ class AgentEmail:
                     dest_file = dest_dir / filename
 
                     with self._message_store_lock():
-                        # Skip if already exists
-                        if dest_file.exists():
+                        # Skip if already exists, or if it would shadow a
+                        # different message held in another folder.
+                        if dest_file.exists() or self._conflicts_with_stored(filename, content):
                             skipped += 1
                             continue
 

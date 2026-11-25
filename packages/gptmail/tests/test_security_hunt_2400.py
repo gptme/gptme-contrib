@@ -479,6 +479,44 @@ def test_inbox_sync_accepts_overlap_with_legacy_archive_copy(
     assert (mail.email_dir / "archive" / filename).read_text() == richer
 
 
+def test_archive_drops_legacy_source_when_archive_copy_is_richer(
+    mail: AgentEmail, tmp_path: Path
+) -> None:
+    message_id = "<legacy-inbox@example.com>"
+    filename = mail._format_filename(message_id)
+    inbox = mail.email_dir / "inbox" / filename
+    _sync_one(mail, tmp_path, "inbox", message_id, LATE_HEADERS)
+    _drop_headers(inbox, *LATE_NAMES)
+    _sync_one(mail, tmp_path, "archive", message_id, LATE_HEADERS)
+    archived = mail.email_dir / "archive" / filename
+    richer = archived.read_text()
+
+    mail.archive(message_id)
+
+    assert not inbox.exists()
+    assert archived.read_text() == richer
+
+
+@pytest.mark.parametrize("original_folder", ["sent", "archive"])
+def test_import_does_not_shadow_message_in_another_folder(
+    mail: AgentEmail, tmp_path: Path, original_folder: str
+) -> None:
+    message_id = "<imported@example.com>"
+    filename = mail._format_filename(message_id)
+    original = mail.email_dir / original_folder / filename
+    original.write_text(f"Message-ID: {message_id}\n\nORIGINAL\n")
+    source = tmp_path / "import-maildir"
+    (source / "new").mkdir(parents=True)
+    raw = source / "new" / "m"
+    _maildir_msg(raw, message_id=message_id, body="IMPOSTOR")
+
+    assert mail.import_from_maildir(source, "inbox")["skipped"] == 1
+    assert not (mail.email_dir / "inbox" / filename).exists()
+
+    raw.write_text(original.read_text())
+    assert mail.import_from_maildir(source, "inbox")["success"] == 1
+
+
 @pytest.mark.parametrize(
     ("old", "new"),
     [
