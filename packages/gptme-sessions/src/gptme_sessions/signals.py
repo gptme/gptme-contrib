@@ -174,7 +174,10 @@ def _stated_commit_subjects(cmd: str) -> list[str]:
         if subject:
             found.append((match.start(), subject))
     for heredoc in heredocs:
-        subject = heredoc.group(2).strip().splitlines()[0].strip()
+        body = heredoc.group(2).strip()
+        if not body:  # empty heredoc message states no subject
+            continue
+        subject = body.splitlines()[0].strip()
         if subject:
             found.append((heredoc.start(), subject))
     subjects = [subject for _, subject in sorted(found)]

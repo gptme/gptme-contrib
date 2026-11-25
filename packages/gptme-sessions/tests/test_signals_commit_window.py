@@ -229,3 +229,13 @@ def test_combined_short_flags_state_the_heredoc_subject() -> None:
         cmd = f"git commit {flag} \"$(cat <<'EOF'\nfeat: x\n\nbody line\nEOF\n)\""
         assert _commit_subject(cmd) == "feat: x", flag
         assert _stated_commit_subjects(cmd) == ["feat: x"], flag
+
+
+def test_empty_heredoc_body_states_no_subject() -> None:
+    """An empty or whitespace-only heredoc message states no subject instead of raising."""
+    from gptme_sessions.signals import _stated_commit_subjects
+
+    for flag in ("-m", "-am"):
+        for body in ("", "   \n\t"):
+            cmd = f"git commit {flag} \"$(cat <<'EOF'\n{body}\nEOF\n)\""
+            assert _stated_commit_subjects(cmd) == [], (flag, body)
