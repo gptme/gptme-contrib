@@ -1026,3 +1026,54 @@ def test_parse_partial_rejection_supersedes_approval(
 ) -> None:
     result = _parse_review(llm_module, _REVIEW_JSON + "\nRevised:\n" + revision)
     assert result == llm_module.ReviewResponse.default()
+
+
+@pytest.mark.parametrize(
+    "prose",
+    [
+        "Plan: fill {tweet text} into the format.",
+        "Shape is { ... } as requested.",
+        "Pick from {a, b} or {'a', 'b'}.",
+        "Template: {{text}}",
+        "A stray { brace in prose, then my recommendation: below.",
+    ],
+    ids=["spaced-placeholder", "ellipsis", "set", "double-brace", "stray"],
+)
+def test_parse_ignores_prose_braces_around_answer(
+    llm_module: types.ModuleType, prose: str
+) -> None:
+    result = _parse_review(llm_module, f"{prose}\n{_REVIEW_JSON}\n{prose}")
+    assert result.recommendation == "approve"
+
+
+@pytest.mark.parametrize(
+    "revision",
+    [
+        '{..., "recommendation": "reject"}',
+        "{'recommendation': 'reject'}",
+        '{ // revised\n "recommendation": "reject"}',
+        '{"recommendation" "reject"}',
+    ],
+    ids=["elided", "single-quoted", "commented", "missing-colon"],
+)
+def test_parse_json_like_broken_revision_fails_closed(
+    llm_module: types.ModuleType, revision: str
+) -> None:
+    result = _parse_review(llm_module, _REVIEW_JSON + "\nRevised:\n" + revision)
+    assert result == llm_module.ReviewResponse.default()
+
+
+def test_parse_skips_reasoning_closed_without_opener(
+    llm_module: types.ModuleType,
+) -> None:
+    """Some chat templates put "<think>" in the prompt, so only the closer shows."""
+    reasoning = 'Draft: {"recommendation": "reject", ...} looks wrong.\n</think>\n'
+    result = _parse_review(llm_module, reasoning + _REVIEW_JSON)
+    assert result.recommendation == "approve"
+
+
+def test_parse_drops_draft_from_reasoning_closed_without_opener(
+    llm_module: types.ModuleType,
+) -> None:
+    result = _parse_review(llm_module, _REVIEW_JSON + "\n</think>\nNo verdict.")
+    assert result == llm_module.ReviewResponse.default()

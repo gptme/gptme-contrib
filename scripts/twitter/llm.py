@@ -588,7 +588,22 @@ Any analysis or thinking should be included in the "reasoning" field of the JSON
 
 T = TypeVar("T", EvaluationResponse, TweetResponse, ReviewResponse)
 
-_RESPONSE_TOKEN_RE = re.compile(r"<think>.*?(?:</think>|\Z)|\{", re.DOTALL)
+_RESPONSE_TOKEN_RE = re.compile(r"<think>.*?(?:</think>|\Z)|</think>|\{", re.DOTALL)
+
+
+# An object opener: {"... or {key: ...
+_JSON_OPENER_RE = re.compile(r'\{\s*(?:"|\w+\s*:)')
+
+
+def _looks_like_json(text: str, start: int, fields: set[str]) -> bool:
+    """Whether the undecodable "{" at ``start`` was meant as JSON, not prose."""
+    if _JSON_OPENER_RE.match(text, start):
+        return True
+    # Or it names a response field as a key before the next brace.
+    end = re.compile(r"[{}]").search(text, start + 1)
+    head = text[start : end.start() if end else len(text)]
+    names = "|".join(map(re.escape, fields))
+    return bool(re.search(rf"""(?:["'](?:{names})["']|,\s*(?:{names}))\s*:""", head))
 
 
 def parse_llm_response(content: str, response_type: Type[T], task: TaskType) -> T:
@@ -612,22 +627,28 @@ def parse_llm_response(content: str, response_type: Type[T], task: TaskType) -> 
     pos = 0
     while token := _RESPONSE_TOKEN_RE.search(text, pos):
         pos = token.end()
+        if token.group() == "</think>":
+            # Some chat templates put "<think>" in the prompt, so only the
+            # closer shows up: everything before it was reasoning.
+            parsed = None
         # Only skip reasoning markup between objects, never inside JSON strings.
         if token.group() != "{":
             continue
-        pos = token.start()
         try:
-            data, end = decoder.raw_decode(text, pos)
+            data, pos = decoder.raw_decode(text, token.start())
         except json.JSONDecodeError:
-            # Bare placeholders such as {review} are prose, not broken answers.
-            # Anything else fails closed: scanning inside malformed JSON could
-            # keep a stale approval or promote a nested draft from a revision.
-            placeholder = re.match(r"\{\w+\}", text[pos:])
-            if placeholder:
-                pos += placeholder.end()
+            # Prose braces such as {tweet text} or { ... } are not answers.
+            if not _looks_like_json(text, token.start(), expected_keys):
                 continue
+            # Broken JSON fails closed: scanning inside it could keep a stale
+            # approval or promote a nested draft from a revision. The exception
+            # is broken JSON in reasoning whose opener was in the prompt.
             parsed = None
-            break
+            closer = text.find("</think>", pos)
+            if closer < 0 or "<think>" in text[pos:closer]:
+                break
+            pos = closer
+            continue
         if isinstance(data, dict):
             try:
                 parsed = response_type.from_dict(data)
@@ -636,7 +657,6 @@ def parse_llm_response(content: str, response_type: Type[T], task: TaskType) -> 
                 # keeping the stale one could resurrect a revised approval.
                 if answer_keys & data.keys():
                     parsed = None
-        pos = end
     if parsed is not None:
         return parsed
     console.print(f"[red]Error: Could not parse LLM response for {task.value}")
