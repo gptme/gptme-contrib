@@ -2720,6 +2720,70 @@ def _gptme_core_carries_default(line: str) -> bool:
     )
 
 
+# Value-only lines inside a `[...]`/`{...}` literal: a changed default in a
+# multi-line mapping or list removes `    "anthropic": "claude-sonnet-4",` or
+# `    "openai/gpt-5",`, which carries no identifier and no "default" keyword,
+# so the line shapes above miss it. Bracket depth is tracked over the patch, so
+# only removals from inside a bracketed literal count — a stray string removed
+# from a function body or a test does not (plain `(...)` calls are not
+# brackets; a keyword line in a multi-line call already holds via shape 4).
+_GPTME_CORE_LITERAL_SHAPE_RES = (
+    re.compile(r"""^\s*["'][^"'\n]+["']\s*:\s*\S"""),
+    re.compile(r"""^\s*["'][^"'\n]*["']\s*,?\s*(?:#.*)?$"""),
+    re.compile(r"^\s*-?\d+(?:\.\d+)?\s*,?\s*(?:#.*)?$"),
+    re.compile(r"^\s*(?:True|False|None)\s*,?\s*(?:#.*)?$"),
+)
+
+
+def _bracket_delta(line: str) -> int:
+    """Net `[`/`{` minus `]`/`}` in a line, ignoring string and comment text."""
+    depth = 0
+    quote: str | None = None
+    escaped = False
+    for ch in line:
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == quote:
+                quote = None
+            continue
+        if ch in "\"'":
+            quote = ch
+        elif ch == "#":
+            break
+        elif ch in "[{":
+            depth += 1
+        elif ch in "]}":
+            depth -= 1
+    return depth
+
+
+def _gptme_core_removed_literal_lines(patch: str | None) -> list[str]:
+    """Removed literal lines that sit inside a `[...]`/`{...}` in the patch.
+
+    Walks every line (context included) tracking bracket depth, so a removal is
+    only reported once the diff has opened a bracketed literal above it.
+    """
+    if not patch:
+        return []
+    depth = 0
+    found: list[str] = []
+    for line in patch.splitlines():
+        if line.startswith(("---", "+++", "@@")):
+            continue
+        body = line[1:] if line[:1] in "+- " else line
+        if (
+            line.startswith("-")
+            and depth > 0
+            and any(rx.match(body) for rx in _GPTME_CORE_LITERAL_SHAPE_RES)
+        ):
+            found.append(body)
+        depth = max(0, depth + _bracket_delta(body))
+    return found
+
+
 def _iter_json_documents(text: str) -> Iterator[Any]:
     """Yield successive JSON values from paginated compact API/jq output.
 
@@ -2852,6 +2916,7 @@ def gptme_core_route_to_erik_reasons(
     required_config: set[str] = set()
     changed_config: set[str] = set()
     sensitive_surface: set[str] = set()
+    unknown_patch: set[str] = set()
 
     for entry in file_shapes:
         path = str(entry.get("path", "")).replace("\\", "/").removeprefix("./")
@@ -2859,6 +2924,17 @@ def gptme_core_route_to_erik_reasons(
         patch = cast("str | None", entry.get("patch"))
         added_lines = _gptme_core_added_lines(patch)
         removed_lines = _gptme_core_removed_lines(patch)
+        changed_literal = bool(_gptme_core_removed_literal_lines(patch))
+        removed_lines.extend(_gptme_core_removed_literal_lines(patch))
+        # GitHub omits `patch` for large diffs, binary files and pure renames.
+        # No evidence is read as "no auth/default change", which is exactly the
+        # class Erik asked to keep held, so a missing patch is unknown and holds
+        # on every surface these shape detectors read.
+        if patch is None and (
+            path.startswith("gptme/config/")
+            or path.startswith(_GPTME_CORE_SENSITIVE_SURFACE_PREFIXES)
+        ):
+            unknown_patch.add(path)
 
         if status == "added" and path.startswith("gptme/cli/"):
             new_cli_files.add(path)
@@ -2873,7 +2949,7 @@ def gptme_core_route_to_erik_reasons(
                 for line in added_lines
             ):
                 required_config.add(path)
-            if any(
+            if changed_literal or any(
                 _GPTME_CORE_CONFIG_FIELD_RE.match(line)
                 or _gptme_core_carries_default(line)
                 for line in removed_lines
@@ -2883,6 +2959,7 @@ def gptme_core_route_to_erik_reasons(
             sensitive_surface.add(path)
         elif path.startswith(_GPTME_CORE_SENSITIVE_SURFACE_PREFIXES) and (
             any(_GPTME_CORE_AUTH_BILLING_RE.search(line) for line in added_lines)
+            or changed_literal
             or any(
                 _GPTME_CORE_AUTH_BILLING_RE.search(line)
                 or _gptme_core_carries_default(line)
@@ -2921,6 +2998,15 @@ def gptme_core_route_to_erik_reasons(
             + '): Erik — "avoid making too much auth cloud-specific"; silent '
             "auth/provider misrouting is exactly this class (auto-merge-"
             "analysis §3 cluster 3, e.g. gptme#2820, #2901)"
+        )
+    if unknown_patch:
+        reasons.append(
+            "Diff text unavailable for ("
+            + ", ".join(sorted(unknown_patch))
+            + "): GitHub omits `patch` for large diffs, binary files and pure "
+            "renames, so the auth/billing/default shapes cannot be read; a "
+            "missing patch is unknown, not clean, and holds (merge rules "
+            "2026-11-24)"
         )
 
     return reasons

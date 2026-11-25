@@ -2751,6 +2751,81 @@ def test_gptme_core_modified_existing_module_is_not_new() -> None:
     assert reasons == []
 
 
+def test_gptme_core_missing_patch_on_sensitive_surface_holds() -> None:
+    """`patch` is omitted for large/binary diffs and pure renames. Reading that
+    as "no auth/default change" would let exactly that class through, so a
+    missing patch holds (review finding 6f65a957f336)."""
+    file_shapes = [
+        {"path": "gptme/llm/llm_openai.py", "status": "modified"},
+        {"path": "gptme/config/models.py", "status": "modified", "patch": None},
+        {"path": "gptme/tools/browser.py", "status": "modified"},
+    ]
+    reasons = self_merge_check.gptme_core_route_to_erik_reasons(
+        "fix(llm): large rewrite", "", file_shapes
+    )
+    joined = " ".join(reasons)
+    assert "gptme/llm/llm_openai.py" in joined
+    assert "gptme/config/models.py" in joined
+    # Unscanned surfaces stay eligible: nothing on them reads patch text.
+    assert "gptme/tools/browser.py" not in joined
+
+
+def test_gptme_core_changed_mapping_default_holds() -> None:
+    """A default model swapped inside a mapping or list is a value-only line
+    with no identifier and no "default" keyword (review finding dd7b3135e311)."""
+    file_shapes = [
+        {
+            "path": "gptme/llm/models.py",
+            "status": "modified",
+            "patch": (
+                "@@ -18,7 +18,7 @@\n"
+                " PROVIDER_DEFAULTS = {\n"
+                '-    "anthropic": "claude-sonnet-4",\n'
+                '+    "anthropic": "claude-opus-5",\n'
+                " }\n"
+            ),
+        },
+        {
+            "path": "gptme/providers/registry.py",
+            "status": "modified",
+            "patch": (
+                "@@ -4,5 +4,5 @@\n"
+                " ORDER = [\n"
+                '-    "openai/gpt-5",\n'
+                '+    "openai/gpt-6",\n'
+                " ]\n"
+            ),
+        },
+    ]
+    reasons = self_merge_check.gptme_core_route_to_erik_reasons(
+        "fix(llm): refresh provider defaults", "", file_shapes
+    )
+    joined = " ".join(reasons)
+    assert "gptme/llm/models.py" in joined
+    assert "gptme/providers/registry.py" in joined
+
+
+def test_gptme_core_literal_removal_outside_brackets_does_not_hold() -> None:
+    """Depth tracking keeps the new literal shape from over-holding: a string
+    removed from a function body (or a test) is not a changed default."""
+    file_shapes = [
+        {
+            "path": "gptme/llm/llm_openai.py",
+            "status": "modified",
+            "patch": (
+                "@@ -40,7 +40,6 @@ def _headers(key):\n"
+                "     key = key.strip()\n"
+                '-    note = "retry disabled"\n'
+                '     return {"Authorization": key}\n'
+            ),
+        },
+    ]
+    reasons = self_merge_check.gptme_core_route_to_erik_reasons(
+        "fix(llm): drop a stale note", "", file_shapes
+    )
+    assert reasons == []
+
+
 def _evaluate_gptme_core(
     files: list[dict[str, Any]],
     file_shapes: list[dict[str, Any]],
