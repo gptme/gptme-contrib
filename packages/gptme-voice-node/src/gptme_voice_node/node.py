@@ -237,7 +237,9 @@ class VoiceNode:
                 speaker_started = True
                 vision_started = self._start_vision(ws)
                 send_task = asyncio.create_task(self._send_loop(ws, mic))
-                recv_task = asyncio.create_task(self._recv_loop(ws, speaker))
+                recv_task = asyncio.create_task(
+                    self._recv_loop(ws, speaker, vision_started)
+                )
                 try:
                     # End the session as soon as either loop ends. When the
                     # socket drops mid-playback the recv loop returns, but the
@@ -292,7 +294,9 @@ class VoiceNode:
                 msg = {"type": "audio", "audio": base64.b64encode(raw).decode()}
                 await ws.send(json.dumps(msg))
 
-    async def _recv_loop(self, ws, speaker_stream) -> None:
+    async def _recv_loop(
+        self, ws, speaker_stream, vision_started: bool = False
+    ) -> None:
         """Receive audio frames from server and play them.
 
         Uses explicit ws.recv() rather than ``async for`` so that the loop
@@ -320,12 +324,29 @@ class VoiceNode:
                 data = json.loads(raw_msg)
                 if not isinstance(data, dict):
                     raise TypeError("message must be a JSON object")
+                msg_type = data.get("type")
+                if msg_type == "vision_look_request" and not vision_started:
+                    # The connection advertises a configured camera before its
+                    # pipeline starts. Never serve a previous session's cached
+                    # frame when startup failed; settle look with an error.
+                    request_id = data.get("request_id")
+                    if isinstance(request_id, str) and request_id:
+                        await ws.send(
+                            json.dumps(
+                                {
+                                    "type": "vision_look_result",
+                                    "request_id": request_id,
+                                    "error": "Camera unavailable for this session.",
+                                }
+                            )
+                        )
+                    continue
                 if (
-                    self.vision_bridge is not None
+                    vision_started
+                    and self.vision_bridge is not None
                     and await self.vision_bridge.handle_message(data, ws.send)
                 ):
                     continue
-                msg_type = data.get("type")
                 if msg_type == "audio":
                     audio = data.get("audio")
                     if not isinstance(audio, str):
