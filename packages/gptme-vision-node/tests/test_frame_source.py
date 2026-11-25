@@ -135,3 +135,36 @@ def test_camera_reopens_after_stream_drop(monkeypatch):
     assert captures[0].released
     assert source.get_frame() is expected
     assert len(captures) == 2
+
+
+@pytest.mark.parametrize("after_drop", [False, True])
+def test_camera_retries_failed_opens_until_recovery(monkeypatch, after_drop):
+    """Opening an unavailable stream is an empty poll, including after a drop."""
+    from unittest.mock import Mock
+
+    expected = solid_frame((7, 8, 9))
+    dropped = Mock()
+    dropped.isOpened.return_value = True
+    dropped.read.return_value = (False, None)
+    unavailable = [Mock(), Mock()]
+    for cap in unavailable:
+        cap.isOpened.return_value = False
+    recovered = Mock()
+    recovered.isOpened.return_value = True
+    recovered.read.return_value = (True, expected)
+    captures = ([dropped] if after_drop else []) + unavailable + [recovered]
+    open_capture = Mock(side_effect=captures)
+    monkeypatch.setattr(cv2, "VideoCapture", open_capture)
+    source = OpenCVCameraSource("rtsp://cam/stream", read_attempts=2)
+
+    if after_drop:
+        assert source.get_frame() is None
+        dropped.release.assert_called_once()
+    for cap in unavailable:
+        assert source.get_frame() is None
+        cap.release.assert_called_once()
+        cap.read.assert_not_called()
+    assert source.get_frame() is expected
+    assert open_capture.call_count == len(captures)
+    source.release()
+    recovered.release.assert_called_once()

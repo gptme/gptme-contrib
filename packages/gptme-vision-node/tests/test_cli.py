@@ -352,3 +352,58 @@ def test_cli_detect_once_on_dead_camera_fails(monkeypatch):
 
     assert result.exit_code == 1
     assert "source produced no frame" in result.output
+
+
+@pytest.mark.parametrize("once", [False, True])
+def test_cli_detect_failed_camera_reopen(monkeypatch, once):
+    """Exercise real capture-source polling through a multi-poll outage."""
+    from unittest.mock import Mock
+
+    expected = scene_frame(4)
+    dropped = Mock()
+    dropped.isOpened.return_value = True
+    dropped.read.return_value = (False, None)
+    unavailable = [Mock(), Mock()]
+    for cap in unavailable:
+        cap.isOpened.return_value = False
+    recovered = Mock()
+    recovered.isOpened.return_value = True
+    recovered.read.return_value = (True, expected)
+    captures = [dropped, *unavailable, recovered]
+    open_capture = Mock(side_effect=captures)
+    monkeypatch.setattr(cv2, "VideoCapture", open_capture)
+    detector = Mock()
+    detector.detect.return_value = []
+    monkeypatch.setattr(cli, "PersonDetector", lambda: detector)
+    monkeypatch.setattr(cli, "MotionDetector", lambda: detector)
+    polls = 0
+
+    def next_poll(interval):
+        nonlocal polls
+        polls += 1
+        if polls == len(captures):
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli.time, "sleep", next_poll)
+    args = ["detect", "--source", "rtsp://cam/stream"]
+    if once:
+        args.append("--once")
+        # Start --once during the outage, rather than at the initial drop.
+        captures.pop(0)
+    result = CliRunner().invoke(cli.main, args)
+
+    if once:
+        assert result.exit_code == 1
+        assert "source produced no frame" in result.output
+        unavailable[0].release.assert_called_once()
+        detector.detect.assert_not_called()
+        assert open_capture.call_count == 1
+    else:
+        assert result.exit_code == 0, result.output
+        assert result.output.count("(no frame)") == 3
+        assert "(no detections)" in result.output
+        for cap in captures:
+            cap.release.assert_called_once()
+        assert open_capture.call_count == len(captures)
+        assert detector.detect.call_count == 2
+        assert detector.detect.call_args.args[0] is expected

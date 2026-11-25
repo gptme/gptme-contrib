@@ -68,7 +68,8 @@ class OpenCVCameraSource:
     The capture is opened lazily on first ``get_frame`` so constructing the
     source is cheap and testable without hardware. After ``read_attempts``
     consecutive failed reads the capture is released and reopened on the
-    next call, so a node recovers when a stream comes back.
+    next call, so a node recovers when a stream comes back. Failed opens
+    return None as well; callers control the polling interval.
     """
 
     stop_on_empty = False
@@ -80,17 +81,19 @@ class OpenCVCameraSource:
         self.read_attempts = read_attempts
         self._cap: cv2.VideoCapture | None = None
 
-    def _ensure_open(self) -> cv2.VideoCapture:
+    def _ensure_open(self) -> cv2.VideoCapture | None:
         if self._cap is None:
             self._cap = cv2.VideoCapture(self.source)
             if not self._cap.isOpened():
                 cap, self._cap = self._cap, None
                 cap.release()
-                raise RuntimeError(f"failed to open capture source: {self.source!r}")
+                return None
         return self._cap
 
     def get_frame(self) -> np.ndarray | None:
         cap = self._ensure_open()
+        if cap is None:
+            return None
         for _ in range(self.read_attempts):
             ok, frame = cap.read()
             if ok and frame is not None:
