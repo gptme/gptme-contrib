@@ -76,10 +76,17 @@ def init_repo(network_dir: Path = DEFAULT_NETWORK_DIR, force: bool = False) -> P
         if top.returncode == 0 and network_dir.samefile(top.stdout.rstrip("\n")):
             print(f"✓ Network repo exists: {network_dir}")
             return network_dir
-        # Never delete a directory we did not create without --force.
+        # Never delete a directory we did not create without --force. Git can
+        # also refuse a valid clone (e.g. "dubious ownership"), so show why and
+        # do not steer the user straight to --force.
+        if top.returncode == 0:
+            reason = f"it is inside the work tree {top.stdout.strip()}"
+        else:
+            reason = top.stderr.strip()
         raise SyncError(
-            f"{network_dir} exists but is not a git repository; "
-            "move it aside or re-run with --force to replace it"
+            f"{network_dir} exists but cannot be used as the network repo: "
+            f"{reason}\nFix the problem or move the directory aside. "
+            "--force deletes it, including any unpushed commits."
         )
 
     # Clone next to the target first, so a failed clone (offline, auth)
@@ -100,13 +107,25 @@ def init_repo(network_dir: Path = DEFAULT_NETWORK_DIR, force: bool = False) -> P
             capture_output=True,
             text=True,
         )
-        if network_dir.exists():
-            shutil.rmtree(network_dir)
-        clone_dir.rename(network_dir)
+        # Move the old directory into staging instead of deleting it in place,
+        # so a failed swap can put it back. A symlink is moved as a link: its
+        # target is left alone.
+        old_dir = staging / "old"
+        replace = force and (network_dir.exists() or network_dir.is_symlink())
+        if replace:
+            network_dir.rename(old_dir)
+        try:
+            clone_dir.rename(network_dir)
+        except OSError:
+            if replace:
+                old_dir.rename(network_dir)
+            raise
         print(f"✓ Cloned to {network_dir}")
         return network_dir
     except subprocess.CalledProcessError as e:
         raise SyncError(f"Failed to clone: {e.stderr}") from e
+    except OSError as e:
+        raise SyncError(f"Failed to replace {network_dir}: {e}") from e
     finally:
         shutil.rmtree(staging, ignore_errors=True)
 

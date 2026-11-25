@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import types
+from pathlib import Path
 
 import pytest
 
@@ -67,6 +68,20 @@ def test_init_repo_refuses_non_repo_directory_without_force(
     assert (target / "my-notes.md").read_text() == "user content\n"
 
 
+def test_init_repo_reports_why_git_refused_a_valid_clone(tmp_path, monkeypatch, sync):
+    remote = _bare_remote_with_seed(tmp_path)
+    clone = tmp_path / "network"
+    subprocess.run(
+        ["git", "clone", "-q", str(remote), str(clone)],
+        check=True,
+        capture_output=True,
+    )
+    monkeypatch.setenv("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
+
+    with pytest.raises(sync.SyncError, match="dubious ownership"):
+        sync.init_repo(clone)
+
+
 def test_init_repo_refuses_directory_inside_enclosing_repo(tmp_path, monkeypatch, sync):
     # e.g. ~/.gptme/network inside a version-controlled home: accepting it would
     # let push_lessons push the enclosing repo's commits.
@@ -75,7 +90,7 @@ def test_init_repo_refuses_directory_inside_enclosing_repo(tmp_path, monkeypatch
     target.mkdir()
     monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent))
 
-    with pytest.raises(sync.SyncError, match="not a git repository"):
+    with pytest.raises(sync.SyncError, match="inside the work tree"):
         sync.init_repo(target)
 
 
@@ -118,6 +133,45 @@ def test_init_repo_force_replaces_directory_after_successful_clone(
     assert sync.init_repo(target, force=True) == target
     assert (target / "README.md").read_text() == "network\n"
     assert not (target / "stale.md").exists()
+
+
+def test_init_repo_force_replaces_symlink_and_keeps_its_target(
+    tmp_path, monkeypatch, sync
+):
+    monkeypatch.setattr(sync, "NETWORK_REPO_URL", str(_bare_remote_with_seed(tmp_path)))
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "my-notes.md").write_text("user content\n")
+    link = tmp_path / "network"
+    link.symlink_to(real, target_is_directory=True)
+
+    assert sync.init_repo(link, force=True) == link
+    assert not link.is_symlink()
+    assert (link / "README.md").exists()
+    assert (real / "my-notes.md").read_text() == "user content\n"
+
+
+def test_init_repo_force_restores_directory_when_swap_fails(
+    tmp_path, monkeypatch, sync
+):
+    monkeypatch.setattr(sync, "NETWORK_REPO_URL", str(_bare_remote_with_seed(tmp_path)))
+    target = tmp_path / "network"
+    target.mkdir()
+    (target / "my-notes.md").write_text("user content\n")
+    before = sorted(p.name for p in tmp_path.iterdir())
+    real_rename = Path.rename
+
+    def fail_moving_clone_in(self, dest):
+        if self.name == "network" and self != target:
+            raise PermissionError("rename refused")
+        return real_rename(self, dest)
+
+    monkeypatch.setattr(Path, "rename", fail_moving_clone_in)
+
+    with pytest.raises(sync.SyncError, match="rename refused"):
+        sync.init_repo(target, force=True)
+    assert (target / "my-notes.md").read_text() == "user content\n"
+    assert sorted(p.name for p in tmp_path.iterdir()) == before
 
 
 def test_push_lessons_pushes_commit_left_by_failed_push(tmp_path, monkeypatch, sync):
