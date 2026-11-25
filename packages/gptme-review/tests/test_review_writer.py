@@ -94,14 +94,14 @@ def test_copied_marker_from_another_author_is_ignored_not_deleted(alice_io):
 
 
 @pytest.mark.parametrize(
-    "marker",
+    ("marker", "sha_key"),
     [
-        '<!-- rev {"sha": "abc"} -->',
-        '<!-- rev-publishing {"sha": "abc"} -->',
-        "<!-- rev head-sha: abc -->",
+        ('<!-- rev {"sha": "abc"} -->', "sha"),
+        ('<!-- rev-publishing {"publishing_sha": "abc"} -->', "publishing_sha"),
+        ("<!-- rev head-sha: abc -->", "sha"),
     ],
 )
-def test_marker_namespace_is_not_matched_as_a_prefix(marker):
+def test_marker_namespace_is_not_matched_as_a_prefix(marker, sha_key):
     # Same author runs namespace `rev` and `rev-ai`: `<!-- rev` is a substring
     # of `<!-- rev-ai`, which made the newer rev-ai marker the keeper and
     # deleted the real `rev` marker (contrib#2384 defect 12).
@@ -120,7 +120,7 @@ def test_marker_namespace_is_not_matched_as_a_prefix(marker):
     w = writer.bind_io(io)
     keeper = w.find_marker_comment("o/r", 7)
     assert keeper is not None and keeper["id"] == 1
-    assert w.marker_state(keeper["body"])["sha"] == "abc"
+    assert w.marker_state(keeper["body"])[sha_key] == "abc"
     assert calls == []
 
 
