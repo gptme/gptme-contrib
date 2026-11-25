@@ -483,3 +483,73 @@ def test_spelled_out_chapter_numbers_and_indented_headings():
     assert "Section Inside" in sections
     # The indented comment stays body text, not a section boundary.
     assert not any("not a heading" in s for s in sections)
+
+
+def test_wrapped_prose_chapter_references_are_not_chapters():
+    """A hard-wrapped prose line starting with "Chapter 3"/"Part one" is body
+    text, not a chapter heading: a heading's title is capitalised or follows a
+    separator, while prose continues in lower case."""
+    body = " ".join(["word"] * 80)
+    text = "\n".join(
+        [
+            "# Chapter 1 Variables",
+            body,
+            "Chapter 3 showed how lists are mutable, so",
+            body,
+            "Part one of the solution is to copy the list.",
+            body,
+            "Chapter 4, the interpreter evaluates the expression.",
+            body,
+            "Chapter 2: Core Concepts",
+            body,
+            "Part Two Advanced Topics",
+            body,
+        ]
+    )
+    docs = parse_book_text(
+        text, source="t", title="T", url="u", target_tokens=5000, min_chunk_tokens=10
+    )
+    chapters = {d.chapter for d in docs}
+    assert chapters == {
+        "Chapter 1 Variables",
+        "Chapter 2: Core Concepts",
+        "Part Two Advanced Topics",
+    }
+    # The prose lines stay in the body instead of being dropped as headings.
+    contents = " ".join(d.content for d in docs)
+    assert "showed how lists are mutable" in contents
+    assert "solution is to copy the list" in contents
+
+
+def test_fenced_code_comment_is_not_a_chapter():
+    """A column-0 "# comment" inside a fenced code block is code, not an H1
+    chapter; headings resume after the fence closes."""
+    body = " ".join(["word"] * 80)
+    text = "\n".join(
+        [
+            "# Chapter 1 Variables",
+            body,
+            "```python",
+            "# compute the percentage of the hour that has elapsed",
+            "minutes = 100",
+            "```",
+            body,
+            "~~~",
+            "# not a heading either",
+            "~~~",
+            body,
+            "# Chapter 2 Core Concepts",
+            body,
+        ]
+    )
+    docs = parse_book_text(
+        text, source="t", title="T", url="u", target_tokens=5000, min_chunk_tokens=10
+    )
+    chapters = {d.chapter for d in docs}
+    assert chapters == {"Chapter 1 Variables", "Chapter 2 Core Concepts"}
+    contents = " ".join(d.content for d in docs)
+    assert "compute the percentage of the hour" in contents
+    assert "not a heading either" in contents
+    # Fence markers are syntax, not prose.
+    assert "```" not in contents
+    assert "~~~" not in contents

@@ -53,6 +53,31 @@ _CHAPTER_NUMBER_WORDS = (
 _BOOK_CHAPTER_RE = re.compile(
     rf"^(chapter|part)\s+(\d+|[ivxlc]+|(?:{_CHAPTER_NUMBER_WORDS}))\b", re.IGNORECASE
 )
+# Fenced code blocks: ``` or ~~~ (three or more). Content inside is code, so a
+# leading "#" there is a comment, not a heading.
+_BOOK_FENCE_RE = re.compile(r"^(`{3,}|~{3,})")
+# Characters that may introduce a chapter title after the number ("Chapter 2: X").
+_CHAPTER_TITLE_SEPARATORS = ":.-–—|"
+
+
+def _chapter_marker(line: str) -> str | None:
+    """Return ``line`` if it looks like a prose chapter heading, else None.
+
+    A number token after "chapter"/"part" is not enough: hard-wrapped prose
+    such as "Chapter 3 showed how lists are mutable, so" or "Part one of the
+    solution is to copy the list" also starts that way. Require the remainder
+    to be empty, start with a title separator, or start with a non-lowercase
+    character (i.e. a title, not a sentence continuation).
+    """
+    m = _BOOK_CHAPTER_RE.match(line)
+    if not m:
+        return None
+    rest = line[m.end() :].strip()
+    if rest and rest[0] not in _CHAPTER_TITLE_SEPARATORS:
+        first_alpha = next((c for c in rest if c.isalpha()), "")
+        if first_alpha.islower():
+            return None
+    return line
 
 
 def estimate_tokens(text: str) -> int:
@@ -111,23 +136,31 @@ def parse_book_text(
         elif not keep_overlap:
             buf = []
 
+    in_fence = False
     for raw_line in text.splitlines():
         line = raw_line.strip()
         if not line:
             continue
 
+        if _BOOK_FENCE_RE.match(line):
+            in_fence = not in_fence
+            continue
+
         header_text: str | None = None
         is_chapter = False
-        # Markdown headers may be indented by up to three spaces; deeper
-        # indentation means a code listing, where "# ..." is a comment.
-        hm = _BOOK_HEADER_RE.match(raw_line)
-        if hm:
-            header_text = hm.group(2).strip()
-            is_chapter = len(hm.group(1)) <= 2
-        elif _BOOK_CHAPTER_RE.match(line):
-            header_text, is_chapter = line, True
-        elif _BOOK_NUMBERED_RE.match(line):
-            header_text, is_chapter = line, False
+        # Inside a fenced code block nothing is a heading: a column-0
+        # "# comment" in a listing is code, not an H1 chapter.
+        if not in_fence:
+            # Markdown headers may be indented by up to three spaces; deeper
+            # indentation means a code listing, where "# ..." is a comment.
+            hm = _BOOK_HEADER_RE.match(raw_line)
+            if hm:
+                header_text = hm.group(2).strip()
+                is_chapter = len(hm.group(1)) <= 2
+            elif _chapter_marker(line):
+                header_text, is_chapter = line, True
+            elif _BOOK_NUMBERED_RE.match(line):
+                header_text, is_chapter = line, False
 
         if header_text is not None:
             skipping = bool(_BOOK_NOISE_RE.match(header_text))
