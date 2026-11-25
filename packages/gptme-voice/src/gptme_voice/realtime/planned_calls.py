@@ -313,7 +313,8 @@ def fulfill_planned_call(
     # acceptance path, not just explicit coverage.
     negative_or_partial = bool(
         re.search(
-            r"\b(?:not|no|never|partly|partially|except|but|only|still|keep|incomplete)\b|don.t",
+            r"\b(?:not|no|never|partly|partially|except|but|only|still|keep|incomplete)\b|don.t|"
+            r"\bcall me (?:again |back )?later\b",
             confirmation.replace("no need", ""),
         )
     )

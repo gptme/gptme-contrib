@@ -139,7 +139,6 @@ def test_fulfills_only_selected_plan(tmp_path):
                 ),
             ]
         },
-        {"caller_confirmation": "Yes"},
         {"caller_confirmation": "I don't think that covers the daily standup."},
         {"caller_confirmation": "That covers only part of the daily standup."},
         {"caller_confirmation": "That covers the daily standup but call me later."},
@@ -150,7 +149,17 @@ def test_uncovered_partial_wrong_identity_or_unconfirmed_stays_scheduled(
     tmp_path, changes
 ):
     plan = register(tmp_path)
-    assert "error" in fulfill(tmp_path, plan, **changes)
+    if "caller_confirmation" in changes:
+        changes["transcript"] = [
+            SimpleNamespace(
+                role="assistant",
+                text="Does that cover the daily standup, so I can skip the later call?",
+            ),
+            SimpleNamespace(role="user", text=changes["caller_confirmation"]),
+        ]
+    result = fulfill(tmp_path, plan, **changes)
+
+    assert "error" in result
     assert not is_planned_call_fulfilled(str(tmp_path), plan["plan_id"])
     assert load_pending_planned_calls(str(tmp_path), PHONE, now=NOW) == [plan]
 
@@ -337,6 +346,7 @@ def test_ordinary_phrasing_of_a_combined_confirmation_is_accepted(tmp_path, quot
         "Yeah, that covers it, but don't cancel the later call.",
         "Yes. That only partly covers the daily standup.",
         "Yes. The later call is still needed.",
+        "Yes. Actually, call me later.",
     ],
 )
 def test_affirmative_with_a_retraction_does_not_suppress_call(tmp_path, quote):

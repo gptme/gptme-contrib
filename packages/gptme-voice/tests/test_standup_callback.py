@@ -613,3 +613,48 @@ def test_early_plan_tool_is_bound_to_current_authenticated_call(
     receipt = json.loads((state / "voice-calls/fulfilled/early-test.json").read_text())
     assert receipt["caller"] == PHONE
     assert receipt["call_sid"] == "CAinbound"
+
+
+def test_signed_webhook_with_pending_plan_does_not_start_generic_prewarm(
+    callback_case, monkeypatch
+):
+    from gptme_voice.realtime.planned_calls import register_planned_call
+    from twilio.request_validator import RequestValidator
+
+    run, server, _, _, state, _, brief = callback_case
+    (state / "voice-calls/last-standup-call-sid.txt").unlink()
+    register_planned_call(
+        str(state.parent),
+        "early-test",
+        PHONE,
+        (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+        "Daily standup",
+        brief,
+    )
+    server._save_recent_call(
+        server_mod.RecentCallRecord(
+            caller_id=PHONE,
+            source="twilio",
+            ended_at=time.time(),
+            transcript=[server_mod.TranscriptTurn("user", "Resume this conversation.")],
+            metadata={"call_sid": "CAprevious"},
+        )
+    )
+    prewarms = []
+    monkeypatch.setattr(server, "_register_prewarm_task", prewarms.append)
+    params = {"From": PHONE, "CallSid": "CAinbound"}
+    signature = RequestValidator("test-token").compute_signature(
+        "https://voice.example/incoming", params
+    )
+
+    class Request:
+        headers = {"host": "voice.example", "X-Twilio-Signature": signature}
+
+        async def form(self):
+            return params
+
+    assert asyncio.run(server.handle_incoming_call(Request())).status_code == 200
+    assert prewarms == []
+    cfg = run()
+    assert "Resume this conversation." in cfg.instructions
+    assert MARKER in cfg.instructions

@@ -2636,10 +2636,11 @@ class VoiceServer:
         # Fire-and-forget: pre-warm the provider connection so it is ready before
         # Twilio's media-stream WebSocket sends its "start" event.  This eliminates
         # most of the ~1-3s dead air between call answer and first greeting audio.
-        # A possible standup callback must retain recent-call evidence until
-        # the authenticated stream chooses callback vs resume. A generic
-        # prewarm would consume that evidence before the decision below.
+        # A callback or pending plan must retain recent-call evidence until
+        # the authenticated stream chooses its cold bootstrap. A generic
+        # prewarm would consume that evidence but cannot be claimed by it.
         callback_candidate = False
+        planned_candidate = False
         if signature_validated and self._twilio_body_caller_allowed(from_number):
             identity = _lookup_caller_identity(from_number, self.workspace)
             callback_candidate = bool(
@@ -2647,7 +2648,12 @@ class VoiceServer:
                 and identity.is_operator
                 and load_callback_candidate(self.workspace) is not None
             )
-        if from_number and not callback_candidate:
+            planned_candidate = bool(
+                identity
+                and identity.is_operator
+                and load_pending_planned_calls(self.workspace, from_number)
+            )
+        if from_number and not callback_candidate and not planned_candidate:
             self._register_prewarm_task(from_number)
 
         # Forward caller number to WebSocket handler via TwiML custom parameters.
