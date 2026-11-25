@@ -88,12 +88,19 @@ class LadderResult(Generic[T]):
 
     @property
     def idle_on_purpose(self) -> bool:
-        """True when the deficit was open, every rung ran, and none filed work."""
-        return self.deficit > 0 and not self.filed
+        """True when the deficit was open, no source failed, and none filed work."""
+        return (
+            self.deficit > 0
+            and not self.filed
+            and not any(rung.error for rung in self.rungs.values())
+        )
 
     def summary(self) -> str:
         """One log line: ``produced_by=X own-prs=1/3 miners=0/0 ...`` (filed/emitted)."""
-        counts = " ".join(f"{k}={v.filed}/{v.emitted}" for k, v in self.rungs.items())
+        counts = " ".join(
+            f"{k}={v.filed}/{v.emitted}" + (f" error={v.error!r}" if v.error else "")
+            for k, v in self.rungs.items()
+        )
         return f"produced_by={self.produced_by or 'none'} {counts}".rstrip()
 
 
@@ -119,12 +126,15 @@ def run_ladder(
     """
     if deficit < 0:
         raise ValueError(f"deficit must be >= 0, got {deficit}")
+    names: set[str] = set()
+    for rung in rungs:
+        if rung.name in names:
+            raise ValueError(f"duplicate rung name: {rung.name!r}")
+        names.add(rung.name)
     result: LadderResult[T] = LadderResult(deficit=deficit)
     for rung in rungs:
         if result.remaining <= 0:
             break
-        if rung.name in result.rungs:
-            raise ValueError(f"duplicate rung name: {rung.name!r}")
         try:
             out = rung.produce()
             # A rung that returns the wrong shape is as broken as one that

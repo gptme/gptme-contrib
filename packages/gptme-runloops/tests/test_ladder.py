@@ -164,6 +164,28 @@ def test_rung_named_none_is_not_confused_with_the_no_producer_sentinel():
     assert res.summary().startswith("produced_by=none none=1/1 miners=1/1")
 
 
+def test_failed_sources_do_not_look_like_a_clean_idle_tick():
+    def boom():
+        raise RuntimeError("source unavailable")
+
+    res = run_ladder([Rung("broken", boom), _rung("empty", [])], 1, _file_all)
+    assert not res.idle_on_purpose
+    assert "RuntimeError: source unavailable" in res.summary()
+    assert "empty=0/0" in res.summary()
+
+
+@pytest.mark.parametrize("deficit", [0, 1, 3])
+def test_duplicate_names_are_rejected_before_any_side_effects(deficit):
+    calls: list[str] = []
+    with pytest.raises(ValueError, match="duplicate"):
+        run_ladder(
+            [_rung("a", ["x"], calls=calls), _rung("a", [], calls=calls)],
+            deficit,
+            lambda name, items: calls.append("filed") or len(items),
+        )
+    assert calls == []
+
+
 def test_zero_deficit_runs_nothing():
     calls: list[str] = []
     res = run_ladder([_rung("own-prs", ["a"], calls=calls)], 0, _file_all)
