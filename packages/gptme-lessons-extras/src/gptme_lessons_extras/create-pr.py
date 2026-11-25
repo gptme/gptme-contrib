@@ -90,19 +90,25 @@ def _undo_lesson_branch(
     start_sha: str,
     branch_name: str,
     relative_path: Path,
+    original_index: str,
+    lesson_commit: str | None = None,
 ) -> None:
-    """Return to the original ref after a failure, keeping the lesson on disk.
+    """Return to the original ref, preserving lesson contents and staging.
 
-    A plain checkout would delete a lesson that is tracked only on the new
-    branch (or revert uncommitted edits to it), and the leftover branch would
-    block every retry. Stops at the first failing step so nothing is lost.
+    A plain checkout would delete a new lesson or revert local edits. First
+    rewind without touching the working tree, switch back, then restore only
+    the lesson's original index entry. Keep the published commit on success;
+    delete the retry-blocking branch on failure. Stop at the first failed step.
     """
     for args in (
         # Drop the lesson commit; the index and working tree stay as they are
         ["reset", "--soft", start_sha],
         ["reset", "-q", start_sha, "--", str(relative_path)],
         ["checkout", original_ref],
-        ["branch", "-D", branch_name],
+        ["reset", "-q", original_index, "--", str(relative_path)],
+        ["branch", "-f", branch_name, lesson_commit]
+        if lesson_commit
+        else ["branch", "-D", branch_name],
     ):
         if subprocess.run(["git", *args], cwd=repo_root).returncode != 0:
             print(
@@ -141,6 +147,11 @@ def create_lesson_pr(
         print("❌ Not in a git repository")
         return False
 
+    # Validation reads content, whereas git would commit the symlink itself.
+    if lesson_file.is_symlink():
+        print(f"❌ Lesson file must not be a symlink: {lesson_file}")
+        return False
+
     # Validate lesson first
     valid, errors = validate_lesson(lesson_file)
     if not valid:
@@ -160,7 +171,7 @@ def create_lesson_pr(
 
     # Determine category from file path
     # Assume path is like lessons/workflow/my-lesson.md or lessons/tools/my-tool.md
-    # Resolve the directory only, so a symlinked lesson is committed as the link
+    # Resolve parent directories before checking repository containment.
     try:
         relative_path = (lesson_file.parent.resolve() / lesson_file.name).relative_to(
             repo_root.resolve()
@@ -169,7 +180,7 @@ def create_lesson_pr(
         print(f"❌ Lesson file is outside the repository: {lesson_file}")
         return False
     parts = relative_path.parts
-    if len(parts) >= 2 and parts[0] == "lessons":
+    if len(parts) >= 3 and parts[0] == "lessons":
         category = parts[1]
     else:
         category = "workflow"  # default
@@ -209,6 +220,15 @@ def create_lesson_pr(
         ).stdout.strip()
         if current_branch == "HEAD":
             current_branch = start_sha
+
+        # Snapshot staging before git add replaces the lesson's index entry.
+        original_index = subprocess.run(
+            ["git", "write-tree"],
+            check=True,
+            capture_output=True,
+            text=True,
+            cwd=repo_root,
+        ).stdout.strip()
 
         # Create and checkout branch
         print(f"📌 Creating branch: {branch_name}")
@@ -303,14 +323,19 @@ def create_lesson_pr(
         pr_url = pr_result.stdout.strip()
         print(f"✅ PR created: {pr_url}")
 
-    except (subprocess.CalledProcessError, OSError) as e:
+    except (subprocess.CalledProcessError, OSError, KeyboardInterrupt) as e:
         print(f"❌ Error creating PR: {e}")
         if hasattr(e, "stderr") and e.stderr:
             print(f"   Error output: {e.stderr}")
 
         if branch_created:
             _undo_lesson_branch(
-                repo_root, current_branch, start_sha, branch_name, relative_path
+                repo_root,
+                current_branch,
+                start_sha,
+                branch_name,
+                relative_path,
+                original_index,
             )
         if pushed:
             print(
@@ -318,12 +343,24 @@ def create_lesson_pr(
                 f"`gh pr create --head {branch_name}` rather than rerunning."
             )
 
+        if isinstance(e, KeyboardInterrupt):
+            raise
         return False
 
-    # Return to previous branch. The PR exists, so a failure here undoes nothing.
+    # Preserve both the published branch and the user's local lesson edits.
+    lesson_commit = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], text=True, cwd=repo_root
+    ).strip()
     print(f"🔙 Returning to branch: {current_branch}")
-    if subprocess.run(["git", "checkout", current_branch], cwd=repo_root).returncode:
-        print(f"⚠️  PR created, but still on {branch_name}")
+    _undo_lesson_branch(
+        repo_root,
+        current_branch,
+        start_sha,
+        branch_name,
+        relative_path,
+        original_index,
+        lesson_commit,
+    )
 
     return True
 

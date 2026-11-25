@@ -181,3 +181,81 @@ def test_relative_lesson_path(repo, create_pr):
         repo, "show", "--name-only", "--format=", "lesson/tools-git-careful"
     ).split()
     assert files == ["lessons/tools/git-careful.md"]
+
+
+@pytest.mark.parametrize("fail_push", [False, True])
+@pytest.mark.parametrize("lesson_state", ["untracked", "staged", "partial"])
+def test_run_preserves_lesson_contents_and_staging(
+    repo, create_pr, fail_push, lesson_state
+):
+    lesson = repo / "lessons" / "tools" / "git-careful.md"
+    if lesson_state == "partial":
+        git(repo, "add", str(lesson))
+        git(repo, "commit", "-qm", "existing lesson")
+        lesson.write_text(LESSON + "\nStaged edit\n")
+    if lesson_state != "untracked":
+        git(repo, "add", str(lesson))
+    lesson.write_text(lesson.read_text() + "\nUnstaged edit\n")
+    (repo / "wip.txt").write_text("unrelated staged work\n")
+    git(repo, "add", "wip.txt")
+    index_before = git(repo, "write-tree")
+    head_before = git(repo, "rev-parse", "HEAD")
+    contents_before = lesson.read_bytes()
+    if fail_push:
+        git(repo, "remote", "set-url", "origin", str(repo.parent / "missing.git"))
+
+    assert create_pr.create_lesson_pr(lesson) is not fail_push
+
+    assert lesson.read_bytes() == contents_before
+    assert git(repo, "write-tree") == index_before
+    assert git(repo, "rev-parse", "HEAD") == head_before
+    assert git(repo, "branch", "--show-current").strip() == "master"
+    if not fail_push:
+        assert (
+            git(repo, "show", "lesson/tools-git-careful:lessons/tools/git-careful.md")
+            == contents_before.decode()
+        )
+        assert (
+            git(repo, "ls-remote", "--heads", "origin", "lesson/*").split()[0]
+            == git(repo, "rev-parse", "lesson/tools-git-careful").strip()
+        )
+
+
+def test_interrupt_during_push_restores_local_state(repo, create_pr, monkeypatch):
+    lesson = repo / "lessons" / "tools" / "git-careful.md"
+    git(repo, "add", str(lesson))
+    index_before = git(repo, "write-tree")
+    run = subprocess.run
+
+    def interrupt_push(args, *positional, **kwargs):
+        if args[:2] == ["git", "push"]:
+            raise KeyboardInterrupt
+        return run(args, *positional, **kwargs)
+
+    monkeypatch.setattr(create_pr.subprocess, "run", interrupt_push)
+    with pytest.raises(KeyboardInterrupt):
+        create_pr.create_lesson_pr(lesson)
+    assert lesson.read_text() == LESSON
+    assert git(repo, "write-tree") == index_before
+    assert git(repo, "branch", "--show-current").strip() == "master"
+    assert git(repo, "branch", "--list", "lesson/*") == ""
+
+
+def test_symlink_lesson_is_rejected(repo, create_pr):
+    lesson = repo / "lessons" / "tools" / "git-careful.md"
+    target = repo.parent / "private-draft.md"
+    target.write_text(LESSON)
+    lesson.unlink()
+    lesson.symlink_to(target)
+
+    assert create_pr.create_lesson_pr(lesson) is False
+    assert git(repo, "branch", "--list", "lesson/*") == ""
+    assert git(repo, "ls-remote", "--heads", "origin", "lesson/*") == ""
+
+
+def test_lesson_directly_under_lessons_uses_default_category(repo, create_pr):
+    lesson = repo / "lessons" / "git-careful.md"
+    lesson.write_text(LESSON)
+
+    assert create_pr.create_lesson_pr(lesson) is True
+    assert git(repo, "branch", "--list", "lesson/workflow-git-careful").strip()
