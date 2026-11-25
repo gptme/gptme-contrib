@@ -1607,3 +1607,26 @@ def test_non_git_gitignore_negation_cannot_reinclude_under_excluded_directory(
 
     specs = indexer._load_gitignore(root)
     assert indexer._is_ignored(file_path, specs) is ignored
+
+
+def test_non_git_gitignore_matches_symlink_directory_by_lexical_path(
+    tmp_path, isolated_gitignore_files
+):
+    indexer = object.__new__(Indexer)
+    root = tmp_path / "docs"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.md").write_text("secret")
+    (outside / "cache.db").write_text("database")
+    (root / "private").symlink_to(outside, target_is_directory=True)
+    (root / ".gitignore").write_text("private/\n")
+
+    specs = indexer._load_gitignore(root)
+    assert indexer._is_ignored(root / "private" / "secret.md", specs)
+    assert indexer._is_ignored(root / "private" / "cache.db", specs)
+    # Built-in rules must still apply without the explicit private/ rule.
+    (root / ".gitignore").write_text("")
+    specs = indexer._load_gitignore(root)
+    assert indexer._is_ignored(root / "private" / "cache.db", specs)
+    assert not indexer._is_ignored(root / "private" / "secret.md", specs)

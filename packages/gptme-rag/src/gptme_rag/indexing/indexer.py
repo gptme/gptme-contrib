@@ -1073,8 +1073,9 @@ class Indexer:
         self, file_path: Path, gitignore_specs: list[tuple[Path, GitIgnoreSpec]]
     ) -> bool:
         """Check whether any loaded gitignore rule set ignores a file."""
-        # Resolve the directory, not the file: a symlinked file is judged by its own path.
-        path = file_path.parent.resolve() / file_path.name
+        # Judge symlinks by their lexical path inside the already-resolved scan root.
+        # Resolving a parent link could move the candidate outside every rule's base.
+        path = file_path.absolute()
         for base, spec in gitignore_specs:
             try:
                 rel_path = path.relative_to(base).as_posix()
