@@ -75,8 +75,8 @@ def parse_book_text(
 
     docs: list[BookDocument] = []
     buf: list[str] = []
-    # Words added since the last emit. Overlap carried into ``buf`` is not
-    # fresh: it must not pad an empty or short section past the minimum.
+    # Words added since the last emit. A buffer with none holds only carried
+    # overlap, which must not become a chunk of its own.
     fresh = 0
     buf_chapter = ""
     buf_section = ""
@@ -86,7 +86,7 @@ def parse_book_text(
 
     def emit(*, keep_overlap: bool) -> None:
         nonlocal buf, fresh
-        if fresh >= min_words:
+        if fresh and len(buf) >= min_words:
             docs.append(
                 BookDocument(
                     source=source,

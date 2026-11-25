@@ -26,7 +26,8 @@ def test_empty_section_gets_no_chunk_of_previous_sections_overlap() -> None:
 
 @pytest.mark.parametrize("beta_words", [2, 37, 38])
 @pytest.mark.parametrize("ending", ["section", "chapter", "eof"])
-def test_overlap_does_not_pad_short_sections_past_minimum(beta_words: int, ending: str) -> None:
+def test_short_section_body_keeps_its_own_section_label(beta_words: int, ending: str) -> None:
+    # A short body after a long section must not slide under the next heading.
     text = (
         f"# Chapter One\n\n### 1.1 Alpha\n{_words('alpha', 200)}\n\n"
         f"### 1.2 Beta\n{_words('beta', beta_words)}\n"
@@ -37,10 +38,8 @@ def test_overlap_does_not_pad_short_sections_past_minimum(beta_words: int, endin
 
     docs = parse_book_text(text, source="s", title="t", url="")
     beta = [d for d in docs if d.section == "1.2 Beta"]
-    # The default minimum is 38 words. Carried Alpha overlap does not count.
-    assert len(beta) == (1 if beta_words >= 38 else 0)
-    if beta:
-        assert "beta0" in beta[0].content
+    assert len(beta) == 1
+    assert beta[0].content.endswith(_words("beta", beta_words))
     if ending != "eof":
         assert any("gamma0" in d.content for d in docs)
 
