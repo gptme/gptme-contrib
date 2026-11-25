@@ -188,6 +188,33 @@ def test_short_http_basic_credential_is_redacted() -> None:
     _contained("Authorization: Basic dTpw", "dTpw")  # base64("u:p")
 
 
+def test_quoted_http_basic_authorization_header_is_redacted() -> None:
+    # The header name is quoted in source and logs, so the colon never follows
+    # `Authorization` directly.
+    b64 = "dXNlcjpwYXNzd29yZA=="  # base64("user:password")
+    _contained(f'headers={{"Authorization": "Basic {b64}"}}', b64)
+
+
+def test_out_to_dev_stdout_under_a_redirect_keeps_later_writes(tmp_path) -> None:
+    import os
+    from pathlib import Path
+
+    from redact.cli import _write_atomic
+
+    target = tmp_path / "report.txt"
+    saved = os.dup(1)
+    try:
+        with open(target, "wb") as fh:
+            os.dup2(fh.fileno(), 1)
+            _write_atomic(Path("/dev/stdout"), "body\n")
+            os.write(1, b"footer\n")
+    finally:
+        os.dup2(saved, 1)
+        os.close(saved)
+    # A rename would leave fd 1 on an unlinked inode and lose the footer.
+    assert target.read_text(encoding="utf-8") == "body\nfooter\n"
+
+
 def test_url_encoded_comma_joined_emails_are_both_redacted() -> None:
     r = redact("mailto:alice@x.com%2Cbob@y.org", literals=[])
     assert "alice" not in r.redacted

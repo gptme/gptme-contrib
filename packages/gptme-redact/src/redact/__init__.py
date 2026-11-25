@@ -482,9 +482,11 @@ _PATTERNS: list[Pattern] = [
         "bearer_header",
     ),
     # HTTP Basic auth: base64("user:password"), the sibling of the Bearer form.
+    # The header name is usually quoted, and JSON/YAML use `:` or `=`, so the
+    # raw HTTP-wire form alone misses `headers={"Authorization": "Basic ..."}`.
     Pattern(
         re.compile(
-            r"\bAuthorization:\s*Basic\s+[A-Za-z0-9+/]{4,}={0,2}",
+            r"\bAuthorization['\"]?\s*[:=]\s*['\"]?Basic\s+[A-Za-z0-9+/]{4,}={0,2}",
             re.IGNORECASE,
         ),
         Severity.CRITICAL,

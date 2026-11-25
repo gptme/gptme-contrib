@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import stat
 import sys
 import tempfile
@@ -218,6 +219,23 @@ def _main_redact(argv: list[str] | None = None) -> int:
     return 2 if result.blocked else 0
 
 
+def _stream_fd(path: Path) -> int | None:
+    """The inherited fd *path* names, when it is a process stream.
+
+    ``/dev/stdout`` is a symlink into ``/proc/self/fd``. Opening it for writing
+    truncates the redirect target and uses a fresh file offset, so a caller
+    that later writes to its own fd (``{ redact --out /dev/stdout f; echo ok; }
+    > report``) overwrites or orphans what we wrote. Writing to the inherited
+    fd keeps one shared offset and never truncates.
+    """
+    raw = os.fspath(path)
+    fixed = {"/dev/stdin": 0, "/dev/stdout": 1, "/dev/stderr": 2}
+    if raw in fixed:
+        return fixed[raw]
+    match = re.fullmatch(r"/(?:dev|proc/self)/fd/(\d+)", raw)
+    return int(match.group(1)) if match else None
+
+
 def _write_atomic(path: Path, text: str) -> None:
     """Write *text* to *path* via a sibling temp file and rename.
 
@@ -232,6 +250,14 @@ def _write_atomic(path: Path, text: str) -> None:
         existing = os.stat(path)
     except FileNotFoundError:
         existing = None
+    # os.stat follows symlinks, so `/dev/stdout` redirected to a regular file
+    # looks regular. Renaming there would swap a new inode in at the redirect
+    # target while the shell's fd 1 keeps the old one, losing later writes.
+    stream_fd = _stream_fd(path)
+    if stream_fd is not None:
+        while data:
+            data = data[os.write(stream_fd, data) :]
+        return
     if existing is not None and not stat.S_ISREG(existing.st_mode):
         with open(path, "wb") as fh:
             fh.write(data)
