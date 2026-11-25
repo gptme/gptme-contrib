@@ -103,3 +103,21 @@ class TestTimeoutCueLevel:
 def test_pcm_cues_mapping_matches_named_cues() -> None:
     assert sounds.PCM_CUES["dispatch"] == sounds.DISPATCH_CUE_PCM
     assert sounds.PCM_CUES["timeout"] == sounds.TIMEOUT_CUE_PCM
+
+
+def test_cancel_cue_is_short_quiet_and_distinct() -> None:
+    pcm = sounds.CANCEL_CUE_PCM
+    assert 0 < len(pcm) / (SAMPLE_RATE * 2) <= 0.18
+    assert pcm not in (sounds.DISPATCH_CUE_PCM, sounds.TIMEOUT_CUE_PCM)
+    assert sounds.PCM_CUES["cancel"] == pcm
+    for audio in (pcm, audioop.ulaw2lin(sounds.CANCEL_CUE_MULAW, 2)):
+        assert _peak(audio) <= sounds.DISPATCH_CUE_MAX_PEAK
+        assert _MIN_AUDIBLE_RMS <= _rms(audio) <= sounds.DISPATCH_CUE_MAX_RMS
+    # A falling pair distinguishes deliberate cancellation from rising activity.
+    first = struct.unpack("<560h", pcm[:1120])
+    second = struct.unpack("<560h", pcm[-1120:])
+
+    def crossings(samples):
+        return sum(a <= 0 < b for a, b in zip(samples, samples[1:]))
+
+    assert crossings(first) > crossings(second)

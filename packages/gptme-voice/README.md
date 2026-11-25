@@ -286,3 +286,28 @@ validation is a conservative confirmation gate, not semantic proof of delivery.
 The scheduler must check `is_planned_call_fulfilled(workspace, plan_id)` immediately
 before dialing and suppress only that occurrence. The voice package does not
 change system timers or infer fulfillment from call duration or a hangup.
+
+### Tool activity sounds
+
+Voice transports share short, quiet cues (PCM for local/browser clients and
+μ-law for Twilio):
+
+| Cue | Meaning |
+| --- | --- |
+| Rising pair, 190 ms | A subagent was dispatched, or a direct tool operation was attempted. This is not a success signal. |
+| Single low tone, 200 ms | A subagent hit its timeout. Other failures are reported through the tool result/spoken response. |
+| Falling pair, 160 ms | An explicit cancellation request successfully cancelled at least one pending subagent. Cancel-all produces one tone. |
+
+Direct activity includes workspace search, camera look, handoff and body
+actuators. Status polling (`subagent_status`, `body_status`), unknown functions
+and hangup are silent. Success arrives through the ordinary result/spoken
+response; it has no separate tone, avoiding two sounds for a fast lookup.
+Validation failures can follow an activity tone because it acknowledges an
+attempt. No polling loop or per-progress-line tones are added.
+
+Cancellation sound follows confirmed cancellation, not merely a request: already
+finished/missing tasks, concurrent repeat requests, suppressed cancellation and
+connection cleanup stay silent. Cues are best-effort, bounded and do not block
+tool execution, clear speech buffers, close sockets or start replacement lookups.
+They are queued through the existing audio transport; local tests establish
+payload/order and level limits, while handset audibility needs a natural call.

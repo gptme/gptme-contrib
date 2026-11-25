@@ -62,7 +62,13 @@ from .planned_calls import (
     load_pending_planned_calls,
     planned_call_guidance,
 )
-from .sounds import DISPATCH_CUE_MULAW, PCM_CUES, SAMPLE_RATE, TIMEOUT_CUE_MULAW
+from .sounds import (
+    CANCEL_CUE_MULAW,
+    DISPATCH_CUE_MULAW,
+    PCM_CUES,
+    SAMPLE_RATE,
+    TIMEOUT_CUE_MULAW,
+)
 from .tool_bridge import GptmeToolBridge
 from .twilio_integration import (
     STREAM_TOKEN_TTL_SECONDS,
@@ -3000,6 +3006,9 @@ class VoiceServer:
                         on_timeout=_make_twilio_cue_callback(
                             websocket, stream_sid, TIMEOUT_CUE_MULAW
                         ),
+                        on_cancel=_make_twilio_cue_callback(
+                            websocket, stream_sid, CANCEL_CUE_MULAW
+                        ),
                         on_hangup=_twilio_hangup,
                         on_handoff=self._make_handoff_callback([caller_id], transcript),
                         transcript_provider=lambda: transcript,
@@ -3318,6 +3327,7 @@ class VoiceServer:
                 on_result=realtime_client.inject_message,
                 on_dispatch=self._make_sound_cue_callback(websocket, "dispatch"),
                 on_timeout=self._make_sound_cue_callback(websocket, "timeout"),
+                on_cancel=self._make_sound_cue_callback(websocket, "cancel"),
                 on_hangup=_local_hangup,
                 on_handoff=self._make_handoff_callback([caller_id], transcript),
                 transcript_provider=lambda: transcript,
@@ -3448,6 +3458,7 @@ class VoiceServer:
                 on_result=realtime_client.inject_message,
                 on_dispatch=self._make_sound_cue_callback(websocket, "dispatch"),
                 on_timeout=self._make_sound_cue_callback(websocket, "timeout"),
+                on_cancel=self._make_sound_cue_callback(websocket, "cancel"),
                 on_hangup=_browser_hangup,
                 on_handoff=self._make_handoff_callback([caller_id], transcript),
                 transcript_provider=lambda: transcript,

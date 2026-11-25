@@ -247,6 +247,7 @@ class PendingTask:
     )
     completed_at: float | None = None
     returncode: int | None = None
+    cancel_requested: bool = False
 
 
 class GptmeToolBridge:
@@ -277,6 +278,7 @@ class GptmeToolBridge:
         body_adapter: "BodyAdapter | None" = None,
         vision_bridge: "VisionSessionBridge | None" = None,
         rag: "VoiceRag | None" = None,
+        on_cancel: Callable[[], Awaitable[None]] | None = None,
     ):
         self.gptme_path = os.environ.get("GPTME_VOICE_SUBAGENT_PATH") or gptme_path
         self.timeout = timeout
@@ -284,6 +286,7 @@ class GptmeToolBridge:
         self.on_result = on_result
         self.on_dispatch = on_dispatch
         self.on_timeout = on_timeout
+        self.on_cancel = on_cancel
         self.on_hangup = on_hangup
         self.on_handoff = on_handoff
         self.on_fulfill_planned_call = on_fulfill_planned_call
@@ -1047,6 +1050,15 @@ class GptmeToolBridge:
         return result
 
     async def _cancel_task(self, task_id: str, entry: PendingTask) -> dict:
+        # Claim cancellation before yielding: concurrent requests must not
+        # interrupt cleanup twice or announce the same cancellation twice.
+        if (
+            entry.cancel_requested
+            or entry.task.done()
+            or entry.completed_at is not None
+        ):
+            return {"task_id": task_id, "cancelled": False}
+        entry.cancel_requested = True
         entry.task.cancel()
         try:
             await entry.task
@@ -1055,13 +1067,34 @@ class GptmeToolBridge:
         except Exception as e:  # noqa: BLE001 - report anything else back
             logger.warning(f"Task {task_id} raised during cancel: {e}")
         self._pending_tasks.pop(task_id, None)
-        return {"task_id": task_id, "cancelled": True}
+        return {"task_id": task_id, "cancelled": entry.task.cancelled()}
 
     async def handle_function_call(self, name: str, arguments: dict) -> dict:
         """Handle an OpenAI function call.
 
         Dispatches subagent tasks asynchronously and returns immediately.
         """
+        # Activity means an attempt, not success. Keep polling and hangup
+        # silent, and leave subagent dispatch to its existing lifecycle cue.
+        if (
+            name
+            in {
+                "workspace_search",
+                "look",
+                "handoff_to_agent",
+                "body_takeoff",
+                "body_land",
+                "body_move",
+                "body_goto",
+                "body_stop",
+                "body_return_home",
+                "body_turn",
+                "body_interact",
+            }
+            and self.on_dispatch
+        ):
+            self._dispatch_cue(self.on_dispatch, cue_name="activity")
+
         if name == "subagent":
             task = arguments.get("task", "")
             if not task:
@@ -1127,7 +1160,12 @@ class GptmeToolBridge:
                         ),
                     }
                 result = await self._cancel_task(task_id_arg, entry)
-                return {"status": "cancelled", **result}
+                if result["cancelled"] and self.on_cancel:
+                    self._dispatch_cue(self.on_cancel, cue_name="cancel")
+                return {
+                    "status": "cancelled" if result["cancelled"] else "not_pending",
+                    **result,
+                }
 
             # No task_id — cancel all pending
             targets = [
@@ -1143,9 +1181,12 @@ class GptmeToolBridge:
             cancelled = []
             for tid, entry in targets:
                 result = await self._cancel_task(tid, entry)
-                cancelled.append(result)
+                if result["cancelled"]:
+                    cancelled.append(result)
+            if cancelled and self.on_cancel:
+                self._dispatch_cue(self.on_cancel, cue_name="cancel")
             return {
-                "status": "cancelled_all",
+                "status": "cancelled_all" if cancelled else "no_pending",
                 "cancelled_count": len(cancelled),
                 "cancelled": cancelled,
             }

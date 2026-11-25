@@ -1620,18 +1620,19 @@ def test_send_to_twilio_uses_stream_sid_field_name() -> None:
     }
 
 
-def test_sound_cue_callback_sends_playable_pcm_payload() -> None:
+@pytest.mark.parametrize("cue", ["dispatch", "timeout", "cancel"])
+def test_sound_cue_callback_sends_playable_pcm_payload(cue: str) -> None:
     async def _exercise() -> None:
         websocket = _DummyWebSocket()
-        callback = VoiceServer._make_sound_cue_callback(websocket, "dispatch")
+        callback = VoiceServer._make_sound_cue_callback(websocket, cue)
 
         await callback()
 
         message = json.loads(websocket.messages[0])
         assert message["type"] == "sound_cue"
-        assert message["cue"] == "dispatch"
+        assert message["cue"] == cue
         assert message["sample_rate"] == SAMPLE_RATE
-        assert base64.b64decode(message["audio"]) == PCM_CUES["dispatch"]
+        assert base64.b64decode(message["audio"]) == PCM_CUES[cue]
 
     asyncio.run(_exercise())
 
@@ -4696,3 +4697,157 @@ def test_callback_greeting_introduces_agent_not_provider():
     assert "never as the voice provider or model" in greeting
     assert "tried to reach them earlier" in greeting
     assert _build_callback_greeting_instructions(None).startswith("You are ")
+
+
+@pytest.mark.parametrize("transport", ["twilio", "twilio-prewarm", "local", "browser"])
+def test_tool_activity_and_cancellation_cues_reach_transport(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, transport: str
+) -> None:
+    """Real tool calls exercise the callbacks installed by each transport."""
+    from unittest.mock import AsyncMock
+
+    from gptme_voice.realtime.sounds import CANCEL_CUE_MULAW, DISPATCH_CUE_MULAW
+    from gptme_voice.realtime.tool_bridge import PendingTask
+
+    async def exercise():
+        server = VoiceServer(workspace=tmp_path, enable_browser_transport=True)
+        server.openai_g711_passthrough = False
+        speech_before = b"\x10\x00" * 240
+        speech_after = b"\x20\x00" * 240
+        audio_order = []
+
+        class CueSocket(_DummyTwilioWebSocket):
+            async def send_text(self, text):
+                message = json.loads(text)
+                if message.get("event") == "media":
+                    audio_order.append(base64.b64decode(message["media"]["payload"]))
+                elif message.get("type") in {"audio", "sound_cue"}:
+                    audio_order.append(base64.b64decode(message["audio"]))
+                await super().send_text(text)
+
+            async def send_bytes(self, payload):
+                audio_order.append(payload)
+                await super().send_bytes(payload)
+
+        rag = AsyncMock()
+        rag.enabled = True
+        rag.search.return_value = {"results": [{"text": "Relevant source"}]}
+        monkeypatch.setattr(server, "_rag_for_websocket", lambda *_args, **_kwargs: rag)
+        monkeypatch.setattr(server, "_on_call_end", AsyncMock())
+        monkeypatch.setattr(
+            server, "_build_session_instructions", AsyncMock(return_value="Test")
+        )
+        monkeypatch.setattr(
+            server,
+            "_build_session_bootstrap",
+            AsyncMock(return_value=SessionBootstrap("Test")),
+        )
+        websocket = CueSocket(
+            [
+                {
+                    "event": "start",
+                    "start": {
+                        "streamSid": "MZcue",
+                        "callSid": "CAcue",
+                        "customParameters": {"from_number": "+15550000000"},
+                    },
+                },
+                {"event": "stop"},
+            ]
+            if transport.startswith("twilio")
+            else []
+        )
+        websocket.client = ("127.0.0.1", 12345)
+        websocket.receive = AsyncMock(return_value={"type": "websocket.disconnect"})
+
+        class CueClient(_FakeRealtimeClient):
+            exercised = False
+
+            async def connect(self):
+                bridge = self.on_function_call.__self__
+                assert isinstance(bridge, GptmeToolBridge)
+                await self.on_audio(speech_before)
+                result = await self.on_function_call(
+                    "workspace_search", {"query": "farewell"}
+                )
+                assert result == rag.search.return_value
+                await asyncio.gather(*bridge._cue_tasks)
+
+                started = asyncio.Event()
+
+                async def running():
+                    started.set()
+                    await asyncio.Event().wait()
+
+                task = asyncio.create_task(running())
+                bridge._pending_tasks["cancel-me"] = PendingTask(
+                    task=task,
+                    description="A running lookup",
+                    mode="fast",
+                    started_at=time.monotonic(),
+                )
+                await started.wait()
+                receipt = await self.on_function_call(
+                    "subagent_cancel", {"task_id": "cancel-me"}
+                )
+                assert receipt["status"] == "cancelled"
+                assert task.cancelled()
+                await asyncio.gather(*bridge._cue_tasks)
+                await self.on_audio(speech_after)
+                self.exercised = True
+
+            async def activate_session(self):
+                self.activate_session_count += 1
+                await self.connect()
+
+        client = CueClient()
+
+        def make_client(_config, **kwargs):
+            for name, callback in kwargs.items():
+                setattr(client, name, callback)
+            return client
+
+        monkeypatch.setattr(server, "_make_client", make_client)
+        monkeypatch.setattr(
+            server,
+            "_claim_prewarm",
+            AsyncMock(return_value=client if transport == "twilio-prewarm" else None),
+        )
+        if transport.startswith("twilio"):
+            await server.handle_twilio_websocket(websocket)
+        elif transport == "local":
+            await server.handle_local_websocket(websocket)
+        else:
+            await server.handle_browser_websocket(websocket)
+        assert client.exercised, "Transport never completed its real tool calls"
+        assert client.activate_session_count == int(transport == "twilio-prewarm")
+        rag.search.assert_awaited_once_with("farewell", n_results=5)
+        messages = [json.loads(message) for message in websocket.messages]
+        assert websocket.close_code is None
+        assert not any(message.get("event") == "clear" for message in messages)
+        if transport.startswith("twilio"):
+            assert [message["event"] for message in messages] == ["media"] * 4
+            assert all(message["streamSid"] == "MZcue" for message in messages)
+            converter = AudioConverter()
+            assert audio_order == [
+                converter.openai_to_twilio(speech_before),
+                DISPATCH_CUE_MULAW,
+                CANCEL_CUE_MULAW,
+                converter.openai_to_twilio(speech_after),
+            ]
+        else:
+            cues = [message for message in messages if message["type"] == "sound_cue"]
+            assert [message["cue"] for message in cues] == ["dispatch", "cancel"]
+            assert [base64.b64decode(message["audio"]) for message in cues] == [
+                PCM_CUES["dispatch"],
+                PCM_CUES["cancel"],
+            ]
+            assert all(message["sample_rate"] == SAMPLE_RATE for message in cues)
+            assert audio_order == [
+                speech_before,
+                PCM_CUES["dispatch"],
+                PCM_CUES["cancel"],
+                speech_after,
+            ]
+
+    asyncio.run(exercise())
