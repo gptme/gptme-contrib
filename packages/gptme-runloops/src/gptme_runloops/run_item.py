@@ -2386,11 +2386,23 @@ def _inspect_gptme_failure(
     if traj_path is None or not traj_path.is_file():
         return None
     try:
-        with traj_path.open(encoding="utf-8", errors="replace") as fh:
+        with traj_path.open("rb") as fh:
             fh.seek(0, 2)
-            size = fh.tell()
-            fh.seek(max(0, size - 4096))
-            tail = fh.read(4096)
+            start = max(0, fh.tell() - 4096)
+            fh.seek(start)
+            chunks = [fh.read()]
+            # Expand back to a record boundary: provider error bodies can be
+            # longer than 4 KiB, but their structured metadata must survive.
+            while start:
+                previous = max(0, start - 4096)
+                fh.seek(previous)
+                prefix = fh.read(start - previous)
+                if b"\n" in prefix:
+                    chunks.append(prefix.rsplit(b"\n", 1)[-1])
+                    break
+                chunks.append(prefix)
+                start = previous
+            tail = b"".join(reversed(chunks)).decode("utf-8", errors="replace")
     except OSError:
         return None
     # This input is known to be a trajectory, even when the entire tail is

@@ -4124,6 +4124,27 @@ class TestInspectGptmeFailure:
             is None
         )
 
+    def test_long_terminal_error_record_is_preserved(self, tmp_path) -> None:
+        traj = tmp_path / "long-terminal-error.jsonl"
+        traj.write_text(
+            json.dumps({"role": "assistant", "content": "previous work"})
+            + "\n"
+            + json.dumps(
+                {
+                    "role": "system",
+                    "content": "error: auth_error\n" + "x" * 5000,
+                    "metadata": {"error": True, "error_class": "auth_error"},
+                }
+            )
+            + "\n"
+        )
+        assert (
+            _inspect_gptme_failure(
+                _make_plan_stub("long-error"), trajectory=str(traj), tmp_dir=tmp_path
+            )
+            == "gptme_auth"
+        )
+
     def test_returns_model_unavailable_on_exit77_trajectory(self, tmp_path) -> None:
         session_id = "gptme-session-333"
         traj = tmp_path / "gptme-session.jsonl"
