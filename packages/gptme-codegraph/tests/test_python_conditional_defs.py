@@ -2,7 +2,15 @@
 
 from pathlib import Path
 
-from gptme_codegraph.core import extract_symbols
+import pytest
+from gptme_codegraph import core
+from gptme_codegraph.core import (
+    SqliteIndexCache,
+    build_call_graph,
+    build_cross_file_call_graph,
+    build_index,
+    extract_symbols,
+)
 
 SOURCE = """\
 import sys
@@ -91,3 +99,64 @@ def test_defs_in_compound_statements_are_extracted(tmp_path: Path):
 
     # Function bodies stay opaque, as before: nested helpers are not symbols.
     assert "not_a_symbol" not in by_name
+
+
+BRANCHES = """\
+try:
+    def run():
+        fast()
+except ImportError:
+    def run():
+        slow()
+
+def fast():
+    pass
+
+def slow():
+    pass
+
+class A:
+    def log(self):
+        fast()
+
+class B:
+    def log(self):
+        slow()
+"""
+
+
+@pytest.mark.parametrize("cross_file", [False, True])
+def test_calls_from_every_branch_definition_are_kept(tmp_path: Path, cross_file: bool):
+    path = tmp_path / "mod.py"
+    path.write_text(BRANCHES)
+    if cross_file:
+        callees, _ = build_cross_file_call_graph(build_index(tmp_path), tmp_path)
+        module = "mod"
+    else:
+        callees, _ = build_call_graph(extract_symbols(path))
+        module = ""
+
+    def local(qid: str) -> set[str]:
+        return {c.rpartition("::")[2] for c in callees[f"{module}::{qid}"]}
+
+    assert local("run") == {"fast", "slow"}
+    # Same-named methods of different classes stay separate callers.
+    assert local("A.log") == {"fast"}
+    assert local("B.log") == {"slow"}
+
+
+def test_index_cached_by_previous_extractor_is_discarded(tmp_path: Path, monkeypatch):
+    """A schema-4 index lacks the conditional defs, so it must not be served."""
+    monkeypatch.setattr(core, "_CODEGRAPH_STATE_DIR", tmp_path / "state")
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "mod.py").write_text("def plain():\n    pass\n")
+    old = SqliteIndexCache(str(project))
+    monkeypatch.setattr(old, "SCHEMA_VERSION", 4)
+    old.save(build_index(project))
+    old.close()
+
+    current = SqliteIndexCache(str(project))
+    loaded = current.load()
+    current.close()
+    assert loaded is None or not loaded.has("plain")

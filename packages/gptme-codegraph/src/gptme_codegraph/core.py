@@ -410,7 +410,7 @@ class SqliteIndexCache:
     the MCP server loads from SQLite instead of re-parsing on every startup.
     """
 
-    SCHEMA_VERSION = 4
+    SCHEMA_VERSION = 5
 
     def __init__(self, directory: str):
         self.db_path = _db_path(directory)
@@ -3328,7 +3328,7 @@ def build_call_graph(
     for sym in symbols:
         if sym.kind == "class":
             continue
-        qid = name_to_qid.get(sym.name, sym.qualified_id())
+        qid = sym.qualified_id()
         # Filter to known symbols only: excludes external builtins and dotted
         # attribute calls like 'calc.add' that can't be resolved locally.
         filtered_calls = {
@@ -3336,7 +3336,8 @@ def build_call_graph(
             for c in sym.calls
             if c in known_names and (resolved := _resolve_call(c, sym)) is not None
         }
-        callees[qid] = filtered_calls
+        # Conditional branches can define one name twice: keep every call.
+        callees.setdefault(qid, set()).update(filtered_calls)
         for called_qid in filtered_calls:
             callers[called_qid].add(qid)
 
