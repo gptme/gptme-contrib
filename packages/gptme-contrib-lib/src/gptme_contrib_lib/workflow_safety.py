@@ -7,9 +7,21 @@ and lists every invariant the edit breaks. An empty list means the edit only
 touches what a repair may touch (step bodies, timeouts, action ``@ref`` pins).
 
 What must stay equal: triggers, top-level ``permissions``/``env``/``defaults``/
-``concurrency``, the job set, each job's trust-bearing keys, every
+``concurrency``, the job set, each job's trust-bearing keys (including
+``strategy``, whose matrix can retarget ``runs-on``/``environment`` through
+``${{ matrix.* }}``, and job ``env``/``defaults``/``concurrency``/``with``), every
 ``secrets.*``/``vars.*`` reference, and the ``owner/repo`` of each ``uses:``.
 Release, publish, deploy, signing and pages workflows or jobs are always out.
+
+Secret-bearing steps are frozen too, because an unchanged reference set says
+nothing about what *consumes* the secret: a ``run:`` edit in the step that holds
+``secrets.X`` can send it anywhere. A step holds a secret when any of its values
+references ``secrets``/``vars``. In a job, every step up to and including the
+last secret-holding step (on either side) must be unchanged, positionally, so an
+earlier step cannot plant a binary or ``$GITHUB_ENV`` entry the secret step then
+runs. When the workflow or job ``env`` references a secret, every step in scope
+sees it, so the whole step list must be unchanged. Only a step's ``@ref`` pin and
+``timeout-minutes`` may differ inside that frozen prefix.
 
 Everything fails closed: a missing YAML parser, unparseable YAML or a
 non-mapping document is a violation, never a pass. PyYAML is imported lazily so
@@ -32,7 +44,14 @@ _JOB_KEYS = (
     "if",
     "needs",
     "uses",
+    "with",
+    "strategy",
+    "env",
+    "defaults",
+    "concurrency",
 )
+# A repair may still change these inside a frozen (secret-visible) step.
+_STEP_REPAIR_KEYS = ("timeout-minutes",)
 _FORBIDDEN_EVENTS = ("pull_request_target", "workflow_run")
 _PRIVILEGED_NAME_RE = re.compile(r"(?i)(release|publish|deploy|sign|pages)")
 # `secrets.X`, `secrets['X']` / `secrets["X"]`, a computed `secrets[expr]`, or the
@@ -131,6 +150,48 @@ def _step_actions(job: Any) -> list[str | None]:
     )
 
 
+def _guarded_step(step: Any) -> Any:
+    """A step as compared inside the frozen prefix: ``@ref`` and timeout may move."""
+    if not isinstance(step, dict):
+        return step
+    out = {k: v for k, v in step.items() if k not in _STEP_REPAIR_KEYS}
+    if "uses" in out:
+        out["uses"] = _action_repo(out["uses"])
+    return out
+
+
+def _secret_step_violations(
+    job_id: Any, old: dict[str, Any], new: dict[str, Any], scope_wide: bool
+) -> list[str]:
+    """Steps that can see a secret must be unchanged (see the module docstring)."""
+    old_steps, new_steps = old.get("steps"), new.get("steps")
+    old_steps = old_steps if isinstance(old_steps, list) else []
+    new_steps = new_steps if isinstance(new_steps, list) else []
+    if scope_wide or _context_refs({"env": old.get("env"), "x": new.get("env")}):
+        if [_guarded_step(s) for s in old_steps] != [
+            _guarded_step(s) for s in new_steps
+        ]:
+            return [f"job `{job_id}`: a step changed in a secret-scoped job"]
+        return []
+    holders = [
+        i
+        for steps in (old_steps, new_steps)
+        for i, step in enumerate(steps)
+        if _context_refs({"step": step})
+    ]
+    if not holders:
+        return []
+    frozen = max(holders) + 1
+    if (
+        len(old_steps) < frozen
+        or len(new_steps) < frozen
+        or [_guarded_step(s) for s in old_steps[:frozen]]
+        != [_guarded_step(s) for s in new_steps[:frozen]]
+    ):
+        return [f"job `{job_id}`: steps through the last secret-holding step changed"]
+    return []
+
+
 def _jobs(doc: dict[str, Any]) -> dict[str, Any] | None:
     jobs = doc.get("jobs")
     return jobs if isinstance(jobs, dict) else None
@@ -160,6 +221,9 @@ def ci_repair_violations(path: str, base_text: str, head_text: str) -> list[str]
             violations.append(f"top-level `{key}` changed")
     if _context_refs(base) != _context_refs(head):
         violations.append("secrets/vars references changed")
+    workflow_env_secrets = bool(
+        _context_refs({"base": base.get("env"), "head": head.get("env")})
+    )
 
     base_jobs, head_jobs = _jobs(base), _jobs(head)
     if base_jobs is None or head_jobs is None:
@@ -179,4 +243,5 @@ def ci_repair_violations(path: str, base_text: str, head_text: str) -> list[str]
                 violations.append(f"job `{job_id}`: `{key}` changed")
         if _step_actions(old) != _step_actions(new):
             violations.append(f"job `{job_id}`: action set changed (only @ref may)")
+        violations += _secret_step_violations(job_id, old, new, workflow_env_secrets)
     return violations

