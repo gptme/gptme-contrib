@@ -198,8 +198,8 @@ def _string_list(value: object) -> list[str]:
 def _match_terms(value: object, *, split_commas: bool) -> list[str]:
     """Normalise a ``keywords``/``patterns`` field to a list of strings.
 
-    Accepts a string or a list. Numeric YAML scalars (``- 404``) are kept as
-    text; booleans, mappings and nulls are dropped. A bare string is split on
+    Accepts a string or a list. Numeric and date YAML scalars are kept as
+    source text; booleans, mappings and nulls are dropped. A bare string is split on
     commas only when ``split_commas`` is set: keyword lists use that
     shorthand, but a comma inside a regex (``x{1,3}``) is part of the pattern.
     """
@@ -483,13 +483,14 @@ def extract_frontmatter(content: str) -> tuple[dict[str, Any], str]:
             def construct_mapping(self, node, deep=False):
                 mapping = super().construct_mapping(node, deep=deep)
 
-                # Keep numeric match terms as written (3.10, 0x1F, 12:30),
-                # not YAML 1.1's coerced values (3.1, 31, 750). Other fields
-                # and non-numeric types retain SafeLoader semantics.
+                # Keep numeric and date match terms as written, not YAML
+                # 1.1's coerced numbers/dates. Other fields and types retain
+                # SafeLoader semantics (including boolean/null exclusion).
                 def term(item):
                     if isinstance(item, yaml.ScalarNode) and item.tag in {
                         "tag:yaml.org,2002:int",
                         "tag:yaml.org,2002:float",
+                        "tag:yaml.org,2002:timestamp",
                     }:
                         return item.value
                     return self.construct_object(item, deep=True)

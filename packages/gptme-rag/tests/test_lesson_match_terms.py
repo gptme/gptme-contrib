@@ -55,6 +55,14 @@ def test_pattern_with_a_comma_is_not_split(tmp_path, frontmatter):
 
 
 @pytest.mark.parametrize("nested", [False, True])
+def test_explicit_pattern_list_keeps_independent_expressions(tmp_path, nested):
+    fields = 'patterns: ["foo", "bar", "x{1,3}y"]\n'
+    if nested:
+        fields = "match:\n  " + fields
+    assert _parse(tmp_path, fields)["patterns"] == ["foo", "bar", "x{1,3}y"]
+
+
+@pytest.mark.parametrize("nested", [False, True])
 def test_numeric_match_terms_preserve_source_text(tmp_path, nested):
     fields = "keywords: [404, 3.10, 1_000, 0x1F, '12:30']\n" "patterns:\n  - 3.10\n  - 12:30\n"
     if nested:
@@ -62,7 +70,18 @@ def test_numeric_match_terms_preserve_source_text(tmp_path, nested):
     parsed = _parse(tmp_path, fields)
     assert parsed["keywords"] == ["404", "3.10", "1_000", "0x1F", "12:30"]
     assert parsed["patterns"] == ["3.10", "12:30"]
-    assert not matcher.match_keyword("Python 3.12", parsed["keywords"][1])
+    assert matcher.match_keyword(parsed["keywords"][1], "python 3.10")
+    assert not matcher.match_keyword(parsed["keywords"][1], "python 3.12")
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_date_match_terms_preserve_source_text(tmp_path, nested):
+    fields = "keywords: [2026-08-05]\npatterns:\n  - 2026-08-05\n"
+    if nested:
+        fields = "match:\n" + "".join("  " + line for line in fields.splitlines(True))
+    parsed = _parse(tmp_path, fields)
+    assert parsed["keywords"] == ["2026-08-05"]
+    assert parsed["patterns"] == ["2026-08-05"]
 
 
 def test_scan_invalidates_pre_normalization_disk_cache(tmp_path, monkeypatch):
