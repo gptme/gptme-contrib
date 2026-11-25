@@ -200,7 +200,7 @@ def log_injection(
         record.update(extra)
 
     try:
-        payload = json.dumps(record) + "\n"
+        payload = json.dumps(record, allow_nan=False) + "\n"
         log_file.parent.mkdir(parents=True, exist_ok=True)
         with open(log_file, "a", encoding="utf-8") as f:
             f.write(payload)
@@ -260,8 +260,8 @@ def summarize_injections(log_file: Path) -> InjectionStats:
                 num_hits = int(rec.get("num_hits", 0) or 0)
                 top_score = float(rec.get("top_score", 0.0) or 0.0)
                 if not math.isfinite(top_score):
-                    # json.loads accepts NaN/Infinity from older writers.
-                    raise ValueError("non-finite top_score")
+                    # Keep legacy injections counted, matching the writer's score fallback.
+                    top_score = 0.0
             except (TypeError, ValueError, OverflowError):
                 # Same contract as a partial trailing line: skip, don't raise.
                 stats.malformed += 1

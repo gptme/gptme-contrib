@@ -710,16 +710,42 @@ def test_log_injection_writes_non_finite_scores_as_zero(tmp_path, bad):
     assert written["top_score"] == 0.0
 
 
-def test_summarize_skips_non_finite_top_score(tmp_path):
-    """A NaN already in a log must not turn avg_top_score into NaN."""
+@pytest.mark.parametrize("bad", ["NaN", "Infinity", "-Infinity", "1e999"])
+def test_summarize_preserves_injections_with_non_finite_top_score(tmp_path, bad):
+    """Legacy non-finite scores become zero without losing injection counts."""
     log = tmp_path / "injections.jsonl"
     log.write_text(
-        '{"num_hits": 1, "top_score": NaN}\n'
-        '{"num_hits": 1, "top_score": Infinity}\n'
+        '{"num_hits": 1, "session_id": "legacy", "harness": "gptme", "top_score": '
+        + bad
+        + "}\n"
         + json.dumps({"num_hits": 2, "top_score": 0.8})
-        + "\n"
+        + '\n{"num_hits": 0, "top_score": 0.0}\n'
     )
     stats = summarize_injections(log)
-    assert stats.malformed == 2
-    assert stats.total == 1
-    assert stats.avg_top_score == pytest.approx(0.8)
+    assert stats.malformed == 0
+    assert stats.total == 3
+    assert stats.nonzero == 2
+    assert stats.fire_rate == pytest.approx(2 / 3)
+    assert stats.avg_hits == pytest.approx(1.0)
+    assert stats.avg_top_score == pytest.approx(0.4)
+    assert stats.unique_sessions == 2
+    assert stats.by_harness == {"gptme": 1, "unknown": 2}
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+@pytest.mark.parametrize("source", ["extra", "hit"])
+def test_log_injection_rejects_non_finite_metadata_without_appending(tmp_path, bad, source):
+    """Invalid metadata must not corrupt an existing strict-JSON log."""
+    log = tmp_path / "injections.jsonl"
+    assert log_injection(log, "valid", _hits(0.5), backend="tfidf", harness="test")
+    before = log.read_text()
+    hits = _hits(0.5)
+    extra = None
+    if source == "extra":
+        extra = {"metrics": {"latency_ms": bad}}
+    else:
+        hits[0]["state"] = bad
+
+    assert log_injection(log, "invalid", hits, backend="tfidf", harness="test", extra=extra) is None
+    assert log.read_text() == before
+    assert _strict_json(before)["top_score"] == 0.5
