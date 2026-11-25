@@ -106,6 +106,14 @@ def test_unrelated_fields_keep_yaml_types():
     assert fm == yaml.safe_load(frontmatter)
 
 
+def test_aliased_match_mapping_leaves_its_anchor_typed():
+    pytest.importorskip("yaml")
+    frontmatter = "base: &base\n  keywords: [3.10]\nmatch: *base\n"
+    fm, _ = matcher.extract_frontmatter(f"---\n{frontmatter}---\n")
+    assert fm["match"]["keywords"] == ["3.10"]
+    assert fm["base"]["keywords"] == [3.1]
+
+
 def test_scan_invalidates_pre_normalization_disk_cache(tmp_path, monkeypatch):
     monkeypatch.setenv("GPTME_LESSON_SCAN_CACHE", str(tmp_path / "cache"))
     lessons_dir = tmp_path / "lessons"

@@ -493,7 +493,9 @@ def extract_frontmatter(content: str) -> tuple[dict[str, Any], str]:
                     self._keep_term_text(node, document)
                     if isinstance(document.get("match"), dict):
                         written = {key.value: value for key, value in node.value}
-                        self._keep_term_text(written["match"], document["match"])
+                        # A plain alias (``match: *base``) shares the anchor's dict.
+                        document["match"] = match = dict(document["match"])
+                        self._keep_term_text(written["match"], match)
                 return document
 
             @staticmethod
