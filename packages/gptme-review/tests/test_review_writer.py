@@ -857,7 +857,8 @@ def test_rule_7_recognises_breaking_change_fix_titles(alice_io, title, flagged):
     assert w._check_fix_without_test(title, ["src/a.py", "tests/test_a.py"]) == []
 
 
-def test_rule_7_accepts_inline_rust_unit_tests(alice_io):
+@pytest.mark.parametrize("attribute", ["#[test]", "#[tokio::test]", "#[cfg(test)]"])
+def test_rule_7_accepts_inline_rust_unit_tests(alice_io, attribute):
     """Rust keeps unit tests in ``#[cfg(test)]`` modules inside ``src/``.
 
     A fix that adds ``#[test]`` functions there carries a regression test
@@ -870,12 +871,12 @@ def test_rule_7_accepts_inline_rust_unit_tests(alice_io):
         "--- a/src/main.rs\n"
         "+++ b/src/main.rs\n"
         "@@ -1,2 +1,6 @@\n"
-        "+    #[test]\n"
+        f"+    {attribute}\n"
         "+    fn threshold_alerts_rearm_on_new_day() {}\n"
     )
     assert w._check_fix_without_test("fix(alerts): re-arm", ["src/main.rs"], diff) == []
     # An existing, unchanged test attribute is context, not a new test.
-    context_only = diff.replace("+    #[test]", "     #[test]")
+    context_only = diff.replace(f"+    {attribute}", f"     {attribute}")
     assert w._check_fix_without_test(
         "fix(alerts): re-arm", ["src/main.rs"], context_only
     )

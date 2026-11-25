@@ -3835,7 +3835,7 @@ _TEST_FILE_RE = re.compile(
 # Horizontal whitespace only: ``\s`` matches newlines, which let an added
 # empty line bridge onto the next context line's existing ``#[test]``.
 _ADDED_INLINE_TEST_RE = re.compile(
-    r"^\+(?!\+\+)[ \t]*#\[(?:cfg\(test\)|(?:tokio::)?test)\b", re.MULTILINE
+    r"^\+(?!\+\+)[ \t]*#\[(?:cfg\(test\)|(?:tokio::)?test\b)", re.MULTILINE
 )
 
 
