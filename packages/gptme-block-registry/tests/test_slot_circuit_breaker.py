@@ -187,7 +187,11 @@ class TestPersistence:
             300.0,
         )
         assert b._probe_started_at is None
-        assert _apply_verdict(b, PRODUCTIVE, 402.0, 90.0) is True
+        # The stale success grants a replacement probe; it cannot close it.
+        assert _apply_verdict(b, PRODUCTIVE, 402.0, 90.0) is False
+        assert b.state == CircuitState.HALF_OPEN
+        assert b._probe_started_at == 402.0
+        assert _apply_verdict(b, PRODUCTIVE, 403.0, 90.0) is True
         assert b.state == CircuitState.HALF_OPEN
 
     def test_non_bool_probe_pending_resets_to_closed(self) -> None:

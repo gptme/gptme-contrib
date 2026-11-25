@@ -283,6 +283,10 @@ def _load_breaker(
         )
         if b._probe_started_at is not None and not math.isfinite(b._probe_started_at):
             b._probe_started_at = None
+        if b._state == CircuitState.HALF_OPEN and b._probe_started_at is None:
+            # Legacy or corrupt state cannot identify an in-flight probe.
+            # Treat the next call as a fresh grant, never as its outcome.
+            b._probe_pending = True
         requires_timestamp = slot_state.get("probe_requires_timestamp", False)
         if not isinstance(requires_timestamp, bool):
             raise ValueError("non-bool probe_requires_timestamp")

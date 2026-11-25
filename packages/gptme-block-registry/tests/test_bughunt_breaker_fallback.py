@@ -61,6 +61,38 @@ def test_r4_1_lost_half_open_probe_suppresses_slot_forever(
     assert (not suppress) or fallback is not None, (suppress, state, fallback)
 
 
+@pytest.mark.parametrize("probe_timestamp", [None, float("nan"), float("inf")])
+@pytest.mark.parametrize("verdict", [NEUTRAL, PRODUCTIVE, AUTH_DEATH])
+@pytest.mark.parametrize("timestamped", [False, True])
+def test_half_open_without_probe_timestamp_grants_one_fresh_probe(
+    tmp_path: Path,
+    clock: list[float],
+    probe_timestamp: float | None,
+    verdict: str,
+    timestamped: bool,
+) -> None:
+    sf = tmp_path / "cb.json"
+    slot_state = {"state": "HALF_OPEN", "failure_count": 3, "opened_at": 1.0}
+    if probe_timestamp is not None:
+        slot_state["probe_started_at"] = probe_timestamp
+    sf.write_text(json.dumps({"bob": slot_state}))
+    clock[0] = 402.0
+    # With no usable grant time, an old outcome cannot settle the breaker.
+    assert decide_respawn(
+        state_file=sf,
+        slot="bob",
+        verdict=verdict,
+        verdict_started_at=90.0 if timestamped else None,
+    ) == (False, "HALF_OPEN")
+    assert json.loads(sf.read_text())["bob"]["probe_started_at"] == 402.0
+    # The recovery is persisted: no second probe is granted immediately.
+    assert decide_respawn(state_file=sf, slot="bob") == (True, "HALF_OPEN")
+    clock[0] = 403.0
+    assert decide_respawn(
+        state_file=sf, slot="bob", verdict=PRODUCTIVE, verdict_started_at=402.0
+    ) == (False, "CLOSED")
+
+
 # R4-2 -----------------------------------------------------------------------
 @pytest.mark.parametrize(
     "opened_at_json",
