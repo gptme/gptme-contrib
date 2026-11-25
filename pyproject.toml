@@ -57,6 +57,7 @@ torch = { index = "pytorch-cpu" }
 numpy = { index = "pypi" }
 gptme = { git = "https://github.com/gptme/gptme.git", branch = "master" }
 gptme-body-protocol = { workspace = true }
+gptme-rag = { workspace = true }
 gptme-vision-node = { workspace = true }
 gptme-sessions = { workspace = true }
 gptme-usage = { workspace = true }
