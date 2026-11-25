@@ -114,7 +114,10 @@ class SessionIndex:
         with self.conn:
             # Lock before reading: a contentless FTS delete must use values
             # that no other writer can replace between this read and our write.
-            self.conn.execute("BEGIN IMMEDIATE")
+            # A transaction already open on the connection is joined and
+            # committed here, since SQLite rejects a nested BEGIN.
+            if not self.conn.in_transaction:
+                self.conn.execute("BEGIN IMMEDIATE")
             existing = self.conn.execute(
                 "SELECT id, title, content, summary FROM sessions WHERE path = ?",
                 (doc.path,),

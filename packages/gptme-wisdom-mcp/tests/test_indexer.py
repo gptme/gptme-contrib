@@ -149,6 +149,31 @@ def test_overlapping_updates_do_not_delete_stale_fts_values(tmp_path: Path):
         )
 
 
+def test_add_joins_a_transaction_already_open_on_the_connection(tmp_path: Path):
+    """DML on idx.conn leaves a transaction open; add() must work and commit it."""
+    from gptme_wisdom_mcp.indexer import SessionIndex
+    from gptme_wisdom_mcp.parsers import SessionDocument
+
+    doc = SessionDocument(
+        source="journal",
+        path="/journal/session.md",
+        date=datetime(2026, 1, 1),
+        title="Session",
+        content="walrus",
+        summary="summary",
+    )
+
+    with SessionIndex(tmp_path / "s.db") as idx:
+        idx.conn.execute("INSERT INTO index_state (key, value) VALUES ('k', 'v')")
+        assert idx.conn.in_transaction
+        assert idx.add(doc) is True
+        assert not idx.conn.in_transaction
+
+    with SessionIndex(tmp_path / "s.db") as reopened:
+        assert len(reopened.search("walrus")) == 1
+        assert reopened.conn.execute("SELECT value FROM index_state").fetchone()[0] == "v"
+
+
 def test_purge_rebuild_preserves_content_search():
     """Purging one path should not degrade FTS recall for remaining content."""
     from gptme_wisdom_mcp.indexer import SessionIndex
