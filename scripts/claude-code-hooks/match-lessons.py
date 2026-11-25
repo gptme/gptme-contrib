@@ -30,8 +30,10 @@ Register in `.claude/settings.json`. Prefer the workspace venv interpreter
 Install gptme-rag in that venv. Run with --self-check (no stdin required)
 for a non-zero exit if the matcher import or lesson-directory resolution fails.
 Normal hook calls remain fail-open, with dependency_missing receipts on import
-failure rather than reporting an ordinary no_match. Independent keyword-memory
-matching continues, and receipts measure any context it emits.
+failure rather than reporting an ordinary no_match. Budget timeouts keep their
+hook_budget_timeout reason and annotate dependency_missing: true on import failure.
+Independent keyword-memory matching continues, and receipts measure any context
+it emits.
 
 The hook auto-discovers your workspace root (the directory containing gptme.toml)
 and reads lesson dirs from [lessons] dirs in that config file.
@@ -1570,26 +1572,43 @@ def check_prompt_repeat(
         prompt_lock.close()
 
 
+# A pointer render puts its ``*Source:`` line right after the "(skill pointer)"
+# heading; transcripts store that newline raw or JSON-escaped.
+_TRANSCRIPT_SOURCE_RE = re.compile(
+    r"(?P<pointer>\(skill pointer\)(?:\\n|\n))?\*Source: (?P<path>[^*]+)\*"
+)
+
+
 def get_already_injected(
-    session_id: str, transcript_path: str | None = None
+    session_id: str,
+    transcript_path: str | None = None,
+    *,
+    include_pointers: bool = False,
 ) -> set[str]:
     """Get set of lesson paths already injected in this session.
 
     Uses session state file as primary source, with transcript fallback.
+    A skill pointer only counts when ``include_pointers`` is set: it suppresses
+    a repeat pointer on tool events, but must not stop a later prompt from
+    delivering the full body.
     """
     injected: set[str] = set()
 
     # From state file
     state = load_session_state(session_id)
     injected.update(state.get("injected", []))
+    if include_pointers:
+        injected.update(state.get("pointed", []))
 
     # From transcript (catches lessons from before state tracking)
     if transcript_path:
         try:
             with open(transcript_path, encoding="utf-8") as f:
                 for line in f:
-                    for m in re.finditer(r"\*Source: ([^*]+)\*", line):
-                        injected.add(m.group(1).strip())
+                    for m in _TRANSCRIPT_SOURCE_RE.finditer(line):
+                        if m.group("pointer") and not include_pointers:
+                            continue
+                        injected.add(m.group("path").strip())
         except TimeoutError:
             raise  # hook budget alarm: must reach the top-level handler
         except Exception:
@@ -1751,7 +1770,7 @@ def emit_empty(
         )
         sys.stdout.flush()
     if session_id:
-        if not _GPTME_RAG_AVAILABLE:
+        if not _GPTME_RAG_AVAILABLE and reason != "hook_budget_timeout":
             reason = "dependency_missing"
         _write_emission_receipt(session_id, event_name, 0, "empty", reason)
 
@@ -1759,6 +1778,11 @@ def emit_empty(
 def _is_skill_path(path: str) -> bool:
     """True if the matched file is a SKILL.md (pointer-inject on PreToolUse)."""
     return Path(path).name.lower() == "skill.md"
+
+
+def _renders_as_pointer(m: dict, event_type: str) -> bool:
+    """True if this match is emitted as a skill pointer rather than its body."""
+    return event_type == "PreToolUse" and _is_skill_path(m["path"])
 
 
 def _render_lesson(m: dict, event_type: str) -> list[str]:
@@ -1769,7 +1793,7 @@ def _render_lesson(m: dict, event_type: str) -> list[str]:
     on a low-confidence trigger. Lessons (small by design, 30-50 lines) and all
     UserPromptSubmit matches keep full-body injection.
     """
-    if event_type == "PreToolUse" and _is_skill_path(m["path"]):
+    if _renders_as_pointer(m, event_type):
         desc = m.get("description", "").strip()
         lines = [f"### {m['title']} (skill pointer)"]
         lines.append(f"*Source: {m['path']}*")
@@ -2534,7 +2558,9 @@ def _match_and_emit(
         return
 
     # --- Dedup: skip already-injected lessons ---
-    already_injected = get_already_injected(session_id, transcript_path)
+    already_injected = get_already_injected(
+        session_id, transcript_path, include_pointers=event_type == "PreToolUse"
+    )
 
     # --- Holdout filtering (A/B testing via HOLDOUT_LESSONS env var) ---
     matches = filter_held_out_lessons(raw_matches, holdout_lessons)
@@ -2630,11 +2656,15 @@ def _match_and_emit(
 
     # Commit dedup only after output succeeds. A pre-emission timeout must leave
     # the real session state retryable, not merely the workspace prompt window.
-    # Only lessons that were actually emitted are marked injected.
+    # Only lessons that were actually emitted are marked injected. A skill
+    # pointer is tracked separately so a later prompt can still inject the body.
     def _commit(state: dict) -> None:
+        pointed = {m["path"] for m in matches if _renders_as_pointer(m, event_type)}
         existing = set(state.get("injected", []))
-        existing.update(m["path"] for m in matches)
+        existing.update(m["path"] for m in matches if m["path"] not in pointed)
         state["injected"] = list(existing)
+        if pointed:
+            state["pointed"] = sorted(pointed.union(state.get("pointed", [])))
         if event_type == "PreToolUse":
             state["last_pretool"] = time.time()
 
@@ -2660,11 +2690,10 @@ def self_check() -> int:
     return 0
 
 
-if __name__ == "__main__":
-    if "--self-check" in sys.argv[1:]:
-        sys.exit(self_check())
+def _run_with_budget(budget_seconds: float) -> None:
+    """Run ``main()`` under the wall-clock budget; a timeout degrades to empty."""
     try:
-        _arm_hook_budget(HOOK_BUDGET_SECONDS)
+        _arm_hook_budget(budget_seconds)
         main()
     except TimeoutError:
         # Stop the re-firing alarm before any recovery work can be interrupted.
@@ -2676,12 +2705,28 @@ if __name__ == "__main__":
         # still readable here. A PreToolUse timeout must emit no payload, not
         # a UserPromptSubmit-shaped one.
         event = "UserPromptSubmit"
+        session_id = None
         try:
-            cached_input = _STDIN_CACHE or ""
-            event = json.loads(cached_input).get("hook_event_name") or event
+            cached = json.loads(_STDIN_CACHE or "")
+            event = cached.get("hook_event_name") or event
+            session_id = cached.get("session_id") or None
         except (json.JSONDecodeError, TypeError, ValueError, AttributeError):
             pass
-        emit_empty(event)
+        # Discard metadata from the abandoned emission decision. In particular,
+        # session_bytes counts reservations, not successfully emitted bytes;
+        # the conservative debit remains, but is not this empty output's size.
+        _RECEIPT_FIELDS.clear()
+        if not _GPTME_RAG_AVAILABLE:
+            _RECEIPT_FIELDS["dependency_missing"] = True
+        # Record the timeout as a measured-zero receipt: without one, a hook
+        # that ran out of budget is indistinguishable from one that never ran.
+        emit_empty(event, session_id, "hook_budget_timeout")
         sys.exit(0)
     finally:
         _disarm_hook_budget()
+
+
+if __name__ == "__main__":
+    if "--self-check" in sys.argv[1:]:
+        sys.exit(self_check())
+    _run_with_budget(HOOK_BUDGET_SECONDS)

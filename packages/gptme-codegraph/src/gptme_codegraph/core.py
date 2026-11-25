@@ -27,6 +27,7 @@ import json
 import sqlite3
 import subprocess
 import sys
+import uuid
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -520,8 +521,29 @@ class SqliteIndexCache:
 
         return True
 
-    def save(self, index: SymbolIndex) -> None:
-        """Persist a SymbolIndex to SQLite."""
+    def generation(self) -> str | None:
+        """Return the token of the last ``save()``, or None if never saved.
+
+        Every save writes a fresh token, so a reader can tell that another
+        process replaced the index even when the file mtimes it checks are
+        unchanged since then. Include ``last_updated`` even when a token exists:
+        older writers update that timestamp but leave an existing token intact.
+        Databases written before tokens existed use the timestamp alone.
+        """
+        conn = self._connect()
+        self._init_schema()
+        metadata = dict(
+            conn.execute(
+                "SELECT key, value FROM metadata "
+                "WHERE key IN ('index_generation', 'last_updated')"
+            ).fetchall()
+        )
+        token = metadata.get("index_generation")
+        last_updated = metadata.get("last_updated")
+        return f"{token}:{last_updated}" if token else last_updated
+
+    def save(self, index: SymbolIndex) -> str:
+        """Persist a SymbolIndex to SQLite and return its generation token."""
         conn = self._connect()
         self._init_schema()
 
@@ -581,11 +603,18 @@ class SqliteIndexCache:
                     (fp_str, _file_mtime(fp), self._directory),
                 )
 
+        last_updated = datetime.now(timezone.utc).isoformat()
         conn.execute(
             "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
-            ("last_updated", datetime.now(timezone.utc).isoformat()),
+            ("last_updated", last_updated),
+        )
+        generation = uuid.uuid4().hex
+        conn.execute(
+            "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+            ("index_generation", generation),
         )
         conn.commit()
+        return f"{generation}:{last_updated}"
 
     def load(self) -> SymbolIndex | None:
         """Load a persisted SymbolIndex from SQLite, or None if empty or stale."""

@@ -17,7 +17,7 @@ classifiers = [
     "Topic :: Utilities",
 ]
 dependencies = [
-    "gptme>=0.29",
+    "gptme>=0.33",
 ]
 
 [project.entry-points."gptme.status_providers"]

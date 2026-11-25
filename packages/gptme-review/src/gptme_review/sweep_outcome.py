@@ -177,7 +177,8 @@ def classify_all_failed_run(
 
     Returns ``None`` unless every attempted review failed. A singleton miss is
     noisy but not systemic; reserve ``systemic`` for multi-review collapse that
-    no known transient class explains.
+    no known transient class explains. A collapse explained only by a mix of
+    known classes that includes a capacity refusal is ``transient_mix``.
     """
     if not attempted or failures != attempted:
         return None
@@ -191,6 +192,8 @@ def classify_all_failed_run(
         return "pr_local"
     if capacity_failures == attempted:
         return "capacity"
+    if rate_limit_failures + too_large_failures + capacity_failures == attempted:
+        return "transient_mix"
     return "systemic"
 
 

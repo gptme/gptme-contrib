@@ -214,7 +214,9 @@ class ReviewPromptGenerator:
 
 def main():
     """Main entry point."""
-    workspace_root = Path(__file__).parent.parent.parent
+    # Run from the agent workspace, like the other maintenance scripts; the
+    # script's own location is inside the installed package, not a workspace.
+    workspace_root = Path.cwd()
     generator = ReviewPromptGenerator(workspace_root)
 
     print("Generating lesson review prompts...\n")
@@ -224,6 +226,7 @@ def main():
 
     # Save report
     output_path = workspace_root / "knowledge/meta/lesson-review-prompts.md"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(report)
 
     print(f"✅ Generated {len(prompts)} review prompts")

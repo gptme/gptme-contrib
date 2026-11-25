@@ -65,7 +65,7 @@ def test_find_marker_comment_reads_through_the_bound_io(alice_io):
         calls.append(cmd)
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
-    alice_io.gh_paginated_list = lambda args: comments
+    alice_io.gh_json = lambda args: [comments]  # one --slurp page
     alice_io.run = fake_run
     keeper = writer.bind_io(alice_io).find_marker_comment("o/r", 7)
     assert keeper is not None and keeper["id"] == 2
@@ -86,7 +86,7 @@ def test_copied_marker_from_another_author_is_ignored_not_deleted(alice_io):
         "user": {"login": "mallory"},
     }
     calls: list[list[str]] = []
-    alice_io.gh_paginated_list = lambda args: [real, copied]
+    alice_io.gh_json = lambda args: [[real, copied]]
     alice_io.run = lambda cmd, **kw: calls.append(cmd)
     keeper = writer.bind_io(alice_io).find_marker_comment("o/r", 7)
     assert keeper is not None and keeper["id"] == 1
@@ -552,9 +552,11 @@ def _scripted_run(responses):
 
     def fake_run(cmd, **kw):
         calls.append(cmd)
-        for prefix, (code, out) in responses.items():
+        for prefix, (code, out, *err) in responses.items():
             if tuple(cmd[: len(prefix)]) == prefix:
-                return subprocess.CompletedProcess(cmd, code, out, "err")
+                return subprocess.CompletedProcess(
+                    cmd, code, out, err[0] if err else "err"
+                )
         raise AssertionError(f"unexpected command {cmd}")
 
     return fake_run, calls
@@ -668,7 +670,9 @@ def test_read_checkout_file_refuses_paths_outside_the_checkout(alice_io, tmp_pat
 
 
 def test_cited_sha_lookup_goes_through_the_bound_run(alice_io):
-    fake_run, calls = _scripted_run({("gh", "api"): (1, "")})
+    fake_run, calls = _scripted_run(
+        {("gh", "api"): (1, "", "gh: No commit found for SHA: abc1234 (HTTP 422)")}
+    )
     w = _bound_with(alice_io, run=fake_run)
     body = "Fixed in `abc1234`. Also bumps the pin, commit 2222222."
     findings = w._check_cited_shas(body, "o/r", ["src/a.py"], _SUBMODULE_DIFF)
@@ -676,6 +680,21 @@ def test_cited_sha_lookup_goes_through_the_bound_run(alice_io):
     assert findings[0]["severity"] == "P1" and findings[0]["static"] is True
     # The gitlink SHA the PR moves is accepted without a lookup.
     assert calls == [["gh", "api", "repos/o/r/commits/abc1234", "--jq", ".sha"]]
+
+
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "gh: API rate limit exceeded (HTTP 403)",
+        "gh: Server Error (HTTP 502)",
+        "error connecting to api.github.com",
+    ],
+)
+def test_cited_sha_lookup_error_is_not_a_missing_commit(alice_io, stderr):
+    """A failed lookup is unknown, not 'not found' (contrib#2384, #2273)."""
+    fake_run, _calls = _scripted_run({("gh", "api"): (1, "", stderr)})
+    w = _bound_with(alice_io, run=fake_run)
+    assert w._check_cited_shas("Fixed in `abc1234`.", "o/r", ["src/a.py"]) == []
 
 
 def test_cited_sha_does_not_truncate_a_full_ref(alice_io):
@@ -1356,3 +1375,34 @@ def test_publish_review_yields_to_a_marker_that_appeared_while_analysing(alice_i
     w, lock = _publish_io(alice_io, fake_run, current=current)
     assert w.publish_review(**_publish_kwargs()) is False
     assert calls == [] and lock.closed
+
+
+def test_unreadable_comment_list_raises_instead_of_reading_as_no_marker(alice_io):
+    # bobutils' gh_paginated_list reads a failed call as []; the marker read must not.
+    alice_io.gh_paginated_list = lambda args: []
+    alice_io.gh_json = lambda args: None  # breaker refusal / 403 / timeout
+    w = writer.bind_io(alice_io)
+    with pytest.raises(writer.ReviewError, match="cannot read o/r#7 comments"):
+        w.find_marker_comment("o/r", 7)
+    alice_io.gh_json = lambda args: [[]]  # a real, empty page
+    assert w.find_marker_comment("o/r", 7) is None
+
+
+@pytest.mark.parametrize(
+    "existing", [None, {"id": 123, "body": "<!-- alice-ai-review {} -->"}]
+)
+def test_refused_marker_reread_publishes_nothing(alice_io, capsys, existing):
+    calls: list[list[str]] = []
+    alice_io.gh_json = lambda args, **kw: None  # REST core exhausted
+    alice_io.gh_paginated_list = lambda args: []
+    alice_io.run = lambda cmd, **kw: calls.append(cmd)
+    alice_io._publication_lock = lambda repo, number: _Lock()
+    w = writer.bind_io(alice_io)
+    assert (
+        w.publish_review(**_publish_kwargs(existing=existing), host=_AdvisoryHost())
+        is False
+    )
+    err = capsys.readouterr().err
+    assert "cannot read o/r#7 comments" in err
+    assert "disappeared" not in err
+    assert calls == []  # no POST/PATCH: an unreadable marker must not be duplicated

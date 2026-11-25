@@ -60,6 +60,7 @@ from gptmail.transport.agent import (
     Deliver,
     local_delivery_time,
     meta_of,
+    stamp_frontmatter_flags,
     write_inbox_metadata,
 )
 from gptmail.transport.receive import (
@@ -671,47 +672,21 @@ def _pending_messages(
 
 def _mark_read(path: Path) -> None:
     """Stamp an inbox message ``read: true``. Idempotent. Handles missing key (pull-fetched msgs)."""
-    if not path.exists():
-        return
-    content = path.read_text()
-    if not content.startswith("---"):
-        return
-    parts = _FM_DELIM.split(content, maxsplit=2)
-    if len(parts) < 3:
-        return
-    fm = parts[1]
-    if re.search(r"^read: true$", fm, flags=re.MULTILINE):
-        return
-    if re.search(r"^read:", fm, flags=re.MULTILINE):
-        fm = re.sub(r"^read: false$", "read: true", fm, flags=re.MULTILINE)
-    else:
-        fm = fm.rstrip("\n") + "\nread: true\n"
-    write_inbox_metadata(path, "---".join([parts[0], fm, parts[2]]))
+    _stamp_inbox(path, {"read": True})
 
 
 def _mark_replied(path: Path) -> None:
     """Stamp an inbox message ``replied: true`` (and ``read: true``). Idempotent."""
+    _stamp_inbox(path, {"read": True, "replied": True})
+
+
+def _stamp_inbox(path: Path, flags: dict[str, bool]) -> None:
     if not path.exists():
         return
     content = path.read_text()
-    if not content.startswith("---"):
-        return
-    parts = _FM_DELIM.split(content, maxsplit=2)
-    if len(parts) < 3:
-        return
-    fm = parts[1]
-    # Mark read — handles "read: false" flip and missing-key insertion (pull-fetched msgs).
-    if not re.search(r"^read: true$", fm, flags=re.MULTILINE):
-        if re.search(r"^read:", fm, flags=re.MULTILINE):
-            fm = re.sub(r"^read: false$", "read: true", fm, flags=re.MULTILINE)
-        else:
-            fm = fm.rstrip("\n") + "\nread: true\n"
-    # Anchor on the key: a subject like "Auto-replied: x" must not suppress the stamp.
-    if re.search(r"^replied:", fm, flags=re.MULTILINE):
-        fm = re.sub(r"^replied:.*$", "replied: true", fm, flags=re.MULTILINE)
-    else:
-        fm = fm.rstrip("\n") + "\nreplied: true\n"
-    write_inbox_metadata(path, "---".join([parts[0], fm, parts[2]]))
+    stamped = stamp_frontmatter_flags(content, flags)
+    if stamped is not None and stamped != content:
+        write_inbox_metadata(path, stamped)
 
 
 def _resolve_message(
@@ -1597,6 +1572,29 @@ def _pull_destination(row: dict, *, fallback_mailbox: str) -> Path | None:
     return _within(inbox, filename)
 
 
+def _pulled_binding_error(path: Path, *, peer: str, recipient: str) -> str | None:
+    """Why a message pulled from ``peer`` must not be imported, or ``None``.
+
+    The pulled bytes come from the peer's own outbox, so ``from`` must name that
+    peer, the same binding ``receive`` enforces on its per-sender key. ``to``
+    is checked against the fetched file, not the peer-supplied listing row.
+    """
+    try:
+        meta = meta_of(path)
+    except ValueError:  # UnicodeDecodeError: undecodable bytes refuse this file only
+        return "not valid UTF-8 text"
+    if meta is None:
+        return "no parseable frontmatter"
+    sender = str(meta.get("from") or "").strip().lower()
+    if sender != peer.strip().lower():
+        return f"'from' is {sender or '(missing)'!r}, not the peer {peer!r}"
+    to = meta.get("to")
+    targets = to if isinstance(to, list) else [to]
+    if recipient.strip().lower() not in {str(t or "").strip().lower() for t in targets}:
+        return f"'to' does not name {recipient!r}"
+    return None
+
+
 def _fetch_from_agent(
     agent_name: str,
     agent: dict[str, str],
@@ -1697,6 +1695,10 @@ def _fetch_from_agent(
                 capture_output=True,
                 timeout=15,
             )
+            refusal = _pulled_binding_error(temp_dest, peer=agent_name, recipient=self_name)
+            if refusal:
+                click.echo(f"Warning: refusing {filename} from {agent_name}: {refusal}", err=True)
+                continue
             # Receiver-local arrival, not a timestamp supplied by the sender.
             arrival = time.time()
             os.utime(temp_dest, (arrival, arrival))
@@ -1741,7 +1743,11 @@ def _fetch_from_agent(
     ),
 )
 @click.option("--json", "json_output", is_flag=True, help="Emit machine-readable JSON.")
-@click.option("--dry-run", is_flag=True, help="Show what would be fetched without writing files.")
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="List candidates without fetching files or verifying message binding.",
+)
 def pull(
     as_recipient: str | None,
     from_agent: str | None,
@@ -1758,6 +1764,10 @@ def pull(
     deduplicates them into the local inbox by filename. Intended for human recipients who cannot
     receive inbound SSH push delivery — run on a cron/launchd schedule (e.g.
     every 30 minutes) to surface messages without manual polling.
+
+    Dry-run counts are candidates from peer-supplied listings, not verified
+    deliveries. Sender/recipient binding is checked only after the real fetch;
+    dry-run JSON includes ``binding_verified: false`` to mark that distinction.
 
     Machine-readable output (for scripted callers and notification daemons):
 
@@ -1784,6 +1794,9 @@ def pull(
     new_files: list[Path] = []
     agents_polled: list[str] = []
     failed_agents: list[str] = []
+
+    if dry_run and not json_output:
+        click.echo("[dry-run] Listing candidates only; message binding is not verified.")
 
     for agent_name, agent_cfg in agents.items():
         if agent_name == self_name:
@@ -1830,7 +1843,7 @@ def pull(
                     if not json_output:
                         subject = str(row.get("subject", "(no subject)"))
                         click.echo(
-                            f"[dry-run] would fetch from {agent_name}: {subject}  ({filename})"
+                            f"[dry-run] candidate from {agent_name}: {subject}  ({filename})"
                         )
             continue
 
@@ -1889,6 +1902,8 @@ def pull(
             "agents_polled": agents_polled,
             "failed_agents": failed_agents,
         }
+        if dry_run:
+            payload["binding_verified"] = False
         click.echo(json.dumps(payload))
 
 

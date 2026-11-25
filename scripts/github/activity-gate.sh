@@ -1530,7 +1530,7 @@ check_greptile_scores() {
             fetched_at="$now"
             greptile_score=$(fetch_issue_comments_json "$repo" "$pr_number" \
                 | jq -r '
-                    [.[] | select(.user.login | test("greptile"; "i"))] | last |
+                    [.[] | select(.user.login // "" | test("greptile"; "i"))] | last |
                     .body // "" | capture("Score: (?<n>[0-9])/5") | .n // empty
                 ' 2>/dev/null || true)
         fi
@@ -1938,8 +1938,11 @@ pending_fix_request() {
     # backslash would otherwise break the jq program (and is an injection
     # vector). ``gh api --jq`` has no --arg equivalent, hence the pipe.
     local ours_json
-    ours_json=$(gh api "repos/${repo}/issues/comments/${comment_id}/reactions" \
-        --paginate --slurp -F per_page=100 2>/dev/null) || return 0
+    # per_page goes in the query string: `-F per_page=100` without `-X GET`
+    # makes gh send a POST, which fails and (via `|| return 0`) reads as
+    # served, so no fix request ever fired.
+    ours_json=$(gh api "repos/${repo}/issues/comments/${comment_id}/reactions?per_page=100" \
+        --paginate --slurp 2>/dev/null) || return 0
     ours=$(printf '%s' "$ours_json" | jq -r --arg me "$FIX_TRIGGER_LOGIN" \
         '[.[][] | select(((.user // {}).login // "") == $me)] | length' 2>/dev/null) || return 0
     # Empty output means the call failed or returned something unparseable →
@@ -2013,7 +2016,7 @@ has_maintainer_waiting_comment() {
 
     local bot_comments
     bot_comments=$(gh api "repos/$repo/issues/$number/comments?per_page=100" \
-        --jq "[.[] | select((.user.login | ascii_downcase) == (\"$bot\" | ascii_downcase) or (.user.login | ascii_downcase) == (\"$author\" | ascii_downcase)) | .body] | join(\"\n\")" 2>/dev/null) || return 1
+        --jq "[.[] | select((.user.login // \"\" | ascii_downcase) == (\"$bot\" | ascii_downcase) or (.user.login // \"\" | ascii_downcase) == (\"$author\" | ascii_downcase)) | .body] | join(\"\n\")" 2>/dev/null) || return 1
 
     [ -n "$bot_comments" ] || return 1
 
@@ -2092,12 +2095,21 @@ latest_comment_is_bot_waiting() {
     local head_sha
     head_sha=$(gh api "repos/$repo/pulls/$number" --jq '.head.sha' 2>/dev/null) || return 1
 
-    jq -en --arg bot "$bot" --arg author "$author" --arg head "$head_sha" \
+    # `user` is nullable in GitHub's schema (deleted accounts), so every login
+    # read is null-safe: one such comment must not crash the filter. jq -e
+    # exits 0 (waiting) or 1 (not waiting); anything higher is a filter error,
+    # which used to be swallowed by `>/dev/null 2>&1` and read as "not
+    # waiting" on every cycle with no trace (gptme/gptme-contrib#2384, #1811).
+    # Keep emitting on an error — dropping a possible human ask is worse than a
+    # NOOP dispatch — but say so on stderr.
+    local jq_err jq_rc=0
+    jq_err=$(jq -en --arg bot "$bot" --arg author "$author" --arg head "$head_sha" \
         --argjson comments "$comments_json" \
         --argjson reviews "$reviews_json" '
+        def login: (.user.login // "" | ascii_downcase);
         def is_bot_author:
-            ((.user.login | ascii_downcase) == ($bot | ascii_downcase))
-            or ((.user.login | ascii_downcase) == ($author | ascii_downcase));
+            (login == ($bot | ascii_downcase))
+            or (login == ($author | ascii_downcase));
         def is_waiting_handoff:
             is_bot_author
             and ((.body // "") | ascii_downcase | (
@@ -2112,8 +2124,8 @@ latest_comment_is_bot_waiting() {
             ));
         def is_human:
             (.user.type // "") == "User"
-            and ((.user.login // "" | ascii_downcase) != ($bot | ascii_downcase))
-            and ((.user.login // "" | ascii_downcase) != ($author | ascii_downcase));
+            and (login != ($bot | ascii_downcase))
+            and (login != ($author | ascii_downcase));
         ($comments | flatten) as $comments
         | ($reviews | flatten) as $reviews
         | ($comments | map(select(is_waiting_handoff)) | first) as $handoff
@@ -2123,7 +2135,11 @@ latest_comment_is_bot_waiting() {
           ] + [
               $reviews[] | select(is_human and (.submitted_at > $handoff.created_at))
           ]) | length == 0)
-    ' >/dev/null 2>&1
+    ' 2>&1 >/dev/null) || jq_rc=$?
+    if [ "$jq_rc" -gt 1 ]; then
+        echo "WARN: maintainer-waiting check failed for $repo#$number (jq exit $jq_rc): ${jq_err:-no stderr}; emitting the notification" >&2
+    fi
+    return "$jq_rc"
 }
 
 # Return 0 if $repo#$number has at least one UNRESOLVED review thread whose

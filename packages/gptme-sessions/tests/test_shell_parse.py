@@ -263,3 +263,44 @@ class TestCommandRepoDir:
         from gptme_sessions.shell_parse import command_repo_dir
 
         assert command_repo_dir(cmd, cwd) == expected
+
+
+class TestQuotedAndSubshellForms:
+    """Quoted arguments and subshells the parser used to mis-read."""
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            'git -C "dir with space" commit -m x',
+            "git -C 'dir with space' commit -m x",
+            'git -C "$REPO" commit -m x',
+        ],
+    )
+    def test_quoted_c_value_commit(self, cmd):
+        assert has_git_commit_command(cmd) is True
+
+    def test_quoted_c_value_push(self):
+        assert has_git_push_command('git -C "dir with space" push origin master') is True
+
+    def test_quoted_c_value_log_is_not_commit(self):
+        assert has_git_commit_command('git -C "a b" log --grep commit') is False
+
+    @pytest.mark.parametrize(
+        ("cmd", "cwd", "expected"),
+        [
+            # cd inside a subshell does not move the parent shell.
+            ("(cd /x && make) && git commit -m y", "/repo", "/repo"),
+            ("echo $(cd /x; pwd) && git commit -m y", "/repo", "/repo"),
+            # A double-quoted $( … ) is still a subshell; single quotes are literal.
+            ('echo "$(cd /x; pwd)" && git commit -m y', "/repo", "/repo"),
+            ('echo "a $(cd /x; pwd) b" && cd /y && git commit -m y', "/repo", "/y"),
+            ("echo '$(' && cd /x && git commit -m y", "/repo", "/x"),
+            # ...but a commit inside the same subshell does run there.
+            ("(cd /x && git commit -m y)", "/repo", "/x"),
+            ("(cd /x && make) && cd /y && git commit -m y", "/repo", "/y"),
+        ],
+    )
+    def test_subshell_cd_scope(self, cmd, cwd, expected):
+        from gptme_sessions.shell_parse import command_repo_dir
+
+        assert command_repo_dir(cmd, cwd) == expected

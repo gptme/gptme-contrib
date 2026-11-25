@@ -174,6 +174,21 @@ from gptodo.worktree import (
 # Keep console instance for CLI output
 console = Console()
 
+
+# Printed whenever a task is parked into waiting. A wait whose blocker is a step
+# the caller could take itself is a silent stall: ask before the park lands.
+PARK_SELF_CHECK = (
+    "Parked {name} as waiting. Can you do this yourself? If the blocker is a step "
+    "you could take (a check, a fix, a decision within your authority), take it and "
+    "set the task back to todo/active instead. Otherwise give it a wake that acts "
+    "(probe:, wait: or a delivered ask)."
+)
+
+
+def _print_park_self_check(name: str) -> None:
+    click.echo(PARK_SELF_CHECK.format(name=name), err=True)
+
+
 BROWSE_DEFAULT_STATES = [
     "backlog",
     "todo",
@@ -2297,7 +2312,12 @@ def check_waiting(fix: bool, verbose: bool):
           type: pr_ci
           ref: "gptme/gptme#1217"
     """
-    from gptodo.waiting import WaitType, check_condition, parse_waiting_for
+    from gptodo.waiting import (
+        WaitType,
+        check_condition,
+        clear_resolved_conditions,
+        parse_waiting_for,
+    )
 
     console = Console()
 
@@ -2352,17 +2372,17 @@ def check_waiting(fix: bool, verbose: bool):
         # Report status
         status_str = ", ".join(status_parts)
         if all_resolved:
+            if fix:
+                if not clear_resolved_conditions(task.path, task.metadata.get("waiting_for")):
+                    pending_count += 1
+                    console.print(f"[yellow]⏳ {task.id}: Conditions changed; recheck required[/]")
+                    continue
+                changes_made.append(task.id)
+                console.print(
+                    "  [cyan]→ Removed resolved external conditions; task deps retained[/]"
+                )
             resolved_count += 1
             console.print(f"[green]✓ {task.id}[/]: {status_str}")
-            if fix:
-                # Clear waiting_for from task
-                post = frontmatter.load(task.path)
-                post.metadata.pop("waiting_for", None)
-                post.metadata.pop("waiting_since", None)
-                with open(task.path, "w") as f:
-                    f.write(frontmatter.dumps(post))
-                changes_made.append(task.id)
-                console.print("  [cyan]→ Cleared waiting_for[/]")
         else:
             pending_count += 1
             console.print(f"[yellow]⏳ {task.id}[/]: {status_str}")
@@ -2375,7 +2395,9 @@ def check_waiting(fix: bool, verbose: bool):
         console.print(f"  Skipped (task deps): [dim]{skipped_count}[/]")
 
     if changes_made:
-        console.print(f"\n[cyan]Cleared waiting_for on {len(changes_made)} task(s):[/]")
+        console.print(
+            f"\n[cyan]Removed resolved external conditions on {len(changes_made)} task(s):[/]"
+        )
         for task_id in changes_made:
             console.print(f"  • {task_id}")
 
@@ -2413,7 +2435,12 @@ def watch(interval: int, fix: bool, once: bool, verbose: bool):
     import signal
     import time
 
-    from gptodo.waiting import WaitType, check_condition, parse_waiting_for
+    from gptodo.waiting import (
+        WaitType,
+        check_condition,
+        clear_resolved_conditions,
+        parse_waiting_for,
+    )
 
     console = Console()
     repo_root = find_repo_root(Path.cwd())
@@ -2470,14 +2497,12 @@ def watch(interval: int, fix: bool, once: bool, verbose: bool):
                 previous_state[task.id][key] = checked.resolved
 
             if all_resolved:
-                resolved_count += 1
                 if fix:
-                    post = frontmatter.load(task.path)
-                    post.metadata.pop("waiting_for", None)
-                    post.metadata.pop("waiting_since", None)
-                    with open(task.path, "w") as f:
-                        f.write(frontmatter.dumps(post))
+                    if not clear_resolved_conditions(task.path, task.metadata.get("waiting_for")):
+                        pending_count += 1
+                        continue
                     changes.append((task.id, task_changes))
+                resolved_count += 1
             else:
                 pending_count += 1
 
@@ -3162,6 +3187,12 @@ def edit(
                     console.print(
                         f"[cyan]↩ {task.name} recurring — reset to waiting, next wait: {result.post.metadata['wait']}[/]"
                     )
+                elif (
+                    result.requested_state == "waiting"
+                    and result.old_state != "waiting"
+                    and result.written
+                ):
+                    _print_park_self_check(task.name)
     finally:
         # Earlier writes remain committed even if a later read/replace fails.
         for path in completion_paths:
@@ -6272,6 +6303,8 @@ def add(
 
     console.print(f"[green]✓ Created task:[/] {filepath}")
     print(filepath.stem)
+    if state == "waiting":
+        _print_park_self_check(filepath.stem)
 
 
 def _frontmatter_block_keys(body: str) -> list[str] | None:

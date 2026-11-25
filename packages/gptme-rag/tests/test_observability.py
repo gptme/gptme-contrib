@@ -682,3 +682,118 @@ def test_slice_age_only_stale_has_per_slice_reason():
     assert health.slices["task"].status == "stale"
     slice_reasons = [r for r in health.reasons if "task" in r]
     assert slice_reasons, f"expected per-slice reason for 'task', got: {health.reasons}"
+
+
+def _strict_json(line: str):
+    def reject(token):
+        raise ValueError(f"non-standard JSON constant {token}")
+
+    return json.loads(line, parse_constant=reject)
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf"), "nan"])
+def test_log_injection_writes_non_finite_scores_as_zero(tmp_path, bad):
+    """#2356 L5: a NaN score was written as the invalid JSON token ``NaN``."""
+    log = tmp_path / "injections.jsonl"
+    record = log_injection(
+        log,
+        "q",
+        [{"id": "d", "similarity": bad}, {"id": "e", "similarity": 0.5}],
+        backend="tfidf",
+        session_id="s",
+        harness="test",
+    )
+    assert record is not None
+    assert record["top_score"] == 0.0
+    assert [h["score"] for h in record["hits"]] == [0.0, 0.5]
+    written = _strict_json(log.read_text().strip())
+    assert written["top_score"] == 0.0
+
+
+@pytest.mark.parametrize("bad", ["NaN", "Infinity", "-Infinity", "1e999"])
+def test_summarize_preserves_injections_with_non_finite_top_score(tmp_path, bad):
+    """Legacy non-finite scores become zero without losing injection counts."""
+    log = tmp_path / "injections.jsonl"
+    log.write_text(
+        '{"num_hits": 1, "session_id": "legacy", "harness": "gptme", "top_score": '
+        + bad
+        + "}\n"
+        + json.dumps({"num_hits": 2, "top_score": 0.8})
+        + '\n{"num_hits": 0, "top_score": 0.0}\n'
+    )
+    stats = summarize_injections(log)
+    assert stats.malformed == 0
+    assert stats.total == 3
+    assert stats.nonzero == 2
+    assert stats.fire_rate == pytest.approx(2 / 3)
+    assert stats.avg_hits == pytest.approx(1.0)
+    assert stats.avg_top_score == pytest.approx(0.4)
+    assert stats.unique_sessions == 2
+    assert stats.by_harness == {"gptme": 1, "unknown": 2}
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+@pytest.mark.parametrize("source", ["extra", "hit"])
+def test_log_injection_sanitizes_non_finite_metadata(tmp_path, bad, source):
+    """Non-finite metadata becomes null; the injection itself is still logged.
+
+    Dropping the record would silently lose the injection from every count in
+    ``summarize_injections``, so sanitising is the contract.
+    """
+    log = tmp_path / "injections.jsonl"
+    assert log_injection(log, "valid", _hits(0.5), backend="tfidf", harness="test")
+    hits = _hits(0.5)
+    extra = None
+    if source == "extra":
+        extra = {"metrics": {"latency_ms": bad}}
+    else:
+        hits[0]["state"] = bad
+
+    record = log_injection(log, "invalid", hits, backend="tfidf", harness="test", extra=extra)
+    assert record is not None
+    lines = log.read_text().splitlines()
+    assert len(lines) == 2
+    written = _strict_json(lines[-1])
+    assert written["top_score"] == 0.5
+    if source == "extra":
+        assert written["metrics"] == {"latency_ms": None}
+        assert record["metrics"] == {"latency_ms": None}
+    else:
+        assert written["hits"][0]["state"] is None
+        assert record["hits"][0]["state"] is None
+
+
+def _cyclic_list():
+    value: list = []
+    value.append(value)
+    return value
+
+
+def _cyclic_dict():
+    value: dict = {}
+    value["self"] = value
+    return value
+
+
+@pytest.mark.parametrize("make_cyclic", [_cyclic_list, _cyclic_dict])
+def test_log_injection_cyclic_metadata_stays_best_effort(tmp_path, make_cyclic):
+    """Cyclic metadata must not escape the best-effort logger.
+
+    ``_json_safe`` recurses until ``RecursionError``, which json's own circular
+    check used to turn into a caught ``ValueError``. The write is skipped and
+    the existing log is left untouched.
+    """
+    log = tmp_path / "injections.jsonl"
+    assert log_injection(log, "valid", _hits(0.5), backend="tfidf", harness="test")
+    before = log.read_text()
+
+    record = log_injection(
+        log,
+        "cyclic",
+        _hits(0.5),
+        backend="tfidf",
+        harness="test",
+        extra={"metadata": make_cyclic()},
+    )
+    assert record is None
+    assert log.read_text() == before

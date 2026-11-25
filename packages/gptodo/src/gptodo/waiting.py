@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
+from typing import Any
 
 from gptodo.frontmatter_compat import frontmatter
 
@@ -40,6 +41,9 @@ class WaitType(str, Enum):
     COMMENT = "comment"  # Wait for comment matching pattern
     TIME = "time"  # Wait until specific time
     TASK = "task"  # Wait for another task (legacy string format)
+    # A ``type:`` this version does not know (a typo, or a newer writer). It
+    # never resolves and is written back exactly as read.
+    UNKNOWN = "unknown"
 
 
 @dataclass
@@ -52,15 +56,20 @@ class WaitCondition:
     resolved: bool = False
     resolution_time: datetime | None = None
     error: str | None = None
+    raw: dict | None = None  # Original mapping for an UNKNOWN type
 
     @classmethod
     def from_dict(cls, data: dict) -> "WaitCondition":
         """Create WaitCondition from dict (parsed YAML)."""
-        wait_type = WaitType(data.get("type", "task"))
+        try:
+            wait_type = WaitType(data.get("type", "task"))
+        except ValueError:
+            wait_type = WaitType.UNKNOWN
         return cls(
             type=wait_type,
             ref=data.get("ref", ""),
             pattern=data.get("pattern"),
+            raw=dict(data) if wait_type is WaitType.UNKNOWN else None,
         )
 
     @classmethod
@@ -74,6 +83,8 @@ class WaitCondition:
 
     def to_dict(self) -> dict:
         """Convert to dict for YAML serialization."""
+        if self.raw is not None:
+            return dict(self.raw)
         result = {"type": self.type.value, "ref": self.ref}
         if self.pattern:
             result["pattern"] = self.pattern
@@ -336,6 +347,9 @@ def check_condition(condition: WaitCondition) -> WaitCondition:
     elif condition.type == WaitType.TASK:
         # Task dependencies handled by unblock.py
         pass
+    elif condition.type == WaitType.UNKNOWN:
+        raw_type = (condition.raw or {}).get("type")
+        error = f"Unknown wait type {raw_type!r}"
 
     condition.resolved = resolved
     condition.error = error
@@ -362,6 +376,40 @@ def check_all_conditions(conditions: list[WaitCondition]) -> tuple[bool, list[Wa
     return all_resolved, updated
 
 
+def _pending_task_entries(waiting_for: object) -> list:
+    """The ``type: task`` entries of a waiting_for value, as written."""
+    items = waiting_for if isinstance(waiting_for, list) else [waiting_for]
+    return [
+        item
+        for item in items
+        if isinstance(item, str)
+        or (isinstance(item, dict) and item.get("type", "task") == WaitType.TASK.value)
+    ]
+
+
+def clear_resolved_conditions(task_path: Path, expected_waiting_for: object) -> bool:
+    """Drop resolved external conditions after every one of them resolved.
+
+    Unresolved ``type: task`` entries (handled by unblock.py) are kept, and so
+    is waiting_since while any remain. The write goes through ``mutate_task``
+    (per-path lock, fresh read, atomic replace). If waiting_for differs from
+    the snapshot that was checked, leave the file untouched and return False;
+    the caller must recheck the new conditions before clearing them.
+    """
+    from gptodo.lifecycle import mutate_task
+
+    def prepare(post: Any) -> list:
+        if post.metadata.get("waiting_for") != expected_waiting_for:
+            return []
+        remaining = _pending_task_entries(post.metadata.get("waiting_for"))
+        if remaining:
+            return [("set", "waiting_for", remaining)]
+        return [("set", "waiting_for", None), ("set", "waiting_since", None)]
+
+    result = mutate_task(task_path, prepare=prepare, completion_effects=False)
+    return result.written
+
+
 def check_task_waiting(task_path: Path) -> tuple[bool, str]:
     """Check and update waiting conditions for a single task.
 
@@ -385,12 +433,9 @@ def check_task_waiting(task_path: Path) -> tuple[bool, str]:
     all_resolved, updated = check_all_conditions(checkable)
 
     if all_resolved:
-        # Clear waiting_for and waiting_since
-        post.metadata.pop("waiting_for", None)
-        post.metadata.pop("waiting_since", None)
-        with open(task_path, "w") as f:
-            f.write(frontmatter.dumps(post))
-        return True, "All conditions resolved - task unblocked"
+        if not clear_resolved_conditions(task_path, post.metadata.get("waiting_for")):
+            return False, "Waiting conditions changed during check - recheck required"
+        return True, "External conditions resolved (task dependencies handled by unblock.py)"
 
     # Report status
     pending = [c for c in updated if not c.resolved]

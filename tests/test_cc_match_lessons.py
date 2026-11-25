@@ -262,7 +262,7 @@ def test_main_applies_skill_cap_after_dropout(hook, tmp_path, monkeypatch):
     monkeypatch.setattr(hook, "filter_by_harness", lambda items, harness: items)
     monkeypatch.setattr(hook, "filter_by_session_category", lambda items, cat: items)
     monkeypatch.setattr(hook, "filter_by_repo", lambda items, repo: items)
-    monkeypatch.setattr(hook, "get_already_injected", lambda sid, tp=None: set())
+    monkeypatch.setattr(hook, "get_already_injected", lambda sid, tp=None, **_k: set())
     monkeypatch.setattr(hook, "score_lessons", lambda *a, **k: list(lessons))
     # Keep the test hermetic: real score_memories reads the workspace and may
     # inject memory hits when gptme happens to be importable.
@@ -2939,3 +2939,159 @@ def test_budget_alarm_refires_after_a_swallowed_timeout(hook):
         hook._disarm_hook_budget()
         signal.signal(signal.SIGALRM, previous)
     assert swallowed
+
+
+# --- PreToolUse skill pointer must not count as full injection (#1729, #2384) ---
+
+
+def _skill_budget_lesson() -> dict:
+    lesson = _budget_lesson(0, 200)
+    lesson.update(path="skills/demo/SKILL.md", title="demo", body="FULL SKILL BODY")
+    return lesson
+
+
+def _run_pretool(hook, monkeypatch, capsys, session_id, command):
+    monkeypatch.setattr(
+        hook,
+        "_STDIN_CACHE",
+        json.dumps(
+            {
+                "hook_event_name": "PreToolUse",
+                "session_id": session_id,
+                "tool_name": "Bash",
+                "tool_input": {"command": command},
+            }
+        ),
+    )
+    with pytest.raises(SystemExit) as exc_info:
+        hook.main()
+    assert exc_info.value.code == 0
+    out = capsys.readouterr().out
+    if not out.strip():
+        return ""
+    return json.loads(out)["hookSpecificOutput"].get("additionalContext", "")
+
+
+def test_pretool_skill_pointer_does_not_suppress_full_body(
+    hook, tmp_path, monkeypatch, capsys
+):
+    """A PreToolUse pointer leaves the skill eligible for its full body later."""
+    _patch_main_for_budget(hook, tmp_path, monkeypatch, [_skill_budget_lesson()])
+    monkeypatch.setattr(hook, "select_advisory_lessons", lambda m, _i: m)
+
+    pointer = _run_pretool(hook, monkeypatch, capsys, "ptr", "echo k0")
+    assert "(skill pointer)" in pointer
+    assert "FULL SKILL BODY" not in pointer
+
+    full = _run_prompt(hook, monkeypatch, capsys, "ptr", "k0")
+    assert "FULL SKILL BODY" in full
+    state = hook.load_session_state("ptr")
+    assert state["injected"] == ["skills/demo/SKILL.md"]
+
+
+def test_pretool_skill_pointer_not_repeated(hook, tmp_path, monkeypatch, capsys):
+    """The pointer is still emitted once per session on tool events."""
+    _patch_main_for_budget(hook, tmp_path, monkeypatch, [_skill_budget_lesson()])
+    monkeypatch.setattr(hook, "select_advisory_lessons", lambda m, _i: m)
+
+    assert "(skill pointer)" in _run_pretool(hook, monkeypatch, capsys, "rep", "k0")
+    hook.update_session_state("rep", lambda state: state.update(last_pretool=0))
+    assert _run_pretool(hook, monkeypatch, capsys, "rep", "k0") == ""
+    state = hook.load_session_state("rep")
+    assert state["injected"] == []
+    assert state["pointed"] == ["skills/demo/SKILL.md"]
+
+
+def test_transcript_pointer_is_not_counted_as_injected(hook, tmp_path):
+    """Transcript fallback dedup only counts full-body renders."""
+    skill = _skill_match("/workspace/skills/computer-use/SKILL.md")
+    lesson = _lesson_match("/workspace/lessons/workflow/merge-conflicts.md")
+    transcript = tmp_path / "transcript.jsonl"
+    transcript.write_text(
+        json.dumps({"c": hook.format_lessons([skill, lesson], set(), "PreToolUse")})
+        + "\n"
+    )
+    injected = hook.get_already_injected("no-state-session", str(transcript))
+    assert lesson["path"] in injected
+    assert skill["path"] not in injected
+
+
+@pytest.mark.parametrize("rag_available", [True, False])
+@pytest.mark.parametrize("event", ["UserPromptSubmit", "PreToolUse"])
+def test_budget_timeout_still_records_a_receipt(
+    hook, tmp_path, monkeypatch, rag_available, event
+):
+    """A hook that runs out of budget must leave a measured-zero receipt;
+    otherwise it is indistinguishable from a hook that never ran.
+
+    ``main`` is replaced by one that cannot finish inside the budget. Running
+    the real hook with a tiny budget races: on a small corpus ``main`` can
+    finish (and receipt ``no_match``) before the alarm lands.
+    """
+    if not hasattr(signal, "setitimer"):
+        pytest.skip("no setitimer on this platform")
+
+    def slow_main():
+        time.sleep(5)
+
+    payload = {"hook_event_name": event, "session_id": "budget-timeout"}
+    monkeypatch.setattr(hook, "main", slow_main)
+    monkeypatch.setattr(hook, "_STDIN_CACHE", json.dumps(payload))
+    monkeypatch.setattr(hook, "_GPTME_RAG_AVAILABLE", rag_available)
+    previous = signal.getsignal(signal.SIGALRM)
+    try:
+        with pytest.raises(SystemExit) as exc_info:
+            hook._run_with_budget(0.05)
+    finally:
+        signal.signal(signal.SIGALRM, previous)
+    assert exc_info.value.code == 0
+    receipts = tmp_path / "cc-session-budget-timeout-lessons-receipts.jsonl"
+    rows = [json.loads(line) for line in receipts.read_text().splitlines()]
+    assert rows[-1]["reason"] == "hook_budget_timeout"
+    assert rows[-1].get("dependency_missing", False) is (not rag_available)
+    assert rows[-1]["outcome"] == "empty"
+    assert rows[-1]["hook"] == event
+    assert rows[-1]["bytes"] == 0
+
+
+def test_timeout_after_budget_reservation_omits_abandoned_fields(
+    hook, tmp_path, monkeypatch, capsys
+):
+    """A timed-out emission must not report its abandoned decision metadata."""
+    _patch_main_for_budget(hook, tmp_path, monkeypatch, [_budget_lesson(0, 100)])
+    monkeypatch.setattr(
+        hook,
+        "_STDIN_CACHE",
+        json.dumps(
+            {
+                "hook_event_name": "UserPromptSubmit",
+                "session_id": "reserved-timeout",
+                "prompt": "k0",
+            }
+        ),
+    )
+
+    def timeout_after_reservation(*args, **kwargs):
+        assert hook._RECEIPT_FIELDS["session_bytes"] > 0
+        raise TimeoutError("hook budget")
+
+    monkeypatch.setattr(hook, "_log_lesson_events", timeout_after_reservation)
+    previous = signal.getsignal(signal.SIGALRM)
+    try:
+        with pytest.raises(SystemExit) as exc_info:
+            hook._run_with_budget(5)
+    finally:
+        signal.signal(signal.SIGALRM, previous)
+    assert exc_info.value.code == 0
+    output = json.loads(capsys.readouterr().out)
+    assert "additionalContext" not in output["hookSpecificOutput"]
+    receipt = _receipts(tmp_path, "reserved-timeout")[-1]
+    assert receipt["reason"] == "hook_budget_timeout"
+    assert receipt["bytes"] == 0
+    assert "session_bytes" not in receipt
+    assert "budget_dropped" not in receipt
+    assert "prompt_lines" not in receipt
+    assert "prompt_novel_lines" not in receipt
+    # Reservation is deliberately conservative; recovery must not overwrite
+    # concurrent hooks' counters or block on the state lock after the timeout.
+    assert hook.load_session_state("reserved-timeout")["budget_bytes"] > 0

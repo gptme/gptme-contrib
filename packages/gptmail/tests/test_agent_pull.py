@@ -31,6 +31,10 @@ from gptmail.agent_cli import agent
 # ---------------------------------------------------------------------------
 
 
+# A well-formed gordon -> erik message, for stubs that fake the SCP copy.
+_PULLED_MSG = "---\nfrom: gordon\nto: erik\nsubject: stub\n---\n\n{body}\n"
+
+
 def _write_outbox_msg(
     outbox_dir: Path,
     *,
@@ -192,6 +196,106 @@ def test_pull_skips_messages_for_others(pull_workspace: Path) -> None:
 
     local_inbox = pull_workspace / "erik" / "messages" / "inbox"
     assert not list(local_inbox.glob("*.md")), "inbox must remain empty"
+
+
+def test_pull_refuses_message_claiming_another_sender(pull_workspace: Path) -> None:
+    """A peer cannot deliver a message claiming to be from someone else."""
+    gordon_outbox = pull_workspace / "gordon" / "messages" / "outbox"
+    _write_outbox_msg(gordon_outbox, sender="carol", recipient="erik", subject="Forged sender")
+
+    result = CliRunner().invoke(agent, ["pull"])
+    assert result.exit_code == 0, result.output
+    # The filename embeds "carol" too, so pin the refusal reason itself.
+    assert "'from' is 'carol', not the peer 'gordon'" in result.output
+
+    local_inbox = pull_workspace / "erik" / "messages" / "inbox"
+    assert not list(local_inbox.glob("*.md")), "forged message must not be imported"
+    assert not list(local_inbox.glob(".delivery-*")), "temp file must be cleaned up"
+
+
+def test_pull_refuses_message_addressed_to_someone_else(
+    pull_workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fetched file's ``to`` must name us even if the remote listing claims it."""
+    gordon_outbox = pull_workspace / "gordon" / "messages" / "outbox"
+    name = _write_outbox_msg(gordon_outbox, sender="gordon", recipient="alice", subject="Misrouted")
+    monkeypatch.setattr(
+        agent_cli,
+        "_remote_pending_rows",
+        lambda *args, **kwargs: [{"file": name, "mailbox": "default", "subject": "Misrouted"}],
+    )
+
+    result = CliRunner().invoke(agent, ["pull"])
+    assert result.exit_code == 0, result.output
+    assert "'to' does not name 'erik'" in result.output
+
+    local_inbox = pull_workspace / "erik" / "messages" / "inbox"
+    assert not list(local_inbox.glob("*.md"))
+
+
+def test_pull_refuses_undecodable_message_and_keeps_pulling(
+    pull_workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pulled file with invalid UTF-8 is refused alone; later messages still import."""
+    gordon_outbox = pull_workspace / "gordon" / "messages" / "outbox"
+    bad = "20260101-000000-000000-gordon-Bad_bytes.md"
+    (gordon_outbox / bad).write_bytes(b"---\nfrom: gordon\nto: erik\n---\n\n\xff\xfe\n")
+    good = _write_outbox_msg(gordon_outbox, sender="gordon", recipient="erik", subject="Fine")
+    monkeypatch.setattr(
+        agent_cli,
+        "_remote_pending_rows",
+        lambda *args, **kwargs: [
+            {"file": bad, "mailbox": "default", "subject": "Bad bytes"},
+            {"file": good, "mailbox": "default", "subject": "Fine"},
+        ],
+    )
+
+    result = CliRunner().invoke(agent, ["pull"])
+    assert result.exit_code == 0, result.output
+    assert f"refusing {bad} from gordon: not valid UTF-8 text" in result.output
+
+    local_inbox = pull_workspace / "erik" / "messages" / "inbox"
+    assert sorted(p.name for p in local_inbox.glob("*.md")) == [good]
+    assert not list(local_inbox.glob(".delivery-*")), "temp file must be cleaned up"
+
+
+def test_pull_accepts_message_addressed_to_a_recipient_list(pull_workspace: Path) -> None:
+    """A ``to`` list that contains us is imported — the binding check is not list-blind."""
+    gordon_outbox = pull_workspace / "gordon" / "messages" / "outbox"
+    name = "20260101-000000-000001-gordon-List_recipients.md"
+    (gordon_outbox / name).write_text(
+        "---\nfrom: gordon\nto: [alice, erik]\nsubject: List recipients\n---\n\nPlease advise.\n"
+    )
+
+    result = CliRunner().invoke(agent, ["pull"])
+    assert result.exit_code == 0, result.output
+    assert "1 new message(s) fetched" in result.output
+
+    local_inbox = pull_workspace / "erik" / "messages" / "inbox"
+    assert (local_inbox / name).exists(), "listed recipient must be imported"
+
+
+def test_pull_refuses_message_without_a_recipient(
+    pull_workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fetched file with no ``to`` at all is refused, not treated as addressed to us."""
+    gordon_outbox = pull_workspace / "gordon" / "messages" / "outbox"
+    name = "20260101-000000-000002-gordon-No_recipient.md"
+    (gordon_outbox / name).write_text("---\nfrom: gordon\nsubject: No recipient\n---\n\nHi.\n")
+    # The remote listing lies: it claims the file is for us.
+    monkeypatch.setattr(
+        agent_cli,
+        "_remote_pending_rows",
+        lambda *args, **kwargs: [{"file": name, "mailbox": "default", "subject": "No recipient"}],
+    )
+
+    result = CliRunner().invoke(agent, ["pull"])
+    assert result.exit_code == 0, result.output
+    assert "'to' does not name 'erik'" in result.output
+
+    local_inbox = pull_workspace / "erik" / "messages" / "inbox"
+    assert not list(local_inbox.glob("*.md")), "recipient-less message must not be imported"
+    assert not list(local_inbox.glob(".delivery-*")), "temp file must be cleaned up"
 
 
 def test_pull_deduplicates_on_repull(pull_workspace: Path) -> None:
@@ -377,6 +481,38 @@ def test_pull_dry_run_does_not_write(pull_workspace: Path) -> None:
     assert not (local_inbox / name).exists(), "dry-run must not write files"
 
 
+@pytest.mark.parametrize("json_output", [False, True])
+def test_pull_dry_run_marks_binding_unverified(
+    pull_workspace: Path, monkeypatch: pytest.MonkeyPatch, json_output: bool
+) -> None:
+    """A listing-only preview must not promise that hostile bytes will be imported."""
+    name = _write_outbox_msg(
+        pull_workspace / "gordon" / "messages" / "outbox",
+        sender="carol",
+        recipient="erik",
+        subject="Forged sender",
+    )
+
+    def _no_transfer(*args, **kwargs):
+        pytest.fail("dry-run must not SCP files to verify binding")
+
+    monkeypatch.setattr(agent_cli.subprocess, "run", _no_transfer)
+    args = ["pull", "--dry-run"] + (["--json"] if json_output else [])
+    result = CliRunner().invoke(agent, args)
+
+    assert result.exit_code == 0, result.output
+    if json_output:
+        payload = json.loads(result.stdout)
+        assert payload["binding_verified"] is False
+        assert payload["new_count"] == 1
+        assert payload["files"] == [name]
+    else:
+        assert "message binding is not verified" in result.output
+        assert "candidate from gordon" in result.output
+        assert "would fetch" not in result.output
+    assert not list((pull_workspace / "erik" / "messages" / "inbox").iterdir())
+
+
 def test_pull_dry_run_json_is_machine_readable(pull_workspace: Path) -> None:
     """``--dry-run --json`` emits JSON only and lists prospective messages."""
     gordon_outbox = pull_workspace / "gordon" / "messages" / "outbox"
@@ -393,6 +529,7 @@ def test_pull_dry_run_json_is_machine_readable(pull_workspace: Path) -> None:
         "files": [name],
         "agents_polled": ["gordon"],
         "failed_agents": [],
+        "binding_verified": False,
     }
     local_inbox = pull_workspace / "erik" / "messages" / "inbox"
     assert not (local_inbox / name).exists()
@@ -520,7 +657,7 @@ def test_pull_quotes_remote_workspace_with_spaces(
 
     def _record_scp(cmd, **kwargs):
         scp_calls.append(cmd)
-        Path(cmd[-1]).write_text("message")
+        Path(cmd[-1]).write_text(_PULLED_MSG.format(body="message"))
         return subprocess.CompletedProcess(cmd, 0)
 
     monkeypatch.setattr(agent_cli.subprocess, "run", _record_scp)
@@ -606,7 +743,7 @@ def test_pull_concurrent_publish_deduplicates_atomically(
     )
 
     def _concurrent_scp(cmd, **kwargs):
-        Path(cmd[-1]).write_text("this pull")
+        Path(cmd[-1]).write_text(_PULLED_MSG.format(body="this pull"))
         destination.write_text("concurrent winner")
         return subprocess.CompletedProcess(cmd, 0)
 

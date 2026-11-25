@@ -137,6 +137,22 @@ def test_local_only_secret_is_also_blocked(tmp_path: Path, scanner: None) -> Non
     assert not list(transport.outbox.iterdir())
 
 
+@pytest.mark.parametrize("local_only", [False, True])
+def test_secret_finding_is_reported_as_policy_block_not_scan_failure(
+    tmp_path: Path, scanner: None, local_only: bool
+) -> None:
+    # A real finding must not read as a broken scanner (gptme-contrib#2335).
+    transport = AgentTransport(
+        tmp_path / "messages",
+        "alice",
+        deliver=None if local_only else (lambda path, recipient: True),
+    )
+    with pytest.raises(ValueError) as exc:
+        transport.send("bob", "Hello", SECRET)
+    assert str(exc.value) == "Outbound agent message blocked by secret policy"
+    assert not list(transport.outbox.iterdir())
+
+
 @pytest.mark.parametrize("field", ["sender", "recipient", "reply_to"])
 def test_metadata_only_secret_is_rejected_before_filename(
     tmp_path: Path, scanner: None, monkeypatch: pytest.MonkeyPatch, field: str

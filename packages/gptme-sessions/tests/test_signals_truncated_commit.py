@@ -169,6 +169,92 @@ def test_failed_or_unconfirmed_commit_is_not_credited():
         assert signals["git_commits"] == [], result
 
 
+def test_failed_push_is_not_commit_evidence():
+    failed = "error: failed to push some refs to 'github.com:o/r.git'\n"
+    for cmd, result in (
+        ("git commit -m x 2>&1 | tail -1; git push -q 2>&1", failed),
+        (
+            "git commit -m x | tail -1; git push -u fork b 2>&1",
+            " * [new branch]      b -> b\n" + failed,
+        ),
+    ):
+        signals = extract_signals_cc(_bash("t1", cmd, result))
+        assert signals["git_commits"] == [], result
+
+    # The commit's own diffstat still proves the local commit landed.
+    signals = extract_signals_cc(
+        _bash(
+            "t1",
+            "git commit -m x | tail -2; git push -q 2>&1",
+            " 1 file changed, 2 insertions(+)\n" + failed,
+        )
+    )
+    assert len(signals["git_commits"]) == 1
+
+
+def test_transport_or_auth_push_failure_is_not_commit_evidence():
+    # Transport/auth failures end in `fatal:` lines, not `error: failed to push`.
+    for failed in (
+        "remote: Permission to o/r.git denied to bob.\n"
+        "fatal: unable to access 'https://github.com/o/r.git/': "
+        "The requested URL returned error: 403\n",
+        "ssh: Could not resolve hostname github.com\n"
+        "fatal: Could not read from remote repository.\n\n"
+        "Please make sure you have the correct access rights\n",
+        "fatal: Authentication failed for 'https://github.com/o/r.git/'\n",
+        "fatal: unable to connect to github.com:\n",
+        "fatal: the remote end hung up unexpectedly\n",
+    ):
+        for cmd in (
+            "git commit -m x 2>&1 | tail -1; git push -q 2>&1",
+            "git commit -m x | tail -1; git push -u fork b 2>&1",
+        ):
+            signals = extract_signals_cc(_bash("t1", cmd, failed))
+            assert signals["git_commits"] == [], failed
+
+
+def test_unrelated_fatal_does_not_cancel_successful_ref_update():
+    signals = extract_signals_cc(
+        _bash(
+            "t1",
+            "git commit -m x | tail -1; git push origin master 2>&1; git -C /nope status",
+            "   e294aad05f..52fad08fbe  master -> master\nfatal: not a git repository: '/nope'\n",
+        )
+    )
+    assert len(signals["git_commits"]) == 1
+
+
+def test_successful_ref_update_survives_another_push_failing():
+    # One push reached origin; a second push (fork) was rejected or unreachable.
+    ok = "   e294aad05f..52fad08fbe  master -> master\n"
+    for failed in (
+        "error: failed to push some refs to 'github.com:o/fork.git'\n",
+        " ! [rejected]        master -> master (fetch first)\n"
+        "error: failed to push some refs to 'github.com:o/fork.git'\n",
+        "fatal: unable to access 'https://github.com/o/fork.git/': 403\n",
+    ):
+        signals = extract_signals_cc(
+            _bash(
+                "t1",
+                "git commit -m x | tail -1; git push origin master 2>&1; git push fork master 2>&1",
+                ok + failed,
+            )
+        )
+        assert signals["git_commits"] == ["(commit output truncated) (52fad08fbe)"], failed
+
+    # A single `git push --all` with one ref updated and another rejected.
+    signals = extract_signals_cc(
+        _bash(
+            "t1",
+            "git commit -m x | tail -1; git push --all 2>&1",
+            ok
+            + " ! [rejected]        dev -> dev (fetch first)\n"
+            + "error: failed to push some refs to 'github.com:o/r.git'\n",
+        )
+    )
+    assert len(signals["git_commits"]) == 1
+
+
 def test_diffstat_from_git_diff_is_not_commit_evidence():
     cmd = "git diff --stat a.md; git-safe-commit --scope-only a.md -m x 2>&1 | tail -1"
     signals = extract_signals_cc(
@@ -214,13 +300,7 @@ def test_heredoc_journal_write_is_not_a_file_write():
 
 def test_commit_heredoc_subject_extracted():
     """Heredoc commit message subject should be captured even when output is truncated."""
-    cmd = (
-        "git commit -m \"$(cat <<'EOF'\n"
-        "fix: quiet heredoc\n\n"
-        "body line\n"
-        "EOF\n"
-        ')" 2>&1 | tail -1'
-    )
+    cmd = "git commit -m \"$(cat <<'EOF'\nfix: quiet heredoc\n\nbody line\nEOF\n)\" 2>&1 | tail -1"
     signals = extract_signals_cc(_bash("t1", cmd, " 1 file changed, 1 insertion(+)"))
     assert len(signals["git_commits"]) == 1
     detail = next(d for d in signals["deliverable_details"] if d["kind"] == "commit")

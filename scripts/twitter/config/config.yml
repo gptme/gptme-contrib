@@ -67,8 +67,16 @@ review:
     - "Under 280 characters"
     - "Links in replies, not main tweet"
     - "No hashtags"
+    - "Natural writing style"
 
   criteria_descriptions:
+    - name: "Natural writing style"
+      description: "Use direct, specific prose and varied sentences. Em-dashes are fine when deliberate, but not as a default separator where a full stop or a direct clause works better. Review canned AI phrasing and thread follow-ups too. Treat detector counts as advisory, especially in short tweets; do not impose a punctuation ban."
+      examples:
+        - fail: "Shipped the fix — improved reliability — ready to go."
+        - pass: "Shipped the fix. Calls now wait for playback before hanging up."
+        - pass: "The delay was 60 seconds — exactly the configured timeout."
+
     - name: "Context Completeness"
       description: "Draft must have access to full conversation thread context (minimum 3 tweets or all if thread is shorter). Check that thread_context is present and includes the complete discussion."
       examples:

@@ -1575,7 +1575,7 @@ async function loadServiceHealth() {
       const healthCls = 'tag-' + s.health;
       const statusCls = s.active === 'active' ? 'tag-active' : s.active === 'failed' ? 'tag-failed' : 'tag-deprecated';
       const restartBtn = _restartToken
-        ? '<button class="restart-btn" onclick="restartService(' + JSON.stringify(s.name).replace(/"/g, '&quot;') + ')" title="Restart service">↺</button>'
+        ? '<button class="restart-btn" onclick="restartService(' + esc(JSON.stringify(s.name)) + ')" title="Restart service">↺</button>'
         : '<span class="restart-btn restart-btn-disabled" title="Restart not available">↺</span>';
       return '<tr>'
         + '<td><strong>' + esc(s.name) + '</strong></td>'
@@ -1636,7 +1636,9 @@ function show(id) {
   if (liveGroup && liveGroup.contains(link)) liveGroup.style.display = '';
 }
 function card(v, l) { return '<div class="stat-card"><div class="number">' + v + '</div><div class="label">' + l + '</div></div>'; }
-function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+// Escapes quotes too: callers interpolate the result into attribute values
+// (href="...", data-service="..."). textContent/innerHTML only escapes & < >.
+function esc(s) { return (s == null ? '' : String(s)).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]); }
 
 // Service log viewer
 let _logsService = '';

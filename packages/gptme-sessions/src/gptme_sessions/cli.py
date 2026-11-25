@@ -55,6 +55,11 @@ from .record import (
 from .pi import PI_EXTRACTION_SCHEMA_VERSION, PiSessionFormatError
 from .signals import extract_from_path
 from .trajectory_identity import TrajectoryIdentityError, validate_claude_trajectory
+from .accepted_yield import (
+    compute_accepted_yield,
+    format_accepted_yield,
+    read_outcome_files,
+)
 from .store import (
     SessionStore,
     compute_run_analytics,
@@ -1356,6 +1361,46 @@ def runs(ctx: click.Context, since: str, as_json: bool) -> None:
             _show_discovery_fallback(since_days=math.ceil(since_days or 14))
     else:
         format_run_analytics(analytics)
+
+
+# -- yield -------------------------------------------------------------------
+
+
+@cli.command("yield")
+@click.option("--since", default="7d", help="Time window (e.g. 2h, 7d, 2w, or 'all')")
+@click.option(
+    "--outcomes",
+    "outcome_files",
+    multiple=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help=(
+        'JSONL of {"item": KEY, "outcome": LABEL} rows from the host (repeatable; '
+        "last row per item wins). Items with no row are pending."
+    ),
+)
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@click.pass_context
+def yield_(ctx: click.Context, since: str, outcome_files: tuple[Path, ...], as_json: bool) -> None:
+    """Accepted-outcome yield per dispatch source.
+
+    Items are task:<id> / pr:<owner/repo#n> keys taken from each session's
+    dispatch_cause or PR deliverables. Outcome labels: accepted, durable,
+    zero, harmful, closed (decided), unverified, pending.
+    """
+    try:
+        outcomes = read_outcome_files(outcome_files)
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
+    since_days = _parse_since(since)
+    report = compute_accepted_yield(store.query(since_days=since_days), outcomes)
+    window = "all time" if since_days is None else f"last {_fmt_since(since_days)}"
+    if as_json:
+        click.echo(json.dumps(report, indent=2))
+    elif not report:
+        click.echo(f"No sessions found ({window}).")
+    else:
+        click.echo(format_accepted_yield(report, window))
 
 
 # -- threads -----------------------------------------------------------------

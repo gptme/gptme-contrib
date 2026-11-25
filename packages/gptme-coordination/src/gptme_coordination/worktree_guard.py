@@ -521,6 +521,7 @@ def run_push_guard(
     brain_root: Path | None = None,
     remote_url: str | None = None,
     upstream_url: str | None = None,
+    origin_url: str | None = None,
     session_id: str | None = None,
     agent_id: str | None = None,
     deny: bool | None = None,
@@ -583,25 +584,47 @@ def run_push_guard(
         return 0
 
     # Fork-based PRs push to the fork while ``worktree-create`` claims the
-    # branch under the base repo's slug. Treat the ``upstream`` remote's slug as
-    # an alias so both keys meet (offline; any failure leaves no alias).
-    alias_slugs: list[str] = []
-    if upstream_url is None:
+    # branch under the base repo's slug. Two remote layouts occur:
+    #   * a fork clone, where ``origin`` is the fork and ``upstream`` the base;
+    #   * a ``worktree-create`` checkout, where ``origin`` is the base and
+    #     ``fork`` the fork — there is no ``upstream`` remote.
+    # Prefer the explicit ``upstream`` relationship. Without it, only alias
+    # ``origin`` for a push to the configured ``fork`` remote, not an arbitrary
+    # destination (offline; remote names declare the relationship).
+    def _remote_slugs(remote: str, *, push: bool = False) -> list[str]:
         import subprocess
 
         try:
-            upstream_url = subprocess.run(
-                ["git", "remote", "get-url", "upstream"],
+            url = subprocess.run(
+                [
+                    "git",
+                    "remote",
+                    "get-url",
+                    *(["--push", "--all"] if push else []),
+                    remote,
+                ],
                 capture_output=True,
                 text=True,
                 check=True,
                 timeout=5,
             ).stdout.strip()
         except Exception:
-            upstream_url = ""
-    upstream_slug = origin_slug(upstream_url or "")
-    if upstream_slug and upstream_slug != slug:
-        alias_slugs.append(upstream_slug)
+            return []
+        return [parsed for line in url.splitlines() if (parsed := origin_slug(line))]
+
+    upstream_slug = (
+        next(iter(_remote_slugs("upstream")), None)
+        if upstream_url is None
+        else origin_slug(upstream_url or "")
+    )
+    base_slug = upstream_slug
+    if not base_slug and slug in _remote_slugs("fork", push=True):
+        base_slug = (
+            next(iter(_remote_slugs("origin")), None)
+            if origin_url is None
+            else origin_slug(origin_url or "")
+        )
+    alias_slugs = [base_slug] if base_slug and base_slug != slug else []
 
     should_deny = deny if deny is not None else _env_flag(*_PUSH_GUARD_DENY_ENV)
     try:

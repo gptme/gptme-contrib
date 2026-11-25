@@ -166,6 +166,36 @@ def test_capacity_shortfall_matches_routing_refusal() -> None:
             "pr_local",
         ),
         ({"attempted": 2, "failures": 2, "capacity_failures": 2}, "capacity"),
+        # Capacity mixed with another known transient class is still transient
+        # (gptme/gptme-contrib#2331 item 4), not an unexplained collapse.
+        (
+            {
+                "attempted": 2,
+                "failures": 2,
+                "rate_limit_failures": 1,
+                "capacity_failures": 1,
+            },
+            "transient_mix",
+        ),
+        (
+            {
+                "attempted": 3,
+                "failures": 3,
+                "rate_limit_failures": 1,
+                "too_large_failures": 1,
+                "capacity_failures": 1,
+            },
+            "transient_mix",
+        ),
+        (
+            {
+                "attempted": 3,
+                "failures": 3,
+                "rate_limit_failures": 1,
+                "capacity_failures": 1,
+            },
+            "systemic",
+        ),
         ({"attempted": 2, "failures": 2}, "systemic"),
     ],
 )
@@ -259,3 +289,10 @@ def test_run_process_group_kills_descendants_on_timeout(
     if stat_read_error is not None:
         stat_file.assert_called_once_with(f"/proc/{child}/stat")
         stat_file.return_value.read.assert_called_once_with()
+
+
+def test_sweep_module_shares_the_outcome_classifier() -> None:
+    # One classifier: the copy in sweep.py drifted from this one before.
+    from gptme_review import sweep
+
+    assert sweep.classify_all_failed_run is o.classify_all_failed_run

@@ -10,6 +10,7 @@ merge, merge_ready must still emit as normal.
 
 from __future__ import annotations
 
+import json
 import os
 import stat
 import subprocess
@@ -28,7 +29,7 @@ TEST_HEAD_SHA = "deadbeef1234"
 # comment-suppression does not fire), and `pr comment` records to COMMENT_MARKER.
 FAKE_GH = r"""#!/usr/bin/env python3
 from __future__ import annotations
-import os, sys, json
+import os, sys, json, subprocess
 
 argv = sys.argv[1:]
 repo = os.environ.get("TEST_REPO", "testorg/testrepo")
@@ -80,9 +81,17 @@ if argv[0] == "api" and len(argv) > 1:
     if path == "repos/" + repo and "permissions" in jq:
         print(can_merge)
         sys.exit(0)
-    # Bot comment history (has_maintainer_waiting_comment) — no prior comments.
+    # Bot comment history (has_maintainer_waiting_comment). Default: no prior
+    # comments. TEST_COMMENTS_JSON serves a real list through real jq, so a
+    # filter error surfaces exactly as gh's --jq would surface it.
     if "comments" in path:
-        sys.exit(0)
+        comments = os.environ.get("TEST_COMMENTS_JSON")
+        if comments is None:
+            sys.exit(0)
+        r = subprocess.run(["jq", "-r", jq], input=comments, capture_output=True, text=True)
+        sys.stdout.write(r.stdout)
+        sys.stderr.write(r.stderr)
+        sys.exit(1 if r.returncode else 0)
     if "--jq" in argv:
         sys.exit(0)
     print("[]")
@@ -99,6 +108,7 @@ def _run_gate(
     can_merge: str,
     marker: Path,
     fmt: str = "jsonl",
+    comments: list[dict] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     fake_gh = tmp / "gh"
     fake_gh.write_text(FAKE_GH)
@@ -110,6 +120,8 @@ def _run_gate(
     env["TEST_HEAD_SHA"] = TEST_HEAD_SHA
     env["TEST_CAN_MERGE"] = can_merge
     env["COMMENT_MARKER"] = str(marker)
+    if comments is not None:
+        env["TEST_COMMENTS_JSON"] = json.dumps(comments)
     env["PATH"] = f"{tmp}:{env['PATH']}"
 
     return subprocess.run(
@@ -197,3 +209,31 @@ def test_markdown_mode_does_not_write_state_file() -> None:
         assert "merge_ready" not in result2.stdout
         assert marker.exists(), "jsonl run must post the maintainer-waiting comment"
         assert marker.read_text().count("comment:") == 1, marker.read_text()
+
+
+def test_deleted_account_comment_does_not_repost_waiting_handoff() -> None:
+    """A `"user": null` comment must not hide the existing handoff.
+
+    gptme/gptme-contrib#2384 (#1811): `.user.login | ascii_downcase` errored
+    on a deleted account's comment, `|| return 1` read that as "no handoff",
+    and the gate re-posted the maintainer-waiting comment every cycle.
+    """
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+        marker = tmp / "comment_marker"
+        comments: list[dict] = [
+            {"user": None, "body": "Comment by a deleted account."},
+            {
+                "user": {"login": "test-author", "type": "User"},
+                "body": "CI-green and mergeable — waiting only on a maintainer click.",
+            },
+        ]
+
+        result = _run_gate(
+            tmp, state_dir, can_merge="false", marker=marker, comments=comments
+        )
+        assert result.returncode in (0, 1), result.stderr
+        assert "merge_ready" not in result.stdout, result.stdout
+        assert not marker.exists(), marker.read_text()

@@ -125,6 +125,65 @@ def local_delivery_time(path: Path) -> float:
         return os.fstat(source.fileno()).st_mtime
 
 
+def stamp_frontmatter_flags(content: str, flags: dict[str, bool]) -> str | None:
+    """Return ``content`` with top-level frontmatter ``flags`` set.
+
+    Edits only the lines of the real top-level keys, located through the YAML
+    node tree, so the rest of the frontmatter stays byte-for-byte intact. A raw
+    line regex cannot tell a key from a quoted scalar's continuation line such
+    as ``replied: soon``: it rewrote the subject and never added the key.
+
+    Returns ``content`` unchanged when every flag already holds, and ``None``
+    when there is no parseable block-style frontmatter mapping.
+    """
+    if not content.startswith("---"):
+        return None
+    parts = _FM_DELIM.split(content, maxsplit=2)
+    if len(parts) < 3:
+        return None
+    fm = parts[1]
+    try:
+        node = yaml.compose(fm, Loader=yaml.SafeLoader)
+        meta = yaml.safe_load(fm)
+    except yaml.YAMLError:
+        return None
+    if not isinstance(node, yaml.MappingNode) or node.flow_style or not isinstance(meta, dict):
+        return None
+    pending = {key: value for key, value in flags.items() if meta.get(key) is not value}
+    if not pending:
+        return content
+    targets = [
+        (key_node, value_node)
+        for key_node, value_node in node.value
+        if isinstance(key_node, yaml.ScalarNode) and key_node.value in pending
+    ]
+    # Splice by character offset (``Mark.index``), not by line: PyYAML also
+    # counts \x85,  ,   and a lone \r as line breaks, so its line
+    # numbers do not index ``fm.split("\n")``. Edit from the end so earlier
+    # offsets stay valid.
+    for key_node, value_node in sorted(
+        targets, key=lambda kv: kv[0].start_mark.index, reverse=True
+    ):
+        key = key_node.value
+        literal = "true" if pending[key] else "false"
+        start, end = value_node.start_mark, value_node.end_mark
+        if start.line == end.line and end.column > start.column:
+            # Single-line value: swap only its span, so a trailing comment stays.
+            fm = fm[: start.index] + literal + fm[end.index :]
+        else:
+            # Multi-line or empty value: rewrite from the key's line start. An
+            # end mark at column 0 sits after the value's final line break.
+            key_mark = key_node.start_mark
+            line_start = key_mark.index - key_mark.column
+            tail = "\n" if end.column == 0 else ""
+            fm = fm[:line_start] + f"{key}: {literal}" + tail + fm[end.index :]
+    present = {key_node.value for key_node, _ in targets}
+    for key, value in pending.items():
+        if key not in present:
+            fm = fm.rstrip("\n") + f"\n{key}: {'true' if value else 'false'}\n"
+    return "---".join([parts[0], fm, parts[2]])
+
+
 def write_inbox_metadata(path: Path, content: str) -> None:
     """Publish read/replied stamps without losing the original arrival time."""
     with path.open() as source:
@@ -300,15 +359,18 @@ class AgentTransport:
         # Check the exact rendered bytes before either publication boundary.
         try:
             allowed = guard_outbound(message, self.channel, self._root.parent, require_scanner=True)
-            if not allowed:
-                raise ValueError("Outbound agent message blocked by secret policy")
-            filename = self._make_filename(self._self, subject)
-            # Preserve the sender's logical ID when a receiver chooses a local
-            # filename. Scan the final bytes too: filename sanitization can
-            # produce text that was not present verbatim in the original.
-            identity = yaml.safe_dump({"message_id": filename}, allow_unicode=True)
-            message = "---\n" + identity + message[4:]
-            allowed = guard_outbound(message, self.channel, self._root.parent, require_scanner=True)
+            # A block is reported after the try: raising it here would be
+            # re-labelled as a scanner failure by the generic handler below.
+            if allowed:
+                filename = self._make_filename(self._self, subject)
+                # Preserve the sender's logical ID when a receiver chooses a local
+                # filename. Scan the final bytes too: filename sanitization can
+                # produce text that was not present verbatim in the original.
+                identity = yaml.safe_dump({"message_id": filename}, allow_unicode=True)
+                message = "---\n" + identity + message[4:]
+                allowed = guard_outbound(
+                    message, self.channel, self._root.parent, require_scanner=True
+                )
         except SecretScannerUnavailable:
             # No scan ran, so this is a missing dependency, not a secret finding.
             raise ValueError(
@@ -386,18 +448,10 @@ class AgentTransport:
 
     def _mark_read(self, path: Path) -> str:
         content = path.read_text()
-        if content.startswith("---"):
-            parts = _FM_DELIM.split(content, maxsplit=2)
-            if len(parts) >= 3:
-                fm = parts[1]
-                if not re.search(r"^read: true$", fm, flags=re.MULTILINE):
-                    if re.search(r"^read:", fm, flags=re.MULTILINE):
-                        fm = re.sub(r"^read: false$", "read: true", fm, flags=re.MULTILINE)
-                    else:
-                        fm = fm.rstrip("\n") + "\nread: true\n"
-                    parts[1] = fm
-                    content = "---".join(parts)
-                    write_inbox_metadata(path, content)
+        stamped = stamp_frontmatter_flags(content, {"read": True})
+        if stamped is not None and stamped != content:
+            write_inbox_metadata(path, stamped)
+            return stamped
         return content
 
     def _lookup_path(self, message_id: str) -> Path | None:

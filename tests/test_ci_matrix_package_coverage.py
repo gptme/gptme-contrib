@@ -81,11 +81,10 @@ def test_matrix_ignores_symlinked_packages_and_cache(tmp_path: Path):
 def test_coverage_ignores_symlinked_packages(tmp_path: Path):
     """Execute the workflow's coverage script with a recording uv stand-in."""
     workflow = (REPO_ROOT / ".github/workflows/test-packages.yml").read_text()
-    script = textwrap.dedent(
-        workflow.split(
-            "      - name: Run coverage for all packages\n        run: |\n", 1
-        )[1].split("\n      - name:", 1)[0]
-    )
+    step = workflow.split("      - name: Run coverage for all packages\n", 1)[1]
+    step = step.split("\n      - name:", 1)[0]
+    # The step may carry other keys (e.g. env:) before its run block.
+    script = textwrap.dedent(step.split("        run: |\n", 1)[1])
     packages = tmp_path / "packages"
     (packages / "real-package" / "tests").mkdir(parents=True)
     (packages / "real-package" / "src").mkdir()

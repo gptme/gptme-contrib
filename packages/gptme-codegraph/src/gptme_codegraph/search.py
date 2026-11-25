@@ -383,18 +383,48 @@ def _ensure_search_tables(conn: sqlite3.Connection) -> None:
             document TEXT NOT NULL,
             PRIMARY KEY (directory, qualified_id)
         );
+        CREATE TABLE IF NOT EXISTS search_documents_generation (
+            directory TEXT PRIMARY KEY,
+            generation TEXT NOT NULL
+        );
+        CREATE TRIGGER IF NOT EXISTS search_documents_invalidate_insert
+        AFTER INSERT ON search_documents BEGIN
+            DELETE FROM search_documents_generation WHERE directory = NEW.directory;
+        END;
+        CREATE TRIGGER IF NOT EXISTS search_documents_invalidate_delete
+        AFTER DELETE ON search_documents BEGIN
+            DELETE FROM search_documents_generation WHERE directory = OLD.directory;
+        END;
+        CREATE TRIGGER IF NOT EXISTS search_documents_invalidate_update
+        AFTER UPDATE ON search_documents BEGIN
+            DELETE FROM search_documents_generation
+            WHERE directory IN (OLD.directory, NEW.directory);
+        END;
     """)
 
 
 def save_search_documents(
-    conn: sqlite3.Connection, directory: str, docs: list[SearchDocument]
+    conn: sqlite3.Connection,
+    directory: str,
+    docs: list[SearchDocument],
+    generation: str | None = None,
 ) -> None:
-    """Persist search documents to SQLite cache."""
+    """Persist search documents to SQLite cache.
+
+    ``generation`` names the symbol-index generation the documents were
+    extracted from (see ``SqliteIndexCache.generation``). Pass the same token
+    to ``load_search_documents`` so documents from a replaced index are not
+    served.
+    """
     import hashlib
     import json
 
     _ensure_search_tables(conn)
     conn.execute("DELETE FROM search_documents WHERE directory = ?", (directory,))
+    conn.execute(
+        "DELETE FROM search_documents_generation WHERE directory = ?",
+        (directory,),
+    )
 
     for doc in docs:
         content_hash = hashlib.sha256(
@@ -444,20 +474,43 @@ def save_search_documents(
                 doc_json,
             ),
         )
+    # Install the marker only after all writes. Triggers invalidate it even
+    # when an older process replaces documents without knowing about generations.
+    if generation is not None:
+        conn.execute(
+            "INSERT OR REPLACE INTO search_documents_generation (directory, generation) "
+            "VALUES (?, ?)",
+            (directory, generation),
+        )
     conn.commit()
 
 
 def load_search_documents(
-    conn: sqlite3.Connection, directory: str
+    conn: sqlite3.Connection, directory: str, generation: str | None = None
 ) -> list[SearchDocument]:
-    """Load search documents from SQLite cache."""
+    """Load search documents from SQLite cache.
+
+    When ``generation`` is given, return ``[]`` unless the stored documents
+    were saved for that same index generation.
+    """
     import json
 
     _ensure_search_tables(conn)
-    rows = conn.execute(
-        "SELECT document FROM search_documents WHERE directory = ?",
-        (directory,),
-    ).fetchall()
+    if generation is not None:
+        # Check the marker and read documents in one SQLite snapshot: a
+        # concurrent save must not replace documents after a separate check.
+        rows = conn.execute(
+            "SELECT document FROM search_documents AS docs "
+            "JOIN search_documents_generation AS gens "
+            "ON docs.directory = gens.directory "
+            "WHERE docs.directory = ? AND gens.generation = ?",
+            (directory, generation),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT document FROM search_documents WHERE directory = ?",
+            (directory,),
+        ).fetchall()
 
     docs: list[SearchDocument] = []
     for (doc_json,) in rows:

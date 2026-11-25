@@ -263,3 +263,21 @@ Logs are stored in:
 - `twitter.log` - Basic operations
 - `twitter_error.log` - Error details
 - `twitter_llm.log` - LLM interactions
+
+### Writing-style review
+
+The existing reviewer must return an explicit `Natural writing style` decision
+before automatic approval. Its prompt includes the authored main post and thread
+follow-ups, plus advisory signals from `gptme_sessions.smell` when available.
+Standalone installs still supply word and em-dash counts. Quoted conversation
+text does not contribute to those counts. Short-post density is not a threshold:
+an occasional meaningful dash is allowed; mechanical punctuation replacement
+and a blanket dash ban are not the policy.
+
+Both normal review and trusted-user automatic replies use this same pass. A
+failed or missing decision stays in the existing review queue. Previously scored
+approvals must be reviewed under the current policy before publication; saving
+or moving a draft preserves its original score binding. The two queued publishers
+return stale scored approvals to `new/` for fresh review. Explicit manual approval
+of an unscored draft retains its existing behavior. Public-safety, duplicate,
+read-budget and spend-cap gates still apply.

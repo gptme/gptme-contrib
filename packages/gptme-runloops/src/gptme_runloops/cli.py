@@ -322,7 +322,11 @@ def run_item_cmd(
     import logging
     import signal
 
-    from gptme_runloops.run_item import build_execution_plan, run_work_file
+    from gptme_runloops.run_item import (
+        RunnerEnvContractError,
+        build_execution_plan,
+        run_work_file,
+    )
     from gptme_runloops.run_item_config import assemble_hooks, load_run_item_config
 
     # Progress lines (the bash-echo mirror) go to stderr so --dry-run stdout
@@ -381,17 +385,22 @@ def run_item_cmd(
     hooks = assemble_hooks(config, raw)
 
     if dry_run:
-        plan = build_execution_plan(
-            work_file,
-            config,
-            hooks,
-            backend=backend,
-            model=model,
-            lane=lane,
-            dispatch_id=dispatch_id,
-            slot_key=slot_key,
-            claim_mode=claim_mode,
-        )
+        try:
+            plan = build_execution_plan(
+                work_file,
+                config,
+                hooks,
+                backend=backend,
+                model=model,
+                lane=lane,
+                dispatch_id=dispatch_id,
+                slot_key=slot_key,
+                claim_mode=claim_mode,
+            )
+        except RunnerEnvContractError as exc:
+            # Same fail-closed exit as a real run, without a traceback.
+            click.echo(f"ERROR: {exc}", err=True)
+            sys.exit(78)
         click.echo(plan.to_json())
         sys.exit(0)
 

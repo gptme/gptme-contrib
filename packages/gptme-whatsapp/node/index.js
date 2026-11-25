@@ -27,6 +27,8 @@ const { Client, LocalAuth } = pkg;
 import qrcode from 'qrcode-terminal';
 import { spawn } from 'child_process';
 import { existsSync } from 'fs';
+import { sessionArgs, sessionName } from './claude-session.js';
+import { createKeyedQueue } from './serial-queue.js';
 
 // Config from env
 const AGENT_NAME = process.env.GPTME_AGENT || 'sven';
@@ -47,6 +49,10 @@ if (BACKEND === 'claude-code' && !existsSync(SYSTEM_PROMPT_FILE)) {
     console.log(`Warning: SYSTEM_PROMPT_FILE not found at ${SYSTEM_PROMPT_FILE}`);
     console.log('Run: cd ${WORKSPACE} && ./scripts/build-system-prompt.sh > ${SYSTEM_PROMPT_FILE}');
 }
+
+// Serializes messages per sender so two rapid messages cannot race for the
+// same agent session.
+const senderQueue = createKeyedQueue();
 
 const client = new Client({
     authStrategy: new LocalAuth({ dataPath: '.wwebjs_auth' }),
@@ -92,12 +98,15 @@ client.on('message', async (msg) => {
 
     console.log(`[${new Date().toISOString()}] Message from ${sender}: ${body.slice(0, 80)}...`);
 
-    // Call agent backend non-interactively
-    const response = await callAgent(sender, body);
-    if (response) {
-        await msg.reply(response);
-        console.log(`[${new Date().toISOString()}] Replied to ${sender}`);
-    }
+    // One conversation per sender, so a sender's messages must not overlap:
+    // they would race for the same session (see serial-queue.js).
+    await senderQueue.run(sender, async () => {
+        const response = await callAgent(sender, body);
+        if (response) {
+            await msg.reply(response);
+            console.log(`[${new Date().toISOString()}] Replied to ${sender}`);
+        }
+    });
 });
 
 /**
@@ -134,7 +143,8 @@ async function callGptme(sender, message) {
 
 /**
  * Call Claude Code with the message and return the response.
- * Uses --append-system-prompt-file for agent identity and --resume for history.
+ * Uses --append-system-prompt-file for agent identity and a per-sender session
+ * (--session-id on the first message, --resume after) for history.
  */
 async function callClaudeCode(sender, message) {
     const args = ['-p', message, '--output-format', 'text'];
@@ -144,9 +154,10 @@ async function callClaudeCode(sender, message) {
         args.push('--append-system-prompt-file', SYSTEM_PROMPT_FILE);
     }
 
-    // Resume previous conversation for this sender (maintains history)
-    const convId = `whatsapp-${AGENT_NAME}-${sender.replace(/[^a-zA-Z0-9]/g, '-')}`;
-    args.push('--resume', convId);
+    // Per-sender session (maintains history). --resume needs an existing
+    // session, so the first message creates it under a deterministic UUID.
+    const convId = sessionName(AGENT_NAME, WORKSPACE, sender);
+    args.push(...sessionArgs(convId));
 
     return spawnAndCapture(CLAUDE_CMD, args, (output) => {
         // Claude Code --output-format text returns just the response

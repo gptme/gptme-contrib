@@ -970,6 +970,192 @@ def test_push_guard_claims_both_keys_for_fork_push(tmp_path: Path) -> None:
             assert claim is not None and claim.claimer == "agent-b"
 
 
+@pytest.mark.parametrize("origin_claimed", [False, True])
+@pytest.mark.parametrize(
+    "upstream_url,fork_url",
+    [
+        ("", ""),
+        ("", "git@github.com:fork-user/frontend.git"),
+        ("git@github.com:base/backend.git", "git@github.com:org/backend.git"),
+    ],
+)
+def test_push_guard_does_not_alias_unrelated_origin(
+    tmp_path: Path, origin_claimed: bool, upstream_url: str, fork_url: str
+) -> None:
+    """An arbitrary destination must neither claim nor collide with origin."""
+    from gptme_coordination.db import CoordinationDB
+    from gptme_coordination.work import WorkClaimManager
+    from gptme_coordination.worktree_guard import run_push_guard
+
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    if fork_url:
+        subprocess.run(["git", "remote", "add", "fork", fork_url], check=True)
+    db_path = tmp_path / "coord.db"
+    origin_key = "pr-branch:org/frontend#feat"
+    with CoordinationDB(db_path) as db:
+        if origin_claimed:
+            assert WorkClaimManager(db).claim("holder-agent", origin_key)
+
+    assert (
+        run_push_guard(
+            ["refs/heads/feat abc123 refs/heads/feat def456"],
+            worktree_root=tmp_path / "wt",
+            brain_root=tmp_path / "brain",
+            remote_url="git@github.com:org/backend.git",
+            origin_url="git@github.com:org/frontend.git",
+            upstream_url=upstream_url,
+            session_id="sess-1",
+            agent_id="agent-b",
+            deny=True,
+            db_path=db_path,
+        )
+        == 0
+    )
+    with CoordinationDB(db_path) as db:
+        work = WorkClaimManager(db)
+        destination = work.get("pr-branch:org/backend#feat")
+        assert destination and destination.claimer == "agent-b"
+        origin = work.get(origin_key)
+        if origin_claimed:
+            assert origin and origin.claimer == "holder-agent"
+        else:
+            assert origin is None
+        if upstream_url:
+            upstream = work.get("pr-branch:base/backend#feat")
+            assert upstream and upstream.claimer == "agent-b"
+
+
+def test_push_guard_aliases_origin_when_no_upstream_remote(tmp_path: Path) -> None:
+    """A ``worktree-create`` layout has ``origin`` = base, ``fork`` = fork.
+
+    There is no ``upstream`` remote, so pre-fix the fork push claimed only the
+    fork slug and never met the base-repo claim held by the worktree creator.
+    """
+    from gptme_coordination.db import CoordinationDB
+    from gptme_coordination.work import WorkClaimManager
+    from gptme_coordination.worktree_guard import run_push_guard
+
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(
+        ["git", "remote", "add", "fork", "https://github.com/TimeToBuildBob/aw-server"],
+        check=True,
+    )
+    db_path = tmp_path / "coord.db"
+    with CoordinationDB(db_path) as db:
+        assert WorkClaimManager(db).claim(
+            "holder-agent", "pr-branch:activitywatch/aw-server#feat", ttl_minutes=60
+        )
+
+    kwargs = {
+        "worktree_root": tmp_path / "wt",
+        "brain_root": tmp_path / "brain",
+        "remote_url": "git@github.com:TimeToBuildBob/aw-server.git",
+        "origin_url": "git@github.com:ActivityWatch/aw-server.git",
+        "session_id": "sess-1",
+        "agent_id": "agent-b",
+        "db_path": db_path,
+    }
+    refspec = ["refs/heads/feat abc123 refs/heads/feat def456"]
+
+    assert run_push_guard(refspec, deny=False, **kwargs) == 0
+    assert run_push_guard(refspec, deny=True, **kwargs) == 1
+
+    ledger = tmp_path / "brain" / "state" / "coordination" / "worktree-guard.jsonl"
+    rows = [json.loads(line) for line in ledger.read_text().splitlines()]
+    denied = [r for r in rows if r["type"] in {"push_would_deny", "push_deny"}]
+    assert {r["key"] for r in denied} == {"pr-branch:activitywatch/aw-server#feat"}
+    assert {r["holder"] for r in denied} == {"holder-agent"}
+
+
+@pytest.mark.parametrize("separate_push_url", [False, True])
+@pytest.mark.parametrize("additional_push_url", [False, True])
+def test_push_guard_reads_base_slug_from_origin_remote(
+    tmp_path: Path, separate_push_url: bool, additional_push_url: bool
+) -> None:
+    """With no explicit ``origin_url``, the guard reads the ``origin`` remote."""
+    from gptme_coordination.db import CoordinationDB
+    from gptme_coordination.work import WorkClaimManager
+    from gptme_coordination.worktree_guard import run_push_guard
+
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(tmp_path),
+            "remote",
+            "add",
+            "origin",
+            "git@github.com:ActivityWatch/aw-server.git",
+        ],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(tmp_path),
+            "remote",
+            "add",
+            "fork",
+            "git@github.com:TimeToBuildBob/aw-server.git",
+        ],
+        check=True,
+    )
+
+    if separate_push_url:
+        subprocess.run(
+            ["git", "remote", "set-url", "fork", "git@github.com:mirror/aw-server.git"],
+            check=True,
+        )
+        subprocess.run(
+            [
+                "git",
+                "remote",
+                "set-url",
+                "--push",
+                "fork",
+                "git@github.com:TimeToBuildBob/aw-server.git",
+            ],
+            check=True,
+        )
+
+    destination = "git@github.com:TimeToBuildBob/aw-server.git"
+    if additional_push_url:
+        # Without --all Git returns only the first URL. Git nevertheless calls
+        # pre-push for every destination, so a later push URL must also alias.
+        subprocess.run(
+            ["git", "remote", "set-url", "--push", "fork", destination], check=True
+        )
+        destination = "git@github.com:backup/aw-server.git"
+        subprocess.run(
+            ["git", "remote", "set-url", "--add", "--push", "fork", destination],
+            check=True,
+        )
+
+    db_path = tmp_path / "coord.db"
+    rc = run_push_guard(
+        ["refs/heads/feat abc123 refs/heads/feat def456"],
+        worktree_root=tmp_path / "wt",
+        brain_root=tmp_path / "brain",
+        remote_url=destination,
+        session_id="sess-1",
+        agent_id="agent-b",
+        deny=True,
+        db_path=db_path,
+    )
+    assert rc == 0
+    with CoordinationDB(db_path) as db:
+        work = WorkClaimManager(db)
+        destination_slug = "backup" if additional_push_url else "timetobuildbob"
+        for key in (
+            f"pr-branch:{destination_slug}/aw-server#feat",
+            "pr-branch:activitywatch/aw-server#feat",
+        ):
+            claim = work.get(key)
+            assert claim is not None and claim.claimer == "agent-b"
+
+
 def test_push_guard_same_upstream_and_destination_is_unchanged(tmp_path: Path) -> None:
     from gptme_coordination.db import CoordinationDB
     from gptme_coordination.work import WorkClaimManager

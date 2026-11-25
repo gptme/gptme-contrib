@@ -777,3 +777,104 @@ def test_leading_mention_without_actual_parent_prefix_is_direct(
 
     assert "addressed TO us" in prompt
     assert "automatic reply prefix" not in prompt
+
+
+@pytest.mark.parametrize("style_passed", [None, False])
+def test_style_must_be_reviewed_and_pass_before_auto_approval(
+    llm_module: types.ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    style_passed: bool | None,
+) -> None:
+    criteria = {
+        "Technical Accuracy": llm_module.ReviewResult(notes="Accurate", passed=True)
+    }
+    if style_passed is not None:
+        criteria["Natural writing style"] = llm_module.ReviewResult(
+            notes="Repeated separator is unnecessary", passed=style_passed
+        )
+    response = llm_module.ReviewResponse(
+        criteria_results=criteria,
+        recommendation="approve",
+        improvements=[],
+        reasoning="All good",
+    )
+    monkeypatch.setattr(llm_module, "review_draft", lambda _: response)
+    approved, result = llm_module.verify_draft(
+        {"text": "One point — another point", "type": "tweet"}
+    )
+    assert approved is False
+    assert result.criteria_results["Natural writing style"].passed is False
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Fixed the timeout. The call now completes.",
+        "The delay was 60 seconds — exactly the configured timeout.",
+    ],
+)
+def test_style_decision_can_approve_clear_prose_with_or_without_a_dash(
+    llm_module: types.ModuleType, monkeypatch: pytest.MonkeyPatch, text: str
+) -> None:
+    response = llm_module.ReviewResponse(
+        criteria_results={
+            "Natural writing style": llm_module.ReviewResult(
+                notes="Clear, precise punctuation", passed=True
+            )
+        },
+        recommendation="approve",
+        improvements=[],
+        reasoning="Good",
+    )
+    monkeypatch.setattr(llm_module, "review_draft", lambda _: response)
+    approved, _ = llm_module.verify_draft({"text": text, "type": "reply"})
+    assert approved is True
+
+
+def test_style_signals_count_authored_thread_not_quoted_context(
+    llm_module: types.ModuleType,
+) -> None:
+    draft = {
+        "text": "A clear sentence.",
+        "type": "thread",
+        "thread": ["One point — another point."],
+        "context": {"original_tweet": {"text": "Quoted — third — party — text"}},
+    }
+    report = llm_module.draft_style_report(draft)
+    assert report["em_dash_count"] == 1
+    assert report["word_count"] > 0
+
+
+def test_reviewer_receives_authored_followups_not_only_aggregate_counts(
+    llm_module: types.ModuleType,
+) -> None:
+    followup = "Unique followup zxqv1234 — unsupported claim — canned conclusion."
+    draft = {
+        "text": "Fixed the bug.",
+        "type": "thread",
+        "thread": [followup],
+        "context": {},
+    }
+    prompt = llm_module.create_review_prompt(draft, {"review": {"required_checks": []}})
+    assert "zxqv1234" in prompt
+    assert "unsupported claim" in prompt
+
+
+@pytest.mark.parametrize("key", ["natural_writing_style", "Natural Writing Style"])
+def test_explicit_style_decision_accepts_normal_criterion_key_formats(
+    llm_module: types.ModuleType, monkeypatch: pytest.MonkeyPatch, key: str
+) -> None:
+    response = llm_module.ReviewResponse(
+        criteria_results={
+            key: llm_module.ReviewResult(notes="Deliberate dash", passed=True)
+        },
+        recommendation="approve",
+        improvements=[],
+        reasoning="Clear",
+    )
+    monkeypatch.setattr(llm_module, "review_draft", lambda _: response)
+    approved, _ = llm_module.verify_draft(
+        {"text": "It took 60 seconds — exactly the timeout.", "type": "reply"}
+    )
+    assert approved
+    assert set(response.criteria_results) == {"Natural writing style"}

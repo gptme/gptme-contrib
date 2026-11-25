@@ -85,6 +85,11 @@ _SKIP_DIR_PARTS: frozenset[str] = frozenset(
 _REPO_SLUG_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 #: SSH remote form: git@github.com:owner/repo.git
 _REPO_SSH_RE = re.compile(r"git@[^:]+:([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?$")
+#: URL-scheme remote form: ssh://[user@]host[:port]/owner/repo(.git), also
+#: git+ssh:// and git://. The path must be exactly owner/repo.
+_REPO_SCHEME_RE = re.compile(
+    r"(?:ssh|git\+ssh|git)://(?:[^@/]+@)?[^/]+/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?/?$"
+)
 #: HTTPS remote form: https://github.com/owner/repo(.git)
 _REPO_HTTPS_RE = re.compile(r"https?://[^/]+/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?(?:/.*)?$")
 
@@ -119,8 +124,8 @@ def _skill_name_pattern(name: str) -> re.Pattern[str]:
 def normalize_repo_slug(value: str) -> str | None:
     """Normalise *value* to a lowercase ``owner/repo`` slug or return ``None``.
 
-    Accepts bare slugs (``gptme/gptme``), HTTPS GitHub URLs, and SSH remote
-    strings.  Anything that does not resolve to exactly two non-empty path
+    Accepts bare slugs (``gptme/gptme``), HTTPS GitHub URLs, SSH remote
+    strings, and ``ssh://``/``git://`` URLs.  Anything that does not resolve to exactly two non-empty path
     segments is returned as ``None`` — callers treat ``None`` as *unknown*.
 
     Examples::
@@ -130,6 +135,7 @@ def normalize_repo_slug(value: str) -> str | None:
         normalize_repo_slug("gptme/gptme.git")           -> "gptme/gptme"
         normalize_repo_slug("https://github.com/A/B")   -> "a/b"
         normalize_repo_slug("git@github.com:A/B.git")   -> "a/b"
+        normalize_repo_slug("ssh://git@github.com/A/B") -> "a/b"
         normalize_repo_slug("./local")                   -> None
         normalize_repo_slug("gptme")                     -> None  (one segment)
     """
@@ -139,6 +145,11 @@ def normalize_repo_slug(value: str) -> str | None:
 
     # SSH form
     m = _REPO_SSH_RE.match(value)
+    if m:
+        return m.group(1).lower()
+
+    # ssh://, git+ssh:// and git:// URL forms
+    m = _REPO_SCHEME_RE.match(value)
     if m:
         return m.group(1).lower()
 

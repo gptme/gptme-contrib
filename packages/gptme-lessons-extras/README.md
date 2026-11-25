@@ -222,8 +222,13 @@ root and reports "Lessons directory not found" outside a git repository). Use `-
 | `python3 -m gptme_lessons_extras.effectiveness_tracker` | Incremental, resumable correlation of lesson inclusion with session outcomes (`--report`, `--limit`, `--full`, `--reset`, `--logs-dir`, `--state-file`) |
 | `python3 -m gptme_lessons_extras.discovery` | `recommend` lessons for context keywords, find `similar` lessons, list `duplicates` |
 | `gptme_lessons_extras.similarity` / `utils.similarity` | Keyword/content similarity and recency scoring (library) |
-| `check-staleness.py`, `analyze-lesson-usage.py`, `improve-lesson-keywords.py`, `detect-lesson-patterns.py`, `generate-review-prompts.py`, `create-pr.py` | Standalone maintenance scripts — run by path from `src/gptme_lessons_extras/` |
+| `analyze-lesson-usage.py`, `improve-lesson-keywords.py`, `detect-lesson-patterns.py`, `generate-review-prompts.py`, `create-pr.py` | Standalone maintenance scripts — run by path from `src/gptme_lessons_extras/` |
 | `export`, `import`, `sync`, `review`, `adopt`, `evolution`, `metrics`, `network_schema` | Experimental sharing of lessons between agents via a git repo |
+
+For staleness analysis, use `similarity.calculate_recency_scores(lessons_dir, usage_stats)`;
+`usage_stats` is optional and maps relative lesson paths to `(last_referenced, reference_count)`.
+The standalone `check-staleness.py` report script was removed; its fixed analytics/report
+paths and threshold rules are no longer maintained.
 
 ## Notes
 
