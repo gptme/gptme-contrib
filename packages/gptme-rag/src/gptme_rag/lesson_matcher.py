@@ -206,6 +206,26 @@ def _string_list(value: object) -> list[str]:
     return []
 
 
+def _match_terms(value: object, *, split_commas: bool) -> list[str]:
+    """Normalise a ``keywords``/``patterns`` field to a list of strings.
+
+    Accepts a string or a list. Numeric and date YAML scalars are kept as
+    source text; booleans, mappings and nulls are dropped. A bare string is split on
+    commas only when ``split_commas`` is set: keyword lists use that
+    shorthand, but a comma inside a regex (``x{1,3}``) is part of the pattern.
+    """
+    items = value if isinstance(value, list) else [value]
+    terms: list[str] = []
+    for item in items:
+        if isinstance(item, bool) or not isinstance(item, str | int | float):
+            continue
+        if split_commas and isinstance(item, str) and not isinstance(value, list):
+            terms.extend(item.split(","))
+        else:
+            terms.append(str(item))
+    return [term.strip() for term in terms if term.strip()]
+
+
 def _clean_plain_scalar(raw: str) -> str:
     """Strip surrounding quotes, then any YAML inline ``#`` comment.
 
@@ -470,7 +490,46 @@ def extract_frontmatter(content: str) -> tuple[dict[str, Any], str]:
     try:
         import yaml
 
-        fm_yaml = yaml.safe_load(fm_str)
+        class MatchTermLoader(yaml.SafeLoader):
+            """Keep numeric and date match terms as written.
+
+            YAML 1.1 reads ``3.10`` as the float 3.1. Only the root and
+            ``match`` mappings, where match terms are read from, are adjusted;
+            every other field keeps SafeLoader semantics.
+            """
+
+            def construct_document(self, node):
+                document = super().construct_document(node)
+                if isinstance(document, dict):
+                    self._keep_term_text(node, document)
+                    if isinstance(document.get("match"), dict):
+                        written = {key.value: value for key, value in node.value}
+                        # A plain alias (``match: *base``) shares the anchor's dict.
+                        document["match"] = match = dict(document["match"])
+                        self._keep_term_text(written["match"], match)
+                return document
+
+            @staticmethod
+            def _keep_term_text(node, mapping):
+                source_tags = {
+                    "tag:yaml.org,2002:int",
+                    "tag:yaml.org,2002:float",
+                    "tag:yaml.org,2002:timestamp",
+                }
+                # Construction has already flattened merge keys into
+                # ``node.value``; as in the mapping, the last duplicate wins.
+                written = {key.value: value for key, value in node.value}
+                for field in ("keywords", "patterns"):
+                    value = written.get(field)
+                    if isinstance(value, yaml.SequenceNode):
+                        mapping[field] = [
+                            item.value if item.tag in source_tags else parsed
+                            for item, parsed in zip(value.value, mapping[field])
+                        ]
+                    elif value is not None and value.tag in source_tags:
+                        mapping[field] = value.value
+
+        fm_yaml = yaml.load(fm_str, Loader=MatchTermLoader)
         return (fm_yaml if isinstance(fm_yaml, dict) else {}), body
     except ImportError:
         pass
@@ -548,16 +607,18 @@ def extract_frontmatter(content: str) -> tuple[dict[str, Any], str]:
         + (
             []
             if top_level_patterns
-            else _string_list(
-                _extract_scalar_frontmatter_field(top_level_without_match, "patterns")
+            else _match_terms(
+                _extract_scalar_frontmatter_field(top_level_without_match, "patterns"),
+                split_commas=False,
             )
         )
         + nested_patterns
         + (
             []
             if nested_patterns
-            else _string_list(
-                _extract_scalar_frontmatter_field(match_block, "patterns", allow_indented=True)
+            else _match_terms(
+                _extract_scalar_frontmatter_field(match_block, "patterns", allow_indented=True),
+                split_commas=False,
             )
         )
     )
@@ -801,8 +862,8 @@ def _score_skill_descriptor(lesson: dict[str, Any], prompt_lower: str) -> tuple[
 # Lesson scanning
 # ---------------------------------------------------------------------------
 
-#: On-disk cache schema. Bump when the lesson dict shape changes.
-_CACHE_VERSION = 2
+#: On-disk cache schema. Bump when the lesson dict shape or parsing semantics change.
+_CACHE_VERSION = 3
 
 # resolved path -> (mtime_ns, size, lesson_or_None). None means parsed-but-skipped.
 _parse_cache: dict[str, tuple[int, int, dict[str, Any] | None]] = {}
@@ -980,13 +1041,18 @@ def _parse_lesson_file(path: Path) -> dict[str, Any] | None:
         raw_keywords = []
         raw_patterns = []
 
-    if isinstance(raw_keywords, str):
-        raw_keywords = [raw_keywords]
-    keywords = _dedupe_strings([*raw_keywords, *_string_list(fm.get("keywords"))])
-
-    if isinstance(raw_patterns, str):
-        raw_patterns = [raw_patterns]
-    patterns = _dedupe_strings([*raw_patterns, *_string_list(fm.get("patterns"))])
+    keywords = _dedupe_strings(
+        [
+            *_match_terms(raw_keywords, split_commas=True),
+            *_match_terms(fm.get("keywords"), split_commas=True),
+        ]
+    )
+    patterns = _dedupe_strings(
+        [
+            *_match_terms(raw_patterns, split_commas=False),
+            *_match_terms(fm.get("patterns"), split_commas=False),
+        ]
+    )
 
     skill_name = fm.get("name") if isinstance(fm.get("name"), str) else None
     lesson_id = fm.get("id") if isinstance(fm.get("id"), str) else None
