@@ -3341,8 +3341,8 @@ def test_contrib_agent_literal_word_boundary_no_false_positive() -> None:
     assert reasons == []
 
 
-def test_contrib_agent_literal_skips_docs_and_comment_lines() -> None:
-    """README examples and full-line comments are exempt; code still routes."""
+def test_contrib_agent_literal_skips_docs_only() -> None:
+    """README examples are exempt; source content still routes."""
     file_shapes = [
         {
             "path": "packages/gptme-coordination/README.md",
@@ -3358,8 +3358,10 @@ def test_contrib_agent_literal_skips_docs_and_comment_lines() -> None:
             ),
         },
     ]
-    assert self_merge_check.contrib_agent_literal_reasons(file_shapes) == []
-    file_shapes[1]["patch"] += '+DEFAULT_AUTHOR = "sven"  # example\n'
+    assert self_merge_check.contrib_agent_literal_reasons(file_shapes[:1]) == []
+    reasons = self_merge_check.contrib_agent_literal_reasons(file_shapes)
+    assert len(reasons) == 1 and '"bob"' in reasons[0]
+    file_shapes[1]["patch"] = '+DEFAULT_AUTHOR = "sven"  # example\n'
     reasons = self_merge_check.contrib_agent_literal_reasons(file_shapes)
     assert len(reasons) == 1 and '"sven"' in reasons[0]
     assert "alice" not in reasons[0] and "README" not in reasons[0]
@@ -3373,6 +3375,7 @@ def test_contrib_agent_literal_skips_docs_and_comment_lines() -> None:
         '    * ["bob", "alice"],',
         '    """bob""",',
         '    /* default */ const agent = "bob";',
+        "# You are Bob",
     ],
 )
 def test_contrib_agent_literal_unpacking_still_routes(line: str) -> None:

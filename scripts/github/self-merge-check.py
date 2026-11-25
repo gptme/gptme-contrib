@@ -3198,11 +3198,8 @@ def contrib_agent_literal_reasons(file_shapes: list[dict[str, Any]]) -> list[str
         if is_test_file(path) or (doc_file and "src" not in Path(path).parts):
             continue
         for line in _contrib_added_lines(cast("str | None", entry.get("patch"))):
-            # Only Python full-line comments are unambiguous without parsing
-            # surrounding source. Triple-quoted strings, '*' unpacking and
-            # block-comment openers can all introduce executable expressions.
-            if Path(path).suffix == ".py" and line.lstrip().startswith("#"):
-                continue
+            # Scan source lines regardless of prefix: even '#' can be runtime
+            # prompt content inside a multiline string, not a comment.
             for match in _CONTRIB_AGENT_LITERAL_RE.finditer(line):
                 hits.setdefault(match.group(1).lower(), set()).add(path)
     if not hits:
