@@ -100,18 +100,22 @@ def _mentions_http_400(error_text: str) -> bool:
 
 
 def _mentions_model_stream_crash(lower: str) -> bool:
-    """A model stream that broke or ended empty — not an unrelated crash.
+    """gptme OpenAI-stream IndexError — a harness/parser crash.
 
-    Two production shapes:
-    - gptme OpenAI-stream IndexError. ``llm_openai`` is the observed marker
-      (module path in the traceback / harness stderr). A bare ``in stream``
-      substring also matches "in streaming mode" / "requests in stream" and
-      is not used.
-    - gptme ``EmptyStreamError``: "Provider stream for MODEL ended without any
-      output".
+    ``llm_openai`` is the observed marker (module path in the traceback /
+    harness stderr). A bare ``in stream`` substring also matches "in streaming
+    mode" / "requests in stream" and is not used.
     """
-    if "list index out of range" in lower and "llm_openai" in lower:
-        return True
+    return "list index out of range" in lower and "llm_openai" in lower
+
+
+def _mentions_empty_provider_stream(lower: str) -> bool:
+    """gptme ``EmptyStreamError``: "Provider stream for MODEL ended without any output".
+
+    A terminal symptom that commonly follows a provider-side failure (overload,
+    throttling, credentials) in the same stderr tail, so it is checked only
+    after those more specific causes.
+    """
     return "provider stream for " in lower and "ended without any output" in lower
 
 
@@ -441,6 +445,11 @@ def classify_failure_reason(
             or "403" in error_text
         ):
             return FAILURE_REASON_AUTH
+        # An empty provider stream is usually the terminal symptom of a
+        # provider-side failure, so it only classifies once quota, 429,
+        # overload, rate-limit and auth causes have been ruled out.
+        if _mentions_empty_provider_stream(lower):
+            return FAILURE_REASON_MODEL_STREAM_CRASH
     # has_assistant_turn is definitive: if the trajectory has a response, model ran.
     # input_tokens==0 alone can't override it — token accounting can be missing on CC.
     no_model_tokens = not has_assistant_turn and (input_tokens == 0 or input_tokens is None)

@@ -1157,3 +1157,35 @@ def test_classify_empty_provider_stream_as_model_stream_crash():
         ),
     )
     assert reason == FAILURE_REASON_MODEL_STREAM_CRASH
+
+
+@pytest.mark.parametrize(
+    ("provider_error", "expected"),
+    [
+        (
+            "Responses stream error: server_is_overloaded: try later",
+            FAILURE_REASON_UPSTREAM_OVERLOADED,
+        ),
+        (
+            "Selected model is at capacity. Please try a different model.",
+            FAILURE_REASON_UPSTREAM_OVERLOADED,
+        ),
+        ("Rate limit reached for requests", FAILURE_REASON_RATE_LIMIT),
+        ("HTTP/1.1 429 Too Many Requests", FAILURE_REASON_RATE_LIMIT),
+        ("401 Unauthorized: invalid credentials", FAILURE_REASON_AUTH),
+    ],
+)
+def test_classify_provider_failure_precedes_empty_stream(provider_error: str, expected: str):
+    """EmptyStreamError is a terminal symptom: a provider overload/rate-limit/auth
+    failure in the same stderr tail is the root cause and must win."""
+    reason = classify_failure_reason(
+        exit_code=1,
+        duration_seconds=106,
+        input_tokens=30536,
+        has_assistant_turn=False,
+        error_text=(
+            f"{provider_error}\n"
+            "ERROR Provider stream for openai-subscription/gpt-6.1-sol ended without any output"
+        ),
+    )
+    assert reason == expected
