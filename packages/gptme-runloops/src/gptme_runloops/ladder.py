@@ -105,7 +105,10 @@ def run_ladder(
     """Run ``rungs`` in order until ``deficit`` items are filed.
 
     ``file_items(rung_name, items)`` receives at most the remaining deficit and
-    returns the number it filed; it is not called with an empty list. A rung
+    returns the number it filed; it is not called with an empty list. After a
+    dedupe shortfall, remaining candidates from the same rung are offered in
+    batches bounded by the updated deficit before advancing to the next rung.
+    Each candidate is offered at most once. A rung
     whose ``produce`` raises is recorded with ``error`` and the ladder moves on:
     one broken source must not starve the rest. A ``file_items`` failure is
     not caught, because the caller cannot tell what was filed.
@@ -132,19 +135,24 @@ def run_ladder(
                 emitted=0, filed=0, error=f"{type(exc).__name__}: {exc}"
             )
             continue
-        take = items[: result.remaining]
-        filed = file_items(rung.name, take) if take else 0
-        if filed < 0 or filed > len(take):
-            raise ValueError(
-                f"file_items for {rung.name!r} returned {filed}, expected 0..{len(take)}"
-            )
+        offset = 0
+        rung_filed = 0
+        while offset < len(items) and result.remaining > 0:
+            take = items[offset : offset + result.remaining]
+            offset += len(take)
+            filed = file_items(rung.name, take)
+            if filed < 0 or filed > len(take):
+                raise ValueError(
+                    f"file_items for {rung.name!r} returned {filed}, expected 0..{len(take)}"
+                )
+            rung_filed += filed
+            if filed:
+                if result.produced_by is None:
+                    result.produced_by = rung.name
+                result.filed.extend(take[:filed])
         result.rungs[rung.name] = RungResult(
-            emitted=len(items), filed=filed, note=getattr(out, "note", "")
+            emitted=len(items), filed=rung_filed, note=getattr(out, "note", "")
         )
-        if filed:
-            if result.produced_by is None:
-                result.produced_by = rung.name
-            result.filed.extend(take[:filed])
     return result
 
 

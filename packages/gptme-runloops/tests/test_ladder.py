@@ -77,6 +77,52 @@ def test_dedupe_shortfall_falls_through_to_next_rung():
     assert res.filed == ["b"]
 
 
+@pytest.mark.parametrize(
+    ("candidates", "expected_batches", "expected_filed", "later_runs"),
+    [
+        (
+            ["dup", "dup", "a", "b", "unused"],
+            [["dup", "dup"], ["a", "b"]],
+            ["a", "b"],
+            False,
+        ),
+        (["a", "dup", "dup", "b"], [["a", "dup"], ["dup"], ["b"]], ["a", "b"], False),
+        (["dup", "dup", "a"], [["dup", "dup"], ["a"]], ["a", "fallback"], True),
+    ],
+)
+def test_dedupe_exhausts_current_rung_before_running_heavier_sources(
+    candidates, expected_batches, expected_filed, later_runs
+):
+    calls: list[str] = []
+    batches: list[list[str]] = []
+    persisted: list[str] = []
+
+    def file_items(name, items):
+        assert 0 < len(items) <= 2 - len(persisted)
+        if name == "own-prs":
+            batches.append(list(items))
+        fresh = [item for item in items if item != "dup"]
+        persisted.extend(fresh)
+        return len(fresh)
+
+    res = run_ladder(
+        [
+            _rung("own-prs", candidates, calls=calls),
+            _rung("heavy", ["fallback"], calls=calls),
+        ],
+        deficit=2,
+        file_items=file_items,
+    )
+    assert persisted == expected_filed
+    assert batches == expected_batches
+    assert calls == (["own-prs", "heavy"] if later_runs else ["own-prs"])
+    assert res.rungs["own-prs"].emitted == len(candidates)
+    assert res.rungs["own-prs"].filed == (1 if later_runs else 2)
+    assert res.produced_by == "own-prs"
+    assert res.remaining == 0
+    assert not res.idle_on_purpose
+
+
 def test_broken_rung_is_recorded_and_ladder_continues():
     def boom():
         raise RuntimeError("manifest stale")
