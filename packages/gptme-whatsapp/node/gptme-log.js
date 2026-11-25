@@ -10,9 +10,31 @@ import { existsSync, readFileSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
 
-// A tool call on its own line in tool format, e.g. `@complete` or
-// `@save(call_1): {"path": ...}`. These are calls, not text for the contact.
-const TOOL_CALL_LINE = /^@[a-z_]+(\([^)]*\))?(:.*)?$/;
+// Structured calls carry a call id; bare @handles are user-facing text.
+// gptme also emits the parameterless completion sentinel as `@complete`.
+const TOOL_CALL_LINE = /^(?:@[a-z_]+\([^)]*\):.*|@complete(?::\s*\{\})?)$/;
+
+const pendingRuns = new Map();
+
+/** Serialize offset capture, generation and extraction for each conversation. */
+export async function runWithReply(convName, generate, logsDir = gptmeLogsDir()) {
+    const key = logPath(convName, logsDir);
+    const previous = pendingRuns.get(key) || Promise.resolve();
+    const current = previous.then(async () => {
+        const since = logLineCount(convName, logsDir);
+        // false means the subprocess failed: never extract a partial reply.
+        if (await generate() === false) return null;
+        return replySince(convName, since, logsDir);
+    });
+    // A failed run must not poison later messages in this conversation.
+    const settled = current.catch(() => {});
+    pendingRuns.set(key, settled);
+    try {
+        return await current;
+    } finally {
+        if (pendingRuns.get(key) === settled) pendingRuns.delete(key);
+    }
+}
 
 /** gptme's conversation logs dir (mirrors gptme.dirs.get_logs_dir). */
 export function gptmeLogsDir(env = process.env) {

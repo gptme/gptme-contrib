@@ -25,7 +25,7 @@
 import pkg from 'whatsapp-web.js';
 const { Client, LocalAuth } = pkg;
 import qrcode from 'qrcode-terminal';
-import { logLineCount, replySince } from './gptme-log.js';
+import { runWithReply } from './gptme-log.js';
 import { spawn } from 'child_process';
 import { existsSync } from 'fs';
 
@@ -132,8 +132,8 @@ async function callGptme(sender, message) {
 
     // Read the reply from the conversation log, not stdout (which also carries
     // the echoed prompt, tool calls and exit chrome). Only rows this run wrote.
-    const since = logLineCount(convName);
-    return spawnAndCapture(GPTME_CMD, args, () => truncate(replySince(convName, since)));
+    return truncate(await runWithReply(convName,
+        () => spawnAndCapture(GPTME_CMD, args, () => true)));
 }
 
 /**
@@ -189,11 +189,13 @@ function spawnAndCapture(cmd, args, responseExtractor) {
         proc.stdout.on('data', (data) => { stdout += data.toString(); });
         proc.stderr.on('data', (data) => { stderr += data.toString(); });
 
+        let timedOut = false;
         proc.on('close', (code) => {
-            if (code !== 0) {
+            clearTimeout(timer);
+            if (code !== 0 || timedOut) {
                 console.error(`${cmd} exited with code ${code}`);
                 console.error('stderr:', stderr.slice(-500));
-                resolve(null);
+                resolve(false);
                 return;
             }
 
@@ -202,15 +204,17 @@ function spawnAndCapture(cmd, args, responseExtractor) {
         });
 
         proc.on('error', (err) => {
+            clearTimeout(timer);
             console.error(`Failed to spawn ${cmd}:`, err);
-            resolve(null);
+            resolve(false);
         });
 
-        // Timeout: 120 seconds
-        setTimeout(() => {
-            proc.kill('SIGTERM');
+        // Keep the conversation locked until the timed-out process has closed:
+        // resolving here would let the next run overlap a still-writing child.
+        const timer = setTimeout(() => {
+            timedOut = true;
+            proc.kill('SIGKILL');
             console.error(`${cmd} timed out`);
-            resolve(null);
         }, 120_000);
     });
 }
