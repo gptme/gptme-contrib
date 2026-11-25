@@ -1142,3 +1142,108 @@ def test_classify_rate_limit_phrases(error_text: str):
         error_text=error_text,
     )
     assert reason == FAILURE_REASON_RATE_LIMIT
+
+
+def test_classify_empty_provider_stream_as_model_stream_crash():
+    """gptme's EmptyStreamError: the provider stream ended without output (#1890)."""
+    reason = classify_failure_reason(
+        exit_code=1,
+        duration_seconds=106,
+        input_tokens=30536,
+        has_assistant_turn=False,
+        error_text=(
+            "gh pass-through: gh issue list --limit 200\n"
+            "ERROR Provider stream for openai-subscription/gpt-6.1-sol ended without any output"
+        ),
+    )
+    assert reason == FAILURE_REASON_MODEL_STREAM_CRASH
+
+
+@pytest.mark.parametrize("input_tokens", [0, None])
+def test_empty_provider_stream_before_any_tokens_stays_pre_response(input_tokens: int | None):
+    """A fast empty stream before any token is accounted is a pre-response API failure.
+
+    It must keep entering the pre_response startup-loss bucket; only an empty
+    stream after the request was accounted is a model_stream_crash.
+    """
+    reason = classify_failure_reason(
+        exit_code=1,
+        duration_seconds=20,
+        input_tokens=input_tokens,
+        has_assistant_turn=False,
+        error_text="ERROR Provider stream for openai/gpt-5 ended without any output",
+    )
+    assert reason == FAILURE_REASON_PRE_RESPONSE
+
+
+@pytest.mark.parametrize(
+    ("provider_error", "expected"),
+    [
+        (
+            "Responses stream error: server_is_overloaded: try later",
+            FAILURE_REASON_UPSTREAM_OVERLOADED,
+        ),
+        (
+            "Selected model is at capacity. Please try a different model.",
+            FAILURE_REASON_UPSTREAM_OVERLOADED,
+        ),
+        ("Rate limit reached for requests", FAILURE_REASON_RATE_LIMIT),
+        ("HTTP/1.1 429 Too Many Requests", FAILURE_REASON_RATE_LIMIT),
+        ("401 Unauthorized: invalid credentials", FAILURE_REASON_AUTH),
+    ],
+)
+def test_classify_provider_failure_precedes_empty_stream(provider_error: str, expected: str):
+    """EmptyStreamError is a terminal symptom: a provider overload/rate-limit/auth
+    failure in the same stderr tail is the root cause and must win."""
+    reason = classify_failure_reason(
+        exit_code=1,
+        duration_seconds=106,
+        input_tokens=30536,
+        has_assistant_turn=False,
+        error_text=(
+            f"{provider_error}\n"
+            "ERROR Provider stream for openai-subscription/gpt-6.1-sol ended without any output"
+        ),
+    )
+    assert reason == expected
+
+
+def test_empty_stream_is_not_auth_when_401_only_appears_inside_a_number():
+    """A digit run like `1403` in the stderr tail is not an HTTP 401.
+
+    The auth branch was a bare substring test, so `gh issue view 1403` (or a
+    count, or a model id with a 20240401 date) short-circuited an empty-stream
+    exit into FAILURE_REASON_AUTH and misled every post-mortem keyed on it.
+    """
+    result = classify_failure_reason(
+        exit_code=1,
+        duration_seconds=106,
+        input_tokens=30536,
+        has_assistant_turn=False,
+        error_text=(
+            "gh issue view 1403\n" "ERROR Provider stream for openai/gpt-5 ended without any output"
+        ),
+    )
+    assert result == FAILURE_REASON_MODEL_STREAM_CRASH
+
+
+@pytest.mark.parametrize(
+    "error_text",
+    [
+        "Error code: 401 - {'error': {'message': 'Invalid API key'}}",
+        "HTTP error: 401 Unauthorized — authentication failed",
+        "status: 403",
+        "401 Unauthorized: invalid credentials",
+    ],
+)
+def test_real_401_and_403_texts_still_classify_as_auth(error_text: str):
+    assert (
+        classify_failure_reason(
+            exit_code=1,
+            duration_seconds=30,
+            input_tokens=0,
+            has_assistant_turn=False,
+            error_text=error_text,
+        )
+        == FAILURE_REASON_AUTH
+    )
