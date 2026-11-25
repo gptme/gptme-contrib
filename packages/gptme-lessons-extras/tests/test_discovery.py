@@ -228,6 +228,23 @@ def test_extract_features_reads_block_and_quoted_keyword_lists(tmp_path: Path) -
         }, name
 
 
+def test_discovery_ignores_non_string_yaml_keywords(tmp_path: Path) -> None:
+    lessons_dir = tmp_path / "lessons"
+    lesson = lessons_dir / "git" / "rebase.md"
+    lesson.parent.mkdir(parents=True)
+    lesson.write_text(
+        '---\nmatch:\n  keywords: [404, yes, null, "Rebase", "  "]\n---\n'
+        + _KEYWORD_BODY
+    )
+    discovery = LessonDiscovery(
+        lessons_dir=lessons_dir, history_dir=tmp_path / "history"
+    )
+
+    assert discovery.extract_features(lesson).keywords == {"rebase"}
+    [rec] = discovery.recommend(keywords=["rebase"], top_k=1)
+    assert rec.keyword_score > 0.0
+
+
 def test_recommend_scores_block_list_keyword_match(tmp_path: Path) -> None:
     lesson = tmp_path / "lessons" / "git" / "rebase.md"
     lesson.parent.mkdir(parents=True)

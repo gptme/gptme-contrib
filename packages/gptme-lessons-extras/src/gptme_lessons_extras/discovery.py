@@ -96,7 +96,9 @@ class LessonDiscovery:
         # Extract frontmatter keywords. Parse the YAML rather than regex-match
         # it: block lists (the template's format) and quoted items must work.
         keywords: Set[str] = {
-            k.strip().lower() for k in extract_keywords(lesson_path) if k.strip()
+            k.strip().lower()
+            for k in extract_keywords(lesson_path)
+            if isinstance(k, str) and k.strip()
         }
 
         # Extract category from path
