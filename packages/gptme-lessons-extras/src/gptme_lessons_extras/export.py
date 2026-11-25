@@ -13,6 +13,7 @@ Usage:
 import os
 import sys
 from pathlib import Path
+from urllib.parse import quote
 
 import click
 import yaml
@@ -134,11 +135,13 @@ def _export_lesson(
             )
             return "skipped"
 
-        # A nested category joins its levels, so tools/shell/x.md and
-        # workflow/shell/x.md get distinct ids (tools-shell vs workflow-shell).
+        # Escape category separators (and literal percent signs), so tools/shell
+        # cannot collide with tools-shell or tools%2Fshell. Ordinary single-level
+        # category ids stay unchanged.
         id_path = lesson_path
-        if len(relative_path.parent.parts) > 1:
-            id_path = Path("-".join(relative_path.parent.parts)) / relative_path.name
+        if relative_path.parent != Path("."):
+            category = quote(relative_path.parent.as_posix(), safe="")
+            id_path = Path(category) / relative_path.name
 
         # Add network metadata
         frontmatter = add_network_metadata(
@@ -254,10 +257,11 @@ def main(lessons_dir: Path, output: Path, lesson: Path | None, agent: str, force
     if lesson:
         # Export single lesson
         success = export_lesson(
-            lesson_path=lesson,
+            lesson_path=lesson.resolve(),
             output_dir=output,
             agent_origin=agent,
             force=force,
+            lessons_root=lessons_dir.resolve(),
         )
 
         sys.exit(0 if success else 1)

@@ -4,9 +4,11 @@ from pathlib import Path
 
 import pytest
 import yaml
+from click.testing import CliRunner
 from gptme_lessons_extras.export import (
     export_all_lessons,
     export_lesson,
+    main,
     parse_lesson_frontmatter,
 )
 
@@ -121,9 +123,66 @@ def test_export_all_keeps_nested_categories_apart(tmp_path: Path):
     # Single-level ids are unchanged; nested ones are distinct
     assert ids == {
         "git/commit.md": "bob-git-commit",
-        "tools/shell/quoting.md": "bob-tools-shell-quoting",
-        "workflow/shell/quoting.md": "bob-workflow-shell-quoting",
+        "tools/shell/quoting.md": "bob-tools%2Fshell-quoting",
+        "workflow/shell/quoting.md": "bob-workflow%2Fshell-quoting",
     }
+
+
+def test_single_cli_export_matches_bulk_paths_and_ids(tmp_path: Path):
+    lessons = tmp_path / "lessons"
+    runner = CliRunner()
+    single = tmp_path / "single"
+    bulk = tmp_path / "bulk"
+    for category in ("tools/shell", "workflow/shell"):
+        lesson = lessons / category / "quoting.md"
+        lesson.parent.mkdir(parents=True)
+        lesson.write_text(MINIMAL_LESSON)
+        result = runner.invoke(
+            main,
+            [
+                "--lessons-dir",
+                str(lessons),
+                "--lesson",
+                str(lesson),
+                "--output",
+                str(single),
+                "--agent",
+                "bob",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+
+    assert export_all_lessons(lessons, bulk, agent_origin="bob")["success"] == 2
+    single_paths = {p.relative_to(single) for p in single.rglob("*.md")}
+    bulk_paths = {p.relative_to(bulk) for p in bulk.rglob("*.md")}
+    assert single_paths == bulk_paths
+    for relative in bulk_paths:
+        single_metadata, _ = parse_lesson_frontmatter((single / relative).read_text())
+        bulk_metadata, _ = parse_lesson_frontmatter((bulk / relative).read_text())
+        assert single_metadata is not None and bulk_metadata is not None
+        assert (
+            single_metadata["network"]["lesson_id"]
+            == bulk_metadata["network"]["lesson_id"]
+        )
+
+
+def test_export_ids_distinguish_nested_dashed_and_escaped_categories(tmp_path: Path):
+    lessons = tmp_path / "lessons"
+    categories = ("tools/shell", "tools-shell", "tools%2Fshell")
+    for category in categories:
+        lesson = lessons / category / "x.md"
+        lesson.parent.mkdir(parents=True)
+        lesson.write_text(MINIMAL_LESSON)
+    output = tmp_path / "out"
+
+    assert export_all_lessons(lessons, output, agent_origin="bob")["success"] == 3
+    ids = []
+    for category in categories:
+        metadata, _ = parse_lesson_frontmatter((output / category / "x.md").read_text())
+        assert metadata is not None
+        ids.append(metadata["network"]["lesson_id"])
+    assert len(set(ids)) == 3
+    assert ids[1] == "bob-tools-shell-x"  # Existing single-level slug is stable.
 
 
 def test_export_keeps_network_metadata_with_unquoted_timestamps(tmp_path: Path):
