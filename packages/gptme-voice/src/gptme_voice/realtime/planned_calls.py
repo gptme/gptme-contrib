@@ -94,9 +94,8 @@ def register_planned_call(
         existing = json.loads(path.read_text())
         if not isinstance(existing, dict):
             raise ValueError("existing planned call is invalid")
-        # Compare the scheduled instant, not its spelling: a retry that
-        # recomputes the same occurrence's ISO timestamp a few microseconds
-        # apart is still the same purpose, while a different time is rejected.
+        # Compare the scheduled instant, not its spelling: equivalent timezone
+        # offsets are accepted, but even a microsecond difference is rejected.
         try:
             same_instant = _timestamp(existing.get("scheduled_at")) == _timestamp(
                 scheduled_at
@@ -310,24 +309,23 @@ def fulfill_planned_call(
             sentences[0],
         )
     )
-    explicit_coverage = (
-        any(
-            re.fullmatch(
-                r"(?:(?:yes|yeah|yep|correct|exactly|that['’]s right)[.!, ]+)?"
-                r"(?:that|this) (?:covers|completes|fulfills) [a-z0-9 ,.’'-]+[.!]?",
-                sentence,
-            )
-            for sentence in sentences
-        )
-        and all(
-            word in re.findall(r"[a-z0-9]+", confirmation) for word in purpose_words
-        )
-        and not re.search(
-            r"\b(?:not|no|never|partly|partially|except|but|only|still|keep|incomplete)\b",
+    # A later clause can retract an initial yes. Apply this veto to every
+    # acceptance path, not just explicit coverage.
+    negative_or_partial = bool(
+        re.search(
+            r"\b(?:not|no|never|partly|partially|except|but|only|still|keep|incomplete)\b|don.t",
             confirmation.replace("no need", ""),
         )
     )
-    if not (
+    explicit_coverage = any(
+        re.fullmatch(
+            r"(?:(?:yes|yeah|yep|correct|exactly|that['’]s right)[.!, ]+)?"
+            r"(?:that|this) (?:covers|completes|fulfills) [a-z0-9 ,.’'-]+[.!]?",
+            sentence,
+        )
+        for sentence in sentences
+    ) and all(word in re.findall(r"[a-z0-9]+", confirmation) for word in purpose_words)
+    if negative_or_partial or not (
         (combined_question and (affirmative or explicit_coverage))
         or (explicit_coverage and explicit_cancellation)
     ):

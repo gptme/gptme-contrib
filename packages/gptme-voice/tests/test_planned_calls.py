@@ -83,6 +83,34 @@ def test_reprocessing_is_idempotent_and_preserves_original_receipt(tmp_path):
     assert path.read_bytes() == first
 
 
+def test_fulfillment_is_per_occurrence_not_per_phone_call(tmp_path):
+    plan = register(tmp_path)
+    assert fulfill(tmp_path, plan)["status"] == "fulfilled"
+    path = tmp_path / "state/voice-calls/fulfilled/standup-one.json"
+    original = path.read_bytes()
+    assert fulfill(tmp_path, plan, call_sid="CA" + "b" * 32)["status"] == "fulfilled"
+    assert path.read_bytes() == original
+    assert json.loads(original)["call_sid"] == "CA" + "a" * 32
+
+
+@pytest.mark.parametrize("later_turn", ["Thanks.", "Actually, keep the later call."])
+def test_confirmation_superseded_by_any_caller_turn_requires_reconfirmation(
+    tmp_path, later_turn
+):
+    plan = register(tmp_path)
+    transcript = [
+        SimpleNamespace(
+            role="assistant",
+            text="Does that cover the daily standup, so I can skip the later call?",
+        ),
+        SimpleNamespace(role="user", text=CONFIRMATION),
+        SimpleNamespace(role="user", text=later_turn),
+    ]
+    result = fulfill(tmp_path, plan, transcript=transcript)
+    assert "latest caller turn" in result["error"]
+    assert not is_planned_call_fulfilled(str(tmp_path), plan["plan_id"])
+
+
 def test_fulfills_only_selected_plan(tmp_path):
     first, second = register(tmp_path), register(tmp_path, "standup-two")
     assert fulfill(tmp_path, first)["status"] == "fulfilled"
@@ -300,6 +328,29 @@ def test_ordinary_phrasing_of_a_combined_confirmation_is_accepted(tmp_path, quot
     ]
     result = fulfill(tmp_path, plan, transcript=transcript, caller_confirmation=quote)
     assert result.get("status") == "fulfilled", result
+
+
+@pytest.mark.parametrize(
+    "quote",
+    [
+        "Yes. But keep the later call.",
+        "Yeah, that covers it, but don't cancel the later call.",
+        "Yes. That only partly covers the daily standup.",
+        "Yes. The later call is still needed.",
+    ],
+)
+def test_affirmative_with_a_retraction_does_not_suppress_call(tmp_path, quote):
+    plan = register(tmp_path)
+    transcript = [
+        SimpleNamespace(
+            role="assistant",
+            text="Does that cover the daily standup, so I can skip the later call?",
+        ),
+        SimpleNamespace(role="user", text=quote),
+    ]
+    result = fulfill(tmp_path, plan, transcript=transcript, caller_confirmation=quote)
+    assert "error" in result
+    assert not is_planned_call_fulfilled(str(tmp_path), plan["plan_id"])
 
 
 def test_yes_after_intervening_user_turn_does_not_answer_an_old_question(tmp_path):
