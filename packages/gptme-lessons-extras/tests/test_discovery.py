@@ -297,3 +297,17 @@ def test_recommend_scores_block_list_keyword_match(tmp_path: Path) -> None:
     )
     [rec] = discovery.recommend(keywords=["rebase"], top_k=1)
     assert rec.keyword_score > 0.0
+
+
+def test_discovery_warns_when_unrelated_field_breaks_frontmatter(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Losing keywords to a YAML error elsewhere must name the lesson file."""
+    lesson = tmp_path / "broken.md"
+    lesson.write_text(
+        "---\nnote: see: docs\nmatch:\n  keywords: [shell]\n---\n# Broken\n"
+    )
+
+    assert LessonDiscovery().extract_features(lesson).keywords == set()
+    assert str(lesson) in caplog.text
+    assert "mapping values are not allowed" in caplog.text

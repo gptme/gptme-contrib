@@ -10,6 +10,7 @@ Created: 2025-10-29 (Session 370)
 """
 
 import json
+import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -19,6 +20,8 @@ from typing import Dict, List, Set, Tuple
 import frontmatter
 
 from gptme_lessons_extras.similarity import NON_LESSON_FILES
+
+logger = logging.getLogger(__name__)
 
 # Try importing sklearn, but provide fallback
 try:
@@ -101,7 +104,12 @@ class LessonDiscovery:
             metadata = frontmatter.loads(content).metadata
             match = metadata.get("match", {})
             raw_keywords = match.get("keywords", []) if isinstance(match, dict) else []
-        except Exception:
+        except Exception as e:
+            # One bad field anywhere in the frontmatter loses every keyword,
+            # so name the file for the author.
+            logger.warning(
+                "Ignoring keywords, invalid frontmatter in %s: %s", lesson_path, e
+            )
             raw_keywords = []
         if isinstance(raw_keywords, str):
             raw_keywords = [raw_keywords]
