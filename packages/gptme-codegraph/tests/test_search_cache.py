@@ -151,3 +151,64 @@ class TestSearchDocumentCacheSemantics:
         ).fetchone()[0]
 
         assert h1 != h2
+
+
+class TestSearchDocumentGeneration:
+    def test_replacement_during_load_cannot_bypass_generation(self, tmp_path):
+        db = tmp_path / "search.db"
+        with sqlite3.connect(db) as writer:
+            save_search_documents(writer, "/proj", [_doc("pkg.mod.new")], "g2")
+
+            class RacingConnection(sqlite3.Connection):
+                def execute(self, sql, parameters=(), /):
+                    if sql.startswith("SELECT document"):
+                        # An older search finishes extracting its documents after
+                        # this reader has checked the newer generation.
+                        save_search_documents(
+                            writer, "/proj", [_doc("pkg.mod.old")], "g1"
+                        )
+                    return super().execute(sql, parameters)
+
+            with sqlite3.connect(db, factory=RacingConnection) as reader:
+                assert load_search_documents(reader, "/proj", "g2") == []
+            assert [d.name for d in load_search_documents(writer, "/proj", "g1")] == [
+                "old"
+            ]
+
+    def test_legacy_document_writer_invalidates_generation(self):
+        conn = _conn()
+        save_search_documents(conn, "/proj", [_doc("pkg.mod.old")])
+        old_document = conn.execute(
+            "SELECT * FROM search_documents WHERE directory = ?", ("/proj",)
+        ).fetchone()
+        save_search_documents(conn, "/proj", [_doc("pkg.mod.new")], "g2")
+        # The old helper only deletes/inserts documents; it knows nothing
+        # about the generation table installed by the upgraded server.
+        conn.execute("DELETE FROM search_documents WHERE directory = ?", ("/proj",))
+        conn.execute(
+            "INSERT INTO search_documents VALUES (?, ?, ?, ?, ?, ?, ?)", old_document
+        )
+        conn.commit()
+        assert load_search_documents(conn, "/proj", "g2") == []
+        assert [d.name for d in load_search_documents(conn, "/proj")] == ["old"]
+
+    def test_matching_generation_loads(self):
+        conn = _conn()
+        save_search_documents(conn, "/proj", [_doc("pkg.mod.f")], generation="g1")
+        assert [d.qualified_id for d in load_search_documents(conn, "/proj", "g1")] == [
+            "pkg.mod.f"
+        ]
+
+    def test_other_generation_is_not_served(self):
+        conn = _conn()
+        save_search_documents(conn, "/proj", [_doc("pkg.mod.f")], generation="g1")
+        assert load_search_documents(conn, "/proj", generation="g2") == []
+
+    def test_unbound_documents_are_not_served_for_a_generation(self):
+        # Documents saved without a generation (older writers) cannot prove
+        # which index they came from.
+        conn = _conn()
+        save_search_documents(conn, "/proj", [_doc("pkg.mod.f")], generation="g1")
+        save_search_documents(conn, "/proj", [_doc("pkg.mod.f")])
+        assert load_search_documents(conn, "/proj", generation="g1") == []
+        assert len(load_search_documents(conn, "/proj")) == 1
