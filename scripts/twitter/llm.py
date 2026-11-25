@@ -614,6 +614,12 @@ def parse_llm_response(content: str, response_type: Type[T], task: TaskType) -> 
         try:
             data, end = decoder.raw_decode(text, pos)
         except json.JSONDecodeError:
+            # A quoted key starts a JSON object, unlike prose such as {review}.
+            # Fail closed on broken JSON: skipping it could keep a stale
+            # approval or promote a nested draft inside a truncated revision.
+            if re.match(r'\s*"', text[pos + 1 :]):
+                parsed = None
+                break
             pos = text.find("{", pos + 1)
             continue
         if isinstance(data, dict):

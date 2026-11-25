@@ -974,3 +974,21 @@ def test_parse_falls_back_to_default_without_matching_object(
     result = _parse_review(llm_module, 'no answer here {"unrelated": 1}')
     assert result.recommendation == "reject"
     assert result.criteria_results == {}
+
+
+@pytest.mark.parametrize(
+    "revision",
+    [
+        '{"criteria_results": {}, "recommendation": "reject", "improvements": [], "reasoning": "x",}',
+        '{"criteria_results": {}, "recommendation": "reject", "improvements": [], "reasoning": "an "unescaped" quote"}',
+        '{"criteria_results": {}, "recommendation": "reject", "improvements": [], "reasoning": "truncated',
+        '{"recommendation": "reject", "reasoning": "truncated before nested draft", "draft": '
+        + _REVIEW_JSON,
+    ],
+    ids=["trailing-comma", "unescaped-quote", "truncated", "nested-draft"],
+)
+def test_parse_syntax_broken_revision_does_not_resurrect_approval(
+    llm_module: types.ModuleType, revision: str
+) -> None:
+    result = _parse_review(llm_module, _REVIEW_JSON + "\nRevised:\n" + revision)
+    assert result == llm_module.ReviewResponse.default()
