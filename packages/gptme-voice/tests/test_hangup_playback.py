@@ -238,3 +238,13 @@ def test_rest_failure_still_closes_websocket_after_playback(monkeypatch):
         )
 
     asyncio.run(run())
+
+
+def test_response_callbacks_preserve_legacy_positional_transcript_arguments():
+    from gptme_voice.realtime.openai_client import OpenAIRealtimeClient
+
+    transcript_callback = Mock()
+    client = OpenAIRealtimeClient("test", None, None, None, transcript_callback)
+    assert client.on_transcript is transcript_callback
+    assert client.on_response_start is None
+    assert client.on_response_end is None

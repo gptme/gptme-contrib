@@ -336,8 +336,6 @@ class OpenAIRealtimeClient:
         session_config: SessionConfig | None = None,
         on_audio: Callable[[bytes], None] | None = None,
         on_audio_end: Callable[[], None] | None = None,
-        on_response_start: Callable[[], None] | None = None,
-        on_response_end: Callable[[], None] | None = None,
         on_transcript: Callable[[str], None] | None = None,
         on_ai_transcript: Callable[[str], None] | None = None,
         on_user_transcript: Callable[[str], None]
@@ -348,6 +346,8 @@ class OpenAIRealtimeClient:
         hold_initial_response: bool = False,
         latency_trace: VoiceLatencyTrace | None = None,
         on_session_failed: Callable[[str], Any] | None = None,
+        on_response_start: Callable[[], None] | None = None,
+        on_response_end: Callable[[], None] | None = None,
     ):
         self.api_key = api_key or _get_openai_api_key()
         if not self.api_key:
