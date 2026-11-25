@@ -5116,7 +5116,11 @@ def review_main(
         model = "panel: " + " + ".join(r.key for r in args.panel_reviewers)
         why = "subscription capacity, one-shot (no tool loop)"
     else:
-        model, why = _io.pick_model(args.model, args.engine)
+        try:
+            model, why = _io.pick_model(args.model, args.engine)
+        except _io.ReviewError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
     print(f"engine: {args.engine} · model: {model} ({why})")
     args.deadline = _io.ReviewDeadline(args.run_timeout)
     if request_run is not None:

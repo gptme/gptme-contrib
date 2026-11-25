@@ -98,9 +98,19 @@ def test_subscription_hook_must_set_panel_reviewers(capsys):
 def test_peer_agent_engine_fails_closed_without_posting(capsys):
     calls: list = []
     w = _peer(calls)
-    with pytest.raises(ReviewError, match="host that implements it"):
-        w.review_main(["alice/repo", "7", "--engine", "agent", "--passes", "1"])
-    assert not any(c[0] == "run" and "POST" in c[1] for c in calls)
+    rc = w.review_main(["alice/repo", "7", "--engine", "agent", "--passes", "1"])
+    assert rc == 2
+    assert "host that implements it" in capsys.readouterr().err
+    # Every writer publication goes through `gh api` with a write body
+    # (`-f`/`-F` field, `--input`) or an explicit `--method`.
+    writes = [
+        c[1]
+        for c in calls
+        if c[0] == "run"
+        and tuple(c[1][:2]) == ("gh", "api")
+        and any(a in ("-f", "-F", "--input", "--method", "-X") for a in c[1])
+    ]
+    assert writes == []
 
 
 def test_peer_defaults_refuse_instead_of_guessing():
