@@ -2830,6 +2830,25 @@ def _fetch_pr_file_shapes(repo: str, number: int) -> list[dict[str, Any]]:
     return [doc for doc in _iter_json_documents(result.stdout) if isinstance(doc, dict)]
 
 
+def _gptme_core_shapes_cover_files(
+    file_shapes: list[dict[str, Any]], files: list[str]
+) -> bool:
+    """True when the shape read provably covers exactly the changed files.
+
+    `_fetch_pr_file_shapes` returns [] on a timeout or a non-zero `gh api`
+    exit, and a partially decoded paginated response truncates the list. The
+    per-file diff-shape detectors can only see the shapes they were given, so
+    an empty or short read would otherwise leave the sensitive-surface checks
+    with nothing to inspect and the PR eligible on diff shape (fail open).
+    """
+    shape_paths = {
+        str(shape.get("path", "")).replace("\\", "/").removeprefix("./")
+        for shape in file_shapes
+    }
+    changed = {path.replace("\\", "/").removeprefix("./") for path in files}
+    return len(file_shapes) == len(files) and shape_paths == changed
+
+
 def _pr_diff_proves_no_gitlinks(repo: str, number: int, file_count: int) -> bool:
     """Use Git mode headers, not quoted pointer text, to exclude gitlinks.
 
@@ -4768,14 +4787,22 @@ def evaluate_pr(
             )
         else:
             file_shapes = _fetch_pr_file_shapes(repo, number)
-            shape_reasons = gptme_core_route_to_erik_reasons(
-                title, cast("str", pr.get("body") or ""), file_shapes
-            )
-            if shape_reasons:
+            if not _gptme_core_shapes_cover_files(file_shapes, files):
                 result.category = None
-                category_reasons.extend(shape_reasons)
+                category_reasons.append(
+                    "Could not read the complete PR diff shape "
+                    f"({len(file_shapes)} shape(s) for {len(files)} changed "
+                    "file(s)); gptme/gptme eligibility requires a complete read"
+                )
             else:
-                result.category = "gptme-core-diff-shape-eligible"
+                shape_reasons = gptme_core_route_to_erik_reasons(
+                    title, cast("str", pr.get("body") or ""), file_shapes
+                )
+                if shape_reasons:
+                    result.category = None
+                    category_reasons.extend(shape_reasons)
+                else:
+                    result.category = "gptme-core-diff-shape-eligible"
     elif repo == _GPTME_CONTRIB_REPO:
         # gptme/gptme-contrib: classify_category's category shape plus the
         # placement rule + spec-doc waiver (see contrib_classify_category's

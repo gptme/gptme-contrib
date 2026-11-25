@@ -2857,6 +2857,46 @@ def test_evaluate_pr_gptme_core_cache_fix_is_eligible() -> None:
     assert result.category == "gptme-core-diff-shape-eligible"
 
 
+def test_evaluate_pr_gptme_core_unreadable_shapes_refuse_eligibility() -> None:
+    """A failed shape read must not fail open to gptme/gptme eligibility.
+
+    `_fetch_pr_file_shapes` returns [] on a timeout or non-zero `gh api` exit,
+    so `gptme_core_route_to_erik_reasons` had nothing to inspect and the PR was
+    eligible on diff shape even when it touched gptme/llm/.
+    """
+    files = [
+        {"path": "gptme/llm/models.py"},
+        {"path": "tests/test_models.py"},
+    ]
+    result = _evaluate_gptme_core(files, [])
+    assert not result.eligible
+    assert result.category is None
+    assert any("diff shape" in reason for reason in result.reasons), result.reasons
+
+
+def test_evaluate_pr_gptme_core_truncated_shapes_refuse_eligibility() -> None:
+    """A truncated paginated read must not drop a sensitive surface.
+
+    Only the test file survived the decode; gptme/llm/models.py is missing, so
+    the sensitive-surface detector never saw the path that should route to Erik.
+    """
+    files = [
+        {"path": "gptme/llm/models.py"},
+        {"path": "tests/test_models.py"},
+    ]
+    file_shapes = [
+        {
+            "path": "tests/test_models.py",
+            "status": "modified",
+            "patch": "@@ -1,1 +1,2 @@\n+x = 1\n",
+        },
+    ]
+    result = _evaluate_gptme_core(files, file_shapes)
+    assert not result.eligible
+    assert result.category is None
+    assert any("diff shape" in reason for reason in result.reasons), result.reasons
+
+
 def test_evaluate_pr_gptme_core_new_hook_module_routes_to_erik() -> None:
     """gptme#3695 end-to-end: new hook module + config surface → NOT eligible,
     even with CI green and AI review clean."""
