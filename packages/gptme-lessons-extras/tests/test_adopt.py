@@ -61,3 +61,20 @@ def test_adoption_failing_on_ledger_is_retryable(tmp_path, monkeypatch):
     assert ok, msg
     assert (lessons / "tools" / "git.md").exists()
     assert len(json.loads(_ledger(lessons).read_text())["adoptions"]) == 1
+
+
+def test_corrupt_ledger_is_set_aside_not_blocking(tmp_path, capsys):
+    lessons = tmp_path / "ws" / "lessons"
+    lessons.mkdir(parents=True)
+    ledger = _ledger(lessons)
+    ledger.parent.mkdir(parents=True)
+    truncated = '{"adoptions": [{"lesson_id": "a-to'
+    ledger.write_text(truncated)
+
+    adopt.record_adoption("a-tools-new", "a", "2026-01-02T00:00:00", lessons)
+
+    data = json.loads(ledger.read_text())
+    assert [a["lesson_id"] for a in data["adoptions"]] == ["a-tools-new"]
+    (backup,) = ledger.parent.glob(f"{ledger.name}.corrupt-*")
+    assert backup.read_text() == truncated
+    assert str(backup) in capsys.readouterr().err

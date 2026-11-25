@@ -153,11 +153,22 @@ def record_adoption(
     metrics_file.parent.mkdir(parents=True, exist_ok=True)
 
     # Load existing metrics
+    metrics: dict[str, Any] = {"adoptions": []}
     if metrics_file.exists():
-        with open(metrics_file) as f:
-            metrics = json.load(f)
-    else:
-        metrics = {"adoptions": []}
+        try:
+            with open(metrics_file) as f:
+                metrics = json.load(f)
+        except json.JSONDecodeError as e:
+            # Left behind by an interrupted write of the old, non-atomic kind.
+            # Keep it for manual recovery and start a new ledger, so it does
+            # not block every later adoption.
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+            backup = metrics_file.with_name(f"{metrics_file.name}.corrupt-{stamp}")
+            os.replace(metrics_file, backup)
+            print(
+                f"Warning: unreadable adoption ledger ({e}); moved to {backup}",
+                file=sys.stderr,
+            )
 
     # Add new adoption
     metrics["adoptions"].append(
