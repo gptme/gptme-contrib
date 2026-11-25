@@ -269,7 +269,8 @@ def draft_content_digest(text: str, thread: List[str] | None = None) -> str:
     the draft file outside the workflow (a hand edit, an external tool) leaves the
     score behind, so reuse is gated on this digest matching the current content.
     """
-    payload = text + "\x00" + "\x00".join(thread or [])
+    # Old scores predate the mandatory writing-style decision.
+    payload = "writing-style-v1\x00" + text + "\x00" + "\x00".join(thread or [])
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
@@ -322,11 +323,11 @@ class TweetDraft:
         # Only include reject_reason if it's set
         if self.reject_reason:
             result["reject_reason"] = self.reject_reason
-        # Only include quality_score if it's set, always paired with the digest
-        # of the content it describes (derived here so it can never go stale).
+        # Preserve the original review binding across saves and queue moves.
+        # A new digest is assigned explicitly after a fresh review.
         if self.quality_score is not None:
             result["quality_score"] = self.quality_score
-            result["scored_digest"] = draft_content_digest(self.text, self.thread)
+            result["scored_digest"] = self.scored_digest
         # Only include thread if it's set and non-empty
         if self.thread:
             result["thread"] = self.thread
@@ -1488,6 +1489,7 @@ def review(
                 quality_score = compute_quality_score(review_result)
                 if not dry_run:
                     draft.quality_score = quality_score
+                    draft.scored_digest = draft_content_digest(draft.text, draft.thread)
                     draft.save(path)  # Persist quality_score to file
 
             # Display review results
@@ -1774,6 +1776,23 @@ def _git_commit_posted(path: Path) -> None:
         )
 
 
+def _defer_stale_review(draft: TweetDraft, path: Path, *, dry_run: bool) -> bool:
+    """Return old scored approvals to the existing review path before publishing."""
+    if draft.quality_score is None or draft.scored_digest == draft_content_digest(
+        draft.text, draft.thread
+    ):
+        return False
+    console.print(
+        "[yellow]Review predates current text/style policy; needs a fresh review"
+    )
+    if not dry_run:
+        draft.quality_score = None
+        draft.scored_digest = None
+        draft.save(path)
+        move_draft(path, "new")
+    return True
+
+
 @cli.command()
 @click.option("--dry-run", is_flag=True, help="Don't actually post tweets")
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
@@ -1832,6 +1851,9 @@ def post(
         draft.text = public_safe(draft.text)
         if draft.thread:
             draft.thread = [public_safe(t) for t in draft.thread]
+
+        if _defer_stale_review(draft, path, dry_run=dry_run):
+            continue
 
         # Skip if scheduled for later
         if draft.scheduled_time and draft.scheduled_time > datetime.now():
@@ -2480,6 +2502,19 @@ def process_timeline_tweets(
                                 )
                                 continue
 
+                            approved, review_result = verify_draft(draft.to_dict())
+                            draft.quality_score = compute_quality_score(review_result)
+                            draft.scored_digest = draft_content_digest(
+                                draft.text, draft.thread
+                            )
+                            if not approved:
+                                path = save_draft(draft, "review")
+                                console.print(f"[yellow]Reply needs review: {path}")
+                                drafts_generated += 1
+                                if draft.in_reply_to is not None:
+                                    _replied_tweet_ids.add(str(draft.in_reply_to))
+                                continue
+
                             client_for_post = load_twitter_client(
                                 require_auth=True, headless=True
                             )
@@ -2982,6 +3017,7 @@ def auto(
             quality_score = compute_quality_score(review_result)
             if not dry_run:
                 draft.quality_score = quality_score
+                draft.scored_digest = draft_content_digest(draft.text, draft.thread)
                 draft.save(path)  # Persist quality_score to file
 
             # Display review results
@@ -3039,6 +3075,9 @@ def auto(
                     break
 
                 draft = TweetDraft.load(path)
+
+                if _defer_stale_review(draft, path, dry_run=dry_run):
+                    continue
 
                 # Skip if scheduled for later
                 if draft.scheduled_time and draft.scheduled_time > datetime.now():
