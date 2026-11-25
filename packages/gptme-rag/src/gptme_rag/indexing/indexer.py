@@ -93,13 +93,13 @@ def _segment_glob_regex(pattern: str) -> re.Pattern[str]:
     out: list[str] = []
     i, n = 0, len(pattern)
     while i < n:
-        if pattern.startswith("**/", i):
+        if pattern.startswith("**/", i) and (i == 0 or pattern[i - 1] == "/"):
             out.append("(?:.*/)?")
             i += 3
         elif pattern.startswith("/**", i) and i + 3 == n:
             out.append("(?:/.*)?")
             i += 3
-        elif pattern.startswith("**", i):
+        elif pattern[i:] == "**" and (i == 0 or pattern[i - 1] == "/"):
             out.append(".*")
             i += 2
         elif pattern[i] == "*":
@@ -125,7 +125,8 @@ def _segment_glob_regex(pattern: str) -> re.Pattern[str]:
                 out.append(re.escape("["))
                 i += 1
                 continue
-            out.append(candidate)
+            # Even negated classes and ranges containing '/' stay in a segment.
+            out.append("(?!/)" + candidate)
             i = end + 1
         else:
             out.append(re.escape(pattern[i]))

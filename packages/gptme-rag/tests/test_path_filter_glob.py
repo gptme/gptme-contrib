@@ -17,6 +17,10 @@ def _matches(source: str, pattern: str) -> bool:
         ("/repo/src/sub/deep.py", "src/*.py"),
         ("/repo/docs/a/b.md", "docs/*"),
         ("/repo/src/sub/deep.py", "src/sub?deep.py"),
+        ("/repo/src/sub/deep.py", "src/sub[!x]deep.py"),
+        ("/repo/src/sub/deep.py", "src/sub[--0]deep.py"),
+        ("/repo/src/sub/deep.py", "src/**deep.py"),
+        ("/repo/src/sub/inner/deep.py", "src/s**/deep.py"),
     ],
 )
 def test_star_does_not_cross_directories(source, pattern):
@@ -52,6 +56,13 @@ def test_leading_caret_is_a_literal_in_a_class():
         ("/repo/src/sub/deep.py", "sub/deep.py"),
         ("/repo/src/sub/deep.py", "/repo/src/*/deep.py"),
         ("/repo/src/top.py", "src/[st]op.py"),
+        ("/repo/src/sub-deep.py", "src/sub[!x]deep.py"),
+        ("/repo/src/sub-deep.py", "src/sub[--0]deep.py"),
+        ("/repo/src/deep.py", "src/**deep.py"),
+        ("/repo/src/sub/deep.py", "src/s**/deep.py"),
+        ("/repo/src/.hidden.py", "src/*.py"),
+        ("/repo/src/].py", "src/[]].py"),
+        ("/repo/src/[.py", "src/[[].py"),
     ],
 )
 def test_segment_globs_still_match(source, pattern):
