@@ -184,6 +184,39 @@ def _graph(root: Path, files: dict[str, str]) -> dict[str, set[str]]:
             "beta::helper",
             id="python-import-prefers-top-level",
         ),
+        pytest.param(
+            "python",
+            {
+                "pkg/__init__.py": "def helper():\n    pass\n",
+                "pkg/alpha.py": "def helper():\n    pass\n",
+                "main.py": "import pkg.alpha\n\n\ndef go():\n    pkg.helper()\n",
+            },
+            "main::go",
+            "pkg::helper",
+            id="python-package-attribute-with-submodule-import",
+        ),
+        pytest.param(
+            "kotlin",
+            {
+                "com/x/alpha/Util.kt": "fun helper() {}\n",
+                "com/x/beta/Util.kt": "fun helper() {}\n",
+                "Main.kt": "import com.x.beta.helper\n\nfun go() { helper() }\n",
+            },
+            "Main::go",
+            "com.x.beta.Util::helper",
+            id="kotlin-package-directory",
+        ),
+        pytest.param(
+            "rust",
+            {
+                "src/alpha.rs": "pub struct Foo;\nimpl Foo { pub fn new() {} }\n",
+                "src/beta.rs": "pub struct Foo;\nimpl Foo { pub fn new() {} }\n",
+                "src/main.rs": "use crate::beta::Foo;\nfn go() { Foo::new(); }\n",
+            },
+            "src.main::go",
+            "src.beta::Foo.new",
+            id="rust-imported-type",
+        ),
     ],
 )
 def test_import_resolves_in_importer_language(
@@ -218,3 +251,15 @@ def test_python_bare_call_in_method_prefers_top_level(tmp_path: Path):
     callees = _graph(tmp_path, {"mod.py": source})
 
     assert callees["mod::B.process"] == {"mod::validate"}
+
+
+@pytest.mark.parametrize("path", ["Self::new", "B::new"])
+def test_rust_type_path_resolves_to_that_type(tmp_path: Path, path: str):
+    pytest.importorskip("tree_sitter_rust")
+    source = (
+        "struct A;\nstruct B;\nimpl A { fn new() {} }\n"
+        f"impl B {{ fn new() {{}} fn make() {{ {path}(); }} }}\n"
+    )
+    callees = _graph(tmp_path, {"lib.rs": source})
+
+    assert callees["lib::B.make"] == {"lib::B.new"}

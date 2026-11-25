@@ -3366,6 +3366,13 @@ def _import_modules_for_call(call: str, file_imports: list[ImportInfo]) -> list[
             and dotted
             and head in (local_binding(imp), imp.module.split(".")[0])
         ):
+            # ``import pkg.alpha`` binds ``pkg``: ``pkg.f()`` is not in ``alpha``.
+            if (
+                head != imp.alias
+                and imp.module.startswith(f"{head}.")
+                and not call.startswith(f"{imp.module}.")
+            ):
+                return [head]
             return [imp.module]
     return []
 
@@ -3436,24 +3443,25 @@ def _import_matches(
     if not wanted:
         return []
 
-    if lang == "go":
-        # The import path ends in the package directory, prefixed by the
-        # repository path: the longest shared tail wins.
-        def shared_tail(symbol: Symbol) -> int:
-            package = relative_parts(Path(symbol.file))[:-1]
-            count = 0
-            for ours, theirs in zip(reversed(package), reversed(wanted)):
-                if ours != theirs:
-                    break
-                count += 1
-            return count
+    if lang != "go":
+        matches = [c for c in candidates if file_parts(c)[-len(wanted) :] == wanted]
+        if matches or lang != "kotlin":
+            # An exact module beats a deeper one that only ends the same way.
+            return sorted(matches, key=lambda c: len(file_parts(c)))
 
-        best = max(map(shared_tail, candidates), default=0)
-        return [c for c in candidates if best and shared_tail(c) == best]
+    # Go and Kotlin import a package, which is a directory. The import path
+    # may carry a repository or root-package prefix: the longest shared tail wins.
+    def shared_tail(symbol: Symbol) -> int:
+        package = relative_parts(Path(symbol.file))[:-1]
+        count = 0
+        for ours, theirs in zip(reversed(package), reversed(wanted)):
+            if ours != theirs:
+                break
+            count += 1
+        return count
 
-    matches = [c for c in candidates if file_parts(c)[-len(wanted) :] == wanted]
-    # An exact module beats a deeper one that only ends the same way.
-    return sorted(matches, key=lambda c: len(file_parts(c)))
+    best = max(map(shared_tail, candidates), default=0)
+    return [c for c in candidates if best and shared_tail(c) == best]
 
 
 def build_cross_file_call_graph(
@@ -3500,9 +3508,12 @@ def build_cross_file_call_graph(
         file_path: str,
         modules: list[str],
         caller_class: str | None = None,
+        owner: str | None = None,
     ) -> str:
         """Pick the definition a call to ``name`` from ``file_path`` refers to.
 
+        Methods of ``owner`` (the ``Type`` in ``Type::name``), when there are
+        any, are the only candidates.
         Order: the only definition; the caller's own method (implicit-``this``
         languages); a definition in an imported module (``modules``); a
         same-file definition (top-level, then the caller's class); otherwise
@@ -3511,6 +3522,9 @@ def build_cross_file_call_graph(
         candidates = defs_by_name.get(name)
         if not candidates:
             return name
+        if owner:
+            owned = [c for c in candidates if c.parent_class == owner]
+            candidates = owned or candidates
         if len(candidates) == 1:
             return candidates[0].qualified_id()
         same_file = [c for c in candidates if c.file == file_path]
@@ -3573,8 +3587,18 @@ def build_cross_file_call_graph(
                         if candidate_qid and candidate_qid in known_qids:
                             qid_calls.add(candidate_qid)
                         elif last_segment in known_names:
-                            path = "::".join(parts[:-1])
-                            qid_calls.add(_qid_for(last_segment, file_path, [path]))
+                            # ``parts[-2]`` is a module or a type.
+                            owner = (
+                                sym.parent_class if parts[-2] == "Self" else parts[-2]
+                            )
+                            modules = [
+                                "::".join(parts[:-1]),
+                                "::".join(parts[:-2]),
+                                *_import_modules_for_call(parts[0], imports),
+                            ]
+                            qid_calls.add(
+                                _qid_for(last_segment, file_path, modules, owner=owner)
+                            )
                     # else: external builtin/library — ignore
             qid = sym.qualified_id()
             callees.setdefault(qid, set()).update(qid_calls)
