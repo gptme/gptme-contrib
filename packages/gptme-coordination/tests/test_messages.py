@@ -111,3 +111,38 @@ class TestHMACVerification:
         history = bus.history()
         assert history[0].hmac is None
         assert history[0].verified is False
+
+
+class TestInboxCursor:
+    """Cursor contracts for incremental polling (gptme/gptme-contrib#2500)."""
+
+    def test_since_cursor_delivers_later_message_in_same_second(
+        self, bus: MessageBus
+    ) -> None:
+        """A later message in the same second must not be skipped by the cursor."""
+        for attempt in range(10):
+            first = bus.send("alice", f"first-{attempt}", recipient="bob")
+            cursor = bus.inbox("bob")[-1].created_at
+            later = bus.send("alice", f"later-{attempt}", recipient="bob")
+            if first.created_at == later.created_at:
+                break
+        else:
+            pytest.skip("could not produce two sends within one second")
+
+        assert later.id in [m.id for m in bus.inbox("bob")]
+        assert later.id in [m.id for m in bus.inbox("bob", since=cursor)]
+
+    def test_since_id_is_an_exact_cursor(self, bus: MessageBus) -> None:
+        """since_id resumes strictly after the last delivered row, without duplicates."""
+        first = bus.send("alice", "first", recipient="bob")
+        second = bus.send("alice", "second", recipient="bob")
+
+        resumed = bus.inbox("bob", since=first.created_at, since_id=first.id)
+        assert [m.id for m in resumed] == [second.id]
+
+    def test_since_id_alone_filters_by_id(self, bus: MessageBus) -> None:
+        """since_id without a timestamp is a plain id > cursor."""
+        first = bus.send("alice", "first", recipient="bob")
+        second = bus.send("alice", "second", recipient="bob")
+
+        assert [m.id for m in bus.inbox("bob", since_id=first.id)] == [second.id]
