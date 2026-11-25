@@ -363,22 +363,58 @@ def test_needs_consensus_upgrade_on_clean_first_pass() -> None:
     assert needs_consensus_upgrade({"sha": "abc", "score": 5, "findings": []}, "abcdef")
 
 
-def test_needs_consensus_upgrade_false_when_single_pass_is_complete() -> None:
-    """The gate accepts a complete single pass, so there is nothing to upgrade."""
+COMPLETE_SINGLE_PASS = {
+    "requested": 1,
+    "answered": 1,
+    "jobs_requested": 1,
+    "jobs_answered": 1,
+    "min_agreement": 1,
+    "min_agreement_requested": 1,
+}
+
+
+def test_complete_single_pass_is_evidence_for_sweep_and_preflight() -> None:
+    """Not upgraded, so the preflight must accept it or the PR is stranded."""
     marker = {
         "sha": "abc",
         "score": 5,
         "findings": [],
-        "consensus": {
-            "requested": 1,
-            "answered": 1,
-            "jobs_requested": 1,
-            "jobs_answered": 1,
-            "min_agreement": 1,
-            "min_agreement_requested": 1,
-        },
+        "consensus": COMPLETE_SINGLE_PASS,
     }
     assert needs_consensus_upgrade(marker, "abcdef") is False
+    assert self_merge_eligible_from_marker(marker) is True
+
+
+def test_outage_single_pass_is_upgraded_and_not_preflight_eligible() -> None:
+    """Outage coverage has complete counts but is not merge evidence."""
+    marker = {
+        "sha": "abc",
+        "score": 5,
+        "findings": [],
+        "outage_single_pass": True,
+        "consensus": COMPLETE_SINGLE_PASS,
+    }
+    assert needs_consensus_upgrade(marker, "abcdef") is True
+    assert self_merge_eligible_from_marker(marker) is False
+
+
+@pytest.mark.parametrize(
+    "degraded",
+    [
+        {"answered": 0},
+        {"jobs_requested": 3},
+        {"min_agreement_requested": 2},
+    ],
+)
+def test_incomplete_single_pass_is_not_evidence(degraded: dict) -> None:
+    marker = {
+        "sha": "abc",
+        "score": 5,
+        "findings": [],
+        "consensus": {**COMPLETE_SINGLE_PASS, **degraded},
+    }
+    assert needs_consensus_upgrade(marker, "abcdef") is True
+    assert self_merge_eligible_from_marker(marker) is False
 
 
 def test_needs_consensus_upgrade_true_when_single_pass_lacks_job_counts() -> None:

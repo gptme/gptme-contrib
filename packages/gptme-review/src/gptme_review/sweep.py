@@ -439,15 +439,19 @@ def recall_boost_passes(marker: Mapping[str, object], max_passes: int) -> int:
     return cap
 
 
-def _single_pass_is_complete_evidence(consensus: Mapping[str, object]) -> bool:
-    """Whether a single-pass consensus record is already merge evidence.
+def _single_pass_is_complete_evidence(marker: Mapping[str, object]) -> bool:
+    """Whether a marker's single-pass review is already merge evidence.
 
-    Mirrors the merge gate's ``_consensus_shortfall``: a complete pass — every
-    requested pass and job answered, agreement at the requested threshold and at
-    least 1 — is evidence (Erik, 2026-11-24), so a second pass would only be
-    spent to satisfy a count. A record that is missing the job or agreement
-    fields cannot be read as complete, and still earns a pass.
+    Mirrors the merge gate's ``_consensus_shortfall`` for one pass: the pass and
+    every one of its jobs answered, at the requested agreement threshold, is
+    evidence (Erik, 2026-11-24), so a second pass would only be spent to satisfy
+    a count. A record that is missing the job or agreement fields cannot be read
+    as complete. Outage coverage is published as "not merge evidence" and is
+    excluded even though its counts are complete.
     """
+    consensus = marker.get("consensus")
+    if marker.get("outage_single_pass") or not isinstance(consensus, dict):
+        return False
 
     def _int(key: str) -> int | None:
         value = consensus.get(key)
@@ -463,9 +467,9 @@ def _single_pass_is_complete_evidence(consensus: Mapping[str, object]) -> bool:
     if applied is None or asked is None:
         return False
     return (
-        0 < requested == answered
+        requested == answered == 1
         and 0 < jobs_requested == jobs_answered
-        and 1 <= applied == asked <= requested
+        and applied == asked == 1
     )
 
 
@@ -498,7 +502,7 @@ def needs_consensus_upgrade(
     history = marker.get("history")
     history_rows = history if isinstance(history, list) else []
     if requested < 2:
-        if _single_pass_is_complete_evidence(consensus):
+        if _single_pass_is_complete_evidence(marker):
             return False
         rounds_on_head = sum(
             1
@@ -529,6 +533,8 @@ def self_merge_eligible_from_marker(marker: Mapping[str, object]) -> bool:
     consensus = marker.get("consensus")
     if not isinstance(consensus, dict):
         return False
+    if _single_pass_is_complete_evidence(marker):
+        return True
     requested = consensus.get("requested")
     answered = consensus.get("answered")
     min_agreement = consensus.get("min_agreement")
