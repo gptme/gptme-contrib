@@ -152,24 +152,31 @@ def stamp_frontmatter_flags(content: str, flags: dict[str, bool]) -> str | None:
     pending = {key: value for key, value in flags.items() if meta.get(key) is not value}
     if not pending:
         return content
-    lines = fm.split("\n")
     targets = [
         (key_node, value_node)
         for key_node, value_node in node.value
         if isinstance(key_node, yaml.ScalarNode) and key_node.value in pending
     ]
-    for key_node, value_node in sorted(targets, key=lambda kv: kv[0].start_mark.line, reverse=True):
+    # Splice by character offset (``Mark.index``), not by line: PyYAML also
+    # counts \x85,  ,   and a lone \r as line breaks, so its line
+    # numbers do not index ``fm.split("\n")``. Edit from the end so earlier
+    # offsets stay valid.
+    for key_node, value_node in sorted(
+        targets, key=lambda kv: kv[0].start_mark.index, reverse=True
+    ):
         key = key_node.value
         literal = "true" if pending[key] else "false"
         start, end = value_node.start_mark, value_node.end_mark
         if start.line == end.line and end.column > start.column:
             # Single-line value: swap only its span, so a trailing comment stays.
-            line = lines[start.line]
-            lines[start.line] = line[: start.column] + literal + line[end.column :]
+            fm = fm[: start.index] + literal + fm[end.index :]
         else:
-            stop = end.line + (1 if end.column else 0)
-            lines[key_node.start_mark.line : stop] = [f"{key}: {literal}"]
-    fm = "\n".join(lines)
+            # Multi-line or empty value: rewrite from the key's line start. An
+            # end mark at column 0 sits after the value's final line break.
+            key_mark = key_node.start_mark
+            line_start = key_mark.index - key_mark.column
+            tail = "\n" if end.column == 0 else ""
+            fm = fm[:line_start] + f"{key}: {literal}" + tail + fm[end.index :]
     present = {key_node.value for key_node, _ in targets}
     for key, value in pending.items():
         if key not in present:

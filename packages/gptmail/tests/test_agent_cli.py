@@ -2809,3 +2809,14 @@ def test_watch_rejects_sender_supplied_arrival_time(workspace, monkeypatch):
     result = CliRunner().invoke(agent, ["watch", "--thread", root, "--once", "--timeout", "2s"])
     assert result.exit_code == agent_cli.WATCH_TIMEOUT_EXIT, result.output
     assert result.stdout == ""
+
+
+@pytest.mark.parametrize("brk", [" ", " ", "\x85", "\r"])
+def test_stamp_survives_yaml_line_breaks_that_split_does_not_count(brk: str) -> None:
+    # PyYAML counts these as line breaks; a "\n"-split line index then lands one
+    # line late and corrupts the frontmatter.
+    content = f'---\nfrom: bob\nsubject: "a{brk}b"\nread: false\n---\n\nfyi\n'
+    stamped = stamp_frontmatter_flags(content, {"read": True})
+    assert stamped == f'---\nfrom: bob\nsubject: "a{brk}b"\nread: true\n---\n\nfyi\n'
+    assert stamped is not None
+    assert yaml.safe_load(stamped.split("---")[1])["read"] is True
