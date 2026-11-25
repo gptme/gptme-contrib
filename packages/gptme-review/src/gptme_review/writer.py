@@ -4503,6 +4503,10 @@ def run_sharded_llm(
         print("submodule: fetched cross-submodule import context")
         note = (note + "\n\n" + submodule_ctx).strip() if note else submodule_ctx
 
+    # Usage of every shard whose call returned, so a failed review still
+    # records what its completed siblings cost.
+    spent: dict[int, dict] = {}
+
     def review_one(shard: Shard) -> tuple[list[dict], dict]:
         label = f"[shard {shard.index}/{n}] "
         lifecycle.stage("shard", shard=shard.index)
@@ -4522,6 +4526,7 @@ def run_sharded_llm(
             note=shard_note,
             label=label,
         )
+        spent[shard.index] = usage
         print(
             f"{label}{len(findings)} finding(s) in {time.monotonic() - started:.0f}s, "
             f"cost=${(usage.get('cost') or 0):.4f}"
@@ -4541,12 +4546,14 @@ def run_sharded_llm(
         results = _io._run_shards(plan, review_one)
     except ReviewError as exc:
         if log:
+            # _run_shards drains its pool before raising, so shards that were
+            # still in flight at the first failure are counted too.
             _io.WRITER_HOST.log_run(
                 repo=args.repo,
                 number=args.number,
                 sha=sha,
                 model=model_name,
-                usage={},
+                usage=merge_shard_usage([spent[i] for i in sorted(spent)], plan),
                 wall_s=time.monotonic() - started,
                 findings=[],
                 error=str(exc),

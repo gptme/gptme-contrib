@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -1120,8 +1121,29 @@ def test_run_sharded_llm_logs_a_failed_review():
         _run_sharded(w, _engine_args())
     assert len(host.runs) == 1
     run = host.runs[0]
-    assert run["usage"] == {} and run["findings"] == []
+    assert "cost" not in run["usage"] and run["findings"] == []
     assert "provider unavailable" in run["error"]
+
+
+def test_run_sharded_llm_failed_review_keeps_completed_shard_cost():
+    # A shard that finished before a sibling failed was still billed.
+    host = _RecordingHost()
+    first_running = threading.Event()
+
+    def one_fails(*args, **kwargs):
+        if kwargs["label"].startswith("[shard 1/"):
+            first_running.set()
+            return [{"title": "t"}], {"cost": 0.25, "prompt_tokens": 10}
+        # Fail only once shard 1 is running, so it cannot be cancelled.
+        assert first_running.wait(5)
+        raise ReviewError("provider unavailable")
+
+    w = _sharded_io(host, one_fails)
+    with pytest.raises(ReviewError, match="shard 2/2 failed"):
+        _run_sharded(w, _engine_args())
+    (run,) = host.runs
+    assert (run["usage"]["cost"], run["usage"]["prompt_tokens"]) == (0.25, 10)
+    assert run["findings"] == [] and "provider unavailable" in run["error"]
 
 
 def test_run_sharded_llm_dry_run_logs_nothing():
