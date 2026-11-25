@@ -421,11 +421,14 @@ class SessionStore:
                                 records[index]._store_invented["row_digest"] = _line_digest(emitted)
                         # Excess on-disk copies of an upserted id are superseded.
 
-            out_lines.extend(
-                _row_json(record) + "\n"
-                for index, record in enumerate(records)
-                if index not in emitted_indices
-            )
+            for index, record in enumerate(records):
+                if index not in emitted_indices:
+                    emitted = _row_json(record)
+                    out_lines.append(emitted + "\n")
+                    if "row_digest" in record._store_invented:
+                        # Appended id-less rows need the same identity refresh
+                        # as replacements for subsequent rewrites to match.
+                        record._store_invented["row_digest"] = _line_digest(emitted)
 
             tmp_path = self.path.with_name(
                 f"{self.path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}"

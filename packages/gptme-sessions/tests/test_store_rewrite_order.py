@@ -239,3 +239,33 @@ def test_mutate_rewrite_twice_without_reload_keeps_one_id_less_row(tmp_path: Pat
     assert rows[0]["attempt_kind"] == "repetition"
     assert rows[0]["category"] == "code"
     assert "session_id" not in rows[0]
+
+
+@pytest.mark.parametrize("source", ["changed", "archive", "removed"])
+def test_appended_id_less_row_stays_matched_on_later_rewrites(tmp_path: Path, source: str) -> None:
+    """Unmatched loaded rows must remember their appended canonical bytes too."""
+    store = SessionStore(sessions_dir=tmp_path)
+    legacy = json.dumps({"model": "opus"}) + "\n"
+    if source == "archive":
+        archive = tmp_path / "session-records-archive-2026-01.jsonl"
+        archive.write_text(legacy, encoding="utf-8")
+        records = store.load_all(include_archives=True)
+    else:
+        store.path.write_text(legacy, encoding="utf-8")
+        records = store.load_all()
+        if source == "changed":
+            store.path.write_text(json.dumps({"model": "other"}) + "\n", encoding="utf-8")
+        else:
+            store.path.unlink()
+
+    expected_models = ["other", "opus"] if source == "changed" else ["opus"]
+    for category in ("code", "research", "knowledge"):
+        records[0].category = category
+        store.rewrite(records)
+        rows = [json.loads(line) for line in store.path.read_text(encoding="utf-8").splitlines()]
+        assert [row["model"] for row in rows] == expected_models
+        assert rows[-1]["category"] == category
+        assert all("session_id" not in row and "timestamp" not in row for row in rows)
+
+    if source == "archive":
+        assert archive.read_text(encoding="utf-8") == legacy
