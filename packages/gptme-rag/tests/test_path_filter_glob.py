@@ -16,11 +16,29 @@ def _matches(source: str, pattern: str) -> bool:
     [
         ("/repo/src/sub/deep.py", "src/*.py"),
         ("/repo/docs/a/b.md", "docs/*"),
-        ("/repo/src/sub/deep.py", "src/?ub.py"),
+        ("/repo/src/sub/deep.py", "src/sub?deep.py"),
     ],
 )
 def test_star_does_not_cross_directories(source, pattern):
     assert not _matches(source, pattern)
+
+
+@pytest.mark.parametrize(
+    "pattern",
+    [
+        "src/[!].py",
+        "src/[z-a].py",
+    ],
+)
+def test_malformed_character_class_does_not_raise(pattern):
+    """A bad class must not crash the search (fnmatch treats it as a literal)."""
+    assert _matches("/repo/src/a.py", pattern) is False
+
+
+def test_leading_caret_is_a_literal_in_a_class():
+    """fnmatch treats '[^ab]' as matching a literal '^', not as negation."""
+    assert _matches("/repo/src/^.py", "src/[^ab].py")
+    assert not _matches("/repo/src/c.py", "src/[^ab].py")
 
 
 @pytest.mark.parametrize(

@@ -110,10 +110,22 @@ def _segment_glob_regex(pattern: str) -> re.Pattern[str]:
             i += 1
         elif pattern[i] == "[" and "]" in pattern[i + 2 :]:
             end = pattern.index("]", i + 2)
-            body = pattern[i + 1 : end]
+            body = pattern[i + 1 : end].replace("\\", "\\\\")
             if body.startswith("!"):
                 body = "^" + body[1:]
-            out.append("[" + body.replace("\\", "\\\\") + "]")
+            elif body[:1] in ("^", "["):
+                # fnmatch treats a leading '^' or '[' as a literal
+                body = "\\" + body
+            candidate = "[" + body + "]"
+            try:
+                re.compile(candidate)
+            except re.error:
+                # e.g. '[!]' or a reversed range: fnmatch treats these as
+                # literals rather than raising, so match the '[' literally.
+                out.append(re.escape("["))
+                i += 1
+                continue
+            out.append(candidate)
             i = end + 1
         else:
             out.append(re.escape(pattern[i]))
