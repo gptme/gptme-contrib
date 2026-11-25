@@ -18,6 +18,7 @@ from chromadb import Collection
 from chromadb.api import ClientAPI
 from chromadb.config import Settings
 from chromadb.errors import NotFoundError
+from pathspec import GitIgnoreSpec
 from pathspec.patterns.gitignore.spec import GitIgnoreSpecPattern
 
 from ..cache import SmartRAGCache, CacheKey, CacheEntry
@@ -1029,64 +1030,57 @@ class Indexer:
             logger.error(f"Failed to process batch: {e}")
             raise
 
-    def _load_gitignore(self, directory: Path) -> list[str]:
-        """Load gitignore patterns from all .gitignore files up to root."""
-        patterns: list[str] = []
+    def _load_gitignore(self, directory: Path) -> list[tuple[Path, GitIgnoreSpec]]:
+        """Load gitignore rules for a non-git directory.
+
+        Each ``.gitignore`` applies relative to the directory that holds it, as in
+        git, so anchored (``/x``) and directory (``dir/``) patterns match the right
+        paths. Global and built-in patterns apply relative to ``directory``.
+        """
+        root = directory.resolve()
+        base_lines: list[str] = []
 
         # Load global gitignore
         global_gitignore = Path.home() / ".config/git/ignore"
         if global_gitignore.exists():
             try:
-                with open(global_gitignore) as f:
-                    for line in f:
-                        line = line.strip()
-                        if line and not line.startswith("#"):
-                            patterns.append(line)
+                base_lines.extend(global_gitignore.read_text().splitlines())
             except Exception as e:
                 logger.warning(f"Error reading global gitignore: {e}")
 
         # Essential patterns for non-git directories
-        patterns.extend(
-            [
-                ".git",
-                ".git/**",  # Ensure .git dirs are always ignored
-                "*.sqlite3",
-                "*.db",
-            ]
-        )
-        current_dir = directory.resolve()
-        max_depth = 10  # Limit traversal to avoid infinite loops
+        base_lines.extend([".git", "*.sqlite3", "*.db"])
+        specs = [(root, GitIgnoreSpec.from_lines(base_lines))]
 
         # Collect all .gitignore files up to root or max depth
+        current_dir = root
+        max_depth = 10  # Limit traversal to avoid infinite loops
         depth = 0
         while current_dir.parent != current_dir and depth < max_depth:
             gitignore_path = current_dir / ".gitignore"
             if gitignore_path.exists():
                 try:
-                    patterns.extend(
-                        line.strip()
-                        for line in gitignore_path.read_text().splitlines()
-                        if line.strip() and not line.startswith("#")
-                    )
+                    lines = gitignore_path.read_text().splitlines()
+                    specs.append((current_dir, GitIgnoreSpec.from_lines(lines)))
                 except Exception as e:
                     logger.warning(f"Error reading {gitignore_path}: {e}")
             current_dir = current_dir.parent
             depth += 1
 
-        return patterns
+        return specs
 
-    def _is_ignored(self, file_path: Path, gitignore_patterns: list[str]) -> bool:
-        """Check if a file matches any gitignore pattern."""
-
-        # Convert path to relative for pattern matching
-        rel_path = str(file_path)
-
-        for pattern in gitignore_patterns:
-            if (
-                fnmatch_path(rel_path, pattern)
-                or fnmatch_path(rel_path, f"**/{pattern}")
-                or fnmatch_path(rel_path, f"**/{pattern}/**")
-            ):
+    def _is_ignored(
+        self, file_path: Path, gitignore_specs: list[tuple[Path, GitIgnoreSpec]]
+    ) -> bool:
+        """Check whether any loaded gitignore rule set ignores a file."""
+        # Resolve the directory, not the file: a symlinked file is judged by its own path.
+        path = file_path.parent.resolve() / file_path.name
+        for base, spec in gitignore_specs:
+            try:
+                rel_path = path.relative_to(base).as_posix()
+            except ValueError:
+                continue
+            if spec.match_file(rel_path):
                 return True
         return False
 

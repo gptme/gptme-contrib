@@ -1535,3 +1535,34 @@ def test_search_path_prefilter_pages_metadata(tmp_path, monkeypatch, count, filt
 
     assert [doc.metadata["source"] for doc in results] == ([wanted_source] if count else [])
     assert offsets == ([0] if count < 1000 else [0, 1000])
+
+
+def test_non_git_gitignore_fallback_honours_dir_and_anchored_patterns(indexer, tmp_path):
+    """#2356 R6: `dir/` and `/x` patterns apply relative to the .gitignore's directory."""
+    root = tmp_path / "docs"
+    (root / "build").mkdir(parents=True)
+    (root / "sub" / "build").mkdir(parents=True)
+    (root / ".gitignore").write_text("build/\n/top.md\n# comment\n")
+    for rel in ["keep.md", "top.md", "sub/top.md", "build/a.md", "sub/build/b.md"]:
+        (root / rel).write_text(f"content of {rel}")
+
+    specs = indexer._load_gitignore(root)
+    ignored = {
+        rel
+        for rel in ["keep.md", "top.md", "sub/top.md", "build/a.md", "sub/build/b.md"]
+        if indexer._is_ignored(root / rel, specs)
+    }
+    # Unanchored `build/` ignores a build dir at any depth; `/top.md` only the root file.
+    assert ignored == {"top.md", "build/a.md", "sub/build/b.md"}
+
+
+def test_non_git_gitignore_from_a_parent_applies_relative_to_that_parent(indexer, tmp_path):
+    (tmp_path / ".gitignore").write_text("/docs/private/\n")
+    root = tmp_path / "docs"
+    (root / "private").mkdir(parents=True)
+    (root / "private" / "x.md").write_text("secret")
+    (root / "public.md").write_text("public")
+
+    specs = indexer._load_gitignore(root)
+    assert indexer._is_ignored(root / "private" / "x.md", specs)
+    assert not indexer._is_ignored(root / "public.md", specs)
