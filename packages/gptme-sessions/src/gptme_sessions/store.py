@@ -71,11 +71,12 @@ def _parse_row(line: str) -> SessionRecord:
     them out of the file.
 
     The derived id only matches while the bytes do, and ``rewrite()`` emits
-    the record's canonical form rather than the original legacy bytes — so a
-    second rewrite of the same in-memory list would derive a different id and
-    append a duplicate (#2338). ``row_digest`` records the digest of the exact
-    line this record was parsed from; ``rewrite()`` keeps it current after
-    each write so the row is recognised again even after its content changed.
+    the record's canonical form rather than the original legacy bytes.
+    ``row_digest`` therefore identifies the canonical content, not the input
+    bytes: an unrelated rewrite that inserts defaults or changes key order
+    must not invalidate another loaded copy (#2338). ``rewrite()`` keeps this
+    digest current after each write so repeated edits to the same in-memory
+    record also recognise the previously emitted content.
 
     Raises the same exceptions as ``SessionRecord.from_dict(json.loads(line))``.
     """
@@ -88,9 +89,9 @@ def _parse_row(line: str) -> SessionRecord:
     record = SessionRecord.from_dict(data)
     if invented_id is not None:
         record._store_invented["session_id"] = invented_id
-        record._store_invented["row_digest"] = _line_digest(line)
         if not data.get("timestamp"):
             record._store_invented["timestamp"] = record.timestamp
+        record._store_invented["row_digest"] = _row_digest(record)
     return record
 
 
@@ -108,6 +109,11 @@ def _row_json(record: SessionRecord) -> str:
         if d.get(key) == value:
             d.pop(key, None)
     return json.dumps(d, default=str)
+
+
+def _row_digest(record: SessionRecord) -> str:
+    """Match canonical content across formatting/default-only rewrites."""
+    return _line_digest(json.dumps(json.loads(_row_json(record)), sort_keys=True))
 
 
 def _default_sessions_dir() -> Path:
@@ -367,17 +373,18 @@ class SessionStore:
         with self.lock():
             by_id: dict[str, deque[int]] = {}
             # A record parsed from an id-less row also remembers that row's
-            # digest: its derived id stops matching once rewrite() writes the
-            # canonical form, so the digest is what recognises the row again
+            # canonical digest: its derived id stops matching once rewrite()
+            # changes the input bytes, so the digest recognises the row again
             # (#2338). Only while the record still carries the invented id —
             # a caller that assigns a real session_id means to add a row.
             by_row_digest: dict[str, deque[int]] = {}
             for index, record in enumerate(records):
-                by_id.setdefault(record.session_id, deque()).append(index)
                 invented_id = record._store_invented.get("session_id")
                 row_digest = record._store_invented.get("row_digest")
                 if row_digest and invented_id == record.session_id:
                     by_row_digest.setdefault(row_digest, deque()).append(index)
+                else:
+                    by_id.setdefault(record.session_id, deque()).append(index)
             emitted_indices: set[int] = set()
             out_lines: list[str] = []
 
@@ -405,9 +412,10 @@ class SessionStore:
                             # line ending, rather than the stripped parse input.
                             out_lines.append(raw if raw.endswith("\n") else raw + "\n")
                             continue
-                        replacements = by_id.get(rec.session_id)
-                        if replacements is None:
-                            replacements = by_row_digest.get(_line_digest(line))
+                        if rec._store_invented:
+                            replacements = by_row_digest.get(rec._store_invented["row_digest"])
+                        else:
+                            replacements = by_id.get(rec.session_id)
                         if replacements is None:
                             out_lines.append(_row_json(rec) + "\n")
                         elif replacements:
@@ -418,7 +426,9 @@ class SessionStore:
                             if "row_digest" in records[index]._store_invented:
                                 # Keep the identity current for a later rewrite
                                 # of the same in-memory list (#2338).
-                                records[index]._store_invented["row_digest"] = _line_digest(emitted)
+                                records[index]._store_invented["row_digest"] = _row_digest(
+                                    records[index]
+                                )
                         # Excess on-disk copies of an upserted id are superseded.
 
             for index, record in enumerate(records):
@@ -428,7 +438,7 @@ class SessionStore:
                     if "row_digest" in record._store_invented:
                         # Appended id-less rows need the same identity refresh
                         # as replacements for subsequent rewrites to match.
-                        record._store_invented["row_digest"] = _line_digest(emitted)
+                        record._store_invented["row_digest"] = _row_digest(record)
 
             tmp_path = self.path.with_name(
                 f"{self.path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}"

@@ -241,6 +241,52 @@ def test_mutate_rewrite_twice_without_reload_keeps_one_id_less_row(tmp_path: Pat
     assert "session_id" not in rows[0]
 
 
+@pytest.mark.parametrize("interleaving", ["subset", "stamp"])
+def test_unrelated_rewrite_keeps_outstanding_id_less_copy_matched(
+    tmp_path: Path, interleaving: str
+) -> None:
+    """Canonicalization alone must not invalidate a previously loaded row."""
+    store = SessionStore(sessions_dir=tmp_path)
+    store.path.write_text(
+        '{"model":"opus", "harness":"claude-code", "extra":{"z":1,"a":2}}\n'
+        '{"session_id":"keep01"}\n',
+        encoding="utf-8",
+    )
+    records = store.load_all()
+    if interleaving == "stamp":
+        assert store.stamp_attempt_kind("keep01", "repetition")
+    else:
+        store.rewrite([records[1]])
+
+    # Use the outstanding copy, not a reload after the intervening rewrite.
+    records[0].category = "code"
+    store.rewrite([records[0]])
+
+    rows = [json.loads(line) for line in store.path.read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == 2
+    assert rows[0]["category"] == "code"
+    assert rows[0]["extra"] == {"z": 1, "a": 2}
+    assert "session_id" not in rows[0]
+    assert "timestamp" not in rows[0]
+    assert rows[1]["session_id"] == "keep01"
+    if interleaving == "stamp":
+        assert rows[1]["attempt_kind"] == "repetition"
+
+
+def test_equivalent_id_less_rows_each_consume_one_replacement(tmp_path: Path) -> None:
+    """Formatting-equivalent rows retain multiplicity and input order."""
+    store = SessionStore(sessions_dir=tmp_path)
+    store.path.write_text('{"model":"opus"}\n{ "model": "opus" }\n', encoding="utf-8")
+    records = store.load_all()
+    store.rewrite(records)
+    records[0].category = "code"
+    records[1].category = "research"
+    store.rewrite(records)
+
+    rows = [json.loads(line) for line in store.path.read_text(encoding="utf-8").splitlines()]
+    assert [row["category"] for row in rows] == ["code", "research"]
+
+
 @pytest.mark.parametrize("source", ["changed", "archive", "removed"])
 def test_appended_id_less_row_stays_matched_on_later_rewrites(tmp_path: Path, source: str) -> None:
     """Unmatched loaded rows must remember their appended canonical bytes too."""
