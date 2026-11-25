@@ -1,4 +1,5 @@
 from datetime import datetime
+import random
 from pathlib import Path
 
 import pytest
@@ -1425,3 +1426,112 @@ def test_watch_exception_filter_catches_cannot_index_directory_error(
     assert (
         "Warning" in result.output or "warning" in result.output.lower()
     ), f"Expected a warning in output but got:\n{result.output}"
+
+
+def test_search_paths_filter_applies_before_top_k(indexer, tmp_path):
+    """Documents inside ``paths`` are found even when outside ones rank higher."""
+    outside = tmp_path / "outside"
+    inside = tmp_path / "inside"
+    outside.mkdir()
+    inside.mkdir()
+    for i in range(6):
+        (outside / f"pelican{i}.txt").write_text(f"pelican pelican pelican beak number {i}")
+    (inside / "notes.txt").write_text("a short note that mentions a pelican once")
+    indexer.index_directory(tmp_path, "**/*.txt")
+
+    results, _, _ = indexer.search("pelican pelican pelican beak", n_results=1, paths=[inside])
+
+    assert [Path(r.metadata["source"]).name for r in results] == ["notes.txt"]
+
+
+@pytest.mark.parametrize("filter_kind", ["paths", "path_filters", "both"])
+@pytest.mark.parametrize("where_kind", ["category", "source", "compound"])
+def test_search_path_filters_preserve_where(tmp_path, filter_kind, where_kind):
+    """Path restrictions intersect caller metadata predicates without mutating them."""
+    from copy import deepcopy
+
+    indexer = Indexer(
+        persist_directory=tmp_path / "index",
+        collection_name="where-intersection",
+        enable_persist=True,
+    )
+    inside = tmp_path / "inside"
+    wanted = inside / "wanted.txt"
+    other = inside / "other.txt"
+    outside = tmp_path / "outside.txt"
+    indexer.add_documents(
+        [
+            Document(
+                content="pelican habitat",
+                metadata={"source": str(path), "category": category},
+                doc_id=str(i),
+            )
+            for i, (path, category) in enumerate(
+                [(wanted, "birds"), (other, "other"), (outside, "birds")]
+            )
+        ]
+    )
+    clauses = {
+        "category": {"category": "birds"},
+        "source": {"source": str(wanted)},
+        "compound": {"$or": [{"source": str(wanted)}, {"source": str(outside)}]},
+    }
+    where = clauses[where_kind]
+    original = deepcopy(where)
+
+    results, _, _ = indexer.search(
+        "pelican",
+        paths=[inside] if filter_kind in ("paths", "both") else None,
+        path_filters=(str(inside / "*.txt"),) if filter_kind in ("path_filters", "both") else None,
+        where=where,
+    )
+
+    assert [r.metadata["source"] for r in results] == [str(wanted)]
+    assert where == original
+
+
+@pytest.mark.parametrize("count", [0, 1000, 1001])
+@pytest.mark.parametrize("filter_kind", ["paths", "path_filters", "both"])
+def test_search_path_prefilter_pages_metadata(tmp_path, monkeypatch, count, filter_kind):
+    """Scan every metadata page without an unbounded get or dropping source spelling."""
+    indexer = Indexer(
+        persist_directory=tmp_path / "index",
+        collection_name="paged-path-prefilter",
+        embedding_function="minilm",
+        enable_persist=True,
+    )
+    inside = tmp_path / "inside"
+    # Path matching normalizes this spelling, but Chroma's source predicate must not.
+    wanted_source = f"{inside}//wanted.txt"
+    if count:
+        rng = random.Random(count)
+        indexer.collection.add(
+            ids=[str(i) for i in range(count)],
+            documents=["pelican habitat"] * count,
+            # Distinct vectors: identical ones degenerate Chroma's HNSW graph,
+            # so a filtered query can miss its only allowed record (flaky).
+            embeddings=[[rng.random() for _ in range(384)] for _ in range(count)],
+            metadatas=[
+                {"source": wanted_source if i == count - 1 else str(tmp_path / f"{i}.txt")}
+                for i in range(count)
+            ],
+        )
+    original_get = type(indexer.collection).get
+    offsets = []
+
+    def bounded_get(collection, *args, **kwargs):
+        assert kwargs.get("limit") == 1000, "path pre-filter must use bounded pages"
+        assert kwargs.get("include") == ["metadatas"]
+        offsets.append(kwargs.get("offset"))
+        return original_get(collection, *args, **kwargs)
+
+    monkeypatch.setattr(type(indexer.collection), "get", bounded_get)
+    results, _, _ = indexer.search(
+        "pelican",
+        paths=[inside] if filter_kind in ("paths", "both") else None,
+        path_filters=("*.txt",) if filter_kind in ("path_filters", "both") else None,
+        where={"source": wanted_source},
+    )
+
+    assert [doc.metadata["source"] for doc in results] == ([wanted_source] if count else [])
+    assert offsets == ([0] if count < 1000 else [0, 1000])
