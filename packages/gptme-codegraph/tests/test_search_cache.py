@@ -154,6 +154,27 @@ class TestSearchDocumentCacheSemantics:
 
 
 class TestSearchDocumentGeneration:
+    def test_replacement_during_load_cannot_bypass_generation(self, tmp_path):
+        db = tmp_path / "search.db"
+        with sqlite3.connect(db) as writer:
+            save_search_documents(writer, "/proj", [_doc("pkg.mod.new")], "g2")
+
+            class RacingConnection(sqlite3.Connection):
+                def execute(self, sql, parameters=(), /):
+                    if sql.startswith("SELECT document"):
+                        # An older search finishes extracting its documents after
+                        # this reader has checked the newer generation.
+                        save_search_documents(
+                            writer, "/proj", [_doc("pkg.mod.old")], "g1"
+                        )
+                    return super().execute(sql, parameters)
+
+            with sqlite3.connect(db, factory=RacingConnection) as reader:
+                assert load_search_documents(reader, "/proj", "g2") == []
+            assert [d.name for d in load_search_documents(writer, "/proj", "g1")] == [
+                "old"
+            ]
+
     def test_matching_generation_loads(self):
         conn = _conn()
         save_search_documents(conn, "/proj", [_doc("pkg.mod.f")], generation="g1")

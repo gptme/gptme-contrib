@@ -483,16 +483,20 @@ def load_search_documents(
 
     _ensure_search_tables(conn)
     if generation is not None:
-        row = conn.execute(
-            "SELECT generation FROM search_documents_generation WHERE directory = ?",
+        # Check the marker and read documents in one SQLite snapshot: a
+        # concurrent save must not replace documents after a separate check.
+        rows = conn.execute(
+            "SELECT document FROM search_documents AS docs "
+            "JOIN search_documents_generation AS gens "
+            "ON docs.directory = gens.directory "
+            "WHERE docs.directory = ? AND gens.generation = ?",
+            (directory, generation),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT document FROM search_documents WHERE directory = ?",
             (directory,),
-        ).fetchone()
-        if row is None or row[0] != generation:
-            return []
-    rows = conn.execute(
-        "SELECT document FROM search_documents WHERE directory = ?",
-        (directory,),
-    ).fetchall()
+        ).fetchall()
 
     docs: list[SearchDocument] = []
     for (doc_json,) in rows:
