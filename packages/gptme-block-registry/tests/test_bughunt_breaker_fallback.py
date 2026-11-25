@@ -119,15 +119,19 @@ def test_r4_3_future_opened_at_after_clock_step_back_blocks_far_past_cooldown(
     tmp_path: Path, clock: list[float]
 ) -> None:
     """The breaker opened while the wall clock was a day fast; NTP then
-    corrects it. The 300 s cooldown silently becomes ~24 h because a future
-    opened_at is trusted verbatim (verdict_started_at in the future is
-    rejected, opened_at is not even clamped)."""
+    corrects it. Restart the cooldown on the corrected clock, rather than
+    waiting ~24 h for the old timestamp or skipping the cooldown entirely."""
     sf = tmp_path / "cb.json"
     clock[0] = 1_000_000.0 + 86_400.0  # clock is one day fast
     decide_respawn(state_file=sf, slot="bob", verdict=AUTH_DEATH, threshold=1)
     clock[0] = 1_000_000.0 + 3600.0  # clock corrected; 1 h of real time passed
-    suppress, state = decide_respawn(state_file=sf, slot="bob", verdict=NEUTRAL)
-    assert suppress is False, (suppress, state, json.loads(sf.read_text()))
+    assert decide_respawn(state_file=sf, slot="bob", verdict=NEUTRAL) == (True, "OPEN")
+    assert json.loads(sf.read_text())["bob"]["opened_at"] == clock[0]
+    clock[0] += 300.0
+    assert decide_respawn(state_file=sf, slot="bob", verdict=NEUTRAL) == (
+        False,
+        "HALF_OPEN",
+    )
 
 
 # R4-4 -----------------------------------------------------------------------

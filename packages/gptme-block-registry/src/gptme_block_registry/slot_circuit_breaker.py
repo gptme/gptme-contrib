@@ -146,15 +146,19 @@ class _SlotBreaker:
         if self._state == CircuitState.CLOSED:
             return False
         if self._state == CircuitState.OPEN:
-            # A future opened_at means the wall clock stepped back; trusting it
-            # would stretch the cooldown without bound, so allow the probe.
-            if self._opened_at is not None and (
-                self._opened_at > now or (now - self._opened_at) >= self.cooldown
-            ):
+            # Restart the window after a backward clock correction: neither
+            # wait for the old clock to catch up nor bypass the cooldown.
+            if self._opened_at is not None and self._opened_at > now:
+                self._opened_at = now
+            if self._opened_at is not None and now - self._opened_at >= self.cooldown:
                 self._state = CircuitState.HALF_OPEN
                 self._probe_pending = True
             else:
                 return True
+        # A backward correction must not immediately dispatch a second probe.
+        # Persist the corrected window so reloads can still reach its timeout.
+        if self._probe_started_at is not None and self._probe_started_at > now:
+            self._probe_started_at = now
         # HALF_OPEN: exactly one probe allowed — consume the slot on first call
         if self._probe_pending or (
             # The granted probe never reported (killed worker, finished item,
@@ -162,10 +166,7 @@ class _SlotBreaker:
             # the slot cannot stay dark forever, without letting a slow probe
             # overlap its replacement; a late verdict is then stale.
             self._probe_started_at is not None
-            and (
-                self._probe_started_at > now
-                or now - self._probe_started_at >= self.probe_timeout
-            )
+            and now - self._probe_started_at >= self.probe_timeout
         ):
             self._probe_pending = False
             self._probe_started_at = now
