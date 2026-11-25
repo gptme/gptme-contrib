@@ -388,14 +388,12 @@ def test_cli_detect_failed_camera_reopen(monkeypatch, once):
     args = ["detect", "--source", "rtsp://cam/stream"]
     if once:
         args.append("--once")
-        # Start --once during the outage, rather than at the initial drop.
-        captures.pop(0)
     result = CliRunner().invoke(cli.main, args)
 
     if once:
         assert result.exit_code == 1
         assert "source produced no frame" in result.output
-        unavailable[0].release.assert_called_once()
+        dropped.release.assert_called_once()
         detector.detect.assert_not_called()
         assert open_capture.call_count == 1
     else:
@@ -407,3 +405,19 @@ def test_cli_detect_failed_camera_reopen(monkeypatch, once):
         assert open_capture.call_count == len(captures)
         assert detector.detect.call_count == 2
         assert detector.detect.call_args.args[0] is expected
+
+
+@pytest.mark.parametrize("command", [["detect"], ["detect", "--once"], ["look"]])
+def test_cli_camera_that_never_opens_exits_naming_source(monkeypatch, command):
+    from unittest.mock import Mock
+
+    unavailable = Mock()
+    unavailable.isOpened.return_value = False
+    monkeypatch.setattr(cv2, "VideoCapture", Mock(return_value=unavailable))
+    # Fail instead of hanging if detect starts polling a source that never opened.
+    monkeypatch.setattr(cli.time, "sleep", Mock(side_effect=AssertionError("polled")))
+
+    result = CliRunner().invoke(cli.main, [*command, "--source", "rtsp://typo/stream"])
+
+    assert result.exit_code == 1, result.output
+    assert "failed to open capture source: 'rtsp://typo/stream'" in result.output

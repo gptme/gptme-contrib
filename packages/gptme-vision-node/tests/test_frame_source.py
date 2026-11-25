@@ -137,9 +137,28 @@ def test_camera_reopens_after_stream_drop(monkeypatch):
     assert len(captures) == 2
 
 
-@pytest.mark.parametrize("after_drop", [False, True])
-def test_camera_retries_failed_opens_until_recovery(monkeypatch, after_drop):
-    """Opening an unavailable stream is an empty poll, including after a drop."""
+def test_camera_that_never_opened_raises_with_source_name(monkeypatch):
+    """A typo or missing camera is an error, and a later call retries the open."""
+    from unittest.mock import Mock
+
+    expected = solid_frame((7, 8, 9))
+    unavailable = Mock()
+    unavailable.isOpened.return_value = False
+    recovered = Mock()
+    recovered.isOpened.return_value = True
+    recovered.read.return_value = (True, expected)
+    monkeypatch.setattr(cv2, "VideoCapture", Mock(side_effect=[unavailable, recovered]))
+    source = OpenCVCameraSource("rtsp://typo/stream")
+
+    with pytest.raises(RuntimeError, match="rtsp://typo/stream"):
+        source.get_frame()
+    unavailable.release.assert_called_once()
+    unavailable.read.assert_not_called()
+    assert source.get_frame() is expected
+
+
+def test_camera_retries_failed_reopens_until_recovery(monkeypatch):
+    """After a drop, a stream that cannot be reopened yet is an empty poll."""
     from unittest.mock import Mock
 
     expected = solid_frame((7, 8, 9))
@@ -152,14 +171,13 @@ def test_camera_retries_failed_opens_until_recovery(monkeypatch, after_drop):
     recovered = Mock()
     recovered.isOpened.return_value = True
     recovered.read.return_value = (True, expected)
-    captures = ([dropped] if after_drop else []) + unavailable + [recovered]
+    captures = [dropped, *unavailable, recovered]
     open_capture = Mock(side_effect=captures)
     monkeypatch.setattr(cv2, "VideoCapture", open_capture)
     source = OpenCVCameraSource("rtsp://cam/stream", read_attempts=2)
 
-    if after_drop:
-        assert source.get_frame() is None
-        dropped.release.assert_called_once()
+    assert source.get_frame() is None
+    dropped.release.assert_called_once()
     for cap in unavailable:
         assert source.get_frame() is None
         cap.release.assert_called_once()
