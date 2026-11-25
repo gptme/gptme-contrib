@@ -21,7 +21,7 @@ def _rung(name, items, note="", calls=None):
 
 
 def _file_all(_name, items):
-    return len(items)
+    return list(items)
 
 
 def test_stops_once_deficit_is_filled_and_skips_later_rungs():
@@ -51,7 +51,7 @@ def test_all_empty_records_zero_per_rung_and_idles_on_purpose():
 
     def file_items(name, items):
         filed_calls.append(name)
-        return len(items)
+        return list(items)
 
     res = run_ladder(rungs, deficit=2, file_items=file_items)
     assert res.idle_on_purpose
@@ -64,7 +64,7 @@ def test_all_empty_records_zero_per_rung_and_idles_on_purpose():
 
 def test_dedupe_shortfall_falls_through_to_next_rung():
     def file_items(name, items):
-        return 0 if name == "own-prs" else len(items)  # all own-prs were dupes
+        return [] if name == "own-prs" else list(items)  # all own-prs were dupes
 
     res = run_ladder(
         [_rung("own-prs", ["a"]), _rung("follow-through", ["b"])],
@@ -103,7 +103,7 @@ def test_dedupe_exhausts_current_rung_before_running_heavier_sources(
             batches.append(list(items))
         fresh = [item for item in items if item != "dup"]
         persisted.extend(fresh)
-        return len(fresh)
+        return fresh
 
     res = run_ladder(
         [
@@ -113,7 +113,7 @@ def test_dedupe_exhausts_current_rung_before_running_heavier_sources(
         deficit=2,
         file_items=file_items,
     )
-    assert persisted == expected_filed
+    assert res.filed == persisted == expected_filed
     assert batches == expected_batches
     assert calls == (["own-prs", "heavy"] if later_runs else ["own-prs"])
     assert res.rungs["own-prs"].emitted == len(candidates)
@@ -121,6 +121,24 @@ def test_dedupe_exhausts_current_rung_before_running_heavier_sources(
     assert res.produced_by == "own-prs"
     assert res.remaining == 0
     assert not res.idle_on_purpose
+
+
+def test_filed_identities_are_the_hosts_actual_dedupe_result():
+    persisted: list[str] = []
+
+    def file_items(_name, items):
+        fresh = [item for item in items if item != "dup"]
+        persisted.extend(fresh)
+        return fresh
+
+    res = run_ladder(
+        [_rung("own-prs", ["dup", "a", "dup", "b", "c"])],
+        deficit=3,
+        file_items=file_items,
+    )
+    assert res.filed == persisted == ["a", "b", "c"]
+    assert res.rungs["own-prs"].filed == 3
+    assert res.remaining == 0
 
 
 def test_broken_rung_is_recorded_and_ladder_continues():
@@ -181,7 +199,7 @@ def test_duplicate_names_are_rejected_before_any_side_effects(deficit):
         run_ladder(
             [_rung("a", ["x"], calls=calls), _rung("a", [], calls=calls)],
             deficit,
-            lambda name, items: calls.append("filed") or len(items),
+            lambda name, items: calls.append("filed") or list(items),
         )
     assert calls == []
 
@@ -194,10 +212,9 @@ def test_zero_deficit_runs_nothing():
     assert not res.idle_on_purpose
 
 
-@pytest.mark.parametrize("bad", [-1, 5])
-def test_file_items_count_out_of_range_raises(bad):
+def test_file_items_returning_too_many_items_raises():
     with pytest.raises(ValueError, match="file_items"):
-        run_ladder([_rung("own-prs", ["a"])], 1, lambda _n, _i: bad)
+        run_ladder([_rung("own-prs", ["a"])], 1, lambda _n, _i: ["a", "b"])
 
 
 def test_negative_deficit_and_duplicate_names_raise():

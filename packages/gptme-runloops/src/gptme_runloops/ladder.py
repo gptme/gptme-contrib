@@ -16,7 +16,7 @@ the host owns the policy.
   note). It is called only when the deficit is still open, so expensive rungs
   cost nothing on a tick an earlier rung already satisfied.
 * Filing is the host's ``file_items`` callback. It receives at most the remaining
-  deficit and returns how many it actually filed (dedupe may drop some).
+  deficit and returns the items it actually filed (dedupe may drop some).
 * No I/O here: no task format, no ledger path, no GitHub client.
 
 The companion :func:`bound_session_gate` enforces principle 1: a work session
@@ -107,12 +107,13 @@ class LadderResult(Generic[T]):
 def run_ladder(
     rungs: Sequence[Rung[T]],
     deficit: int,
-    file_items: Callable[[str, Sequence[T]], int],
+    file_items: Callable[[str, Sequence[T]], Sequence[T]],
 ) -> LadderResult[T]:
     """Run ``rungs`` in order until ``deficit`` items are filed.
 
     ``file_items(rung_name, items)`` receives at most the remaining deficit and
-    returns the number it filed; it is not called with an empty list. After a
+    returns the subset it actually filed, not a count; it is not called with an
+    empty list. After a
     dedupe shortfall, remaining candidates from the same rung are offered in
     batches bounded by the updated deficit before advancing to the next rung.
     Each candidate is offered at most once. A rung
@@ -120,9 +121,8 @@ def run_ladder(
     one broken source must not starve the rest. A ``file_items`` failure is
     not caught, because the caller cannot tell what was filed.
 
-    The filed items are reported as the first ``filed`` items handed to
-    ``file_items``; a host whose dedupe drops items from the middle should
-    re-derive identities from its own store.
+    ``LadderResult.filed`` contains exactly the items returned by the host,
+    including when dedupe rejects candidates from anywhere in a batch.
     """
     if deficit < 0:
         raise ValueError(f"deficit must be >= 0, got {deficit}")
@@ -150,16 +150,17 @@ def run_ladder(
         while offset < len(items) and result.remaining > 0:
             take = items[offset : offset + result.remaining]
             offset += len(take)
-            filed = file_items(rung.name, take)
-            if filed < 0 or filed > len(take):
+            filed = list(file_items(rung.name, take))
+            if len(filed) > len(take):
                 raise ValueError(
-                    f"file_items for {rung.name!r} returned {filed}, expected 0..{len(take)}"
+                    f"file_items for {rung.name!r} returned {len(filed)} items, "
+                    f"expected at most {len(take)}"
                 )
-            rung_filed += filed
+            rung_filed += len(filed)
             if filed:
                 if result.produced_by is None:
                     result.produced_by = rung.name
-                result.filed.extend(take[:filed])
+                result.filed.extend(filed)
         result.rungs[rung.name] = RungResult(
             emitted=len(items), filed=rung_filed, note=getattr(out, "note", "")
         )
