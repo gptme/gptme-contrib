@@ -386,14 +386,80 @@ def _codex_output(out: Any) -> tuple[int | None, bool, str]:
         texts.append(block_text)
     text = "\n".join(texts)
     # A completed sibling says nothing about a command that is still running.
-    running = inner_running or text.lstrip().startswith("Script running")
+    running = inner_running or text.lstrip().startswith(("Script running", "Process running"))
     return code, running, text
+
+
+_CODEX_RUNNING_RE = re.compile(r"Script running with cell ID (\w+)")
+_CODEX_PROCESS_RE = re.compile(r"Process running with session ID (\w+)")
+_CODEX_CONTINUE_RE = re.compile(r"\b(write_stdin|wait)\s*\(\s*(\{[^{}]*\})", re.DOTALL)
+
+
+def _codex_running_keys(out: Any) -> set[tuple[str, str]]:
+    """Continuation handles, distinct for outer JS cells and inner processes."""
+    text = result_text(out) if isinstance(out, (str, list)) else json.dumps(out)
+    keys = {("cell", m.group(1)) for m in _CODEX_RUNNING_RE.finditer(text)}
+    keys.update(("process", m.group(1)) for m in _CODEX_PROCESS_RE.finditer(text))
+    blocks = out if isinstance(out, list) else [out]
+    for block in blocks:
+        if isinstance(block, dict) and "text" in block:
+            block = block["text"]
+        if isinstance(block, str):
+            try:
+                block = json.loads(block)
+            except ValueError:
+                continue
+        if isinstance(block, dict) and block.get("exit_code") is None:
+            sid = block.get("session_id")
+            if isinstance(sid, (int, str)) and not isinstance(sid, bool):
+                keys.add(("process", str(sid)))
+    return keys
+
+
+def _codex_continuation(name: str, text: str) -> tuple[str, str] | None:
+    """Read a direct poll, or one literal poll inside a JS exec cell.
+
+    Mixed cells cannot safely inherit a command's landing kinds: the result
+    blocks have no call ids connecting them to the individual JS statements.
+    """
+    try:
+        args = json.loads(text)
+    except ValueError:
+        args = None
+    if not isinstance(args, dict):
+        matches = list(_CODEX_CONTINUE_RE.finditer(text)) if name == "exec" else []
+        if len(matches) != 1 or _CODEX_CMD_RE.search(text):
+            return None
+        name = matches[0].group(1)
+        try:
+            args = json.loads(matches[0].group(2))
+        except ValueError:
+            # JS object literals commonly leave keys unquoted. Read only a
+            # literal handle, never evaluate the cell's source.
+            field = "session_id" if name == "write_stdin" else "cell_id"
+            handle = re.search(
+                rf"(?:\{{|,)\s*{field}\s*:\s*(\d+|\"[^\"\\]*\"|'[^'\\]*')\s*(?=,|\}})",
+                matches[0].group(2),
+            )
+            if not handle:
+                return None
+            args = {field: handle.group(1).strip("\"'")}
+    field, kind = ("session_id", "process") if name == "write_stdin" else ("cell_id", "cell")
+    sid = args.get(field) if name in ("write_stdin", "wait") else None
+    return (kind, str(sid)) if isinstance(sid, (int, str)) and not isinstance(sid, bool) else None
 
 
 class CodexExtractor(Extractor):
     """Codex rollouts: ``~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl``."""
 
     harness = "codex"
+
+    def __init__(self, session: str, agent: str = "", subagent: bool = False) -> None:
+        super().__init__(session, agent, subagent)
+        self._running: dict[
+            tuple[str, str], tuple[tuple[str, list[str], str | None, str | None], bool]
+        ] = {}
+        self._continued_failed: set[str] = set()
 
     def feed(self, rec: dict[str, Any]) -> list[AgentEvent]:
         rtype = rec.get("type")
@@ -434,6 +500,12 @@ class CodexExtractor(Extractor):
                     )
                 if workdir:
                     self._pending[call_id] = (*self._pending[call_id][:3], workdir)
+            continuation = _codex_continuation(name, text)
+            if call_id and continuation is not None and continuation in self._running:
+                pending, failed = self._running.pop(continuation)
+                self._pending[call_id] = pending
+                if failed:
+                    self._continued_failed.add(call_id)
             if name == "apply_patch":
                 m = _CODEX_PATCH_PATH_RE.search(text)
                 if m:
@@ -441,12 +513,17 @@ class CodexExtractor(Extractor):
             return [ev]
         if ptype in ("function_call_output", "custom_tool_call_output") and call_id:
             code, running, text = _codex_output(payload.get("output"))
+            failed = (code is not None and code != 0) or call_id in self._continued_failed
+            self._continued_failed.discard(call_id)
             if running:
-                # Yield expired with the command still going (slow hooks): its
-                # outcome is unknown here, so report no landing.
-                self._pending.pop(call_id, None)
+                # Transfer the original command/workdir to its continuation
+                # handle. A poll gets a new call id, not a new command.
+                suspended = self._pending.pop(call_id, None)
+                keys = _codex_running_keys(payload.get("output"))
+                if suspended and len(keys) == 1:
+                    self._running[keys.pop()] = (suspended, failed)
                 return []
-            return self._result(ts, call_id, code is not None and code != 0, text)
+            return self._result(ts, call_id, failed, text)
         return []
 
     @staticmethod

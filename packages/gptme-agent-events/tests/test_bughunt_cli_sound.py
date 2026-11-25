@@ -151,9 +151,9 @@ def test_r3_2_non_finite_agent_volume_does_not_crash_sound_loop(tmp_path, monkey
         ["sound", "--sounds-dir", str(media), "--agent-volume", "bob=nan", "-q"],
         input=_event_line(agent="bob") + _event_line(agent="alice"),
     )
-    # Either reject the option up front (usage error, exit 2) or survive the
-    # event; an uncaught ValueError traceback mid-stream is the defect.
-    assert not isinstance(result.exception, (ValueError, OverflowError)), repr(result.exception)
+    # Either reject the option up front (usage error, exit 2) or process the
+    # stream successfully. An unrelated captured exception is also a failure.
+    assert result.exit_code in (0, 2), repr(result.exception)
 
 
 def test_r3_2b_agent_volume_cannot_exceed_volume_ceiling(tmp_path, monkeypatch):

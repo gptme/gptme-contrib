@@ -321,3 +321,155 @@ def test_codex_relative_workdir_resolves_against_session_cwd(two_repos, tool):
     assert commit.kind == "commit"
     assert commit.detail.get("dir") == str(two_repos["wt"])
     assert commit.detail.get("repo") == "gptme/gptme-contrib"
+
+
+@pytest.mark.parametrize("wrapped", [False, True, "js_literal"])
+@pytest.mark.parametrize("exit_code", [0, 128])
+def test_codex_yielded_command_lands_only_after_continuation(two_repos, wrapped, exit_code):
+    ex = CodexExtractor("r")
+    ex.feed(codex("turn_context", {"cwd": str(two_repos["brain"])}))
+    ex.feed(exec_call("start", "git commit -m x", workdir=str(two_repos["wt"])))
+
+    running = codex(
+        "response_item",
+        {
+            "type": "custom_tool_call_output",
+            "call_id": "start",
+            "output": [json.dumps({"session_id": 7, "output": "running hooks"})],
+        },
+    )
+    assert landings(ex.feed(running)) == []
+    # The next turn's cwd must not replace the original command's workdir.
+    ex.feed(codex("turn_context", {"cwd": str(two_repos["brain"])}))
+    for call_id in ("poll1", "poll2"):
+        args = json.dumps({"session_id": 7, "chars": ""})
+        payload = {
+            "type": "function_call",
+            "name": "write_stdin",
+            "call_id": call_id,
+            "arguments": args,
+        }
+        if wrapped:
+            if wrapped == "js_literal":
+                args = '{session_id: 7, chars: ""}'
+            payload = {
+                "type": "custom_tool_call",
+                "name": "exec",
+                "call_id": call_id,
+                "input": f"text(JSON.stringify(await tools.write_stdin({args})));",
+            }
+        assert landings(ex.feed(codex("response_item", payload))) == []
+        if call_id == "poll1":
+            running["payload"]["call_id"] = call_id
+            assert landings(ex.feed(running)) == []
+    result = exec_output("poll2", exit_code, "[master 6528ea53] x\n")
+    events = ex.feed(result)
+    assert landings(events) == (["commit"] if exit_code == 0 else ["error"])
+    if exit_code == 0:
+        assert events[0].detail["sha"] == "6528ea53"
+        assert events[0].detail["dir"] == str(two_repos["wt"])
+        assert events[0].detail["repo"] == "gptme/gptme-contrib"
+    assert ex.feed(result) == []
+
+
+@pytest.mark.parametrize("outer_cell", [False, True])
+def test_codex_text_running_handle_preserves_pr_creation(outer_cell):
+    ex = CodexExtractor("r")
+    ex.feed(exec_call("start", "gh pr create --title x --body x"))
+    running = (
+        "Script running with cell ID 22" if outer_cell else "Process running with session ID 22"
+    )
+    assert (
+        ex.feed(
+            codex(
+                "response_item",
+                {
+                    "type": "custom_tool_call_output",
+                    "call_id": "start",
+                    "output": running,
+                },
+            )
+        )
+        == []
+    )
+    name = "wait" if outer_cell else "write_stdin"
+    args = {"cell_id" if outer_cell else "session_id": "22"}
+    ex.feed(
+        codex(
+            "response_item",
+            {
+                "type": "function_call",
+                "name": name,
+                "call_id": "poll",
+                "arguments": json.dumps(args),
+            },
+        )
+    )
+    (event,) = ex.feed(exec_output("poll", 0, "https://github.com/gptme/gptme/pull/123"))
+    assert event.kind == "pr_open"
+    assert event.detail["url"] == "https://github.com/gptme/gptme/pull/123"
+
+
+def test_codex_completed_sibling_failure_survives_continuation():
+    ex = CodexExtractor("r")
+    ex.feed(exec_call("start", "git commit -m x; git push"))
+    assert (
+        ex.feed(
+            codex(
+                "response_item",
+                {
+                    "type": "custom_tool_call_output",
+                    "call_id": "start",
+                    "output": [
+                        json.dumps({"exit_code": 128, "output": "failed commit"}),
+                        json.dumps({"session_id": 7, "output": "running push"}),
+                    ],
+                },
+            )
+        )
+        == []
+    )
+    ex.feed(
+        codex(
+            "response_item",
+            {
+                "type": "function_call",
+                "name": "write_stdin",
+                "call_id": "poll",
+                "arguments": json.dumps({"session_id": 7}),
+            },
+        )
+    )
+    assert landings(ex.feed(exec_output("poll", 0, "done"))) == ["error"]
+
+
+def test_codex_unknown_continuation_cannot_land_another_process():
+    ex = CodexExtractor("r")
+    ex.feed(exec_call("start", "git commit -m x"))
+    assert (
+        ex.feed(
+            codex(
+                "response_item",
+                {
+                    "type": "custom_tool_call_output",
+                    "call_id": "start",
+                    "output": [json.dumps({"session_id": 7, "output": "running"})],
+                },
+            )
+        )
+        == []
+    )
+    for sid in (8, 7):
+        ex.feed(
+            codex(
+                "response_item",
+                {
+                    "type": "function_call",
+                    "name": "write_stdin",
+                    "call_id": str(sid),
+                    "arguments": json.dumps({"session_id": sid}),
+                },
+            )
+        )
+        out = ex.feed(exec_output(str(sid), 0, "[master 6528ea53] x"))
+        assert landings(out) == ([] if sid == 8 else ["commit"])
