@@ -84,7 +84,16 @@ _COMMIT_FAILED_RE = re.compile(
     r"COMMIT OUTCOME UNCONFIRMED|nothing to commit|no changes added to commit"
     r"|pre-commit checks failed|hook failed|Aborting commit"
 )
-_PUSH_FAILED_RE = re.compile(r"error: failed to push")
+# A push that did not (fully) land: ref-level rejections end in
+# "error: failed to push"; transport/auth failures end in specific `fatal:`
+# lines instead. Bare `fatal:` is not matched, so another command's error
+# cannot mask a push.
+_PUSH_FAILED_RE = re.compile(
+    r"(?i)error: failed to push"
+    r"|fatal: (?:unable to access|could not read from remote|unable to connect"
+    r"|authentication failed|the remote end hung up)"
+    r"|remote: permission to \S+ denied"
+)
 _MUTATION_FAILED_RE = re.compile(
     r"(?i)\brejected\b|fatal:|error:|permission denied|could not read from remote|"
     r"failed to (?:push|create)|timed out"
@@ -2368,12 +2377,14 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                         if not _direct_commit_matched and not _COMMIT_FAILED_RE.search(result_str):
                             # A failed push is not evidence that the commit
                             # landed; only the commit's own diffstat still is.
+                            # A ref-update line is printed only for a ref that
+                            # was updated, so it stays evidence even when
+                            # another push in the same output failed.
                             push_ok = not _PUSH_FAILED_RE.search(result_str)
                             push_hash = None
-                            if push_ok:
-                                for push_match in _PUSH_REF_RE.finditer(result_str):
-                                    if _is_push_ref_update(push_match.group(4)):
-                                        push_hash = push_match.group(2)
+                            for push_match in _PUSH_REF_RE.finditer(result_str):
+                                if _is_push_ref_update(push_match.group(4)):
+                                    push_hash = push_match.group(2)
                             if (
                                 push_hash is not None
                                 or (push_ok and _COMMIT_PUSH_EVIDENCE_RE.search(result_str))
