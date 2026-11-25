@@ -131,6 +131,19 @@ def get_collection(client: ClientAPI, name: str, embedding_function=None) -> Col
         )
 
 
+def _is_tombstone(doc: Document) -> bool:
+    """True for the content-less marker Document.from_file yields for an empty file."""
+    return not doc.is_chunk and not (doc.content or "").strip()
+
+
+def _longest_suffix_prefix(left: str, right: str) -> str:
+    """Longest string that is both a suffix of ``left`` and a prefix of ``right``."""
+    for size in range(min(len(left), len(right)), 0, -1):
+        if left.endswith(right[:size]):
+            return right[:size]
+    return ""
+
+
 class Indexer:
     """Handles document indexing and embedding storage."""
 
@@ -1001,8 +1014,9 @@ class Indexer:
         for source in sources:
             self.delete_documents({"source": source})
 
-        # Process the documents
-        self.add_documents(documents)
+        # Empty files yield a content-less tombstone so their old chunks get
+        # deleted above; the tombstone itself is not a document to store.
+        self.add_documents([doc for doc in documents if not _is_tombstone(doc)])
 
         logger.info(f"Indexed {n_files} files from {directory}")
         return n_files
@@ -1533,18 +1547,24 @@ class Indexer:
         all_doc_contents = all_docs["documents"] or []
         all_metas = all_docs["metadatas"] or []
 
-        # Filter chunks belonging to this document
+        # Filter chunks belonging to this document. Match the "#chunk" separator
+        # too: a bare prefix test also claims any id that merely extends this one.
+        chunk_prefix = f"{base_doc_id}#chunk"
         chunks = []
         for i, doc_id in enumerate(all_ids):
-            if doc_id.startswith(base_doc_id):
+            if doc_id == base_doc_id or doc_id.startswith(chunk_prefix):
+                metadata = dict(all_metas[i] or {})
+                raw_index = metadata.get("chunk_index")
                 chunk = Document(
                     content=all_doc_contents[i],
-                    metadata=all_metas[i],  # type: ignore[arg-type]
+                    metadata=metadata,
                     doc_id=doc_id,
+                    chunk_index=raw_index if isinstance(raw_index, int) else None,
                 )
                 chunks.append(chunk)
 
-        # Sort chunks by index
+        # Sort chunks by index (stored in metadata; the collection does not
+        # round-trip the Document.chunk_index attribute).
         chunks.sort(key=lambda x: x.chunk_index or 0)
         return chunks
 
@@ -1561,8 +1581,7 @@ class Indexer:
         if not chunks:
             raise ValueError(f"No chunks found for document {doc_id}")
 
-        # Combine chunk contents
-        content = "\n".join(chunk.content for chunk in chunks)
+        content = self._merge_chunk_contents(chunks)
 
         # Use metadata from first chunk, removing chunk-specific fields
         # Create clean metadata without chunk-specific fields
@@ -1583,6 +1602,31 @@ class Indexer:
             source_path=chunks[0].source_path,
             last_modified=chunks[0].last_modified,
         )
+
+    def _merge_chunk_contents(self, chunks: list[Document]) -> str:
+        """Concatenate ordered chunks, dropping the token overlap between neighbours.
+
+        Each chunk records its token span (chunk_start/chunk_end). A chunk that
+        starts before the previous one ended repeats those tokens; the repeated
+        text is located by re-encoding the chunk and checked against both
+        neighbours before it is dropped.
+        """
+        content = chunks[0].content
+        prev_end = chunks[0].metadata.get("chunk_end")
+        for chunk in chunks[1:]:
+            text = chunk.content
+            start = chunk.metadata.get("chunk_start")
+            overlap = ""
+            if isinstance(prev_end, int) and isinstance(start, int) and prev_end > start:
+                tokens = self.processor.encoding.encode(text)
+                candidate = self.processor.encoding.decode(tokens[: prev_end - start])
+                if content.endswith(candidate) and text.startswith(candidate):
+                    overlap = candidate
+                else:
+                    overlap = _longest_suffix_prefix(content, text)
+            content += text[len(overlap) :]
+            prev_end = chunk.metadata.get("chunk_end")
+        return content
 
     def verify_document(
         self,
@@ -1728,23 +1772,27 @@ class Indexer:
         """Delete a document and all its chunks from the index.
 
         Args:
-            doc_id: Base document ID (without chunk suffix)
+            doc_id: Base document ID (without chunk suffix), or a source path
 
         Returns:
-            bool: True if deletion was successful
+            bool: True if anything was deleted, False if nothing matched or the
+            delete failed
         """
         try:
-            # First try to delete by exact ID
-            self.collection.delete(ids=[doc_id])
-            logger.debug(f"Deleted document: {doc_id}")
-
-            # Then delete any related chunks
-            try:
-                self.collection.delete(where={"source": doc_id})
-                logger.debug(f"Deleted related chunks for: {doc_id}")
-            except Exception as chunk_e:
-                logger.warning(f"Error deleting chunks for {doc_id}: {chunk_e}")
-
+            # Chunk ids are "<base_id>#chunk<i>-<start>"; chroma has no id-prefix
+            # filter, so list the ids and select the document's own.
+            chunk_prefix = f"{doc_id}#chunk"
+            all_ids = self.collection.get(include=[])["ids"] or []
+            ids = [i for i in all_ids if i == doc_id or i.startswith(chunk_prefix)]
+            # Callers may also pass a source path; keep deleting by source.
+            by_source = self.collection.get(where={"source": doc_id}, include=[])["ids"] or []
+            ids = sorted(set(ids) | set(by_source))
+            if not ids:
+                logger.debug(f"No document or chunks found for: {doc_id}")
+                return False
+            with self._index_writer_lock():
+                self.collection.delete(ids=ids)
+            logger.debug(f"Deleted {len(ids)} entries for: {doc_id}")
             return True
         except Exception as e:
             logger.error(f"Error deleting document {doc_id}: {e}")
@@ -1890,10 +1938,14 @@ class Indexer:
             Number of documents indexed
         """
         documents = self.collect_documents(path)
-        if documents:
-            self.add_documents(documents)
-            return len(documents)
-        return 0
+        stored = [doc for doc in documents if not _is_tombstone(doc)]
+        for doc in documents:
+            if _is_tombstone(doc):
+                # The file was emptied: drop whatever was indexed for it.
+                self.delete_documents({"source": doc.metadata["source"]})
+        if stored:
+            self.add_documents(stored)
+        return len(stored)
 
     def get_all_documents(self) -> list[Document]:
         """Get all documents from the index.
