@@ -555,7 +555,12 @@ def assess(
 
 
 def _gh(args: list[str]) -> subprocess.CompletedProcess:
-    return subprocess.run(["gh", *args], capture_output=True, text=True, timeout=30)
+    # A hung network (TimeoutExpired) or missing gh (FileNotFoundError) becomes a
+    # failed result, so callers' returncode checks and fallbacks still run.
+    try:
+        return subprocess.run(["gh", *args], capture_output=True, text=True, timeout=30)
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return subprocess.CompletedProcess(["gh", *args], 1, "", str(e))
 
 
 def find_open_issue(cfg: Config) -> dict | None:
@@ -811,8 +816,18 @@ def escalate(cfg: Config, status: dict, dry_run: bool, now: datetime) -> None:
                     if dry_run:
                         print(f"[dry-run] would REOPEN issue #{reopen['number']}")
                         return
+                    # --comment posts the details before reopening and fails as a
+                    # whole, so the issue is never left reopened without them.
                     res = _gh(
-                        ["issue", "reopen", str(reopen["number"]), "--repo", cfg.repo]
+                        [
+                            "issue",
+                            "reopen",
+                            str(reopen["number"]),
+                            "--repo",
+                            cfg.repo,
+                            "--comment",
+                            _reopen_body(cfg, status),
+                        ]
                     )
                     if res.returncode != 0:
                         # Don't report success, and don't let a failed reopen
@@ -826,24 +841,6 @@ def escalate(cfg: Config, status: dict, dry_run: bool, now: datetime) -> None:
                         )
                     else:
                         reopened = True
-                        res = _gh(
-                            [
-                                "issue",
-                                "comment",
-                                str(reopen["number"]),
-                                "--repo",
-                                cfg.repo,
-                                "--body",
-                                _reopen_body(cfg, status),
-                            ]
-                        )
-                        if res.returncode != 0:
-                            print(
-                                f"[self-outage-check] reopened #{reopen['number']} "
-                                f"but the status comment failed (rc={res.returncode}): "
-                                f"{(res.stderr or res.stdout).strip()}",
-                                file=sys.stderr,
-                            )
                         print(
                             f"Reopened issue #{reopen['number']} (outage still ongoing)."
                         )

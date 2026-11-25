@@ -248,6 +248,102 @@ def test_failed_reopen_falls_back_to_create_and_does_not_claim_success(
     assert not any(a[:2] == ["issue", "comment"] for a in calls)
 
 
+def test_reopen_timeout_falls_back_to_create_and_notifies(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    # A hung network makes `gh issue reopen` raise TimeoutExpired (and a missing
+    # gh raises FileNotFoundError). That must not escape escalate(): the fallback
+    # create and the supplementary fan-out still have to run.
+    calls: list[list[str]] = []
+    notified: list[bool] = []
+    closed_at = (NOW - timedelta(hours=5)).isoformat()
+    title = cfg_for(tmp_path).issue_title
+
+    def fake_run(cmd: list[str], **kwargs):
+        args = cmd[1:]
+        calls.append(args)
+        if args[:2] == ["issue", "reopen"]:
+            raise soc.subprocess.TimeoutExpired(cmd, kwargs.get("timeout", 30))
+        stdout = ""
+        if args[:2] == ["issue", "list"]:
+            stdout = (
+                json.dumps([{"number": 97, "title": title, "closedAt": closed_at}])
+                if "closed" in args
+                else "[]"
+            )
+        return soc.subprocess.CompletedProcess(cmd, 0, stdout, "")
+
+    monkeypatch.setattr(soc.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        soc, "_supplementary_notify", lambda cfg, status: notified.append(True)
+    )
+    cfg = cfg_for(tmp_path)
+    write_records(
+        tmp_path,
+        [rec(40, "productive")]
+        + [rec(h, "failed", "auth_failure") for h in (1, 2, 3, 4)],
+    )
+    status = assess(tmp_path)
+    soc.escalate(cfg, status, dry_run=False, now=NOW)
+
+    out = capsys.readouterr()
+    assert "Reopened" not in out.out
+    assert "reopen" in out.err.lower()
+    assert any(a[:2] == ["issue", "create"] for a in calls), "must still surface"
+    assert notified, "supplementary channels must still fire"
+
+
+def test_reopen_carries_details_atomically(tmp_path: Path, monkeypatch) -> None:
+    # The outage details must ride on the reopen itself (`gh issue reopen
+    # --comment` posts the comment before reopening and fails as a whole), not a
+    # separate follow-up comment: a failed follow-up would leave the issue open
+    # with no details, and the reopen's updatedAt bump makes the next run treat
+    # it as fresh, so the details would never be posted.
+    calls: list[list[str]] = []
+    closed_at = (NOW - timedelta(hours=5)).isoformat()
+
+    def fake_gh(args: list[str]):
+        calls.append(args)
+
+        class R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        if args[:2] == ["issue", "list"]:
+            if "closed" in args:
+                R.stdout = json.dumps(
+                    [
+                        {
+                            "number": 97,
+                            "title": cfg_for(tmp_path).issue_title,
+                            "closedAt": closed_at,
+                        }
+                    ]
+                )
+            else:
+                R.stdout = "[]"
+        return R()
+
+    monkeypatch.setattr(soc, "_gh", fake_gh)
+    monkeypatch.setattr(soc, "_supplementary_notify", lambda cfg, status: None)
+    cfg = cfg_for(tmp_path)
+    write_records(
+        tmp_path,
+        [rec(40, "productive")]
+        + [rec(h, "failed", "auth_failure") for h in (1, 2, 3, 4)],
+    )
+    status = assess(tmp_path)
+    soc.escalate(cfg, status, dry_run=False, now=NOW)
+
+    reopens = [a for a in calls if a[:2] == ["issue", "reopen"]]
+    assert len(reopens) == 1
+    assert "--comment" in reopens[0]
+    body = reopens[0][reopens[0].index("--comment") + 1]
+    assert "Reopening" in body and "auth-outage sessions" in body
+    assert not any(a[:2] == ["issue", "comment"] for a in calls)
+
+
 def test_outage_creates_new_when_closed_issue_predates_last_productive(
     tmp_path: Path, monkeypatch
 ) -> None:
