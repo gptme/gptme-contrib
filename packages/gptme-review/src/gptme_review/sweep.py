@@ -444,10 +444,10 @@ def _single_pass_is_complete_evidence(marker: Mapping[str, object]) -> bool:
 
     Mirrors the merge gate's ``_consensus_shortfall`` for one pass: the pass and
     every one of its jobs answered, at the requested agreement threshold, is
-    evidence (Erik, 2026-11-24), so a second pass would only be spent to satisfy
-    a count. A record that is missing the job or agreement fields cannot be read
-    as complete. Outage coverage is published as "not merge evidence" and is
-    excluded even though its counts are complete.
+    evidence (gptme/gptme-contrib#2457), so a second pass would only be spent to
+    satisfy a count. A record that is missing the job or agreement fields cannot
+    be read as complete. Outage coverage is published as "not merge evidence" and
+    is excluded even though its counts are complete.
     """
     consensus = marker.get("consensus")
     if marker.get("outage_single_pass") or not isinstance(consensus, dict):
