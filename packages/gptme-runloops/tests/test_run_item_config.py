@@ -350,4 +350,5 @@ def test_cli_dry_run_rejects_bad_runner_env_like_a_real_run(tmp_path) -> None:
     assert result.exit_code == 78, result.output
     assert result.exception is None or isinstance(result.exception, SystemExit)
     assert "runner_env.mode" in result.output
-    assert "{" not in result.output  # no plan JSON for an invalid contract
+    # No plan JSON for an invalid contract (a plan always starts with a brace).
+    assert not any(line.lstrip().startswith("{") for line in result.output.splitlines())

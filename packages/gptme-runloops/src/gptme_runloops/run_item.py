@@ -3573,9 +3573,12 @@ def run_work_file(
 
     try:
         runner_base_env = _resolve_runner_base_env(config, backend)
-    except RunnerEnvContractError as exc:
+    except ValueError as exc:
         # Fail closed before claiming or locking: a misdeclared contract must
-        # never silently degrade to ambient inheritance.
+        # never silently degrade to ambient inheritance. The resolver wraps
+        # its own failures in :class:`RunnerEnvContractError` (a ``ValueError``
+        # subclass); catching the base class keeps every resolution failure on
+        # the 78 path instead of letting an unwrapped one escape as a traceback.
         _log(f"ERROR: {exc}")
         return 78
 

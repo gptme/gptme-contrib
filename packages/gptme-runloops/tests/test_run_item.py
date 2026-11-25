@@ -912,6 +912,34 @@ def test_run_work_file_claim_denied_skips_and_exits_zero(tmp_path) -> None:
     assert skipped[0]["note"] == "coordination_claim_denied:gptme/gptme-contrib#1234"
 
 
+def test_run_work_file_unwrapped_runner_env_valueerror_exits_78(
+    tmp_path, monkeypatch
+) -> None:
+    """A plain ``ValueError`` from the resolver stays fail-closed.
+
+    The resolver wraps its own failures in ``RunnerEnvContractError`` (a
+    ``ValueError`` subclass), but the catch site must not narrow to the
+    subclass: an unwrapped resolution failure has to exit 78 before locking
+    rather than escape as a traceback (gptme-contrib#2341 consensus review).
+    """
+    from gptme_runloops import run_item
+
+    item = make_item()
+    work_file = _write_work_file(tmp_path, item)
+    config = make_config(tmp_path)
+
+    def _raise(_config, _backend):
+        raise ValueError("runner_env.mode is unknown")
+
+    monkeypatch.setattr(run_item, "_resolve_runner_base_env", _raise)
+    run_cmd = FakeRunCmd()
+    rc = run_work_file(
+        work_file, config, make_hooks(run_cmd=run_cmd), backend="claude-code"
+    )
+    assert rc == 78
+    assert run_cmd.find("/fake/run.sh") == []
+
+
 def test_run_work_file_lock_busy_exits_zero(tmp_path) -> None:
     import fcntl
 
