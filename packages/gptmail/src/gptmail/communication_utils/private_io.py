@@ -9,6 +9,7 @@ them. These helpers create files as 0600 and tighten files that already exist.
 from __future__ import annotations
 
 import os
+import uuid
 from pathlib import Path
 
 PRIVATE_FILE_MODE = 0o600
@@ -26,7 +27,18 @@ def open_private(path: str | Path, flags: int = os.O_WRONLY | os.O_CREAT | os.O_
 
 
 def write_private_text(path: str | Path, text: str) -> None:
-    """Write ``text`` to ``path`` (UTF-8) with owner-only permissions."""
-    fd = open_private(path)
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write(text)
+    """Atomically write ``text`` to ``path`` (UTF-8) with owner-only permissions.
+
+    Readers never see a partial file, and an interrupted write leaves any
+    existing file as it was.
+    """
+    path = Path(path)
+    # Short, non-``.md`` name: invisible to message globs, no length overflow.
+    temp = path.with_name(f".{uuid.uuid4().hex}.tmp")
+    try:
+        with os.fdopen(open_private(temp), "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(temp, path)
+    except BaseException:
+        temp.unlink(missing_ok=True)
+        raise

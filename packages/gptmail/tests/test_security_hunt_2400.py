@@ -9,6 +9,8 @@ import fcntl
 import os
 import stat
 import sys
+import threading
+import time
 import types
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,6 +20,7 @@ from click.testing import CliRunner
 
 import gptmail.agent_cli as agent_cli
 import gptmail.cli as gptmail_cli
+from gptmail.communication_utils.private_io import write_private_text
 from gptmail.communication_utils.state.locks import FileLock, LockError
 from gptmail.lib import AgentEmail, authentication_failed
 from gptmail.transport.agent import AgentTransport
@@ -424,3 +427,231 @@ def test_receive_identical_retry_preserves_stored_message(mail: AgentEmail, fold
 )
 def test_env_quoted_escapes_are_not_truncated(line: str, expected: str) -> None:
     assert gptmail_cli._parse_env_line(line) == ("KEY", expected)
+
+
+# Cross-folder overlap with copies stored before a header was preserved.
+
+
+def _sync_one(mail: AgentEmail, root: Path, folder: str, message_id: str, extra: str) -> None:
+    maildir = root / f"maildir-{folder}"
+    (maildir / "new").mkdir(parents=True)
+    _maildir_msg(maildir / "new" / "m", message_id=message_id, body="genuine", extra=extra)
+    mail.external_maildir_folders[folder] = maildir
+    mail.sync_from_maildir(folder)
+
+
+def _drop_headers(path: Path, *names: str) -> str:
+    """Rewrite a stored message as an older version would have synced it."""
+    head, _, body = path.read_text().partition("\n\n")
+    kept = [line for line in head.split("\n") if line.split(":")[0] not in names]
+    old = "\n".join(kept) + "\n\n" + body
+    path.write_text(old)
+    return old
+
+
+LATE_HEADERS = (
+    "Authentication-Results: mx.example; spf=pass; dmarc=pass\n"
+    "Delivered-To: bob@example.com\n"
+    "Reply-To: friend@example.com\n"
+)
+LATE_NAMES = ("Authentication-Results", "Delivered-To", "Reply-To")
+
+
+def test_inbox_sync_accepts_overlap_with_legacy_archive_copy(
+    mail: AgentEmail, tmp_path: Path
+) -> None:
+    message_id = "<legacy@example.com>"
+    filename = mail._format_filename(message_id)
+    _sync_one(mail, tmp_path, "archive", message_id, LATE_HEADERS)
+    legacy = _drop_headers(mail.email_dir / "archive" / filename, *LATE_NAMES)
+
+    _sync_one(mail, tmp_path, "inbox", message_id, LATE_HEADERS)
+
+    inbox = mail.email_dir / "inbox" / filename
+    assert "dmarc=pass" in inbox.read_text()
+    assert [e.message_id for e in mail.get_unreplied_emails()] == [message_id]
+    assert (mail.email_dir / "archive" / filename).read_text() == legacy
+
+    # Archiving keeps the richer copy instead of refusing as a conflict.
+    richer = inbox.read_text()
+    mail.archive(message_id)
+    assert not inbox.exists()
+    assert (mail.email_dir / "archive" / filename).read_text() == richer
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        ("dmarc=pass", "dmarc=fail"),  # a late header both copies have must match
+        ("Subject: Hello genuine", "Subject: Changed"),
+        ("\n\ngenuine", "\n\nIMPOSTOR"),
+    ],
+)
+def test_legacy_tolerance_still_rejects_conflicts(
+    mail: AgentEmail, tmp_path: Path, old: str, new: str
+) -> None:
+    message_id = "<conflict@example.com>"
+    filename = mail._format_filename(message_id)
+    _sync_one(mail, tmp_path, "archive", message_id, LATE_HEADERS)
+    archived = mail.email_dir / "archive" / filename
+    content = archived.read_text()
+    assert old in content
+    archived.write_text(content.replace(old, new))
+
+    _sync_one(mail, tmp_path, "inbox", message_id, LATE_HEADERS)
+
+    assert not (mail.email_dir / "inbox" / filename).exists()
+
+
+def test_header_missing_from_incoming_copy_is_still_a_conflict(
+    mail: AgentEmail, tmp_path: Path
+) -> None:
+    message_id = "<stripped@example.com>"
+    _sync_one(mail, tmp_path, "archive", message_id, LATE_HEADERS)
+    _sync_one(mail, tmp_path, "inbox", message_id, "")
+    assert not (mail.email_dir / "inbox" / mail._format_filename(message_id)).exists()
+
+
+def test_legacy_tolerance_never_drops_lines_without_a_header_separator(
+    mail: AgentEmail,
+) -> None:
+    message_id = "<crlf@example.com>"
+    filename = mail._format_filename(message_id)
+    archived = mail.email_dir / "archive" / filename
+    original = f"Message-ID: {message_id}\r\n\r\nbody\r\n"
+    archived.write_bytes(original.encode())
+    (mail.email_dir / "inbox" / filename).write_bytes((original + "\nCc: injected").encode())
+
+    with pytest.raises(ValueError, match="refusing to overwrite"):
+        mail.archive(message_id)
+    assert archived.read_bytes() == original.encode()
+
+
+# Several Authentication-Results instances from the receiving MTA.
+
+
+@pytest.mark.parametrize(
+    ("values", "failed"),
+    [
+        (("mx.example; spf=pass", "mx.example; dmarc=fail"), True),
+        (("mx.example 1; spf=pass", "MX.Example; dmarc=fail"), True),
+        (("mx.example; dkim=pass", "mx.example; spf=softfail"), True),
+        (("mx.example; dmarc=pass", "mx.example; spf=fail"), False),
+        # A lower instance may be sender-supplied: it cannot excuse a failure.
+        (("mx.example; spf=fail", "mx.example; dmarc=pass"), True),
+        # Another authserv-id is not the receiving MTA's verdict.
+        (("mx.example; spf=pass", "relay.other; dmarc=fail"), False),
+        # Some receivers omit the authserv-id.
+        (("spf=fail smtp.mailfrom=x; dkim=none",), True),
+        (("spf=pass smtp.mailfrom=x", "dmarc=fail header.from=x"), True),
+        ((), False),
+    ],
+)
+def test_authentication_failed_across_instances(values: tuple[str, ...], failed: bool) -> None:
+    assert authentication_failed(*values) is failed
+
+
+@pytest.mark.parametrize("ingest", ["sync", "receive", "import"])
+def test_later_receiver_dmarc_failure_is_not_lost(
+    mail: AgentEmail, tmp_path: Path, ingest: str
+) -> None:
+    source = tmp_path / "multi-maildir"
+    (source / "new").mkdir(parents=True)
+    raw = source / "new" / "forged"
+    _maildir_msg(
+        raw,
+        message_id="<multi@example.com>",
+        body="forged",
+        extra=(
+            "Authentication-Results: mx.example; spf=pass\n"
+            "Authentication-Results: relay.other; dmarc=pass\n"
+            "Authentication-Results: mx.example; dmarc=fail header.from=example.com\n"
+        ),
+    )
+    if ingest == "sync":
+        mail.external_maildir_folders["inbox"] = source
+        mail.sync_from_maildir("inbox")
+        stored = (
+            mail.email_dir / "inbox" / mail._format_filename("<multi@example.com>")
+        ).read_text()
+        assert stored.count("Authentication-Results:") == 2
+        assert "relay.other" not in stored
+    elif ingest == "receive":
+        mail.receive(raw.read_text())
+    else:
+        assert mail.import_from_maildir(source, "inbox")["success"] == 1
+    assert len(list((mail.email_dir / "inbox").glob("*.md"))) == 1
+    assert mail.get_unreplied_emails() == []
+
+
+# Message-ID check and publication are one step.
+
+
+def test_concurrent_receive_cannot_substitute_content(
+    mail: AgentEmail, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def slow_write(path: Path, text: str) -> None:
+        time.sleep(0.3)  # widen the window between the check and publication
+        write_private_text(path, text)
+
+    monkeypatch.setattr("gptmail.lib.write_private_text", slow_write)
+    barrier = threading.Barrier(2)
+    accepted: list[str] = []
+    refused: list[str] = []
+
+    def deliver(body: str) -> None:
+        barrier.wait()
+        try:
+            mail.receive(f"Message-ID: <race@example.com>\nSubject: x\n\n{body}\n")
+            accepted.append(body)
+        except ValueError:
+            refused.append(body)
+
+    threads = [threading.Thread(target=deliver, args=(body,)) for body in ("one", "two")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert len(accepted) == 1 and len(refused) == 1
+    stored = mail.email_dir / "inbox" / mail._format_filename("<race@example.com>")
+    assert stored.read_text().endswith(f"\n\n{accepted[0]}\n")
+
+
+@pytest.mark.parametrize("delivered_to", ["inbox", "archive"])
+def test_sync_rechecks_store_before_publishing(
+    mail: AgentEmail, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, delivered_to: str
+) -> None:
+    message_id = "<midsync@example.com>"
+    filename = mail._format_filename(message_id)
+    first = f"Message-ID: {message_id}\nSubject: first\n\nFIRST\n"
+
+    def deliver_mid_sync(*args: object) -> bool:
+        # Runs after the sync preload and before publication.
+        mail.receive(first)
+        if delivered_to != "inbox":
+            mail.archive(message_id)
+        return False
+
+    monkeypatch.setattr(mail, "_is_duplicate_message", deliver_mid_sync)
+    _sync_one(mail, tmp_path, "inbox", message_id, "")
+
+    assert (mail.email_dir / delivered_to / filename).read_text() == first
+    if delivered_to != "inbox":
+        assert not (mail.email_dir / "inbox" / filename).exists()
+
+
+def test_interrupted_private_write_leaves_existing_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "message.md"
+    write_private_text(target, "ORIGINAL")
+
+    def interrupted(*args: object) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(os, "replace", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        write_private_text(target, "PARTIAL")
+    assert target.read_text() == "ORIGINAL"
+    assert list(tmp_path.iterdir()) == [target]
