@@ -84,6 +84,28 @@ def test_date_match_terms_preserve_source_text(tmp_path, nested):
     assert parsed["patterns"] == ["2026-08-05"]
 
 
+@pytest.mark.parametrize(
+    "frontmatter",
+    [
+        "base: &base\n  keywords: [3.10]\nmatch:\n  <<: *base\n",
+        "terms: &terms [3.10]\nmatch:\n  keywords: *terms\n",
+        "match:\n  keywords: [old]\n  keywords: [3.10]\n",
+        "match:\n  keywords: [old]\nmatch:\n  keywords: [3.10]\n",
+        "match:\n  keywords: 3.10\n  keywords: [3.10]\n",
+    ],
+)
+def test_source_text_survives_merge_alias_and_duplicate_keys(tmp_path, frontmatter):
+    pytest.importorskip("yaml")  # beyond the fallback's YAML subset
+    assert _parse(tmp_path, frontmatter)["keywords"] == ["3.10"]
+
+
+def test_unrelated_fields_keep_yaml_types():
+    yaml = pytest.importorskip("yaml")
+    frontmatter = "metadata:\n  keywords: 3.10\n  patterns: [0x1F]\n"
+    fm, _ = matcher.extract_frontmatter(f"---\n{frontmatter}---\n")
+    assert fm == yaml.safe_load(frontmatter)
+
+
 def test_scan_invalidates_pre_normalization_disk_cache(tmp_path, monkeypatch):
     monkeypatch.setenv("GPTME_LESSON_SCAN_CACHE", str(tmp_path / "cache"))
     lessons_dir = tmp_path / "lessons"

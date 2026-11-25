@@ -480,29 +480,41 @@ def extract_frontmatter(content: str) -> tuple[dict[str, Any], str]:
         import yaml
 
         class MatchTermLoader(yaml.SafeLoader):
-            def construct_mapping(self, node, deep=False):
-                mapping = super().construct_mapping(node, deep=deep)
+            """Keep numeric and date match terms as written.
 
-                # Keep numeric and date match terms as written, not YAML
-                # 1.1's coerced numbers/dates. Other fields and types retain
-                # SafeLoader semantics (including boolean/null exclusion).
-                def term(item):
-                    if isinstance(item, yaml.ScalarNode) and item.tag in {
-                        "tag:yaml.org,2002:int",
-                        "tag:yaml.org,2002:float",
-                        "tag:yaml.org,2002:timestamp",
-                    }:
-                        return item.value
-                    return self.construct_object(item, deep=True)
+            YAML 1.1 reads ``3.10`` as the float 3.1. Only the root and
+            ``match`` mappings, where match terms are read from, are adjusted;
+            every other field keeps SafeLoader semantics.
+            """
 
-                for key, value in node.value:
-                    if key.value in {"keywords", "patterns"}:
-                        mapping[key.value] = (
-                            [term(item) for item in value.value]
-                            if isinstance(value, yaml.SequenceNode)
-                            else term(value)
-                        )
-                return mapping
+            def construct_document(self, node):
+                document = super().construct_document(node)
+                if isinstance(document, dict):
+                    self._keep_term_text(node, document)
+                    if isinstance(document.get("match"), dict):
+                        written = {key.value: value for key, value in node.value}
+                        self._keep_term_text(written["match"], document["match"])
+                return document
+
+            @staticmethod
+            def _keep_term_text(node, mapping):
+                source_tags = {
+                    "tag:yaml.org,2002:int",
+                    "tag:yaml.org,2002:float",
+                    "tag:yaml.org,2002:timestamp",
+                }
+                # Construction has already flattened merge keys into
+                # ``node.value``; as in the mapping, the last duplicate wins.
+                written = {key.value: value for key, value in node.value}
+                for field in ("keywords", "patterns"):
+                    value = written.get(field)
+                    if isinstance(value, yaml.SequenceNode):
+                        mapping[field] = [
+                            item.value if item.tag in source_tags else parsed
+                            for item, parsed in zip(value.value, mapping[field])
+                        ]
+                    elif value is not None and value.tag in source_tags:
+                        mapping[field] = value.value
 
         fm_yaml = yaml.load(fm_str, Loader=MatchTermLoader)
         return (fm_yaml if isinstance(fm_yaml, dict) else {}), body
