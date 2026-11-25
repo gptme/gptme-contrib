@@ -2,6 +2,7 @@
 
 import fcntl
 import os
+import shutil
 import subprocess
 import tempfile
 import textwrap
@@ -3114,6 +3115,10 @@ def test_new_gitlink_with_unresolvable_default_branch_names_the_real_gap(
     != 0,
     reason="fuser not installed",
 )
+@pytest.mark.skipif(
+    not Path("/proc/self/stat").exists(),
+    reason="descendant filtering needs Linux /proc",
+)
 def test_lock_holder_diagnosis_skips_waiters_own_subshells(tmp_path: Path):
     """#1771: subshells that inherit the waiter's lock fd are not holders."""
     lockfile = tmp_path / "commit.lock"
@@ -3147,3 +3152,35 @@ def test_lock_holder_diagnosis_skips_waiters_own_subshells(tmp_path: Path):
     holders = out.split("holders=", 1)[1].split()
     assert holders == [str(other.pid)]
     assert own not in holders
+
+
+_UNSHARE_PID = ["unshare", "--user", "--map-root-user", "--pid", "--fork"]
+
+
+@pytest.mark.skipif(
+    shutil.which("unshare") is None
+    or subprocess.run(
+        [*_UNSHARE_PID, "--mount-proc", "true"], capture_output=True
+    ).returncode
+    != 0,
+    reason="unprivileged PID namespaces unavailable",
+)
+def test_lock_holder_diagnosis_recognizes_waiter_running_as_pid_1():
+    """A container entrypoint is PID 1: it and its children are still "self"."""
+    harness = textwrap.dedent(
+        f"""
+        eval "$(sed -n '/^_pid_descends_from_self()/,/^}}/p' {SAFE_COMMIT})"
+        echo "pid=$$"
+        sleep 30 >/dev/null 2>&1 &
+        _pid_descends_from_self "$$" && echo self=yes
+        _pid_descends_from_self "$!" && echo child=yes
+        kill $!
+        """
+    )
+    out = subprocess.run(
+        [*_UNSHARE_PID, "--mount-proc", "bash", "-c", harness],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    ).stdout
+    assert out.split() == ["pid=1", "self=yes", "child=yes"]

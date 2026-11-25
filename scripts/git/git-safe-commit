@@ -1141,8 +1141,10 @@ resolve_pre_commit_hook() {
 # inherit the lock fd, so fuser lists them beside the real holder (#1771).
 _pid_descends_from_self() {
     local pid="$1" stat rest depth=0
-    while [ -n "$pid" ] && [ "$pid" -gt 1 ] && [ "$depth" -lt 64 ]; do
+    while [ -n "$pid" ] && [ "$depth" -lt 64 ]; do
+        # Match before the init cutoff: the waiter itself may be PID 1.
         [ "$pid" = "$$" ] && return 0
+        [ "$pid" -gt 1 ] || return 1
         stat="$(cat "/proc/$pid/stat" 2>/dev/null)" || return 1
         rest="${stat##*) }"   # comm may contain spaces; ppid is field 2 after it
         pid="$(printf '%s' "$rest" | cut -d' ' -f2)"
