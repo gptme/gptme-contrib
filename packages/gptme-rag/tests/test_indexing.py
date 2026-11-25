@@ -1537,7 +1537,25 @@ def test_search_path_prefilter_pages_metadata(tmp_path, monkeypatch, count, filt
     assert offsets == ([0] if count < 1000 else [0, 1000])
 
 
-def test_non_git_gitignore_fallback_honours_dir_and_anchored_patterns(indexer, tmp_path):
+@pytest.fixture
+def isolated_gitignore_files(tmp_path, monkeypatch):
+    """Use real test-owned ignore files, but never read host ignore rules."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    read_text = Path.read_text
+
+    def read_test_ignore(path, *args, **kwargs):
+        if path.name == ".gitignore" and not path.is_relative_to(tmp_path):
+            raise FileNotFoundError(path)
+        return read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_test_ignore)
+
+
+def test_non_git_gitignore_fallback_honours_dir_and_anchored_patterns(
+    indexer, tmp_path, isolated_gitignore_files
+):
     """#2356 R6: `dir/` and `/x` patterns apply relative to the .gitignore's directory."""
     root = tmp_path / "docs"
     (root / "build").mkdir(parents=True)
@@ -1556,7 +1574,9 @@ def test_non_git_gitignore_fallback_honours_dir_and_anchored_patterns(indexer, t
     assert ignored == {"top.md", "build/a.md", "sub/build/b.md"}
 
 
-def test_non_git_gitignore_from_a_parent_applies_relative_to_that_parent(indexer, tmp_path):
+def test_non_git_gitignore_from_a_parent_applies_relative_to_that_parent(
+    indexer, tmp_path, isolated_gitignore_files
+):
     (tmp_path / ".gitignore").write_text("/docs/private/\n")
     root = tmp_path / "docs"
     (root / "private").mkdir(parents=True)
