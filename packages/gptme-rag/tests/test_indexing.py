@@ -1586,3 +1586,24 @@ def test_non_git_gitignore_from_a_parent_applies_relative_to_that_parent(
     specs = indexer._load_gitignore(root)
     assert indexer._is_ignored(root / "private" / "x.md", specs)
     assert not indexer._is_ignored(root / "public.md", specs)
+
+
+@pytest.mark.parametrize(
+    ("rules", "ignored"),
+    [
+        pytest.param("*\n!sub/keep.md\n", True, id="excluded-parent"),
+        pytest.param("*\n!sub/\n!sub/keep.md\n", False, id="reincluded-parent"),
+    ],
+)
+def test_non_git_gitignore_negation_cannot_reinclude_under_excluded_directory(
+    tmp_path, isolated_gitignore_files, rules, ignored
+):
+    indexer = object.__new__(Indexer)  # Ignore matching needs no database or embeddings.
+    root = tmp_path / "docs"
+    (root / "sub").mkdir(parents=True)
+    (root / ".gitignore").write_text(rules)
+    file_path = root / "sub" / "keep.md"
+    file_path.write_text("content")
+
+    specs = indexer._load_gitignore(root)
+    assert indexer._is_ignored(file_path, specs) is ignored

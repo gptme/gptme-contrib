@@ -1080,6 +1080,17 @@ class Indexer:
                 rel_path = path.relative_to(base).as_posix()
             except ValueError:
                 continue
+            # Git cannot re-include a file while its parent directory is excluded.
+            # We enumerate files without pruning directories, so check their prefixes.
+            parts = rel_path.split("/")
+            for depth in range(1, len(parts)):
+                parent = "/".join(parts[:depth]) + "/"
+                # A directory's last matching rule wins, including `!dir/`.
+                for pattern in reversed(spec.patterns):
+                    if pattern.match_file(parent):
+                        if pattern.include:
+                            return True
+                        break
             if spec.match_file(rel_path):
                 return True
         return False
