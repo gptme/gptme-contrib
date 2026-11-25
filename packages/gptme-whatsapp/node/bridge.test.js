@@ -1,41 +1,60 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { readFileSync, mkdtempSync, mkdirSync, appendFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import {
+    readFileSync, mkdtempSync, mkdirSync, appendFileSync, writeFileSync, existsSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import vm from 'node:vm';
 import { gptmeLogsDir, runWithReply } from './gptme-log.js';
+import { createKeyedQueue } from './serial-queue.js';
 
 // Exercise the actual bridge functions without installing Chromium or contacting
-// WhatsApp. Only imports are replaced; callGptme/spawnAndCapture run unchanged.
-function bridge(env = {}) {
+// WhatsApp. Only imports and `process` are replaced; the message handler,
+// callGptme and spawnAndCapture run unchanged.
+function bridge(env = {}, overrides = {}) {
     const logs = mkdtempSync(join(tmpdir(), 'whatsapp-bridge-'));
     const environment = { HOME: logs, GPTME_AGENT: 'test', GPTME_LOGS_HOME: logs, ...env };
     const children = [];
     const timers = new Set();
+    const handlers = {};
+    const signals = {};
+    const sent = [];
     const source = readFileSync(new URL('./index.js', import.meta.url), 'utf8')
         .replace(/^import .*;\n/gm, '');
     class Client {
-        on() {}
+        on(event, handler) { handlers[event] = handler; }
         initialize() {}
+        async destroy() {}
     }
     const context = vm.createContext({
         pkg: { Client, LocalAuth: class {} },
         qrcode: {},
         console: { log() {}, error() {} },
-        process: { env: environment, on() {} },
+        process: {
+            env: environment,
+            platform: 'linux',
+            on(signal, handler) { signals[signal] = handler; },
+            exit() {},
+            kill(pid, signal) { children.find((c) => c.pid === -pid).signal = signal; },
+        },
         existsSync: () => true,
+        createKeyedQueue,
         gptmeLogsDir: (env, cwd) => gptmeLogsDir(env, cwd),
         runWithReply: (name, generate, dir = gptmeLogsDir(environment)) => runWithReply(name, generate, dir),
         setTimeout: (callback) => { timers.add(callback); return callback; },
         clearTimeout: (timer) => timers.delete(timer),
         spawn: (cmd, args, options) => {
             const child = new EventEmitter();
+            child.pid = 1000 + children.length;
+            child.detached = options.detached;
             child.stdin = { end() {} };
             child.stdout = new EventEmitter();
             child.stderr = new EventEmitter();
-            child.kill = (signal) => { child.signal = signal; };
+            child.stdout.destroy = () => { child.stdout.destroyed = true; };
+            child.stderr.destroy = () => { child.stderr.destroyed = true; };
             const name = args[args.indexOf('--name') + 1];
             // Model the child's cwd, independently of the extraction helper.
             const dir = resolve(options.cwd, environment.GPTME_LOGS_HOME
@@ -46,48 +65,121 @@ function bridge(env = {}) {
             children.push(child);
             return child;
         },
+        ...overrides,
     });
     vm.runInContext(source, context);
-    return { context, children, timers };
+    const receive = (body) => handlers.message({
+        from: '123@c.us', body, reply: async (text) => { sent.push(text); },
+    });
+    return { context, children, timers, signals, sent, receive };
 }
 
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 
-test('callGptme serializes subprocesses and extracts the matching replies', async () => {
-    const { context, children, timers } = bridge();
-    const first = context.callGptme('123', 'first');
-    const second = context.callGptme('123', 'second');
+test('messages from one sender are serialized and get their own replies', async () => {
+    const { children, timers, sent, receive } = bridge();
+    const first = receive('first');
+    const second = receive('second');
     await tick();
     assert.equal(children.length, 1);
     children[0].answer('first answer');
     children[0].emit('close', 0);
-    assert.equal(await first, 'first answer');
+    await first;
     await tick();
     assert.equal(children.length, 2);
     children[1].answer('second answer');
     children[1].emit('close', 0);
-    assert.equal(await second, 'second answer');
+    await second;
+    assert.deepEqual(sent, ['first answer', 'second answer']);
     assert.equal(timers.size, 0);
 });
 
-test('a timed-out child keeps the queue locked until close and sends no partial reply', async () => {
-    const { context, children, timers } = bridge();
-    const first = context.callGptme('123', 'first');
-    const second = context.callGptme('123', 'second');
+test('a timed-out run holds the queue until close and sends no partial reply', async () => {
+    const { children, timers, sent, receive } = bridge();
+    const first = receive('first');
+    const second = receive('second');
     await tick();
     children[0].answer('partial answer');
     [...timers][0]();
+    assert.equal(children[0].detached, true);
     assert.equal(children[0].signal, 'SIGKILL');
     await tick();
     assert.equal(children.length, 1);
     children[0].emit('close', null);
-    assert.equal(await first, null);
+    await first;
     await tick();
     assert.equal(children.length, 2);
     children[1].answer('next answer');
     children[1].emit('close', 0);
-    assert.equal(await second, 'next answer');
+    await second;
+    assert.deepEqual(sent, ['next answer']);
     assert.equal(timers.size, 0);
+});
+
+test('a timed-out run that never closes is abandoned after the grace period', async () => {
+    const { children, timers, sent, receive } = bridge();
+    const first = receive('first');
+    const second = receive('second');
+    await tick();
+    children[0].answer('partial answer');
+    const [timeout] = timers;
+    timeout();
+    const [grace] = [...timers].filter((timer) => timer !== timeout);
+    grace();
+    await first;
+    assert.equal(children[0].stdout.destroyed, true);
+    assert.equal(children[0].stderr.destroyed, true);
+    await tick();
+    assert.equal(children.length, 2);
+    children[1].answer('next answer');
+    children[1].emit('close', 0);
+    await second;
+    assert.deepEqual(sent, ['next answer']);
+    assert.equal(timers.size, 0);
+});
+
+test('a timeout also kills what a wrapper command started', {
+    skip: process.platform === 'win32', timeout: 10_000,
+}, async (t) => {
+    const dir = mkdtempSync(join(tmpdir(), 'whatsapp-wrapper-'));
+    const wrapper = join(dir, 'gptme-wrapper');
+    const pidFile = join(dir, 'agent.pid');
+    // The background sleep inherits stdout/stderr, like gptme under a wrapper.
+    writeFileSync(wrapper, '#!/bin/sh\nsleep 30 &\necho $! > agent.pid\nwait\n', { mode: 0o755 });
+    const { context, timers } = bridge(
+        { AGENT_WORKSPACE: dir, GPTME_CMD: wrapper, PATH: process.env.PATH },
+        { spawn, process: {
+            env: { HOME: dir, AGENT_WORKSPACE: dir, GPTME_CMD: wrapper, PATH: process.env.PATH },
+            platform: process.platform,
+            on() {},
+            kill: (pid, signal) => process.kill(pid, signal),
+        } },
+    );
+    const agentPid = () => (existsSync(pidFile) ? Number(readFileSync(pidFile, 'utf8')) : 0);
+    t.after(() => {
+        if (!agentPid()) return;
+        try {
+            process.kill(agentPid(), 'SIGKILL');
+        } catch { /* already gone */ }
+    });
+    const reply = context.callGptme('123', 'hi');
+    while (!agentPid()) await new Promise((resolve) => setTimeout(resolve, 10));
+    // Fire only the run timeout: `close` must arrive without the grace fallback.
+    [...timers][0]();
+    assert.equal(await reply, null);
+    assert.equal(timers.size, 0);
+});
+
+test('shutdown signals are forwarded to running agent process groups', async () => {
+    const { children, signals, receive } = bridge();
+    const run = receive('hi');
+    await tick();
+    for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+        signals[signal]();
+        assert.equal(children[0].signal, signal);
+    }
+    children[0].emit('close', null);
+    await run;
 });
 
 test('relative logs home is read from the subprocess workspace', async () => {
@@ -101,15 +193,16 @@ test('relative logs home is read from the subprocess workspace', async () => {
 });
 
 test('spawn failure clears the timer and releases the conversation', async () => {
-    const { context, children, timers } = bridge();
-    const first = context.callGptme('123', 'first');
+    const { children, timers, sent, receive } = bridge();
+    const first = receive('first');
     await tick();
     children[0].emit('error', new Error('ENOENT'));
-    assert.equal(await first, null);
+    await first;
     assert.equal(timers.size, 0);
-    const second = context.callGptme('123', 'second');
+    const second = receive('second');
     await tick();
     children[1].answer('recovered');
     children[1].emit('close', 0);
-    assert.equal(await second, 'recovered');
+    await second;
+    assert.deepEqual(sent, ['recovered']);
 });

@@ -79,47 +79,12 @@ test('ordinary contact handles survive reply extraction', () => {
     assert.equal(replySince(conv, 1, logs), '@helpdesk');
 });
 
-test('overlapping runs for one conversation read only their own reply', async () => {
+test('a run returns only its own reply, and nothing when it failed', async () => {
     const { logs, conv, file } = setup();
-    let finishFirst;
-    let firstStarted;
-    const started = new Promise((resolve) => { firstStarted = resolve; });
-    const held = new Promise((resolve) => { finishFirst = resolve; });
-    const first = runWithReply(conv, async () => {
-        appendFileSync(file, row('assistant', 'first answer'));
-        firstStarted();
-        await held;
-    }, logs);
-    await started;
-    let secondStarted = false;
-    const second = runWithReply(conv, async () => {
-        secondStarted = true;
-        appendFileSync(file, row('assistant', 'second answer'));
-    }, logs);
-    await new Promise((resolve) => setImmediate(resolve));
-    const overlapped = secondStarted;
-    finishFirst();
-    assert.deepEqual(await Promise.all([first, second]), ['first answer', 'second answer']);
-    assert.equal(overlapped, false);
-});
-
-test('other conversations run independently and a failed run does not block the queue', async () => {
-    const { logs, conv, file } = setup();
-    let release;
-    const held = new Promise((resolve) => { release = resolve; });
-    const failed = runWithReply(conv, async () => {
-        await held;
-        throw new Error('generation failed');
-    }, logs);
-    const rejection = assert.rejects(failed, /generation failed/);
-    const next = runWithReply(conv, async () => {
-        appendFileSync(file, row('assistant', 'recovered'));
-    }, logs);
-    const other = await runWithReply('another-contact', async () => 'done', logs);
-    assert.equal(other, null);
-    release();
-    await rejection;
-    assert.equal(await next, 'recovered');
+    writeFileSync(file, row('assistant', 'old reply'));
+    assert.equal(await runWithReply(conv, async () => {
+        appendFileSync(file, row('assistant', 'new reply'));
+    }, logs), 'new reply');
     // A subprocess reporting failure must not send its partially written text.
     assert.equal(await runWithReply(conv, async () => {
         appendFileSync(file, row('assistant', 'partial reply'));

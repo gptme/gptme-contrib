@@ -55,6 +55,12 @@ if (BACKEND === 'claude-code' && !existsSync(SYSTEM_PROMPT_FILE)) {
 // same agent session.
 const senderQueue = createKeyedQueue();
 
+const RUN_TIMEOUT_MS = 120_000;
+// How long a killed run gets to release its pipes before we stop waiting.
+const KILL_GRACE_MS = 5_000;
+// Agent subprocesses still running.
+const running = new Set();
+
 const client = new Client({
     authStrategy: new LocalAuth({ dataPath: '.wwebjs_auth' }),
     puppeteer: {
@@ -177,6 +183,19 @@ async function callClaudeCode(sender, message) {
 }
 
 /**
+ * Signal a subprocess and everything it started (its process group), so a
+ * GPTME_CMD / CLAUDE_CMD wrapper does not leave the real agent running.
+ */
+function signalTree(proc, signal) {
+    try {
+        process.kill(-proc.pid, signal);
+    } catch {
+        // No such group: already gone, or a platform without process groups.
+        proc.kill(signal);
+    }
+}
+
+/**
  * Spawn a subprocess and capture its output.
  */
 function spawnAndCapture(cmd, args, responseExtractor) {
@@ -190,7 +209,10 @@ function spawnAndCapture(cmd, args, responseExtractor) {
                 CLAUDE_CODE_ENTRYPOINT: undefined,
             },
             stdio: ['pipe', 'pipe', 'pipe'],
+            // Lead a new process group, which signalTree() can target.
+            detached: process.platform !== 'win32',
         });
+        running.add(proc);
 
         // Close stdin immediately (prevents SIGSTOP in non-interactive contexts)
         proc.stdin.end();
@@ -202,32 +224,44 @@ function spawnAndCapture(cmd, args, responseExtractor) {
         proc.stderr.on('data', (data) => { stderr += data.toString(); });
 
         let timedOut = false;
-        proc.on('close', (code) => {
+        let graceTimer;
+        const finish = (result) => {
             clearTimeout(timer);
+            clearTimeout(graceTimer);
+            running.delete(proc);
+            resolve(result);
+        };
+
+        proc.on('close', (code) => {
             if (code !== 0 || timedOut) {
                 console.error(`${cmd} exited with code ${code}`);
                 console.error('stderr:', stderr.slice(-500));
-                resolve(false);
+                finish(false);
                 return;
             }
 
-            const response = responseExtractor(stdout);
-            resolve(response);
+            finish(responseExtractor(stdout));
         });
 
         proc.on('error', (err) => {
-            clearTimeout(timer);
             console.error(`Failed to spawn ${cmd}:`, err);
-            resolve(false);
+            finish(false);
         });
 
-        // Keep the conversation locked until the timed-out process has closed:
-        // resolving here would let the next run overlap a still-writing child.
+        // Do not resolve yet: that would let the sender's next run overlap a
+        // still-writing process.
         const timer = setTimeout(() => {
             timedOut = true;
-            proc.kill('SIGKILL');
             console.error(`${cmd} timed out`);
-        }, 120_000);
+            signalTree(proc, 'SIGKILL');
+            // A process that left the group can hold the pipes open, so `close`
+            // may never fire. Stop waiting, or this sender stays blocked.
+            graceTimer = setTimeout(() => {
+                proc.stdout.destroy();
+                proc.stderr.destroy();
+                finish(false);
+            }, KILL_GRACE_MS);
+        }, RUN_TIMEOUT_MS);
     });
 }
 
@@ -240,14 +274,14 @@ function truncate(response) {
     return response;
 }
 
-// Graceful shutdown
-process.on('SIGTERM', () => {
-    console.log('Shutting down WhatsApp bridge...');
-    client.destroy().then(() => process.exit(0));
-});
-process.on('SIGINT', () => {
-    console.log('Shutting down WhatsApp bridge...');
-    client.destroy().then(() => process.exit(0));
-});
+// Graceful shutdown. Agent runs lead their own process groups, so a terminal's
+// Ctrl-C or hangup no longer reaches them: pass the signal on.
+for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
+    process.on(signal, () => {
+        console.log('Shutting down WhatsApp bridge...');
+        for (const proc of running) signalTree(proc, signal);
+        client.destroy().then(() => process.exit(0));
+    });
+}
 
 client.initialize();

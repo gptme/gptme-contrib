@@ -57,26 +57,17 @@ function withoutToolCalls(content) {
     return (result + content.slice(cursor)).trim();
 }
 
-const pendingRuns = new Map();
-
-/** Serialize offset capture, generation and extraction for each conversation. */
+/**
+ * Run `generate` and return the reply it wrote.
+ *
+ * Runs of one conversation must not overlap, or the row offset cannot tell
+ * their replies apart; the bridge's per-sender queue guarantees that.
+ */
 export async function runWithReply(convName, generate, logsDir = gptmeLogsDir()) {
-    const key = logPath(convName, logsDir);
-    const previous = pendingRuns.get(key) || Promise.resolve();
-    const current = previous.then(async () => {
-        const since = logLineCount(convName, logsDir);
-        // false means the subprocess failed: never extract a partial reply.
-        if (await generate() === false) return null;
-        return replySince(convName, since, logsDir);
-    });
-    // A failed run must not poison later messages in this conversation.
-    const settled = current.catch(() => {});
-    pendingRuns.set(key, settled);
-    try {
-        return await current;
-    } finally {
-        if (pendingRuns.get(key) === settled) pendingRuns.delete(key);
-    }
+    const since = logLineCount(convName, logsDir);
+    // false means the subprocess failed: never extract a partial reply.
+    if (await generate() === false) return null;
+    return replySince(convName, since, logsDir);
 }
 
 /** gptme's conversation logs dir (mirrors gptme.dirs.get_logs_dir). */
