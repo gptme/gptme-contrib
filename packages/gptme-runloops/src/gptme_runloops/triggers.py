@@ -100,20 +100,67 @@ class TriggerState:
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> TriggerState:
+        """Build a state from decoded JSON, rejecting shapes it cannot honour.
+
+        A missing or ``null`` field degrades to its default, but a field of the
+        wrong type raises :class:`ValueError` rather than being coerced into
+        nonsense — ``load_state`` treats that as a corrupt file and fails open.
+        """
+        if not isinstance(data, Mapping):
+            raise ValueError(
+                f"trigger state must be a JSON object, got {type(data).__name__}"
+            )
         return cls(
-            last_session_ts=float(data.get("last_session_ts", 0.0) or 0.0),
-            blocked_until=float(data.get("blocked_until", 0.0) or 0.0),
-            last_reasons=tuple(data.get("last_reasons", ()) or ()),
-            observations=dict(data.get("observations", {}) or {}),
+            last_session_ts=_state_float(data, "last_session_ts"),
+            blocked_until=_state_float(data, "blocked_until"),
+            last_reasons=_state_reasons(data),
+            observations=_state_observations(data),
         )
+
+
+def _state_float(data: Mapping[str, Any], key: str) -> float:
+    """Read a numeric field; ``null`` defaults, any other type is a shape error."""
+    value = data.get(key)
+    if value is None:
+        return 0.0
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise ValueError(f"{key} must be a number, got {type(value).__name__}")
+    return float(value)
+
+
+def _state_reasons(data: Mapping[str, Any]) -> tuple[str, ...]:
+    """Read the audit-trail reasons; a plain string is a shape error, not a char list."""
+    value = data.get("last_reasons")
+    if value is None:
+        return ()
+    if isinstance(value, str) or not isinstance(value, list | tuple):
+        raise ValueError(
+            f"last_reasons must be a list of strings, got {type(value).__name__}"
+        )
+    if not all(isinstance(reason, str) for reason in value):
+        raise ValueError("last_reasons entries must be strings")
+    return tuple(value)
+
+
+def _state_observations(data: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Read the opaque observation slots, which must stay a mapping to round-trip."""
+    value = data.get("observations")
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        raise ValueError(
+            f"observations must be a JSON object, got {type(value).__name__}"
+        )
+    return dict(value)
 
 
 def load_state(path: str | Path) -> TriggerState:
     """Load durable trigger state, failing open to a fresh state.
 
-    A missing file (fresh fork, first run) or a corrupt/unreadable one must never
-    wedge the lane — both degrade to a default :class:`TriggerState`, which lets the
-    ``max_skip`` floor take over. This is the Tier-0 rule: no silent wedge on bad state.
+    A missing file (fresh fork, first run), an unreadable one, or JSON of the
+    wrong shape must never wedge the lane — all of them degrade to a default
+    :class:`TriggerState`, which lets the ``max_skip`` floor take over. This is
+    the Tier-0 rule: no silent wedge on bad state.
     """
     p = Path(path)
     try:
