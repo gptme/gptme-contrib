@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -1158,6 +1159,88 @@ def test_llm_review_call_logs_errors_through_the_peer_host():
     )
     assert run["usage"] == {} and run["findings"] == []
     assert run["error"] == "provider unavailable" and run["wall_s"] >= 0
+
+
+def _sharded_io(host, review_call):
+    io = writer.default_io(sweep_identity("alice-agent", "alice-ai-review"), host)
+    io.preload_files = lambda args, pr, paths: ({}, set(), {})
+    io.fetch_submodule_context = lambda *a, **k: ""
+    io._openrouter_review_call = review_call
+    return writer.bind_io(io)
+
+
+def _run_sharded(w, args):
+    return w.run_sharded_llm(
+        args,
+        {"headRefOid": "abc"},
+        [Shard(index=1), Shard(index=2)],
+        reviewable_diff="",
+        model="openrouter/m",
+        key="k",
+        base_note="",
+    )
+
+
+def test_run_sharded_llm_logs_one_merged_run():
+    # Shard calls are labelled, so llm_review_call skips log_run for each of
+    # them; the merged review must still reach the run ledger once (#2282).
+    host = _RecordingHost()
+    w = _sharded_io(host, lambda *a, **k: ([{"title": "t"}], {"cost": 0.25}))
+    findings, usage, *_ = _run_sharded(w, _engine_args())
+    assert len(findings) == 2
+    assert len(host.runs) == 1
+    run = host.runs[0]
+    assert (run["repo"], run["number"], run["sha"], run["model"]) == (
+        "o/r",
+        7,
+        "abc",
+        "m",
+    )
+    assert run["findings"] == findings and run["usage"] == usage
+    assert run.get("error") is None and run["wall_s"] >= 0
+
+
+def test_run_sharded_llm_logs_a_failed_review():
+    host = _RecordingHost()
+
+    def fail(*args, **kwargs):
+        raise ReviewError("provider unavailable")
+
+    w = _sharded_io(host, fail)
+    with pytest.raises(ReviewError, match="provider unavailable"):
+        _run_sharded(w, _engine_args())
+    assert len(host.runs) == 1
+    run = host.runs[0]
+    assert "cost" not in run["usage"] and run["findings"] == []
+    assert "provider unavailable" in run["error"]
+
+
+def test_run_sharded_llm_failed_review_keeps_completed_shard_cost():
+    # A shard that finished before a sibling failed was still billed.
+    host = _RecordingHost()
+    first_running = threading.Event()
+
+    def one_fails(*args, **kwargs):
+        if kwargs["label"].startswith("[shard 1/"):
+            first_running.set()
+            return [{"title": "t"}], {"cost": 0.25, "prompt_tokens": 10}
+        # Fail only once shard 1 is running, so it cannot be cancelled.
+        assert first_running.wait(5)
+        raise ReviewError("provider unavailable")
+
+    w = _sharded_io(host, one_fails)
+    with pytest.raises(ReviewError, match="shard 2/2 failed"):
+        _run_sharded(w, _engine_args())
+    (run,) = host.runs
+    assert (run["usage"]["cost"], run["usage"]["prompt_tokens"]) == (0.25, 10)
+    assert run["findings"] == [] and "provider unavailable" in run["error"]
+
+
+def test_run_sharded_llm_dry_run_logs_nothing():
+    host = _RecordingHost()
+    w = _sharded_io(host, lambda *a, **k: ([], {}))
+    _run_sharded(w, _engine_args(dry_run=True))
+    assert host.runs == []
 
 
 def test_subscription_engine_is_unavailable_on_a_default_peer_host(alice_io):

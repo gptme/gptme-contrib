@@ -4516,6 +4516,10 @@ def run_sharded_llm(
         print("submodule: fetched cross-submodule import context")
         note = (note + "\n\n" + submodule_ctx).strip() if note else submodule_ctx
 
+    # Usage of every shard whose call returned, so a failed review still
+    # records what its completed siblings cost.
+    spent: dict[int, dict] = {}
+
     def review_one(shard: Shard) -> tuple[list[dict], dict]:
         label = f"[shard {shard.index}/{n}] "
         lifecycle.stage("shard", shard=shard.index)
@@ -4535,6 +4539,7 @@ def run_sharded_llm(
             note=shard_note,
             label=label,
         )
+        spent[shard.index] = usage
         print(
             f"{label}{len(findings)} finding(s) in {time.monotonic() - started:.0f}s, "
             f"cost=${(usage.get('cost') or 0):.4f}"
@@ -4543,7 +4548,40 @@ def run_sharded_llm(
             findings, shard_fully, label
         ), usage
 
-    results = _io._run_shards(plan, review_one)
+    # Each shard's llm_review_call is labelled and so skips log_run; log the
+    # merged review once here so sharded runs reach the ledger too. The
+    # subscription panel logs its own calls.
+    log = args.engine != "subscription" and not args.dry_run
+    sha = str(pr.get("headRefOid") or "")
+    model_name = model.removeprefix("openrouter/")
+    started = time.monotonic()
+    try:
+        results = _io._run_shards(plan, review_one)
+    except ReviewError as exc:
+        if log:
+            # _run_shards drains its pool before raising, so shards that were
+            # still in flight at the first failure are counted too.
+            _io.WRITER_HOST.log_run(
+                repo=args.repo,
+                number=args.number,
+                sha=sha,
+                model=model_name,
+                usage=merge_shard_usage([spent[i] for i in sorted(spent)], plan),
+                wall_s=time.monotonic() - started,
+                findings=[],
+                error=str(exc),
+            )
+        raise
     findings = merge_shard_findings([r[0] for r in results])
     usage = merge_shard_usage([r[1] for r in results], plan)
+    if log:
+        _io.WRITER_HOST.log_run(
+            repo=args.repo,
+            number=args.number,
+            sha=sha,
+            model=model_name,
+            usage=usage,
+            wall_s=time.monotonic() - started,
+            findings=findings,
+        )
     return findings, usage, contents, fully_preloaded, preload_coverage
