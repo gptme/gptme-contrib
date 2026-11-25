@@ -804,6 +804,23 @@ def _supplementary_notify(cfg: Config, status: dict) -> None:
         print(f"[supplementary-notify] skipped: {e}", file=sys.stderr)
 
 
+def _comment_outage(cfg: Config, number: int, status: dict) -> None:
+    """Post the current outage details on an existing open outage issue."""
+    res = _gh(
+        [
+            "issue",
+            "comment",
+            str(number),
+            "--repo",
+            cfg.repo or "",
+            "--body",
+            _issue_body(cfg, status),
+        ]
+    )
+    if not _report_gh_failure("comment on issue", res):
+        print(res.stdout.strip())
+
+
 def escalate(cfg: Config, status: dict, dry_run: bool, now: datetime) -> None:
     """File/update/close the outage issue and manage the local alert file."""
     cfg.alert_file.parent.mkdir(parents=True, exist_ok=True)
@@ -827,13 +844,14 @@ def escalate(cfg: Config, status: dict, dry_run: bool, now: datetime) -> None:
                 # #98 then minted). Reopen that thread instead of duplicating, so
                 # one continuous outage stays one issue.
                 reopen = find_recent_closed_issue(cfg)
-                reopened = False
+                surfaced = False  # an open issue is carrying this outage
                 if reopen is not None and _closed_during_outage(reopen, status, now):
                     if dry_run:
                         print(f"[dry-run] would REOPEN issue #{reopen['number']}")
                         return
-                    # --comment posts the details before reopening and fails as a
-                    # whole, so the issue is never left reopened without them.
+                    # gh posts --comment first and reopens only if that worked, so
+                    # the issue is never left reopened without the details. The two
+                    # calls are not atomic: a closed issue can keep the comment.
                     res = _gh(
                         [
                             "issue",
@@ -845,46 +863,35 @@ def escalate(cfg: Config, status: dict, dry_run: bool, now: datetime) -> None:
                             _reopen_body(cfg, status),
                         ]
                     )
-                    if res.returncode != 0:
-                        # Don't report success, and don't let a failed reopen
-                        # swallow the alarm: fall through to a fresh issue.
-                        print(
-                            f"[self-outage-check] reopen of #{reopen['number']} "
-                            f"failed (rc={res.returncode}): "
-                            f"{(res.stderr or res.stdout).strip()}; "
-                            "filing a new issue instead.",
-                            file=sys.stderr,
-                        )
-                        # A client-side failure is not proof the request failed: a
-                        # 30s timeout kills gh, not the call it already made, so
-                        # the issue can be reopened (and carry the details) while
-                        # rc=1 comes back. Re-query before minting a duplicate —
-                        # #97/#98 is exactly the outcome this path prevents.
-                        # Only the *same* issue counts: another same-titled open
-                        # issue is not proof this reopen landed, and treating it
-                        # as success would swallow the alarm this PR protects.
-                        open_issue = find_open_issue(cfg)
-                        if (
-                            open_issue is not None
-                            and open_issue.get("number") == reopen["number"]
-                        ):
-                            reopened = True
-                            print(
-                                f"Issue #{reopen['number']} is open again — its "
-                                "reopen landed despite the client error."
-                            )
-                            _supplementary_notify_pending = True
-                    else:
-                        reopened = True
+                    if not _report_gh_failure(f"reopen of #{reopen['number']}", res):
+                        surfaced = True
                         print(
                             f"Reopened issue #{reopen['number']} (outage still ongoing)."
                         )
-                        _supplementary_notify_pending = True
-                if not reopened and dry_run:
+                    else:
+                        # A client-side failure is not proof the request failed (a
+                        # 30s timeout kills gh, not the call it already made), and
+                        # another run may have opened a thread meanwhile. Re-query
+                        # before minting a duplicate (#97/#98). If this lookup fails
+                        # too, we still file: a duplicate beats a silent alarm.
+                        open_issue = find_open_issue(cfg)
+                        if open_issue is not None:
+                            surfaced = True
+                            if open_issue["number"] == reopen["number"]:
+                                print(
+                                    f"Issue #{reopen['number']} is open again — its "
+                                    "reopen landed despite the client error."
+                                )
+                            else:
+                                # Not our reopen, so that thread may lack the
+                                # current details: post them there.
+                                _comment_outage(cfg, open_issue["number"], status)
+                    _supplementary_notify_pending = surfaced
+                if not surfaced and dry_run:
                     print("[dry-run] would CREATE issue:", cfg.issue_title)
                     print(_issue_body(cfg, status))
                     return
-                elif not reopened:
+                elif not surfaced:
                     res = _gh(
                         [
                             "issue",
@@ -913,19 +920,7 @@ def escalate(cfg: Config, status: dict, dry_run: bool, now: datetime) -> None:
                 if dry_run:
                     print(f"[dry-run] would COMMENT on issue #{existing['number']}")
                     return
-                res = _gh(
-                    [
-                        "issue",
-                        "comment",
-                        str(existing["number"]),
-                        "--repo",
-                        cfg.repo,
-                        "--body",
-                        _issue_body(cfg, status),
-                    ]
-                )
-                if not _report_gh_failure("comment on issue", res):
-                    print(res.stdout.strip())
+                _comment_outage(cfg, existing["number"], status)
         else:
             print(
                 "[self-outage-check] outage confirmed; no --repo set, skipping GitHub issue."

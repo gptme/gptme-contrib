@@ -295,8 +295,8 @@ def test_reopen_timeout_falls_back_to_create_and_notifies(
 
 def test_reopen_carries_details_atomically(tmp_path: Path, monkeypatch) -> None:
     # The outage details must ride on the reopen itself (`gh issue reopen
-    # --comment` posts the comment before reopening and fails as a whole), not a
-    # separate follow-up comment: a failed follow-up would leave the issue open
+    # --comment` posts the comment before reopening and aborts if that fails),
+    # not a separate follow-up comment: a failed follow-up would leave the issue open
     # with no details, and the reopen's updatedAt bump makes the next run treat
     # it as fresh, so the details would never be posted.
     calls: list[list[str]] = []
@@ -1262,13 +1262,12 @@ def test_reopen_client_error_but_issue_is_open_does_not_duplicate(
     assert "is open again" in out.out
 
 
-def test_failed_reopen_with_a_different_open_issue_still_surfaces(
+def test_failed_reopen_comments_on_a_different_open_issue(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
-    # The re-query must confirm *this* issue reopened. A same-titled open issue
-    # with another number (a concurrent create, or one the recovery path failed
-    # to close) is not proof the reopen landed; treating it as success would
-    # swallow the alarm this PR protects.
+    # A same-titled open issue with another number (e.g. a concurrent create) is
+    # not proof the reopen landed, so the outage details must be posted there.
+    # Filing yet another issue would split one outage across threads.
     calls: list[list[str]] = []
     closed_at = (NOW - timedelta(hours=5)).isoformat()
     open_queries = {"n": 0}
@@ -1307,8 +1306,11 @@ def test_failed_reopen_with_a_different_open_issue_still_surfaces(
             R.stderr = "Command 'gh' timed out after 30 seconds"
         return R()
 
+    notified: list[bool] = []
     monkeypatch.setattr(soc, "_gh", fake_gh)
-    monkeypatch.setattr(soc, "_supplementary_notify", lambda cfg, status: None)
+    monkeypatch.setattr(
+        soc, "_supplementary_notify", lambda cfg, status: notified.append(True)
+    )
     cfg = cfg_for(tmp_path)
     write_records(
         tmp_path,
@@ -1320,9 +1322,11 @@ def test_failed_reopen_with_a_different_open_issue_still_surfaces(
 
     out = capsys.readouterr()
     assert "is open again" not in out.out
-    assert any(
-        a[:2] == ["issue", "create"] for a in calls
-    ), "an unrelated open issue must not mask a failed reopen"
+    assert not any(a[:2] == ["issue", "create"] for a in calls), "must not duplicate"
+    comments = [a for a in calls if a[:2] == ["issue", "comment"]]
+    assert [a[2] for a in comments] == ["98"]
+    assert "auth-outage sessions" in comments[0][comments[0].index("--body") + 1]
+    assert notified, "supplementary channels must still fire"
 
 
 def test_failed_close_is_not_reported_as_recovered(
