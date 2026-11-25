@@ -1140,12 +1140,14 @@ def _notification(
     reason: str = "mention",
     repo: str = "owner/repo",
     title: str = "Test notification",
+    updated_at: str = "",
 ) -> dict:
     """Build a GitHub notification payload as returned by `gh api notifications`."""
     return {
         "id": notif_id,
         "reason": reason,
         "unread": True,
+        "updated_at": updated_at,
         "repository": {"full_name": repo},
         "subject": {
             "title": title,
@@ -1153,6 +1155,17 @@ def _notification(
             "url": subject_url,
             "latest_comment_url": latest_comment_url,
         },
+    }
+
+
+def _state_ids(state_file) -> set[str]:
+    """Notification ids recorded in `notifications.state` ("<id>\\t<updated_at>")."""
+    if not state_file.exists():
+        return set()
+    return {
+        line.split("\t", 1)[0]
+        for line in state_file.read_text().splitlines()
+        if line.strip()
     }
 
 
@@ -1212,7 +1225,7 @@ def test_check_notifications_pull_request_still_works(workspace):
 
     # Processed notifications are recorded in state so they aren't re-surfaced
     state_file = run.state_dir / "notifications.state"
-    assert "2" in state_file.read_text().split("\n")
+    assert "2" in _state_ids(state_file)
 
 
 def test_check_notifications_unparseable_not_marked_processed(workspace):
@@ -1236,7 +1249,7 @@ def test_check_notifications_unparseable_not_marked_processed(workspace):
 
     assert items == []
     state_file = run.state_dir / "notifications.state"
-    assert "3" not in state_file.read_text().split("\n")
+    assert "3" not in _state_ids(state_file)
 
 
 def test_check_assigned_issues_concurrent_claim_is_emitted_once(workspace):
@@ -1307,24 +1320,64 @@ def test_check_notifications_concurrent_claim_is_emitted_once(workspace):
 
 
 def test_check_notifications_previously_processed_skipped(workspace):
-    """Already-processed notifications are skipped but kept in state."""
+    """A follow-up re-emits once; an unchanged thread stays skipped.
+
+    GitHub reuses the notification id and advances `updated_at` for follow-up
+    comments, so dedupe must be watermark-based, not presence-based
+    (gptme-contrib#802). Two controls: an advanced timestamp is surfaced, an
+    unchanged one is not.
+    """
     run = ProjectMonitoringRun(workspace)
     state_file = run.state_dir / "notifications.state"
-    state_file.write_text("4")
 
-    items = _run_check_notifications(
-        run,
-        [
+    def notification(ts: str) -> list[dict]:
+        return [
             _notification(
                 "4",
                 "PullRequest",
                 "https://api.github.com/repos/owner/repo/pulls/44",
+                updated_at=ts,
             )
-        ],
-    )
+        ]
 
-    assert items == []
-    assert "4" in state_file.read_text().split("\n")
+    # First sight: emitted, watermark recorded.
+    assert len(_run_check_notifications(run, notification("2026-11-25T10:00:00Z"))) == 1
+    assert "4" in _state_ids(state_file)
+
+    # Unchanged updated_at: skipped (control).
+    assert _run_check_notifications(run, notification("2026-11-25T10:00:00Z")) == []
+
+    # Follow-up comment advanced updated_at: re-emitted.
+    assert len(_run_check_notifications(run, notification("2026-11-25T11:00:00Z"))) == 1
+
+    # Watermark advanced monotonically: the same follow-up is not re-emitted.
+    assert _run_check_notifications(run, notification("2026-11-25T11:00:00Z")) == []
+
+
+def test_check_notifications_legacy_presence_state_reemits_once(workspace):
+    """A bare-id state file (presence-only) re-emits exactly once, then records.
+
+    Migration contract from gptme-contrib#802/#2312: existing presence-only
+    state must not silently keep swallowing the thread, and must not re-dispatch
+    on every run afterwards.
+    """
+    run = ProjectMonitoringRun(workspace)
+    state_file = run.state_dir / "notifications.state"
+    state_file.write_text("7")
+
+    notification = [
+        _notification(
+            "7",
+            "Issue",
+            "https://api.github.com/repos/owner/repo/issues/77",
+            updated_at="2026-11-25T09:00:00Z",
+        )
+    ]
+
+    assert len(_run_check_notifications(run, notification)) == 1
+    # State rewritten with a watermark, so the next run is suppressed.
+    assert "\t2026-11-25T09:00:00Z" in state_file.read_text()
+    assert _run_check_notifications(run, notification) == []
 
 
 # ── check_contributor_unreviewed ─────────────────────────────────────────────
