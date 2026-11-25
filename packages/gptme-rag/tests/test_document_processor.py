@@ -150,3 +150,37 @@ def test_small_text():
 
     assert len(chunks) == 1
     assert chunks[0]["text"] == text
+
+
+@pytest.mark.parametrize("chunk_size", range(1, 11))
+def test_chunks_never_split_multibyte_characters(chunk_size):
+    """#2356 R4: every token position survives, including repeated characters."""
+    text = "日本語のテキスト 🎉🚀 emoji ünïcödé " * 8
+    for overlap in range(chunk_size):
+        processor = DocumentProcessor(chunk_size=chunk_size, chunk_overlap=overlap)
+        tokens = processor.encoding.encode(text)
+        token_bytes = [processor.encoding.decode_single_token_bytes(t) for t in tokens]
+        covered_end = 0
+        previous_start = -1
+        reconstructed = b""
+        chunk_count = 0
+        for chunk in processor.process_text(text):
+            chunk_count += 1
+            # Fail rather than hang if a boundary adjustment stops advancing.
+            assert chunk_count <= len(tokens)
+            metadata = chunk["metadata"]
+            assert "error" not in metadata
+            start, end = metadata["chunk_start"], metadata["chunk_end"]
+            assert previous_start < start <= covered_end
+            assert start < end <= len(tokens)
+            # Strict decoding catches cuts inside UTF-8; metadata must also
+            # describe the exact text emitted, not just a plausible interval.
+            assert chunk["text"] == b"".join(token_bytes[start:end]).decode("utf-8")
+            assert "�" not in chunk["text"]
+            reconstructed += b"".join(token_bytes[max(start, covered_end) : end])
+            covered_end = max(covered_end, end)
+            previous_start = start
+        assert chunk_count > 1
+        assert covered_end == len(tokens)
+        # Strip overlap by position, preserving order and every repetition.
+        assert reconstructed.decode("utf-8") == text

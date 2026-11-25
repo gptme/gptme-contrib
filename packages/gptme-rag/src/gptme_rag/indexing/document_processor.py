@@ -76,9 +76,28 @@ class DocumentProcessor:
             chunk_start = 0
             chunk_count = 0
 
+            def at_char_boundary(i: int) -> bool:
+                # A byte-level BPE token can end partway through a multi-byte
+                # UTF-8 character. Position i is safe to cut at when token i
+                # does not start with a continuation byte (0b10xxxxxx).
+                if i <= 0 or i >= len(tokens):
+                    return True
+                first = self.encoding.decode_single_token_bytes(tokens[i])[:1]
+                return not first or (first[0] & 0xC0) != 0x80
+
             while chunk_start < len(tokens):
-                # Calculate chunk end
+                # Calculate chunk end, pulled back to a character boundary
+                # (unless that would leave the chunk empty).
                 chunk_end = min(chunk_start + self.chunk_size, len(tokens))
+                end = chunk_end
+                while end > chunk_start + 1 and not at_char_boundary(end):
+                    end -= 1
+                if at_char_boundary(end):
+                    chunk_end = end
+                else:
+                    # A single character spans more than the chunk: extend.
+                    while chunk_end < len(tokens) and not at_char_boundary(chunk_end):
+                        chunk_end += 1
 
                 # Get chunk tokens and decode
                 chunk_tokens = tokens[chunk_start:chunk_end]
@@ -111,7 +130,17 @@ class DocumentProcessor:
 
                 # Move forward by at least one token, considering overlap
                 next_start = chunk_start + max(1, self.chunk_size - self.chunk_overlap)
-                chunk_start = min(next_start, len(tokens) - 1)
+                next_start = min(next_start, chunk_end)
+                # Start on a character boundary: step back into the overlap,
+                # or forward if that would not make progress.
+                start = next_start
+                while start > chunk_start + 1 and not at_char_boundary(start):
+                    start -= 1
+                if not at_char_boundary(start):
+                    start = next_start
+                    while start < chunk_end and not at_char_boundary(start):
+                        start += 1
+                chunk_start = min(start, len(tokens) - 1)
                 chunk_count += 1
 
                 # Check max chunks limit
