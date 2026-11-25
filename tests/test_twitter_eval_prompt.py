@@ -878,3 +878,202 @@ def test_explicit_style_decision_accepts_normal_criterion_key_formats(
     )
     assert approved
     assert set(response.criteria_results) == {"Natural writing style"}
+
+
+# --- parse_llm_response: reasoning-model output (ErikBjare/bob#1519) ---------
+
+_REVIEW_JSON = """{
+  "criteria_results": {"professional_tone": {"notes": "ok", "passed": true}},
+  "recommendation": "approve",
+  "improvements": [],
+  "reasoning": "fine"
+}"""
+
+
+def _parse_review(llm_module: types.ModuleType, content: str) -> Any:
+    return llm_module.parse_llm_response(
+        content, llm_module.ReviewResponse, llm_module.TaskType.REVIEW
+    )
+
+
+# A complete, answer-shaped object, so the assertion depends on stripping the
+# think block rather than on the scan rejecting a partial draft.
+_THINK_DRAFT_JSON = """{
+  "criteria_results": {"professional_tone": {"notes": "draft", "passed": false}},
+  "recommendation": "reject",
+  "improvements": ["rewrite the opener"],
+  "reasoning": "draft verdict"
+}"""
+
+
+def test_parse_skips_json_inside_think_block(llm_module: types.ModuleType) -> None:
+    """A draft object in a <think> block must not be glued to the real answer.
+
+    Slicing first "{" to last "}" produced "Extra data" and a default reject,
+    which parked an approved blog promotion at 0/3. The draft is a complete
+    ReviewResponse placed *after* the answer, so the test fails if
+    the parser stops skipping think blocks (the draft would win as the
+    last matching object).
+    """
+    content = (
+        _REVIEW_JSON
+        + "\n\nThinking about a revision:\n<think>\n"
+        + _THINK_DRAFT_JSON
+        + "\n</think>\n"
+    )
+    result = _parse_review(llm_module, content)
+    assert result.recommendation == "approve"
+    assert set(result.criteria_results) == {"professional_tone"}
+    assert result.criteria_results["professional_tone"].passed is True
+
+
+def test_parse_skips_stray_braces_in_prose(llm_module: types.ModuleType) -> None:
+    content = "Using the {review} format:\n" + _REVIEW_JSON + "\nDone {ok}."
+    assert _parse_review(llm_module, content).recommendation == "approve"
+
+
+def test_parse_prefers_last_matching_object(llm_module: types.ModuleType) -> None:
+    """A reasoning model may restate the answer; the final object wins."""
+    first = _REVIEW_JSON.replace('"approve"', '"reject"')
+    result = _parse_review(llm_module, first + "\nRevised:\n" + _REVIEW_JSON)
+    assert result.recommendation == "approve"
+
+
+def test_parse_malformed_revision_does_not_resurrect_earlier_answer(
+    llm_module: types.ModuleType,
+) -> None:
+    """A broken revision supersedes the earlier answer instead of being skipped.
+
+    The revision below is answer-shaped but missing "reasoning", so
+    `ReviewResponse.from_dict` raises. Keeping the earlier approval would report
+    an approval the model explicitly revised away.
+    """
+    malformed = """{
+  "criteria_results": {},
+  "recommendation": "reject",
+  "improvements": []
+}"""
+    result = _parse_review(llm_module, _REVIEW_JSON + "\nRevised:\n" + malformed)
+    assert result.recommendation == "reject"
+    assert result.criteria_results == {}
+
+
+def test_parse_ignores_prose_object_with_a_single_answer_key(
+    llm_module: types.ModuleType,
+) -> None:
+    """Prose that mentions one field name must not wipe the real answer."""
+    content = _REVIEW_JSON + '\nNote: {"reasoning": "see above"} is not the answer.'
+    result = _parse_review(llm_module, content)
+    assert result.recommendation == "approve"
+    assert set(result.criteria_results) == {"professional_tone"}
+
+
+def test_parse_falls_back_to_default_without_matching_object(
+    llm_module: types.ModuleType,
+) -> None:
+    result = _parse_review(llm_module, 'no answer here {"unrelated": 1}')
+    assert result.recommendation == "reject"
+    assert result.criteria_results == {}
+
+
+@pytest.mark.parametrize(
+    "revision",
+    [
+        '{"criteria_results": {}, "recommendation": "reject", "improvements": [], "reasoning": "x",}',
+        '{"criteria_results": {}, "recommendation": "reject", "improvements": [], "reasoning": "an "unescaped" quote"}',
+        '{"criteria_results": {}, "recommendation": "reject", "improvements": [], "reasoning": "truncated',
+        '{"recommendation": "reject", "reasoning": "truncated before nested draft", "draft": '
+        + _REVIEW_JSON,
+    ],
+    ids=["trailing-comma", "unescaped-quote", "truncated", "nested-draft"],
+)
+def test_parse_syntax_broken_revision_does_not_resurrect_approval(
+    llm_module: types.ModuleType, revision: str
+) -> None:
+    result = _parse_review(llm_module, _REVIEW_JSON + "\nRevised:\n" + revision)
+    assert result == llm_module.ReviewResponse.default()
+
+
+def test_parse_unquoted_revision_does_not_promote_nested_draft(
+    llm_module: types.ModuleType,
+) -> None:
+    revision = '{recommendation: "reject", "draft": ' + _REVIEW_JSON + "}"
+    result = _parse_review(llm_module, _REVIEW_JSON + "\nRevised:\n" + revision)
+    assert result == llm_module.ReviewResponse.default()
+
+
+def test_parse_preserves_think_tags_in_json_strings(
+    llm_module: types.ModuleType,
+) -> None:
+    response = llm_module.TweetResponse.example()
+    response.text = "Explain <think>private reasoning</think> tags"
+    content = llm_module.json.dumps(llm_module.asdict(response))
+    result = llm_module.parse_llm_response(
+        content, llm_module.TweetResponse, llm_module.TaskType.RESPONSE
+    )
+    assert result == response
+
+
+@pytest.mark.parametrize(
+    "revision",
+    [
+        '{"recommendation": "reject", "reasoning": "Unsupported claim"}',
+        '{"recommendation": "reject"}',
+    ],
+)
+def test_parse_partial_rejection_supersedes_approval(
+    llm_module: types.ModuleType, revision: str
+) -> None:
+    result = _parse_review(llm_module, _REVIEW_JSON + "\nRevised:\n" + revision)
+    assert result == llm_module.ReviewResponse.default()
+
+
+@pytest.mark.parametrize(
+    "prose",
+    [
+        "Plan: fill {tweet text} into the format.",
+        "Shape is { ... } as requested.",
+        "Pick from {a, b} or {'a', 'b'}.",
+        "Template: {{text}}",
+        "A stray { brace in prose, then my recommendation: below.",
+    ],
+    ids=["spaced-placeholder", "ellipsis", "set", "double-brace", "stray"],
+)
+def test_parse_ignores_prose_braces_around_answer(
+    llm_module: types.ModuleType, prose: str
+) -> None:
+    result = _parse_review(llm_module, f"{prose}\n{_REVIEW_JSON}\n{prose}")
+    assert result.recommendation == "approve"
+
+
+@pytest.mark.parametrize(
+    "revision",
+    [
+        '{..., "recommendation": "reject"}',
+        "{'recommendation': 'reject'}",
+        '{ // revised\n "recommendation": "reject"}',
+        '{"recommendation" "reject"}',
+    ],
+    ids=["elided", "single-quoted", "commented", "missing-colon"],
+)
+def test_parse_json_like_broken_revision_fails_closed(
+    llm_module: types.ModuleType, revision: str
+) -> None:
+    result = _parse_review(llm_module, _REVIEW_JSON + "\nRevised:\n" + revision)
+    assert result == llm_module.ReviewResponse.default()
+
+
+def test_parse_skips_reasoning_closed_without_opener(
+    llm_module: types.ModuleType,
+) -> None:
+    """Some chat templates put "<think>" in the prompt, so only the closer shows."""
+    reasoning = 'Draft: {"recommendation": "reject", ...} looks wrong.\n</think>\n'
+    result = _parse_review(llm_module, reasoning + _REVIEW_JSON)
+    assert result.recommendation == "approve"
+
+
+def test_parse_drops_draft_from_reasoning_closed_without_opener(
+    llm_module: types.ModuleType,
+) -> None:
+    result = _parse_review(llm_module, _REVIEW_JSON + "\n</think>\nNo verdict.")
+    assert result == llm_module.ReviewResponse.default()

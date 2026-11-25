@@ -588,6 +588,23 @@ Any analysis or thinking should be included in the "reasoning" field of the JSON
 
 T = TypeVar("T", EvaluationResponse, TweetResponse, ReviewResponse)
 
+_RESPONSE_TOKEN_RE = re.compile(r"<think>.*?(?:</think>|\Z)|</think>|\{", re.DOTALL)
+
+
+# An object opener: {"... or {key: ...
+_JSON_OPENER_RE = re.compile(r'\{\s*(?:"|\w+\s*:)')
+
+
+def _looks_like_json(text: str, start: int, fields: set[str]) -> bool:
+    """Whether the undecodable "{" at ``start`` was meant as JSON, not prose."""
+    if _JSON_OPENER_RE.match(text, start):
+        return True
+    # Or it names a response field as a key before the next brace.
+    end = re.compile(r"[{}]").search(text, start + 1)
+    head = text[start : end.start() if end else len(text)]
+    names = "|".join(map(re.escape, fields))
+    return bool(re.search(rf"""(?:["'](?:{names})["']|,\s*(?:{names}))\s*:""", head))
+
 
 def parse_llm_response(content: str, response_type: Type[T], task: TaskType) -> T:
     """Parse LLM response into a typed response object.
@@ -597,20 +614,55 @@ def parse_llm_response(content: str, response_type: Type[T], task: TaskType) -> 
         response_type: The type to parse into (must implement ResponseProtocol)
         task: Task type for error messages
     """
-    try:
-        # Extract just the JSON part (between first { and last })
-        start = content.find("{")
-        end = content.rfind("}") + 1
-        if start >= 0 and end > start:
-            json_str = content[start:end]
-            data = json.loads(json_str)
-            return response_type.from_dict(data)
-        raise json.JSONDecodeError("No JSON found", content, 0)
-    except (json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
-        console.print(f"[red]Error: Could not parse LLM response for {task.value}: {e}")
-        console.print(content)
-        logging.exception(f"Error parsing LLM response for {task.value}")
-        return response_type.default()
+    # Reasoning models put draft objects in <think> and prose can carry stray
+    # braces, so slicing first "{" to last "}" glues unrelated text together.
+    # Decode each top-level object and keep the last one that fits the type.
+    text = content
+    expected_keys = set(getattr(response_type, "__dataclass_fields__", {}))
+    # Reasoning alone can be prose; any task-specific field is an answer
+    # attempt, even when most required fields are missing.
+    answer_keys = expected_keys - {"reasoning"}
+    decoder = json.JSONDecoder()
+    parsed: T | None = None
+    pos = 0
+    while token := _RESPONSE_TOKEN_RE.search(text, pos):
+        pos = token.end()
+        if token.group() == "</think>":
+            # Some chat templates put "<think>" in the prompt, so only the
+            # closer shows up: everything before it was reasoning.
+            parsed = None
+        # Only skip reasoning markup between objects, never inside JSON strings.
+        if token.group() != "{":
+            continue
+        try:
+            data, pos = decoder.raw_decode(text, token.start())
+        except json.JSONDecodeError:
+            # Prose braces such as {tweet text} or { ... } are not answers.
+            if not _looks_like_json(text, token.start(), expected_keys):
+                continue
+            # Broken JSON fails closed: scanning inside it could keep a stale
+            # approval or promote a nested draft from a revision. The exception
+            # is broken JSON in reasoning whose opener was in the prompt.
+            parsed = None
+            closer = text.find("</think>", pos)
+            if closer < 0 or "<think>" in text[pos:closer]:
+                break
+            pos = closer
+            continue
+        if isinstance(data, dict):
+            try:
+                parsed = response_type.from_dict(data)
+            except (KeyError, ValueError, TypeError, AttributeError):
+                # A partial answer supersedes an earlier accepted object:
+                # keeping the stale one could resurrect a revised approval.
+                if answer_keys & data.keys():
+                    parsed = None
+    if parsed is not None:
+        return parsed
+    console.print(f"[red]Error: Could not parse LLM response for {task.value}")
+    console.print(content)
+    logging.error(f"No {response_type.__name__} JSON object in LLM {task.value} reply")
+    return response_type.default()
 
 
 def _resolve_openrouter_api_key() -> str:
