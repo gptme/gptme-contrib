@@ -28,6 +28,7 @@ import qrcode from 'qrcode-terminal';
 import { spawn } from 'child_process';
 import { existsSync } from 'fs';
 import { sessionArgs } from './claude-session.js';
+import { createKeyedQueue } from './serial-queue.js';
 
 // Config from env
 const AGENT_NAME = process.env.GPTME_AGENT || 'sven';
@@ -48,6 +49,10 @@ if (BACKEND === 'claude-code' && !existsSync(SYSTEM_PROMPT_FILE)) {
     console.log(`Warning: SYSTEM_PROMPT_FILE not found at ${SYSTEM_PROMPT_FILE}`);
     console.log('Run: cd ${WORKSPACE} && ./scripts/build-system-prompt.sh > ${SYSTEM_PROMPT_FILE}');
 }
+
+// Serializes messages per sender so two rapid messages cannot race for the
+// same agent session.
+const senderQueue = createKeyedQueue();
 
 const client = new Client({
     authStrategy: new LocalAuth({ dataPath: '.wwebjs_auth' }),
@@ -93,12 +98,15 @@ client.on('message', async (msg) => {
 
     console.log(`[${new Date().toISOString()}] Message from ${sender}: ${body.slice(0, 80)}...`);
 
-    // Call agent backend non-interactively
-    const response = await callAgent(sender, body);
-    if (response) {
-        await msg.reply(response);
-        console.log(`[${new Date().toISOString()}] Replied to ${sender}`);
-    }
+    // One conversation per sender, so a sender's messages must not overlap:
+    // they would race for the same session (see serial-queue.js).
+    await senderQueue.run(sender, async () => {
+        const response = await callAgent(sender, body);
+        if (response) {
+            await msg.reply(response);
+            console.log(`[${new Date().toISOString()}] Replied to ${sender}`);
+        }
+    });
 });
 
 /**
