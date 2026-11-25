@@ -1487,3 +1487,47 @@ def test_search_path_filters_preserve_where(tmp_path, filter_kind, where_kind):
 
     assert [r.metadata["source"] for r in results] == [str(wanted)]
     assert where == original
+
+
+@pytest.mark.parametrize("count", [0, 1000, 1001])
+@pytest.mark.parametrize("filter_kind", ["paths", "path_filters", "both"])
+def test_search_path_prefilter_pages_metadata(tmp_path, monkeypatch, count, filter_kind):
+    """Scan every metadata page without an unbounded get or dropping source spelling."""
+    indexer = Indexer(
+        persist_directory=tmp_path / "index",
+        collection_name="paged-path-prefilter",
+        embedding_function="minilm",
+        enable_persist=True,
+    )
+    inside = tmp_path / "inside"
+    # Path matching normalizes this spelling, but Chroma's source predicate must not.
+    wanted_source = f"{inside}//wanted.txt"
+    if count:
+        indexer.collection.add(
+            ids=[str(i) for i in range(count)],
+            documents=["pelican habitat"] * count,
+            embeddings=[[0.1] * 384 for _ in range(count)],
+            metadatas=[
+                {"source": wanted_source if i == count - 1 else str(tmp_path / f"{i}.txt")}
+                for i in range(count)
+            ],
+        )
+    original_get = type(indexer.collection).get
+    offsets = []
+
+    def bounded_get(collection, *args, **kwargs):
+        assert kwargs.get("limit") == 1000, "path pre-filter must use bounded pages"
+        assert kwargs.get("include") == ["metadatas"]
+        offsets.append(kwargs.get("offset"))
+        return original_get(collection, *args, **kwargs)
+
+    monkeypatch.setattr(type(indexer.collection), "get", bounded_get)
+    results, _, _ = indexer.search(
+        "pelican",
+        paths=[inside] if filter_kind in ("paths", "both") else None,
+        path_filters=("*.txt",) if filter_kind in ("path_filters", "both") else None,
+        where={"source": wanted_source},
+    )
+
+    assert [doc.metadata["source"] for doc in results] == ([wanted_source] if count else [])
+    assert offsets == ([0] if count < 1000 else [0, 1000])
