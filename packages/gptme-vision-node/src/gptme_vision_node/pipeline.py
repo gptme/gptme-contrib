@@ -95,12 +95,13 @@ class VisionPipeline:
             self.latest_frame = frame.copy()
 
         detections: list[Detection] = []
-        detector_failed = False
+        person_detector_failed = False
         for detector in self.detectors:
             try:
                 detections.extend(detector.detect(frame))
             except Exception:
-                detector_failed = True
+                if "person" in getattr(detector, "detection_kinds", {"person"}):
+                    person_detector_failed = True
                 logger.exception("detector %r failed", detector)
 
         events: list[VisionEvent] = []
@@ -112,8 +113,9 @@ class VisionPipeline:
             if not self._person_present:
                 self._person_present = True
                 events.append(VisionEvent(PERSON_APPEARED, persons))
-        elif self._person_present and not detector_failed:
-            # A failing detector is not evidence of absence.
+        elif self._person_present and not person_detector_failed:
+            # A failing person detector is not evidence of absence; failures
+            # from motion-only detectors must not suppress valid absence.
             self._frames_without_person += 1
             if self._frames_without_person >= self.absent_frames_for_left:
                 self._person_present = False

@@ -4,8 +4,8 @@ so a person who never left gets a person_left event."""
 from __future__ import annotations
 
 import numpy as np
-from gptme_vision_node.detect import Detection
-from gptme_vision_node.pipeline import PERSON_LEFT, VisionPipeline
+from gptme_vision_node.detect import Detection, MotionDetector
+from gptme_vision_node.pipeline import PERSON_APPEARED, PERSON_LEFT, VisionPipeline
 
 
 class Frames:
@@ -34,3 +34,25 @@ def test_detector_failure_is_not_absence():
     for _ in range(4):
         events.extend(pipeline.step())
     assert PERSON_LEFT not in [e.kind for e in events]
+
+
+def test_motion_failure_does_not_hide_successful_person_absence():
+    class PersonLeaves:
+        def __init__(self):
+            self.n = 0
+
+        def detect(self, frame):
+            self.n += 1
+            if self.n == 1:
+                return [Detection("person", (0, 0, 10, 10), 1.0)]
+            return []
+
+    class BrokenMotionDetector(MotionDetector):
+        def detect(self, frame):
+            raise RuntimeError("motion processing failed")
+
+    pipeline = VisionPipeline(
+        Frames(), [PersonLeaves(), BrokenMotionDetector()], absent_frames_for_left=3
+    )
+    events = [event for _ in range(4) for event in pipeline.step()]
+    assert [event.kind for event in events] == [PERSON_APPEARED, PERSON_LEFT]
