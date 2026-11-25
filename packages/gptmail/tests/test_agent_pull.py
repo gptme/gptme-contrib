@@ -259,6 +259,45 @@ def test_pull_refuses_undecodable_message_and_keeps_pulling(
     assert not list(local_inbox.glob(".delivery-*")), "temp file must be cleaned up"
 
 
+def test_pull_accepts_message_addressed_to_a_recipient_list(pull_workspace: Path) -> None:
+    """A ``to`` list that contains us is imported — the binding check is not list-blind."""
+    gordon_outbox = pull_workspace / "gordon" / "messages" / "outbox"
+    name = "20260101-000000-000001-gordon-List_recipients.md"
+    (gordon_outbox / name).write_text(
+        "---\nfrom: gordon\nto: [alice, erik]\nsubject: List recipients\n---\n\nPlease advise.\n"
+    )
+
+    result = CliRunner().invoke(agent, ["pull"])
+    assert result.exit_code == 0, result.output
+    assert "1 new message(s) fetched" in result.output
+
+    local_inbox = pull_workspace / "erik" / "messages" / "inbox"
+    assert (local_inbox / name).exists(), "listed recipient must be imported"
+
+
+def test_pull_refuses_message_without_a_recipient(
+    pull_workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fetched file with no ``to`` at all is refused, not treated as addressed to us."""
+    gordon_outbox = pull_workspace / "gordon" / "messages" / "outbox"
+    name = "20260101-000000-000002-gordon-No_recipient.md"
+    (gordon_outbox / name).write_text("---\nfrom: gordon\nsubject: No recipient\n---\n\nHi.\n")
+    # The remote listing lies: it claims the file is for us.
+    monkeypatch.setattr(
+        agent_cli,
+        "_remote_pending_rows",
+        lambda *args, **kwargs: [{"file": name, "mailbox": "default", "subject": "No recipient"}],
+    )
+
+    result = CliRunner().invoke(agent, ["pull"])
+    assert result.exit_code == 0, result.output
+    assert "'to' does not name 'erik'" in result.output
+
+    local_inbox = pull_workspace / "erik" / "messages" / "inbox"
+    assert not list(local_inbox.glob("*.md")), "recipient-less message must not be imported"
+    assert not list(local_inbox.glob(".delivery-*")), "temp file must be cleaned up"
+
+
 def test_pull_deduplicates_on_repull(pull_workspace: Path) -> None:
     """Re-running ``pull`` does not duplicate already-fetched messages."""
     gordon_outbox = pull_workspace / "gordon" / "messages" / "outbox"
