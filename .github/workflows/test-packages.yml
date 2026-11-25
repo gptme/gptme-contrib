@@ -164,7 +164,12 @@ jobs:
         # The shared lock requires >=3.11. Python 3.10 support must be
         # exercised in isolated package jobs (e.g. rag-lightweight), not
         # labelled as covered by an incompatible workspace installation.
-        python-version: ['3.11', '3.12']
+        # PRs test the 3.11 floor only: it is where newer-syntax breaks show
+        # up, and the second version doubled this workflow's PR jobs on the
+        # shared runner pool, starving master runs. Push, schedule and
+        # dispatch keep the full matrix, so 3.12-only breaks surface on
+        # master or in the nightly run.
+        python-version: ${{ github.event_name == 'pull_request' && fromJSON('["3.11"]') || fromJSON('["3.11", "3.12"]') }}
         package: ${{ fromJson(needs.discover.outputs.packages) }}
     env:
       CI_EXPECTED_PYTHON: ${{ matrix.python-version }}
