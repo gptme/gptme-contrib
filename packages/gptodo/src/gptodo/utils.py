@@ -1037,8 +1037,12 @@ def has_new_activity(updated_at: str | None, waiting_since: str | date | None) -
         else:
             return False
 
-        # Parse waiting_since (could be date or datetime string)
-        if isinstance(waiting_since, date) and not isinstance(waiting_since, datetime):
+        # Parse waiting_since. YAML loads an unquoted ISO timestamp as a
+        # datetime and a bare date as a date, so accept both objects as well as
+        # strings.
+        if isinstance(waiting_since, datetime):
+            waiting_dt = waiting_since
+        elif isinstance(waiting_since, date):
             # Convert date to datetime at start of day
             waiting_dt = datetime.combine(waiting_since, datetime.min.time())
         elif isinstance(waiting_since, str):
