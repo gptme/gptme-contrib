@@ -140,9 +140,11 @@ whose `wait:` date or typed `gate.deadline` has passed, oldest first, without
 releasing them; `--json`/`--jsonl` rows name the field in `gated_by` and the
 gate's `gate_kind`.
 
-Piped input is **body text**, not frontmatter. A leading `---` key block in
-that input produces a warning but is preserved as body text; set metadata
-with command flags or `gptodo edit --set` instead.
+Piped input is **body text**, not frontmatter. A leading `---` block whose keys
+are task fields (`state`, `wait`, `priority`, ...) is refused with exit 2, because
+they would be stored as inert body text; a block of unknown keys warns and is kept
+as body. Set metadata with command flags or `gptodo edit --set` instead, or pass
+`--allow-frontmatter-body` to keep the block as text.
 
 ## Task files
 
@@ -241,22 +243,30 @@ Common confusions:
 
 ### Legal transitions
 
+This diagram mirrors `gptodo transitions --json` (`VALID_TRANSITIONS` in `checker.py`).
+Regenerate it from that output when the table changes.
+
 ```mermaid
 stateDiagram-v2
     [*] --> backlog
     [*] --> draft
-    draft --> backlog : released
-    draft --> todo : released
-    draft --> cancelled
     backlog --> todo
+    backlog --> active
+    backlog --> waiting
+    backlog --> done
     backlog --> draft
     backlog --> someday
     backlog --> cancelled
+    backlog --> expired : auto-reap
     todo --> active
+    todo --> waiting
+    todo --> done
+    todo --> ready_for_review
     todo --> backlog
     todo --> draft
     todo --> someday
     todo --> cancelled
+    todo --> expired : auto-reap
     active --> ready_for_review
     active --> waiting
     active --> draft
@@ -264,16 +274,26 @@ stateDiagram-v2
     active --> done
     active --> cancelled
     ready_for_review --> active : review fails
+    ready_for_review --> todo
+    ready_for_review --> waiting
+    ready_for_review --> someday
     ready_for_review --> done
     ready_for_review --> cancelled
     waiting --> active : blocker resolved
+    waiting --> todo
+    waiting --> backlog
+    waiting --> done
+    waiting --> ready_for_review
     waiting --> someday
     waiting --> cancelled
+    draft --> backlog : released
+    draft --> todo : released
+    draft --> cancelled
     someday --> backlog : revived
     someday --> todo : revived
+    someday --> waiting
+    someday --> done
     someday --> cancelled
-    backlog --> expired : auto-reap
-    todo --> expired : auto-reap
     someday --> expired : auto-reap
     expired --> backlog : revived
     expired --> todo : revived

@@ -138,7 +138,8 @@ class SessionIndex:
         recent sessions. The final score blends keyword relevance with recency.
 
         Args:
-            query: Search query (supports FTS5 syntax: AND, OR, NOT, phrases)
+            query: Free-text query, split into terms that must all match
+                (FTS5 operators and phrase syntax are not supported)
             source: Filter by source type ("journal", "gptme", "claude_code",
                 "cursor", or "codex")
             limit: Max results to return
@@ -179,19 +180,13 @@ class SessionIndex:
         """
         params = [query, *params, fetch_limit]
 
-        # Normalize query for FTS5: the unicode61 tokenizer splits on
-        # hyphens, so "SWE-bench" is tokenized as "swe" + "bench".
-        # Replace hyphens with spaces so the query matches the token stream.
+        # Quoted terms split like the unicode61 tokenizer: "SWE-bench"
+        # queries "swe" + "bench", and punctuation cannot break the syntax.
         normalized_query = _normalize_fts_query(query)
+        if not normalized_query:
+            return []
         params[0] = normalized_query
-
-        try:
-            rows = self.conn.execute(sql, params).fetchall()
-        except sqlite3.OperationalError:
-            # FTS query syntax error — try wrapping terms in quotes
-            escaped_query = _quote_fts_phrase(normalized_query)
-            params[0] = escaped_query
-            rows = self.conn.execute(sql, params).fetchall()
+        rows = self.conn.execute(sql, params).fetchall()
 
         if not rows:
             return []
@@ -293,25 +288,18 @@ class SessionIndex:
 
 
 def _normalize_fts_query(query: str) -> str:
-    """Normalize a search query for FTS5's unicode61 tokenizer.
+    """Turn free text into an FTS5 query of quoted terms, ANDed implicitly.
 
-    The tokenizer splits on hyphens and most punctuation, so compound terms
-    like "SWE-bench" become two tokens "swe" + "bench". We replace hyphens
-    with spaces so the query aligns with the token stream.
+    The unicode61 tokenizer splits on anything that is not a letter or digit,
+    so compound terms like "SWE-bench" index as "swe" + "bench". Split the
+    query the same way and quote each term, so punctuation (``,`` ``?`` ``'``)
+    neither raises a syntax error nor turns the query into an exact phrase.
+    Uppercase FTS5 keyword operators are dropped.
     """
     import re as _re
 
-    # Replace hyphens with spaces (tokenizer does this too)
-    q = query.replace("-", " ")
-    # Collapse multiple spaces
-    q = _re.sub(r"\s+", " ", q).strip()
-    return q
-
-
-def _quote_fts_phrase(query: str) -> str:
-    """Return query as an FTS5 phrase, escaping embedded double quotes."""
-    escaped = query.replace('"', '""')
-    return f'"{escaped}"'
+    tokens = _re.findall(r"[^\W_]+", query)
+    return " ".join(f'"{t}"' for t in tokens if t not in {"AND", "OR", "NOT", "NEAR"})
 
 
 # Source quality weights: journal entries are curated summaries,

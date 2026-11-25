@@ -52,6 +52,9 @@ def _stub_external_merge_checks():
         # Same for gptme/gptme's diff-shape fetch: only gptme-core tests
         # that need real patch text override this.
         patch.object(self_merge_check, "_fetch_pr_file_shapes", return_value=[]),
+        # A review of another sha fetches both compare diffs to decide whether it
+        # carries to the head; unreadable keeps it stale.
+        patch.object(self_merge_check, "run_gh_bytes", return_value=None),
     ):
         yield
     self_merge_check.merge_permission.cache_clear()

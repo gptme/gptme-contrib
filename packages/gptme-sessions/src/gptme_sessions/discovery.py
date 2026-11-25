@@ -622,23 +622,36 @@ def discover_cc_sessions(
             logger.debug("CC projects directory does not exist: %s", root)
             continue
         try:
-            for project_dir in sorted(root.iterdir()):
-                if not project_dir.is_dir():
-                    continue
-                for jsonl_file in sorted(project_dir.glob("*.jsonl")):
-                    key = jsonl_file.name
-                    if key in seen:
-                        continue
-                    # Skip stub sessions (metadata-only, no assistant response)
-                    if min_size > 0 and jsonl_file.stat().st_size < min_size:
-                        continue
-                    session_date = _quick_date_from_jsonl(jsonl_file)
-                    if session_date is None or not start <= session_date <= end:
-                        continue
-                    seen.add(key)
-                    sessions_with_dates.append((session_date, jsonl_file))
+            project_dirs = sorted(root.iterdir())
         except OSError as e:
             logger.debug("Failed to read CC projects root %s: %s", root, e)
+            continue
+        # Errors are handled per entry: one bad file or directory (e.g. a
+        # dangling symlink) must not hide everything that sorts after it.
+        for project_dir in project_dirs:
+            try:
+                if not project_dir.is_dir():
+                    continue
+                jsonl_files = sorted(project_dir.glob("*.jsonl"))
+            except OSError as e:
+                logger.debug("Failed to read CC project %s: %s", project_dir, e)
+                continue
+            for jsonl_file in jsonl_files:
+                key = jsonl_file.name
+                if key in seen:
+                    continue
+                # Skip stub sessions (metadata-only, no assistant response)
+                try:
+                    if min_size > 0 and jsonl_file.stat().st_size < min_size:
+                        continue
+                except OSError as e:
+                    logger.debug("Failed to stat CC session %s: %s", jsonl_file, e)
+                    continue
+                session_date = _quick_date_from_jsonl(jsonl_file)
+                if session_date is None or not start <= session_date <= end:
+                    continue
+                seen.add(key)
+                sessions_with_dates.append((session_date, jsonl_file))
     return [path for _, path in sorted(sessions_with_dates)]
 
 

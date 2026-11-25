@@ -507,3 +507,154 @@ def test_placed_at_anchor_does_not_revive_expired_callback(
         load_callback_candidate(str(state.parent), now=callback_at, caller=PHONE)
         is None
     )
+
+
+def test_early_inbound_receives_pending_brief_without_outbound_call(callback_case):
+    run, _, _, requests, state, _, brief = callback_case
+    (state / "voice-calls/last-standup-call-sid.txt").unlink()
+    planned = state / "voice-calls/planned"
+    planned.mkdir()
+    (planned / "standup-test.json").write_text(
+        json.dumps(
+            {
+                "plan_id": "standup-test",
+                "caller": PHONE,
+                "scheduled_at": (
+                    datetime.now(timezone.utc) + timedelta(hours=1)
+                ).isoformat(),
+                "purpose": "Daily standup",
+                "context": brief,
+            }
+        )
+    )
+    cfg = run()
+    assert MARKER in cfg.instructions
+    assert "standup-test" in cfg.instructions
+    assert "attempted to reach" not in cfg.instructions.lower()
+    assert any(tool.get("name") == "fulfill_planned_call" for tool in cfg.extra_tools)
+    assert not requests
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"grant": False},
+        {"grant_sid": "CAdifferent"},
+        {"grant_from": "+19999999"},
+        {"from_number": "+19999999"},
+    ],
+)
+def test_early_plan_never_leaks_through_untrusted_start(callback_case, kwargs):
+    from gptme_voice.realtime.planned_calls import register_planned_call
+
+    run, _, _, _, state, _, brief = callback_case
+    (state / "voice-calls/last-standup-call-sid.txt").unlink()
+    register_planned_call(
+        str(state.parent),
+        "early-test",
+        PHONE,
+        (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+        "Daily standup",
+        brief,
+    )
+    cfg = run(**kwargs)
+    assert MARKER not in cfg.instructions
+    assert not any(
+        tool.get("name") == "fulfill_planned_call" for tool in cfg.extra_tools
+    )
+    assert not (state / "voice-calls/fulfilled/early-test.json").exists()
+
+
+def test_early_plan_tool_is_bound_to_current_authenticated_call(
+    callback_case, monkeypatch
+):
+    from gptme_voice.realtime.planned_calls import (
+        is_planned_call_fulfilled,
+        register_planned_call,
+    )
+
+    run, _, _, _, state, _, brief = callback_case
+    (state / "voice-calls/last-standup-call-sid.txt").unlink()
+    register_planned_call(
+        str(state.parent),
+        "early-test",
+        PHONE,
+        (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+        "Daily standup",
+        brief,
+    )
+    bridge_args = {}
+
+    class CapturingBridge(_DummyToolBridge):
+        def __init__(self, **kwargs):
+            bridge_args.update(kwargs)
+
+    monkeypatch.setattr(server_mod, "GptmeToolBridge", CapturingBridge)
+    run()
+    fulfill = bridge_args["on_fulfill_planned_call"]
+    arguments = {
+        "plan_id": "early-test",
+        "caller_confirmation": "That covers the daily standup.",
+        "summary": "Delivered the full daily standup and discussed next steps.",
+    }
+    assert "error" in fulfill(arguments)
+    transcript = bridge_args["transcript_provider"]()
+    transcript.extend(
+        [
+            server_mod.TranscriptTurn(
+                "assistant",
+                "The release shipped. Does that cover the daily standup, so the later call is unnecessary?",
+            ),
+            server_mod.TranscriptTurn("user", arguments["caller_confirmation"]),
+        ]
+    )
+    assert fulfill(arguments)["status"] == "fulfilled"
+    assert is_planned_call_fulfilled(str(state.parent), "early-test")
+    receipt = json.loads((state / "voice-calls/fulfilled/early-test.json").read_text())
+    assert receipt["caller"] == PHONE
+    assert receipt["call_sid"] == "CAinbound"
+
+
+def test_signed_webhook_with_pending_plan_does_not_start_generic_prewarm(
+    callback_case, monkeypatch
+):
+    from gptme_voice.realtime.planned_calls import register_planned_call
+    from twilio.request_validator import RequestValidator
+
+    run, server, _, _, state, _, brief = callback_case
+    (state / "voice-calls/last-standup-call-sid.txt").unlink()
+    register_planned_call(
+        str(state.parent),
+        "early-test",
+        PHONE,
+        (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+        "Daily standup",
+        brief,
+    )
+    server._save_recent_call(
+        server_mod.RecentCallRecord(
+            caller_id=PHONE,
+            source="twilio",
+            ended_at=time.time(),
+            transcript=[server_mod.TranscriptTurn("user", "Resume this conversation.")],
+            metadata={"call_sid": "CAprevious"},
+        )
+    )
+    prewarms = []
+    monkeypatch.setattr(server, "_register_prewarm_task", prewarms.append)
+    params = {"From": PHONE, "CallSid": "CAinbound"}
+    signature = RequestValidator("test-token").compute_signature(
+        "https://voice.example/incoming", params
+    )
+
+    class Request:
+        headers = {"host": "voice.example", "X-Twilio-Signature": signature}
+
+        async def form(self):
+            return params
+
+    assert asyncio.run(server.handle_incoming_call(Request())).status_code == 200
+    assert prewarms == []
+    cfg = run()
+    assert "Resume this conversation." in cfg.instructions
+    assert MARKER in cfg.instructions

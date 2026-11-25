@@ -1283,32 +1283,41 @@ class Indexer:
         # Prepare where clause
         search_where = where.copy() if where else {}
 
-        # Pre-filter documents based on all patterns
-        if path_filters:
-            logger.debug(f"Filtering with patterns: {path_filters}")
-            all_docs = self.collection.get()
+        # Pre-filter documents based on all paths and patterns, so the top-k
+        # query runs inside them instead of losing their documents to
+        # higher-ranked ones outside.
+        if path_filters or paths:
+            logger.debug(f"Filtering with paths {paths} and patterns {path_filters}")
+            # Like list_documents(), bound each read to avoid SQLite's variable
+            # limit. Only metadata is needed, not the indexed document contents.
+            page_size = 1000
+            offset = 0
             matching_sources = set()
+            while True:
+                page = self.collection.get(limit=page_size, offset=offset, include=["metadatas"])
+                for meta in page["metadatas"] or []:
+                    if not meta or "source" not in meta:
+                        continue
 
-            for meta in all_docs["metadatas"] or []:
-                if not meta or "source" not in meta:
-                    continue
+                    # Create a dummy document for path matching
+                    doc = Document(content="", metadata=dict(meta), doc_id="temp")
 
-                source_path = Path(str(meta["source"]))
-                # Create a dummy document for path matching
-                doc = Document(
-                    content="",
-                    metadata=dict(meta),
-                    doc_id="temp",
-                    source_path=source_path,
-                )
+                    # Chroma compares exact strings; retain the stored spelling
+                    # even though _matches_paths normalizes it through Path.
+                    if self._matches_paths(doc, paths=paths, path_filters=path_filters):
+                        matching_sources.add(str(meta["source"]))
 
-                # Use _matches_paths to check all patterns
-                if self._matches_paths(doc, paths=None, path_filters=path_filters):
-                    matching_sources.add(str(source_path))
+                page_count = len(page["ids"] or [])
+                if page_count < page_size:
+                    break
+                offset += page_count
 
             if matching_sources:
                 logger.debug(f"Found {len(matching_sources)} matching files")
-                search_where["source"] = {"$in": list(matching_sources)}
+                source_clause = {"source": {"$in": list(matching_sources)}}
+                search_where = (
+                    {"$and": [search_where, source_clause]} if search_where else source_clause
+                )
             else:
                 logger.debug("No files matched the filter patterns")
                 return [], [], [] if explain else None

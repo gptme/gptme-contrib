@@ -7,6 +7,7 @@ Usage:
 """
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -84,6 +85,85 @@ def validate_lesson(lesson_path: Path) -> tuple[bool, list[str]]:
     return len(errors) == 0, errors
 
 
+def _literal_pathspec(path: Path) -> str:
+    """Stop git from reading `[`, `*` or `?` in a path as a glob."""
+    return f":(literal){path.as_posix()}"
+
+
+def _origin_has_commit(repo_root: Path, branch_name: str, commit: str) -> bool:
+    """Whether the branch on origin is at commit; False if it cannot be checked."""
+    ref = f"refs/heads/{branch_name}"
+    try:
+        push_url = subprocess.check_output(
+            ["git", "remote", "get-url", "--push", "origin"],
+            text=True,
+            cwd=repo_root,
+        ).strip()
+        refs = subprocess.check_output(
+            ["git", "ls-remote", push_url, ref],
+            text=True,
+            cwd=repo_root,
+            stderr=subprocess.DEVNULL,
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+            timeout=15,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return False
+    return f"{commit}\t{ref}" in refs.splitlines()
+
+
+def _undo_lesson_branch(
+    repo_root: Path,
+    original_ref: str,
+    start_sha: str,
+    branch_name: str,
+    relative_path: Path,
+    original_index: str,
+    intent_to_add: bool,
+    lesson_commit: str | None = None,
+) -> None:
+    """Return to the original ref, preserving lesson contents and staging.
+
+    A plain checkout would delete a new lesson or revert local edits. First
+    rewind without touching the working tree, switch back, then restore only
+    the lesson's original index entry. Keep the published commit on success;
+    delete the retry-blocking branch on failure. Stop at the first failed step.
+    """
+    pathspec = _literal_pathspec(relative_path)
+    for args in (
+        # Drop the lesson commit; the index and working tree stay as they are
+        ["reset", "--soft", start_sha],
+        ["reset", "-q", start_sha, "--", pathspec],
+        ["checkout", original_ref],
+        ["reset", "-q", original_index, "--", pathspec],
+        *([["add", "-N", "--", pathspec]] if intent_to_add else []),
+        ["branch", "-f", branch_name, lesson_commit]
+        if lesson_commit
+        else ["branch", "-D", branch_name],
+    ):
+        if subprocess.run(["git", *args], cwd=repo_root).returncode != 0:
+            # post-checkout can fail after the switch completed. Verify the
+            # actual ref before deciding whether index restoration is safe.
+            if args[0] == "checkout":
+                actual_ref = subprocess.check_output(
+                    ["git", "rev-parse", "--symbolic-full-name", "HEAD"],
+                    text=True,
+                    cwd=repo_root,
+                ).strip()
+                expected_ref = (
+                    "HEAD"
+                    if original_ref == start_sha
+                    else f"refs/heads/{original_ref}"
+                )
+                if actual_ref == expected_ref:
+                    continue
+            print(
+                f"⚠️  Cleanup stopped at `git {' '.join(args)}`; "
+                f"check branch {branch_name}"
+            )
+            return
+
+
 def create_lesson_pr(
     lesson_file: Path,
     judge_scores: dict | None = None,
@@ -113,6 +193,11 @@ def create_lesson_pr(
         print("❌ Not in a git repository")
         return False
 
+    # Validation reads content, whereas git would commit the symlink itself.
+    if lesson_file.is_symlink():
+        print(f"❌ Lesson file must not be a symlink: {lesson_file}")
+        return False
+
     # Validate lesson first
     valid, errors = validate_lesson(lesson_file)
     if not valid:
@@ -132,15 +217,19 @@ def create_lesson_pr(
 
     # Determine category from file path
     # Assume path is like lessons/workflow/my-lesson.md or lessons/tools/my-tool.md
+    # Resolve parent directories before checking repository containment.
     try:
-        relative_path = lesson_file.relative_to(repo_root)
-        parts = relative_path.parts
-        if len(parts) >= 2 and parts[0] == "lessons":
-            category = parts[1]
-        else:
-            category = "workflow"  # default
+        relative_path = (lesson_file.parent.resolve() / lesson_file.name).relative_to(
+            repo_root.resolve()
+        )
     except ValueError:
-        category = "workflow"
+        print(f"❌ Lesson file is outside the repository: {lesson_file}")
+        return False
+    parts = relative_path.parts
+    if len(parts) >= 3 and parts[0] == "lessons":
+        category = parts[1]
+    else:
+        category = "workflow"  # default
 
     # Create slug from filename
     slug = lesson_file.stem
@@ -157,8 +246,18 @@ def create_lesson_pr(
         print("🔍 Dry run - would create PR but not actually doing it")
         return True
 
+    pathspec = _literal_pathspec(relative_path)
+    start_sha = current_branch = lesson_commit = ""
+    branch_created = pushed = False
     try:
-        # Store current branch
+        # Store current branch (or the commit itself when HEAD is detached)
+        start_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+            cwd=repo_root,
+        ).stdout.strip()
         current_branch = subprocess.run(
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
             check=True,
@@ -166,31 +265,59 @@ def create_lesson_pr(
             text=True,
             cwd=repo_root,
         ).stdout.strip()
+        if current_branch == "HEAD":
+            current_branch = start_sha
 
-        # Create and checkout branch
-        print(f"📌 Creating branch: {branch_name}")
-        subprocess.run(
-            ["git", "checkout", "-b", branch_name],
+        # Snapshot staging before git add replaces the lesson's index entry.
+        original_index = subprocess.run(
+            ["git", "write-tree"],
             check=True,
+            capture_output=True,
+            text=True,
             cwd=repo_root,
+        ).stdout.strip()
+
+        # A tree omits intent-to-add entries; preserve that flag separately.
+        intent_to_add = bool(
+            subprocess.check_output(
+                [
+                    "git",
+                    "diff",
+                    "--name-only",
+                    "--diff-filter=A",
+                    "--",
+                    pathspec,
+                ],
+                text=True,
+                cwd=repo_root,
+            ).strip()
         )
+
+        # Create separately: checkout hooks may fail after switching branches.
+        print(f"📌 Creating branch: {branch_name}")
+        subprocess.run(["git", "branch", branch_name], check=True, cwd=repo_root)
+        branch_created = True
+        subprocess.run(["git", "checkout", branch_name], check=True, cwd=repo_root)
 
         # Add the lesson file
         print(f"➕ Adding file: {relative_path}")
         subprocess.run(
-            ["git", "add", str(relative_path)],
+            ["git", "add", "--", pathspec],
             check=True,
             cwd=repo_root,
         )
 
-        # Commit
+        # Commit only the lesson: other staged work stays staged and unpushed
         commit_msg = f"feat(lessons): add {title}"
         print(f"💾 Committing: {commit_msg}")
         subprocess.run(
-            ["git", "commit", "-m", commit_msg],
+            ["git", "commit", "-m", commit_msg, "--", pathspec],
             check=True,
             cwd=repo_root,
         )
+        lesson_commit = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], text=True, cwd=repo_root
+        ).strip()
 
         # Push branch
         print(f"🚀 Pushing branch: {branch_name}")
@@ -199,6 +326,7 @@ def create_lesson_pr(
             check=True,
             cwd=repo_root,
         )
+        pushed = True
 
         # Create PR body
         pr_body = f"""## New Lesson: {title}
@@ -258,32 +386,48 @@ def create_lesson_pr(
         pr_url = pr_result.stdout.strip()
         print(f"✅ PR created: {pr_url}")
 
-        # Return to previous branch
-        print(f"🔙 Returning to branch: {current_branch}")
-        subprocess.run(
-            ["git", "checkout", current_branch],
-            check=True,
-            cwd=repo_root,
-        )
-
-        return True
-
-    except subprocess.CalledProcessError as e:
+    except (subprocess.CalledProcessError, OSError, KeyboardInterrupt) as e:
         print(f"❌ Error creating PR: {e}")
         if hasattr(e, "stderr") and e.stderr:
             print(f"   Error output: {e.stderr}")
 
-        # Try to clean up - return to previous branch
-        try:
-            subprocess.run(
-                ["git", "checkout", current_branch],
-                check=False,
-                cwd=repo_root,
+        if branch_created:
+            _undo_lesson_branch(
+                repo_root,
+                current_branch,
+                start_sha,
+                branch_name,
+                relative_path,
+                original_index,
+                intent_to_add,
             )
-        except Exception:
-            pass
+        # An interrupt or dropped connection can follow the remote ref update
+        if lesson_commit and not pushed:
+            pushed = _origin_has_commit(repo_root, branch_name, lesson_commit)
+        if pushed:
+            print(
+                f"ℹ️  {branch_name} is already on origin. Open the PR with "
+                f"`gh pr create --head {branch_name}` rather than rerunning."
+            )
 
+        if isinstance(e, KeyboardInterrupt):
+            raise
         return False
+
+    # Preserve both the published branch and the user's local lesson edits.
+    print(f"🔙 Returning to branch: {current_branch}")
+    _undo_lesson_branch(
+        repo_root,
+        current_branch,
+        start_sha,
+        branch_name,
+        relative_path,
+        original_index,
+        intent_to_add,
+        lesson_commit,
+    )
+
+    return True
 
 
 @click.command()

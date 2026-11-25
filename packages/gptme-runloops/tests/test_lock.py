@@ -5,7 +5,9 @@ import tempfile
 import time
 from pathlib import Path
 from threading import Thread
+from unittest import mock
 
+import pytest
 from gptme_runloops.utils.lock import RunLoopLock
 
 
@@ -128,3 +130,23 @@ def test_lock_file_truncated_on_release():
         # informational, so empty == "lock not held".
         assert lock.lock_file.exists()
         assert lock.lock_file.read_text().strip() == ""
+
+
+@pytest.mark.parametrize("failing", ["os.ftruncate", "os.write", "os.fsync"])
+def test_lock_acquire_write_failure_does_not_leak_the_flock(tmpdir, failing):
+    """A failed PID write must not wedge the lock for the rest of the process.
+
+    Regression test for gptme/gptme-contrib#2518: `flock` succeeded, then
+    `ftruncate`/`write`/`fsync` raised (ENOSPC, EIO) while `lock_fd` was still
+    None, so `release()` had nothing to clean up and the leaked descriptor kept
+    the flock held — the lane could never reacquire it before exit.
+    """
+    lock_dir = Path(str(tmpdir))
+    lock = RunLoopLock(lock_dir, "test")
+    with mock.patch(failing, side_effect=OSError(28, "No space left on device")):
+        with pytest.raises(OSError):
+            lock.acquire()
+
+    assert lock.lock_fd is None
+    # The fd is closed, so the lock is free again for a fresh instance.
+    assert RunLoopLock(lock_dir, "test").acquire(wait=False)

@@ -32,6 +32,21 @@ logger = logging.getLogger(__name__)
 DEFAULT_LOCK_TIMEOUT_HOURS = 4
 
 
+def _same_inode(fd: int, path: Path) -> bool:
+    """True if ``fd`` refers to the file currently at ``path``.
+
+    Guards against locking an unlinked inode: after the flock is granted the
+    path may have been unlinked (and possibly recreated) by a concurrent
+    release or cleanup, in which case the lock we hold protects nothing.
+    """
+    try:
+        path_stat = os.stat(str(path))
+    except FileNotFoundError:
+        return False
+    fd_stat = os.fstat(fd)
+    return (path_stat.st_dev, path_stat.st_ino) == (fd_stat.st_dev, fd_stat.st_ino)
+
+
 @contextmanager
 def _atomic_lock_file(path: Path, write: bool = False) -> Iterator[tuple[dict | None, Path]]:
     """Context manager for atomic file operations with flock.
@@ -59,11 +74,26 @@ def _atomic_lock_file(path: Path, write: bool = False) -> Iterator[tuple[dict | 
     # Use 'a+' mode to create file if it doesn't exist without truncating
     fd = None
     try:
-        fd = os.open(str(path), os.O_RDWR | os.O_CREAT, 0o644)
+        # Acquire the flock, then verify we locked the inode currently at the
+        # path. A concurrent owner that releases by unlinking (or a cleanup
+        # sweep) can leave us holding the flock on an unlinked inode; a later
+        # acquirer then locks the fresh file and both proceed as holders
+        # (gptme/gptme-contrib#2304 item 6a). Retry on the fresh file when the
+        # inode no longer matches.
+        while True:
+            fd = os.open(str(path), os.O_RDWR | os.O_CREAT, 0o644)
 
-        # Acquire exclusive lock (blocks until available)
-        # Use LOCK_NB for non-blocking if we want to fail fast
-        fcntl.flock(fd, fcntl.LOCK_EX)
+            # Acquire exclusive lock (blocks until available)
+            # Use LOCK_NB for non-blocking if we want to fail fast
+            fcntl.flock(fd, fcntl.LOCK_EX)
+
+            if _same_inode(fd, path):
+                break
+
+            # Stale inode: release and retry on the file now at the path.
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+            fd = None
 
         # Read existing content
         existing_data = None
@@ -322,13 +352,30 @@ def cleanup_expired_locks(repo_root: Path | None = None) -> list[TaskLock]:
 
     removed = []
     for lock_file in locks_dir.glob("*.lock"):
+        # Cheap pre-filter, then re-validate under the flock so a concurrent
+        # acquirer that is taking over the expired lock is not raced: without
+        # the flock, cleanup could unlink a lock B just took over and C then
+        # acquires it too (two holders, gptme/gptme-contrib#2304 item 6b).
         lock = TaskLock.from_file(lock_file)
-        if lock is not None and lock.is_expired():
-            try:
-                lock_file.unlink()
-                removed.append(lock)
-            except OSError as e:
-                logger.warning("Failed to remove expired lock %s: %s", lock_file, e)
+        if lock is None or not lock.is_expired():
+            continue
+        try:
+            with _atomic_lock_file(lock_file, write=False) as (existing_data, path):
+                if not existing_data:
+                    continue
+                try:
+                    current = TaskLock(**existing_data)
+                except (TypeError, KeyError):
+                    continue
+                if not current.is_expired():
+                    continue  # renewed while we waited for the flock
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    pass
+                removed.append(current)
+        except OSError as e:
+            logger.warning("Failed to remove expired lock %s: %s", lock_file, e)
     return removed
 
 

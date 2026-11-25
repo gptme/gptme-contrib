@@ -27,7 +27,11 @@ class Detection:
 
 @runtime_checkable
 class Detector(Protocol):
-    """Anything that can turn a frame into detections."""
+    """Anything that can turn a frame into detections.
+
+    Detectors may declare ``detection_kinds`` to identify their capabilities.
+    Without it, the pipeline conservatively assumes person detection is possible.
+    """
 
     def detect(self, frame: np.ndarray) -> list[Detection]: ...
 
@@ -39,6 +43,8 @@ class PersonDetector:
     here" presence events at v0. Swap for a real model later via the same
     ``detect(frame) -> list[Detection]`` interface.
     """
+
+    detection_kinds = frozenset({"person"})
 
     def __init__(
         self,
@@ -91,6 +97,8 @@ class MotionDetector:
     changed regions above ``min_area`` become ``motion`` detections whose
     score is the fraction of the frame that changed (capped at 1.0).
     """
+
+    detection_kinds = frozenset({"motion"})
 
     def __init__(
         self,

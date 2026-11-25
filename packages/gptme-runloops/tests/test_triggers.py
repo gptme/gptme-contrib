@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 
+import pytest
 from gptme_runloops.triggers import (
     SuppressorSpec,
     TriggerDecision,
@@ -69,6 +70,39 @@ def test_load_state_corrupt_file_fails_open(tmp_path):
     p = tmp_path / "state.json"
     p.write_text("{not json")
     assert load_state(p) == TriggerState()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "null",
+        "[]",
+        '"a bare string"',
+        "5",
+        '{"last_session_ts": "yesterday"}',
+        '{"last_session_ts": true}',
+        '{"blocked_until": [1, 2]}',
+        pytest.param('{"last_session_ts": 1' + "0" * 400 + "}", id="huge-int"),
+        '{"last_session_ts": NaN}',
+        '{"blocked_until": Infinity}',
+        '{"blocked_until": 1e400}',
+        '{"last_reasons": 5}',
+        '{"last_reasons": "inbox: 1 unread"}',
+        '{"last_reasons": ["ok", 7]}',
+        '{"observations": [1, 2]}',
+    ],
+)
+def test_load_state_wrong_shape_fails_open(tmp_path, payload):
+    # Valid JSON of the wrong shape is not a ValueError from json.loads, so it
+    # must be rejected by the shape contract and still fail open (#2519).
+    p = tmp_path / "state.json"
+    p.write_text(payload)
+    assert load_state(p) == TriggerState()
+
+
+def test_from_dict_rejects_non_mapping():
+    with pytest.raises(ValueError, match="must be a JSON object"):
+        TriggerState.from_dict([])  # type: ignore[arg-type]
 
 
 def test_save_then_load_is_identity(tmp_path):

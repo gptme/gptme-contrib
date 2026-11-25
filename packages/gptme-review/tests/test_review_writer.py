@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -65,7 +66,7 @@ def test_find_marker_comment_reads_through_the_bound_io(alice_io):
         calls.append(cmd)
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
-    alice_io.gh_paginated_list = lambda args: comments
+    alice_io.gh_json = lambda args: [comments]  # one --slurp page
     alice_io.run = fake_run
     keeper = writer.bind_io(alice_io).find_marker_comment("o/r", 7)
     assert keeper is not None and keeper["id"] == 2
@@ -86,7 +87,7 @@ def test_copied_marker_from_another_author_is_ignored_not_deleted(alice_io):
         "user": {"login": "mallory"},
     }
     calls: list[list[str]] = []
-    alice_io.gh_paginated_list = lambda args: [real, copied]
+    alice_io.gh_json = lambda args: [[real, copied]]
     alice_io.run = lambda cmd, **kw: calls.append(cmd)
     keeper = writer.bind_io(alice_io).find_marker_comment("o/r", 7)
     assert keeper is not None and keeper["id"] == 1
@@ -552,9 +553,11 @@ def _scripted_run(responses):
 
     def fake_run(cmd, **kw):
         calls.append(cmd)
-        for prefix, (code, out) in responses.items():
+        for prefix, (code, out, *err) in responses.items():
             if tuple(cmd[: len(prefix)]) == prefix:
-                return subprocess.CompletedProcess(cmd, code, out, "err")
+                return subprocess.CompletedProcess(
+                    cmd, code, out, err[0] if err else "err"
+                )
         raise AssertionError(f"unexpected command {cmd}")
 
     return fake_run, calls
@@ -668,7 +671,9 @@ def test_read_checkout_file_refuses_paths_outside_the_checkout(alice_io, tmp_pat
 
 
 def test_cited_sha_lookup_goes_through_the_bound_run(alice_io):
-    fake_run, calls = _scripted_run({("gh", "api"): (1, "")})
+    fake_run, calls = _scripted_run(
+        {("gh", "api"): (1, "", "gh: No commit found for SHA: abc1234 (HTTP 422)")}
+    )
     w = _bound_with(alice_io, run=fake_run)
     body = "Fixed in `abc1234`. Also bumps the pin, commit 2222222."
     findings = w._check_cited_shas(body, "o/r", ["src/a.py"], _SUBMODULE_DIFF)
@@ -676,6 +681,21 @@ def test_cited_sha_lookup_goes_through_the_bound_run(alice_io):
     assert findings[0]["severity"] == "P1" and findings[0]["static"] is True
     # The gitlink SHA the PR moves is accepted without a lookup.
     assert calls == [["gh", "api", "repos/o/r/commits/abc1234", "--jq", ".sha"]]
+
+
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "gh: API rate limit exceeded (HTTP 403)",
+        "gh: Server Error (HTTP 502)",
+        "error connecting to api.github.com",
+    ],
+)
+def test_cited_sha_lookup_error_is_not_a_missing_commit(alice_io, stderr):
+    """A failed lookup is unknown, not 'not found' (contrib#2384, #2273)."""
+    fake_run, _calls = _scripted_run({("gh", "api"): (1, "", stderr)})
+    w = _bound_with(alice_io, run=fake_run)
+    assert w._check_cited_shas("Fixed in `abc1234`.", "o/r", ["src/a.py"]) == []
 
 
 def test_cited_sha_does_not_truncate_a_full_ref(alice_io):
@@ -855,6 +875,96 @@ def test_rule_7_recognises_breaking_change_fix_titles(alice_io, title, flagged):
         ["fix PR has no regression test"] if flagged else []
     )
     assert w._check_fix_without_test(title, ["src/a.py", "tests/test_a.py"]) == []
+
+
+@pytest.mark.parametrize("attribute", ["#[test]", "#[tokio::test]", "#[cfg(test)]"])
+def test_rule_7_accepts_inline_rust_unit_tests(alice_io, attribute):
+    """Rust keeps unit tests in ``#[cfg(test)]`` modules inside ``src/``.
+
+    A fix that adds ``#[test]`` functions there carries a regression test
+    even though no touched path looks like a test file
+    (ActivityWatch/aw-notify-rs#49 got the advisory anyway).
+    """
+    w = writer.bind_io(alice_io)
+    diff = (
+        "diff --git a/src/main.rs b/src/main.rs\n"
+        "--- a/src/main.rs\n"
+        "+++ b/src/main.rs\n"
+        "@@ -1,2 +1,6 @@\n"
+        f"+    {attribute}\n"
+        "+    fn threshold_alerts_rearm_on_new_day() {}\n"
+    )
+    assert w._check_fix_without_test("fix(alerts): re-arm", ["src/main.rs"], diff) == []
+    # An existing, unchanged test attribute is context, not a new test.
+    context_only = diff.replace(f"+    {attribute}", f"     {attribute}")
+    assert w._check_fix_without_test(
+        "fix(alerts): re-arm", ["src/main.rs"], context_only
+    )
+
+
+def test_rule_7_accepts_inline_rust_tests_in_git_quoted_paths(alice_io):
+    w = writer.bind_io(alice_io)
+    diff = (
+        'diff --git "a/src/caf\\303\\251.rs" "b/src/caf\\303\\251.rs"\n'
+        '--- "a/src/caf\\303\\251.rs"\n'
+        '+++ "b/src/caf\\303\\251.rs"\n'
+        "@@ -0,0 +1,2 @@\n"
+        "+#[test]\n"
+        "+fn regression() {}\n"
+    )
+    assert w._check_fix_without_test("fix: regression", ["src/café.rs"], diff) == []
+
+
+@pytest.mark.parametrize("example_path", ["docs/guide.md", "src/app.py"])
+@pytest.mark.parametrize("example_first", [False, True])
+def test_rule_7_ignores_rust_attributes_outside_rust_files(
+    alice_io, example_path, example_first
+):
+    w = writer.bind_io(alice_io)
+    rust_diff = (
+        "diff --git a/src/main.rs b/src/main.rs\n"
+        "--- a/src/main.rs\n"
+        "+++ b/src/main.rs\n"
+        "@@ -1 +1 @@\n"
+        "-fn helper() {}\n"
+        "+fn helper() { fixed(); }\n"
+    )
+    example_diff = (
+        f"diff --git a/{example_path} b/{example_path}\n"
+        f"--- a/{example_path}\n"
+        f"+++ b/{example_path}\n"
+        "@@ -0,0 +1,4 @@\n"
+        "+```rust\n"
+        "+#[test]\n"
+        "+fn example() {}\n"
+        "+```\n"
+    )
+    diff = example_diff + rust_diff if example_first else rust_diff + example_diff
+    findings = w._check_fix_without_test(
+        "fix(helper): handle input", ["src/main.rs", example_path], diff
+    )
+    assert [f["title"] for f in findings] == ["fix PR has no regression test"]
+
+
+def test_rule_7_context_test_attribute_is_not_bridged_by_a_blank_line(alice_io):
+    """An added blank line must not reach the next context line's ``#[test]``.
+
+    ``\\s`` matches newlines, so ``^\\+\\s*#\\[`` could consume the line break of
+    an added empty line and match a test attribute that was already there. That
+    suppressed rule 7 without any regression test being added.
+    """
+    w = writer.bind_io(alice_io)
+    diff = (
+        "diff --git a/src/main.rs b/src/main.rs\n"
+        "--- a/src/main.rs\n"
+        "+++ b/src/main.rs\n"
+        "@@ -1,2 +1,3 @@\n"
+        "+    fn helper() {}\n"
+        "+\n"
+        "     #[test]\n"
+    )
+    findings = w._check_fix_without_test("fix(alerts): re-arm", ["src/main.rs"], diff)
+    assert [f["title"] for f in findings] == ["fix PR has no regression test"]
 
 
 def test_visual_rule_keys_sections_by_new_path_not_header_split(alice_io):
@@ -1049,6 +1159,88 @@ def test_llm_review_call_logs_errors_through_the_peer_host():
     )
     assert run["usage"] == {} and run["findings"] == []
     assert run["error"] == "provider unavailable" and run["wall_s"] >= 0
+
+
+def _sharded_io(host, review_call):
+    io = writer.default_io(sweep_identity("alice-agent", "alice-ai-review"), host)
+    io.preload_files = lambda args, pr, paths: ({}, set(), {})
+    io.fetch_submodule_context = lambda *a, **k: ""
+    io._openrouter_review_call = review_call
+    return writer.bind_io(io)
+
+
+def _run_sharded(w, args):
+    return w.run_sharded_llm(
+        args,
+        {"headRefOid": "abc"},
+        [Shard(index=1), Shard(index=2)],
+        reviewable_diff="",
+        model="openrouter/m",
+        key="k",
+        base_note="",
+    )
+
+
+def test_run_sharded_llm_logs_one_merged_run():
+    # Shard calls are labelled, so llm_review_call skips log_run for each of
+    # them; the merged review must still reach the run ledger once (#2282).
+    host = _RecordingHost()
+    w = _sharded_io(host, lambda *a, **k: ([{"title": "t"}], {"cost": 0.25}))
+    findings, usage, *_ = _run_sharded(w, _engine_args())
+    assert len(findings) == 2
+    assert len(host.runs) == 1
+    run = host.runs[0]
+    assert (run["repo"], run["number"], run["sha"], run["model"]) == (
+        "o/r",
+        7,
+        "abc",
+        "m",
+    )
+    assert run["findings"] == findings and run["usage"] == usage
+    assert run.get("error") is None and run["wall_s"] >= 0
+
+
+def test_run_sharded_llm_logs_a_failed_review():
+    host = _RecordingHost()
+
+    def fail(*args, **kwargs):
+        raise ReviewError("provider unavailable")
+
+    w = _sharded_io(host, fail)
+    with pytest.raises(ReviewError, match="provider unavailable"):
+        _run_sharded(w, _engine_args())
+    assert len(host.runs) == 1
+    run = host.runs[0]
+    assert "cost" not in run["usage"] and run["findings"] == []
+    assert "provider unavailable" in run["error"]
+
+
+def test_run_sharded_llm_failed_review_keeps_completed_shard_cost():
+    # A shard that finished before a sibling failed was still billed.
+    host = _RecordingHost()
+    first_running = threading.Event()
+
+    def one_fails(*args, **kwargs):
+        if kwargs["label"].startswith("[shard 1/"):
+            first_running.set()
+            return [{"title": "t"}], {"cost": 0.25, "prompt_tokens": 10}
+        # Fail only once shard 1 is running, so it cannot be cancelled.
+        assert first_running.wait(5)
+        raise ReviewError("provider unavailable")
+
+    w = _sharded_io(host, one_fails)
+    with pytest.raises(ReviewError, match="shard 2/2 failed"):
+        _run_sharded(w, _engine_args())
+    (run,) = host.runs
+    assert (run["usage"]["cost"], run["usage"]["prompt_tokens"]) == (0.25, 10)
+    assert run["findings"] == [] and "provider unavailable" in run["error"]
+
+
+def test_run_sharded_llm_dry_run_logs_nothing():
+    host = _RecordingHost()
+    w = _sharded_io(host, lambda *a, **k: ([], {}))
+    _run_sharded(w, _engine_args(dry_run=True))
+    assert host.runs == []
 
 
 def test_subscription_engine_is_unavailable_on_a_default_peer_host(alice_io):
@@ -1356,3 +1548,34 @@ def test_publish_review_yields_to_a_marker_that_appeared_while_analysing(alice_i
     w, lock = _publish_io(alice_io, fake_run, current=current)
     assert w.publish_review(**_publish_kwargs()) is False
     assert calls == [] and lock.closed
+
+
+def test_unreadable_comment_list_raises_instead_of_reading_as_no_marker(alice_io):
+    # bobutils' gh_paginated_list reads a failed call as []; the marker read must not.
+    alice_io.gh_paginated_list = lambda args: []
+    alice_io.gh_json = lambda args: None  # breaker refusal / 403 / timeout
+    w = writer.bind_io(alice_io)
+    with pytest.raises(writer.ReviewError, match="cannot read o/r#7 comments"):
+        w.find_marker_comment("o/r", 7)
+    alice_io.gh_json = lambda args: [[]]  # a real, empty page
+    assert w.find_marker_comment("o/r", 7) is None
+
+
+@pytest.mark.parametrize(
+    "existing", [None, {"id": 123, "body": "<!-- alice-ai-review {} -->"}]
+)
+def test_refused_marker_reread_publishes_nothing(alice_io, capsys, existing):
+    calls: list[list[str]] = []
+    alice_io.gh_json = lambda args, **kw: None  # REST core exhausted
+    alice_io.gh_paginated_list = lambda args: []
+    alice_io.run = lambda cmd, **kw: calls.append(cmd)
+    alice_io._publication_lock = lambda repo, number: _Lock()
+    w = writer.bind_io(alice_io)
+    assert (
+        w.publish_review(**_publish_kwargs(existing=existing), host=_AdvisoryHost())
+        is False
+    )
+    err = capsys.readouterr().err
+    assert "cannot read o/r#7 comments" in err
+    assert "disappeared" not in err
+    assert calls == []  # no POST/PATCH: an unreadable marker must not be duplicated

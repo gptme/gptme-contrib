@@ -5,6 +5,9 @@ on:
     branches: [ main, master ]
   pull_request:
     branches: [ main, master, 'feat/**' ]
+  # Merge queue: test the queued merge commit before it lands on master.
+  merge_group:
+    types: [checks_requested]
   # master pushes test only what the push changed; the full matrix runs nightly
   schedule:
     - cron: '0 3 * * *'
@@ -17,7 +20,9 @@ on:
 # Push runs only test what changed, so `discover` diffs from a successful run
 # of this workflow, not from github.event.before; the survivor then also
 # covers replaced or failed runs. Without a safe baseline, test everything.
-# Schedule/dispatch runs keep a per-commit group.
+# Schedule/dispatch runs keep a per-commit group, and so do merge queue runs:
+# github.sha is the merge group's head_sha, so a queue run never shares a
+# group with (or is cancelled by) a PR push.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.event_name == 'push' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -25,8 +30,9 @@ concurrency:
 jobs:
   # Detect which paths changed to skip expensive jobs on unrelated PRs
   changes:
-    name: Detect changes
+    name: Plugins / detect changes
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       pull-requests: read
     outputs:
@@ -36,6 +42,12 @@ jobs:
     - uses: dorny/paths-filter@v3
       id: filter
       with:
+        # merge_group has no pull_request payload: compare the queued merge
+        # commit with the base it was built on (both SHAs, so paths-filter
+        # does a plain `git diff base..head`). Empty on other events, which
+        # keeps the default PR (API) and push (event.before) behaviour.
+        base: ${{ github.event.merge_group.base_sha }}
+        ref: ${{ github.event.merge_group.head_sha }}
         filters: |
           plugins:
             - 'plugins/**'
@@ -48,9 +60,11 @@ jobs:
   # On PRs, filters the matrix to only plugins with actual file changes
   discover:
     needs: changes
-    # Always run on push to master; on PRs, only when plugin code changed
-    if: github.event_name != 'pull_request' || needs.changes.outputs.plugins == 'true'
+    # Always run on push to master; on PRs and in the merge queue, only when
+    # plugin code changed
+    if: (github.event_name != 'pull_request' && github.event_name != 'merge_group') || needs.changes.outputs.plugins == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       contents: read
       actions: read
@@ -59,13 +73,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # Needed for git diff against base branch on PRs
+          fetch-depth: 0  # Needed for git diff against the base on PRs and merge groups
 
       - name: Discover plugins with tests
         id: discover
         env:
           BASE_REF: ${{ github.base_ref }}
           BEFORE: ${{ github.event.before }}
+          MERGE_GROUP_BASE: ${{ github.event.merge_group.base_sha }}
           GH_TOKEN: ${{ github.token }}
         run: |
           # Get all plugins from Makefile (single source of truth)
@@ -91,13 +106,18 @@ jobs:
             fi
           fi
 
-          # Files changed by this PR, or by this push to master. Schedule/dispatch
-          # runs (and pushes we can't diff, e.g. a new branch or a force-push
-          # past the old head) test everything.
+          # Files changed by this PR, by this merge queue group (queued merge
+          # commit vs the base it was built on), or by this push to master.
+          # Schedule/dispatch runs (and pushes or groups we can't diff, e.g. a
+          # new branch or a force-push past the old head) test everything.
           changed=""
           full=1
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
             changed=$(git diff --name-only "origin/${BASE_REF}...HEAD")
+            full=0
+          elif [[ "${{ github.event_name }}" == "merge_group" && -n "$MERGE_GROUP_BASE" ]] \
+              && git cat-file -e "${MERGE_GROUP_BASE}^{commit}" 2>/dev/null; then
+            changed=$(git diff --name-only "$MERGE_GROUP_BASE" HEAD)
             full=0
           elif [[ "${{ github.event_name }}" == "push" && -n "$BEFORE" && ! "$BEFORE" =~ ^0+$ ]] \
               && git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
@@ -141,6 +161,7 @@ jobs:
     needs: discover
     if: needs.discover.result == 'success' && needs.discover.outputs.plugins != '[]'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -170,6 +191,7 @@ jobs:
     needs: discover
     if: github.event_name == 'push' && github.ref == 'refs/heads/master' && needs.discover.result == 'success' && needs.discover.outputs.plugins != '[]'
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -204,9 +226,12 @@ jobs:
   # Coverage report (combined for all plugins)
   coverage:
     needs: changes
-    # Always run on push to master; on PRs, only when plugin code changed
-    if: github.event_name != 'pull_request' || needs.changes.outputs.plugins == 'true'
+    # Always run on push to master; on PRs, only when plugin code changed.
+    # Skipped in the merge queue: it gates nothing (every run ends in
+    # `|| true`), and a Codecov upload for a temporary queue branch is noise.
+    if: github.event_name != 'merge_group' && (github.event_name != 'pull_request' || needs.changes.outputs.plugins == 'true')
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -248,3 +273,28 @@ jobs:
           flags: plugins
           name: codecov-plugins
           fail_ci_if_error: false
+
+  # Stable required check for the merge queue / branch ruleset. Matrix job
+  # names vary per PR, so they can't be required directly. Skipped jobs pass
+  # (a PR touching no plugins must be mergeable); failed or cancelled ones
+  # fail. always(), not !cancelled(): a skipped required check counts as
+  # passing, so this job must run (and fail) even when the run is cancelled.
+  # coverage (metric-only) and integration-tests (master push only) are left
+  # out on purpose.
+  required:
+    name: Plugins / required
+    needs: [changes, discover, test]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check needed jobs
+        env:
+          RESULTS: ${{ toJSON(needs.*.result) }}
+          FAILED: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
+        run: |
+          echo "Needed job results: $RESULTS"
+          if [[ "$FAILED" == "true" ]]; then
+            echo "::error::A required Test Plugins job failed or was cancelled"
+            exit 1
+          fi

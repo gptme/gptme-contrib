@@ -49,6 +49,13 @@ class TestResolveCoordinationDbPath:
             result = resolve_coordination_db_path(cwd=tmp, env={})
             assert result == Path(tmp) / "state/coordination/coord.db"
 
+    def test_fallback_outside_git_repo_is_silent(self, capfd, monkeypatch):
+        """git's 'not a git repository' error must not leak to the caller's stderr."""
+        with tempfile.TemporaryDirectory() as tmp:
+            monkeypatch.setenv("GIT_CEILING_DIRECTORIES", tmp)
+            resolve_coordination_db_path(cwd=tmp, env={})
+        assert "not a git repository" not in capfd.readouterr().err
+
     def test_env_overrides_git_root(self):
         """COORDINATION_DB env var still wins even if git root is discoverable."""
         with tempfile.TemporaryDirectory() as tmp:

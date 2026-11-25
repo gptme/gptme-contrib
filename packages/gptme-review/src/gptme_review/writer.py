@@ -177,8 +177,25 @@ def default_io(
 
 
 def _find_all_marker_comments(repo: str, number: int) -> list[dict]:
-    """All AI-review marker comments on this PR (should normally be 0 or 1)."""
-    comments = _io.gh_paginated_list(["api", f"repos/{repo}/issues/{number}/comments"])
+    """All AI-review marker comments on this PR (should normally be 0 or 1).
+
+    Raises ``ReviewError`` when the comment list cannot be read. Do not use
+    ``gh_paginated_list`` here: it returns [] on any failure, so a refused read
+    (REST quota breaker, 403, timeout) would look exactly like "no marker" —
+    spending a review on a PR already reviewed at head, reporting a vanished
+    marker mid-publish, or stacking a duplicate one.
+    """
+    parsed = _io.gh_json(
+        ["api", f"repos/{repo}/issues/{number}/comments", "--paginate", "--slurp"]
+    )
+    if not isinstance(parsed, list):
+        raise ReviewError(
+            f"cannot read {repo}#{number} comments (GitHub API refused or failed)"
+        )
+    if all(isinstance(page, list) for page in parsed):
+        comments: list[object] = [item for page in parsed for item in page]
+    else:
+        comments = list(parsed)
     return [
         c
         for c in comments
@@ -212,6 +229,9 @@ def _delete_marker_comment(repo: str, comment_id: int) -> None:
 
 def find_marker_comment(repo: str, number: int) -> dict | None:
     """The existing AI-review comment on this PR, if any.
+
+    Raises ``ReviewError`` when the comments cannot be read: an unreadable
+    list is not an empty one.
 
     Matched on the marker prefix ALONE — not on the SHA — so that a re-review
     edits the same comment instead of stacking a new one per commit.
@@ -855,7 +875,13 @@ def publish_review(
         # Re-read after acquiring the lock. If another local publisher changed
         # the comment while this run was analysing, its result wins; overwriting
         # it would create duplicate native reviews or resurrect stale state.
-        current = _io.find_marker_comment(repo, number)
+        try:
+            current = _io.find_marker_comment(repo, number)
+        except ReviewError as exc:
+            # Unreadable is not vanished, and on a first publish it is not
+            # absent either: posting now could stack a duplicate marker.
+            print(f"error: {exc}; not publishing this run", file=sys.stderr)
+            return False
         initial_body = str((existing or {}).get("body") or "")
         required_served_through = final_state.get("served_through")
         if existing is None and current is not None:
@@ -3617,11 +3643,22 @@ def _repos_cited_in_body(pr_body: str, parent_repo: str) -> list[str]:
     return found
 
 
-def _commit_exists(repo: str, sha: str) -> bool:
+# gh reports a missing commit as 422 "No commit found for SHA" (or 404 for an
+# unknown repo). Anything else (rate limit, 5xx, network) says nothing about
+# whether the commit exists.
+_COMMIT_MISSING_RE = re.compile(r"HTTP 404|HTTP 422|No commit found", re.IGNORECASE)
+
+
+def _commit_exists(repo: str, sha: str) -> bool | None:
+    """True if the commit exists, False if GitHub says it does not, None if unknown."""
     check: subprocess.CompletedProcess = _io.run(
         ["gh", "api", f"repos/{repo}/commits/{sha}", "--jq", ".sha"]
     )
-    return check.returncode == 0
+    if check.returncode == 0:
+        return True
+    if _COMMIT_MISSING_RE.search(f"{check.stderr or ''}\n{check.stdout or ''}"):
+        return False
+    return None
 
 
 def _check_cited_shas(
@@ -3670,9 +3707,16 @@ def _check_cited_shas(
         seen.add(sha)
         if _sha_matches_any(sha, gitlinks):
             continue
-        if _commit_exists(repo, sha):
+        lookups = [_commit_exists(repo, sha)]
+        for other in extra_repos:
+            if lookups[-1]:
+                break
+            lookups.append(_commit_exists(other, sha))
+        if any(lookups):
             continue
-        if any(_commit_exists(other, sha) for other in extra_repos):
+        if None in lookups:
+            # A lookup failed for a reason other than "not found" (rate limit,
+            # 5xx, network): we cannot tell, so do not raise a false P1.
             continue
         anchor = next(iter(touched_files), "")
         results.append(
@@ -3828,6 +3872,14 @@ def _check_unrelated_ci_claim(
 _TEST_FILE_RE = re.compile(
     r"^tests?/|/tests?/|(?:^|/)test_[^/]+$|[^/]+_test\.[^/]+$|[^/]+\.test\.[^/]+$|[^/]+\.spec\.[^/]+$",
     re.IGNORECASE,
+)
+
+# Rust keeps unit tests inline (``#[cfg(test)]`` modules in ``src/``), so an
+# added test attribute counts as a test even when no path looks like one.
+# Horizontal whitespace only: ``\s`` matches newlines, which let an added
+# empty line bridge onto the next context line's existing ``#[test]``.
+_ADDED_INLINE_TEST_RE = re.compile(
+    r"^\+(?!\+\+)[ \t]*#\[(?:cfg\(test\)|(?:tokio::)?test\b)", re.MULTILINE
 )
 
 
@@ -4062,7 +4114,7 @@ def _check_visual_screenshot(
 
 
 def _check_fix_without_test(
-    pr_title: str, touched_files: Collection[str]
+    pr_title: str, touched_files: Collection[str], diff: str = ""
 ) -> list[dict]:
     """Rule 7 — fix(...) PR with zero test files is advisory P2.
 
@@ -4075,6 +4127,11 @@ def _check_fix_without_test(
         return []
     if any(_TEST_FILE_RE.search(f) for f in touched_files):
         return []
+    # Attributes in documentation examples or other languages are not Rust tests.
+    for section in split_file_sections(diff):
+        if section.path is not None and section.path.endswith(".rs"):
+            if _ADDED_INLINE_TEST_RE.search(section.text):
+                return []
     anchor = next(iter(touched_files), "")
     return [
         _static_finding(
@@ -4128,7 +4185,7 @@ def static_preflight_findings(
     results.extend(_check_cited_shas(pr_body, repo, touched_files, diff))
     results.extend(_check_unrelated_ci_claim(pr_body, repo, number, touched_files))
     results.extend(_check_visual_screenshot(pr_body, diff, touched_files))
-    results.extend(_check_fix_without_test(pr_title, touched_files))
+    results.extend(_check_fix_without_test(pr_title, touched_files, diff))
     results.extend(host.extra_static_checks(diff, touched_files))
     return results
 
@@ -4459,6 +4516,10 @@ def run_sharded_llm(
         print("submodule: fetched cross-submodule import context")
         note = (note + "\n\n" + submodule_ctx).strip() if note else submodule_ctx
 
+    # Usage of every shard whose call returned, so a failed review still
+    # records what its completed siblings cost.
+    spent: dict[int, dict] = {}
+
     def review_one(shard: Shard) -> tuple[list[dict], dict]:
         label = f"[shard {shard.index}/{n}] "
         lifecycle.stage("shard", shard=shard.index)
@@ -4478,6 +4539,7 @@ def run_sharded_llm(
             note=shard_note,
             label=label,
         )
+        spent[shard.index] = usage
         print(
             f"{label}{len(findings)} finding(s) in {time.monotonic() - started:.0f}s, "
             f"cost=${(usage.get('cost') or 0):.4f}"
@@ -4486,7 +4548,40 @@ def run_sharded_llm(
             findings, shard_fully, label
         ), usage
 
-    results = _io._run_shards(plan, review_one)
+    # Each shard's llm_review_call is labelled and so skips log_run; log the
+    # merged review once here so sharded runs reach the ledger too. The
+    # subscription panel logs its own calls.
+    log = args.engine != "subscription" and not args.dry_run
+    sha = str(pr.get("headRefOid") or "")
+    model_name = model.removeprefix("openrouter/")
+    started = time.monotonic()
+    try:
+        results = _io._run_shards(plan, review_one)
+    except ReviewError as exc:
+        if log:
+            # _run_shards drains its pool before raising, so shards that were
+            # still in flight at the first failure are counted too.
+            _io.WRITER_HOST.log_run(
+                repo=args.repo,
+                number=args.number,
+                sha=sha,
+                model=model_name,
+                usage=merge_shard_usage([spent[i] for i in sorted(spent)], plan),
+                wall_s=time.monotonic() - started,
+                findings=[],
+                error=str(exc),
+            )
+        raise
     findings = merge_shard_findings([r[0] for r in results])
     usage = merge_shard_usage([r[1] for r in results], plan)
+    if log:
+        _io.WRITER_HOST.log_run(
+            repo=args.repo,
+            number=args.number,
+            sha=sha,
+            model=model_name,
+            usage=usage,
+            wall_s=time.monotonic() - started,
+            findings=findings,
+        )
     return findings, usage, contents, fully_preloaded, preload_coverage

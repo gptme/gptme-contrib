@@ -388,9 +388,7 @@ class TestStreakCooldownGate:
             force_session=True,
             **WEEKDAY,
         )
-        assert d.proceed is True
-        assert d.toggle_action is None
-        assert "inactive" in d.reason
+        assert d == StreakCooldownDecision(True, "gate inactive (forced session)")
 
     def test_toggle_regime_unarmed_proceeds_and_arms(self) -> None:
         d = streak_cooldown_gate(

@@ -395,6 +395,22 @@ def index(
                 if doc.doc_id and str(doc.metadata.get("source", "")) in sources
             ]
 
+        # Sources indexed earlier under one of the requested paths whose file no
+        # longer exists: drop their chunks so search stops returning deleted
+        # content. Sources outside the requested paths are left alone.
+        # Collection resolves symlink roots before storing source paths; pruning
+        # must use that same namespace, including when a root is relative.
+        roots = [str(p.resolve()) for p in paths]
+        deleted_sources = {
+            source
+            for source in existing_files
+            if not os.path.isfile(source)
+            and any(
+                source == root or source.startswith(root.rstrip(os.sep) + os.sep) for root in roots
+            )
+        }
+        empty_sources |= deleted_sources
+
         leftover_stale_ids = stale_ids_for(cleanup_hashes) + ids_for_sources(empty_sources)
 
         if not all_documents:
@@ -622,13 +638,10 @@ def search(
                         )
                         assembler = ContextAssembler(max_tokens=max_tokens)
 
-                        # Combine paths and filters for search
+                        # Without PATHS, --filter applies to the whole index; it
+                        # must not narrow the search to the current directory.
                         search_paths = list(paths)
                         if filter:
-                            # If no paths were specified but filters are present,
-                            # search from root and apply filters
-                            if not paths:
-                                search_paths = [Path(".")]
                             logger.debug(f"Using path filters: {filter}")
 
                         explanations: list | None = None

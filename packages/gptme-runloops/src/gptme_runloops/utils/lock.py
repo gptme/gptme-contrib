@@ -100,9 +100,18 @@ class RunLoopLock:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
                 # Success! Write PID to lock file
-                os.ftruncate(fd, 0)
-                os.write(fd, f"{os.getpid()}\n".encode())
-                os.fsync(fd)
+                try:
+                    os.ftruncate(fd, 0)
+                    os.write(fd, f"{os.getpid()}\n".encode())
+                    os.fsync(fd)
+                except OSError:
+                    # ENOSPC/EIO here must not leave the flock held by a
+                    # descriptor nothing can reach: `lock_fd` is still None, so
+                    # release() would skip it and this process could never
+                    # reacquire the lock. Close the fd (which drops the flock)
+                    # and let the error surface.
+                    os.close(fd)
+                    raise
 
                 self.lock_fd = fd
 

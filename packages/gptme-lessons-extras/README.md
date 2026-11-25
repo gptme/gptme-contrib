@@ -175,8 +175,9 @@ It auto-detects three formats:
   `Verification Checklist`, `Exceptions`, `Automation Hooks`, `Origin`, `Related`.
 - **Skill:** `SKILL.md` files, which must have `name` and `description` frontmatter.
 
-It also checks frontmatter (keywords, `status`) and that an optional `target_grade` is one of
-`trajectory_grade`, `productivity`, `alignment`, `harm`.
+It also checks frontmatter keywords and that an optional `target_grade` is one of
+`trajectory_grade`, `productivity`, `alignment`, `harm`. `status` values are not validated;
+`status: archived` only relaxes the required-section checks.
 
 Minimal two-file lesson:
 
@@ -210,8 +211,9 @@ What happens when you follow this pattern.
 
 ## Other tools
 
-Run from the root of an agent workspace (most default to `./lessons` and gptme's log directory
-`~/.local/share/gptme/logs`). Use `--help` on any click-based module for full options.
+Run inside an agent workspace checkout (most default to `./lessons` and gptme's log directory
+`~/.local/share/gptme/logs`; `analytics` resolves `lessons/` from the nearest enclosing `.git`
+root and reports "Lessons directory not found" outside a git repository). Use `--help` on any click-based module for full options.
 
 | Module | What it does |
 |--------|--------------|
@@ -220,8 +222,13 @@ Run from the root of an agent workspace (most default to `./lessons` and gptme's
 | `python3 -m gptme_lessons_extras.effectiveness_tracker` | Incremental, resumable correlation of lesson inclusion with session outcomes (`--report`, `--limit`, `--full`, `--reset`, `--logs-dir`, `--state-file`) |
 | `python3 -m gptme_lessons_extras.discovery` | `recommend` lessons for context keywords, find `similar` lessons, list `duplicates` |
 | `gptme_lessons_extras.similarity` / `utils.similarity` | Keyword/content similarity and recency scoring (library) |
-| `check-staleness.py`, `analyze-lesson-usage.py`, `improve-lesson-keywords.py`, `detect-lesson-patterns.py`, `generate-review-prompts.py`, `create-pr.py` | Standalone maintenance scripts — run by path from `src/gptme_lessons_extras/` |
+| `analyze-lesson-usage.py`, `improve-lesson-keywords.py`, `detect-lesson-patterns.py`, `generate-review-prompts.py`, `create-pr.py` | Standalone maintenance scripts — run by path from `src/gptme_lessons_extras/` |
 | `export`, `import`, `sync`, `review`, `adopt`, `evolution`, `metrics`, `network_schema` | Experimental sharing of lessons between agents via a git repo |
+
+For staleness analysis, use `similarity.calculate_recency_scores(lessons_dir, usage_stats)`;
+`usage_stats` is optional and maps relative lesson paths to `(last_referenced, reference_count)`.
+The standalone `check-staleness.py` report script was removed; its fixed analytics/report
+paths and threshold rules are no longer maintained.
 
 ## Notes
 

@@ -5,6 +5,7 @@ import os
 import time
 from pathlib import Path
 
+import pytest
 from gptme_lessons_extras.discovery import LessonDiscovery
 
 LESSON_TEMPLATE = """---
@@ -203,3 +204,110 @@ def test_recommend_uses_file_recency_when_metrics_are_missing(tmp_path: Path) ->
     assert recommendations[0].recency_score > recommendations[1].recency_score
     assert recommendations[0].recency_score > 0.0
     assert recommendations[1].recency_score == 0.0
+
+
+_KEYWORD_BODY = "\n# Title\n\n## Rule\nUse rebase.\n"
+
+
+def test_extract_features_reads_block_and_quoted_keyword_lists(tmp_path: Path) -> None:
+    # #2362 LX6: the regex only read inline lists and kept their quotes, so
+    # the template's block lists gave no keywords at all.
+    lessons = tmp_path / "lessons" / "git"
+    lessons.mkdir(parents=True)
+    frontmatters = {
+        "block": 'match:\n  keywords:\n    - "Rebase conflict"\n    - force push\n',
+        "quoted": 'match:\n  keywords: ["Rebase conflict", "force push"]\n',
+        "plain": "match:\n  keywords: [Rebase conflict, force push]\n",
+    }
+    discovery = LessonDiscovery(lessons_dir=tmp_path / "lessons")
+    for name, fm in frontmatters.items():
+        lesson = lessons / f"{name}.md"
+        lesson.write_text("---\n" + fm + "---\n" + _KEYWORD_BODY)
+        assert discovery.extract_features(lesson).keywords == {
+            "rebase conflict",
+            "force push",
+        }, name
+
+
+def test_discovery_ignores_non_string_yaml_keywords(tmp_path: Path) -> None:
+    lessons_dir = tmp_path / "lessons"
+    lesson = lessons_dir / "git" / "rebase.md"
+    lesson.parent.mkdir(parents=True)
+    lesson.write_text(
+        '---\nmatch:\n  keywords: [404, true, null, "Rebase", "  "]\n---\n'
+        + _KEYWORD_BODY
+    )
+    discovery = LessonDiscovery(
+        lessons_dir=lessons_dir, history_dir=tmp_path / "history"
+    )
+
+    assert discovery.extract_features(lesson).keywords == {"rebase"}
+    [rec] = discovery.recommend(keywords=["rebase"], top_k=1)
+    assert rec.keyword_score > 0.0
+
+
+def test_discovery_normalizes_scalar_keyword_without_character_matches(
+    tmp_path: Path,
+) -> None:
+    lessons_dir = tmp_path / "lessons"
+    lesson = lessons_dir / "git" / "scalar.md"
+    lesson.parent.mkdir(parents=True)
+    lesson.write_text(
+        '---\nmatch:\n  keywords: " Rebase conflict "\n---\n' + _KEYWORD_BODY
+    )
+    discovery = LessonDiscovery(
+        lessons_dir=lessons_dir, history_dir=tmp_path / "history"
+    )
+
+    assert discovery.extract_features(lesson).keywords == {"rebase conflict"}
+    [match] = discovery.recommend(keywords=["rebase conflict"], top_k=1)
+    [letter] = discovery.recommend(keywords=["r"], top_k=1)
+    assert match.keyword_score > 0.0
+    assert letter.keyword_score == 0.0
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        "match: null",
+        "match: rebase",
+        "match:\n  keywords: null",
+        "match:\n  keywords: 404",
+        "match:\n  keywords: {rebase: conflict}",
+        "match: [",
+        "keywords: [rebase]",
+    ],
+)
+def test_discovery_ignores_invalid_or_unsupported_keyword_fields(
+    tmp_path: Path, metadata: str
+) -> None:
+    lesson = tmp_path / "invalid.md"
+    lesson.write_text("---\n" + metadata + "\n---\n" + _KEYWORD_BODY)
+    discovery = LessonDiscovery(lessons_dir=tmp_path)
+
+    assert discovery.extract_features(lesson).keywords == set()
+
+
+def test_recommend_scores_block_list_keyword_match(tmp_path: Path) -> None:
+    lesson = tmp_path / "lessons" / "git" / "rebase.md"
+    lesson.parent.mkdir(parents=True)
+    lesson.write_text('---\nmatch:\n  keywords:\n    - "rebase"\n---\n' + _KEYWORD_BODY)
+    discovery = LessonDiscovery(
+        lessons_dir=tmp_path / "lessons", history_dir=tmp_path / "history"
+    )
+    [rec] = discovery.recommend(keywords=["rebase"], top_k=1)
+    assert rec.keyword_score > 0.0
+
+
+def test_discovery_warns_when_unrelated_field_breaks_frontmatter(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Losing keywords to a YAML error elsewhere must name the lesson file."""
+    lesson = tmp_path / "broken.md"
+    lesson.write_text(
+        "---\nnote: see: docs\nmatch:\n  keywords: [shell]\n---\n# Broken\n"
+    )
+
+    assert LessonDiscovery().extract_features(lesson).keywords == set()
+    assert str(lesson) in caplog.text
+    assert "mapping values are not allowed" in caplog.text

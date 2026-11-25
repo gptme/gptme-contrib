@@ -28,6 +28,11 @@ from typing import NamedTuple, Protocol
 
 from gptme_review.core import blocking_shortfall, is_review_only_blocker
 
+# Re-exported: one classifier for hosts that import it from either module.
+from gptme_review.sweep_outcome import (
+    classify_all_failed_run as classify_all_failed_run,
+)
+
 _LOGIN_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$")
 _NAMESPACE_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$")
 _HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
@@ -504,29 +509,6 @@ def self_merge_eligible_from_marker(marker: Mapping[str, object]) -> bool:
     ):
         return False
     return True
-
-
-def classify_all_failed_run(
-    *,
-    attempted: int,
-    failures: int,
-    rate_limit_failures: int,
-    too_large_failures: int,
-    capacity_failures: int = 0,
-) -> str | None:
-    if not attempted or failures != attempted:
-        return None
-    if attempted == 1:
-        return "singleton"
-    if rate_limit_failures == attempted:
-        return "rate_limited"
-    if too_large_failures == attempted or (
-        rate_limit_failures + too_large_failures == attempted
-    ):
-        return "pr_local"
-    if capacity_failures == attempted:
-        return "capacity"
-    return "systemic"
 
 
 def is_benign_file(path: str) -> bool:

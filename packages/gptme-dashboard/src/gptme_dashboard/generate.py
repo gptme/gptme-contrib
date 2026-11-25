@@ -25,6 +25,7 @@ from itertools import groupby
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
+import nh3
 import yaml  # type: ignore[import-untyped]
 from bobutils.frontmatter import split_frontmatter
 from jinja2 import Environment, FileSystemLoader
@@ -46,6 +47,47 @@ def _highlight_code(code: str, lang: str, attrs: str) -> str:
 
 
 _md = MarkdownIt("commonmark", options_update={"highlight": _highlight_code}).enable("table")
+
+# Workspace markdown quotes outside content (issue text, PR comments, tweets),
+# so its raw HTML is untrusted: rendered bodies go through an allowlist
+# sanitizer. Formatting tags (details/summary, kbd, br, img, align, ...) are
+# kept; scripts, event handlers, iframes and javascript: URLs are dropped.
+# The extra attributes cover what the renderer itself emits: heading anchor
+# ids, pygments inline styles and classes, and table cell alignment.
+_SANITIZE_ATTRIBUTES: dict[str, set[str]] = {
+    tag: set(attrs) for tag, attrs in nh3.ALLOWED_ATTRIBUTES.items()
+}
+for _tag in ("h1", "h2", "h3", "h4", "h5", "h6"):
+    _SANITIZE_ATTRIBUTES.setdefault(_tag, set()).add("id")
+for _tag in ("div", "pre", "span", "code"):
+    _SANITIZE_ATTRIBUTES.setdefault(_tag, set()).update({"class", "style"})
+for _tag in ("p", "div", "td", "th"):
+    _SANITIZE_ATTRIBUTES.setdefault(_tag, set()).add("align")
+for _tag in ("td", "th"):
+    _SANITIZE_ATTRIBUTES[_tag].add("style")
+_SANITIZE_STYLE_PROPERTIES = {
+    "background",
+    "background-color",
+    "border",
+    "color",
+    "font-style",
+    "font-weight",
+    "line-height",
+    "padding",
+    "text-align",
+    "text-decoration",
+}
+
+
+def sanitize_html(html: str) -> str:
+    """Drop script-capable markup from rendered markdown, keep formatting."""
+    return nh3.clean(
+        html,
+        attributes=_SANITIZE_ATTRIBUTES,
+        filter_style_properties=_SANITIZE_STYLE_PROPERTIES,
+        link_rel=None,
+    )
+
 
 # State ordering for task display (active work first)
 _STATE_ORDER = {
@@ -246,7 +288,7 @@ def render_markdown_to_html(md_text: str) -> str:
     env: dict = {}
     tokens = _md.parse(md_text, env)
     _add_heading_anchors(tokens)
-    return _md.renderer.render(tokens, _md.options, env)  # type: ignore[no-any-return]
+    return sanitize_html(_md.renderer.render(tokens, _md.options, env))
 
 
 def render_body_html(
@@ -349,6 +391,8 @@ def parse_frontmatter(path: Path) -> tuple[dict, str]:
     try:
         fm = yaml.safe_load(fm_text) or {}
     except yaml.YAMLError:
+        fm = {}
+    if not isinstance(fm, dict):
         fm = {}
 
     return fm, body.strip()
@@ -1175,8 +1219,12 @@ def scan_skills(workspace: Path, source: str = "") -> list[dict]:
     skills = []
     for skill_md in sorted(skills_dir.rglob("SKILL.md")):
         fm, body = parse_frontmatter(skill_md)
-        name = fm.get("name", skill_md.parent.name.replace("-", " ").title())
+        name = fm.get("name")
+        if not isinstance(name, str) or not name:
+            name = skill_md.parent.name.replace("-", " ").title()
         description = fm.get("description", "")
+        if not isinstance(description, str):
+            description = ""
         if description:
             # Normalize multiline descriptions to a single short summary line.
             # YAML block scalars (description: |) can span multiple lines and include
@@ -2244,10 +2292,14 @@ def generate(
     if effective_base_url:
         sitemap_xml = generate_sitemap(data, effective_base_url)
         (output / "sitemap.xml").write_text(sitemap_xml)
-        print(f"Generated sitemap at {output / 'sitemap.xml'} ({effective_base_url})")
+        print(
+            f"Generated sitemap at {output / 'sitemap.xml'} ({effective_base_url})", file=sys.stderr
+        )
         feed_xml = generate_atom_feed(data, effective_base_url, data["workspace_name"])
         (output / "feed.xml").write_text(feed_xml)
-        print(f"Generated Atom feed at {output / 'feed.xml'} ({effective_base_url})")
+        print(
+            f"Generated Atom feed at {output / 'feed.xml'} ({effective_base_url})", file=sys.stderr
+        )
 
     stats = data["stats"]
     journal_count = len(data["journals"])
@@ -2256,7 +2308,7 @@ def generate(
     package_page_count = len(packages_with_pages)
     summary_count = len(data["summaries"])
     session_msg = f", {stats['total_sessions']} sessions" if include_sessions else ""
-    print(f"Generated dashboard at {output / 'index.html'}")
+    print(f"Generated dashboard at {output / 'index.html'}", file=sys.stderr)
     print(
         f"  {stats['total_lessons']} lessons ({stats['total_lessons']} detail pages), "
         f"{stats['total_plugins']} plugins ({plugin_page_count} detail pages), "
@@ -2265,7 +2317,8 @@ def generate(
         f"{journal_count} journals ({journal_count} detail pages), "
         f"{task_count} tasks ({task_count} detail pages), "
         f"{summary_count} summaries ({summary_count} detail pages)"
-        f"{session_msg}"
+        f"{session_msg}",
+        file=sys.stderr,
     )
 
     return data
@@ -2341,6 +2394,6 @@ def generate_json(
     if output is not None:
         output.mkdir(parents=True, exist_ok=True)
         (output / "data.json").write_text(json_str)
-        print(f"Generated data dump at {output / 'data.json'}")
+        print(f"Generated data dump at {output / 'data.json'}", file=sys.stderr)
 
     return json_str

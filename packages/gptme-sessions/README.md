@@ -182,7 +182,7 @@ resolve against `--journal-root` (default: the record's project dir).
 | Group | Commands |
 |-------|----------|
 | Record | `post-session`, `sync`, `annotate`, `append` (deprecated), `stamp-attempt-kind` |
-| Inspect | `stats` (also the default with no subcommand), `query`, `show`, `export`, `runs`, `cost`, `cost-attribution`, `search` |
+| Inspect | `stats` (also the default with no subcommand), `query`, `show`, `export`, `runs`, `yield`, `cost`, `cost-attribution`, `search` |
 | Trajectories | `discover`, `signals PATH` (productivity signals, grade, `--usage`), `transcript PATH` (normalised transcript), `replay TARGET` (terminal replay) |
 | Classify & grade | `classify`, `classify-stats`, `auto-tag`, `judge`, `regrade`, `repair-grades` |
 | Maintenance | `dedup` (merge duplicate records), `rotate` (archive records older than `--keep-days`, default 30) |
@@ -304,6 +304,30 @@ selection state, `EVENT_ID`/`EVENT_URL`/`EVENT_TRIGGER_TYPE`, `PM_DISPATCH_ID` w
 `PM_WORK_FILE`, and systemd's `INVOCATION_ID`. A `systemd` cause classifies as
 `unknown` rather than `timer`: an invocation id proves a service ran, not that a
 timer fired it.
+
+### Accepted-outcome yield (`yield`)
+
+`yield` answers *"which dispatch sources produce work someone else accepts?"* It
+groups sessions by `dispatch_cause.kind`, extracts each session's items, and joins
+them to outcomes the host supplies. The package never calls GitHub or reads a task
+tracker: deciding acceptance is the host's job.
+
+```bash
+gptme-sessions yield --since 14d --outcomes outcomes.jsonl [--outcomes more.jsonl] [--json]
+```
+
+- **Items**: `task:<id>` from `dispatch_cause.task`, else `pr:<owner/repo#n>`
+  (lowercase) from `dispatch_cause.pr`, else the PR URLs in `deliverables`. A session
+  with none is *unkeyed*: a coverage gap, never zero yield.
+- **Outcomes file**: JSONL rows `{"item": KEY, "outcome": LABEL}`; the last row per
+  item wins, and an item with no row is `pending`. Unknown labels are an error.
+- **Labels**: `accepted` (someone other than the agent acted on it), `durable` (the
+  agent's own lasting work, e.g. a self-merge), `zero`, `harmful`, `closed` — these
+  five are *decided* — plus `unverified` (e.g. merged, merger unknown) and `pending`.
+- **Per source**: `sessions`, `keyed_sessions`, `unkeyed_sessions`, `coverage`,
+  `items`, `outcomes`, `decided`, `accepted_yield` (accepted / decided) and
+  `sessions_per_accepted`, which divides *all* of the source's sessions and so is a
+  cost ceiling.
 
 ## Where trajectories are discovered
 

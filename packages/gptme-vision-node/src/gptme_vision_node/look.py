@@ -46,7 +46,7 @@ def build_request(
     jpeg = encode_frame_jpeg(frame, quality=jpeg_quality)
     b64 = base64.b64encode(jpeg).decode("ascii")
     return {
-        "model": model or os.environ.get("VISION_MODEL", DEFAULT_MODEL),
+        "model": model or os.environ.get("VISION_MODEL") or DEFAULT_MODEL,
         "max_tokens": max_tokens,
         "messages": [
             {
@@ -76,7 +76,9 @@ def describe_frame(
     key = api_key or os.environ.get("OPENAI_API_KEY")
     if not key:
         raise RuntimeError("OPENAI_API_KEY is not set (and no api_key passed)")
-    url = (base_url or os.environ.get("OPENAI_BASE_URL", DEFAULT_BASE_URL)).rstrip("/")
+    url = (base_url or os.environ.get("OPENAI_BASE_URL") or DEFAULT_BASE_URL).rstrip(
+        "/"
+    )
 
     body = build_request(frame, prompt, model=model)
     response = httpx.post(

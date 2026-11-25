@@ -75,6 +75,9 @@ def parse_book_text(
 
     docs: list[BookDocument] = []
     buf: list[str] = []
+    # Words added since the last emit. A buffer with none holds only carried
+    # overlap, which must not become a chunk of its own.
+    fresh = 0
     buf_chapter = ""
     buf_section = ""
     chapter = ""
@@ -82,8 +85,8 @@ def parse_book_text(
     skipping = False
 
     def emit(*, keep_overlap: bool) -> None:
-        nonlocal buf
-        if len(buf) >= min_words:
+        nonlocal buf, fresh
+        if fresh and len(buf) >= min_words:
             docs.append(
                 BookDocument(
                     source=source,
@@ -96,8 +99,10 @@ def parse_book_text(
                 )
             )
             buf = buf[-overlap_words:] if (keep_overlap and overlap_words) else []
+            fresh = 0
         elif not keep_overlap:
             buf = []
+            fresh = 0
 
     for raw_line in text.splitlines():
         line = raw_line.strip()
@@ -133,6 +138,7 @@ def parse_book_text(
             buf_chapter, buf_section = chapter, section
         for word in line.split():
             buf.append(word)
+            fresh += 1
             if len(buf) >= target_words:
                 emit(keep_overlap=True)
                 if not buf:

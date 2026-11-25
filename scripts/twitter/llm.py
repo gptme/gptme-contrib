@@ -51,6 +51,7 @@ from rich.console import Console
 # Without this: each request reserves ~$0.96 (64k * $15/M), exhausting a $10/day budget in ~10 requests.
 # With this: each request reserves ~$0.06 (4k * $15/M), allowing 160+ requests/day.
 TWITTER_MAX_TOKENS = 4096
+WRITING_STYLE_CHECK = "Natural writing style"
 
 
 class TaskType(Enum):
@@ -222,7 +223,10 @@ class ReviewResponse:
         """Example for LLM format documentation"""
         return cls(
             reasoning="Draft maintains professional tone and adds value",
-            criteria_results={"professional_tone": ReviewResult.example()},
+            criteria_results={
+                "professional_tone": ReviewResult.example(),
+                WRITING_STYLE_CHECK: ReviewResult.example(),
+            },
             recommendation="approve",
             improvements=["Consider adding specific example"],
         )
@@ -440,9 +444,34 @@ Response Guidelines:
     "[media here]", or any bracket-enclosed instruction. If you don't have a specific URL
     or media item to include, write a complete response without referencing it — either
     omit the link entirely or say you'll share it separately as plain prose.
+11. Vary sentence structure. Do not default to em-dashes as generic separators;
+    prefer a full stop or a direct clause when it reads naturally. An occasional
+    em-dash that adds useful emphasis or precision is fine. Avoid canned AI phrasing.
 
 Few-shot examples:
 {yaml.dump(config["templates"]["examples"])}"""
+
+
+def draft_style_report(draft: Dict) -> Dict[str, Any]:
+    """Measure authored text only; quoted thread context is not our writing."""
+    texts = [draft["text"]] + [
+        text for text in (draft.get("thread") or []) if isinstance(text, str)
+    ]
+    text = "\n".join(texts)
+    try:
+        from gptme_sessions.smell import detect_smells
+    except ImportError:
+        # Standalone installs need not carry the session-analysis package.
+        return {
+            "detector_available": False,
+            "word_count": len(text.split()),
+            "em_dash_count": text.count("—"),
+        }
+    report = detect_smells(text)
+    return {
+        key: report[key]
+        for key in ("word_count", "em_dash_count", "em_dash_per_1k", "hits")
+    }
 
 
 def create_review_prompt(draft: Dict, config: Dict) -> str:
@@ -486,13 +515,24 @@ def create_review_prompt(draft: Dict, config: Dict) -> str:
     return f"""Review this draft tweet.
 
 Draft Tweet: "{draft["text"]}"
+Authored thread follow-ups: {json.dumps(draft.get("thread") or [])}
 Type: {draft["type"]}
 Context: {json.dumps(draft.get("context", {}), indent=2)}
 {thread_context}
 
 Review Criteria:
 {yaml.dump(config["review"]["required_checks"])}
-{detailed_criteria}"""
+{detailed_criteria}
+
+Authored-text style signals (not quoted context):
+{json.dumps(draft_style_report(draft))}
+These are advisory signals, not a score threshold. Per-1000-word rates are noisy
+for short tweets. Do not ban em-dashes or mechanically replace punctuation.
+Decide whether this draft uses them meaningfully or repeats a generic separator
+where a direct clause or full stop reads better. Check thread follow-ups too.
+Return an explicit criteria_results["{WRITING_STYLE_CHECK}"] decision with notes;
+fail it and recommend revise when the writing needs a substantive style edit.
+An occasional precise dash can pass; the signal alone is not a rejection."""
 
 
 def get_system_prompt() -> Message:
@@ -548,6 +588,23 @@ Any analysis or thinking should be included in the "reasoning" field of the JSON
 
 T = TypeVar("T", EvaluationResponse, TweetResponse, ReviewResponse)
 
+_RESPONSE_TOKEN_RE = re.compile(r"<think>.*?(?:</think>|\Z)|</think>|\{", re.DOTALL)
+
+
+# An object opener: {"... or {key: ...
+_JSON_OPENER_RE = re.compile(r'\{\s*(?:"|\w+\s*:)')
+
+
+def _looks_like_json(text: str, start: int, fields: set[str]) -> bool:
+    """Whether the undecodable "{" at ``start`` was meant as JSON, not prose."""
+    if _JSON_OPENER_RE.match(text, start):
+        return True
+    # Or it names a response field as a key before the next brace.
+    end = re.compile(r"[{}]").search(text, start + 1)
+    head = text[start : end.start() if end else len(text)]
+    names = "|".join(map(re.escape, fields))
+    return bool(re.search(rf"""(?:["'](?:{names})["']|,\s*(?:{names}))\s*:""", head))
+
 
 def parse_llm_response(content: str, response_type: Type[T], task: TaskType) -> T:
     """Parse LLM response into a typed response object.
@@ -557,20 +614,55 @@ def parse_llm_response(content: str, response_type: Type[T], task: TaskType) -> 
         response_type: The type to parse into (must implement ResponseProtocol)
         task: Task type for error messages
     """
-    try:
-        # Extract just the JSON part (between first { and last })
-        start = content.find("{")
-        end = content.rfind("}") + 1
-        if start >= 0 and end > start:
-            json_str = content[start:end]
-            data = json.loads(json_str)
-            return response_type.from_dict(data)
-        raise json.JSONDecodeError("No JSON found", content, 0)
-    except (json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
-        console.print(f"[red]Error: Could not parse LLM response for {task.value}: {e}")
-        console.print(content)
-        logging.exception(f"Error parsing LLM response for {task.value}")
-        return response_type.default()
+    # Reasoning models put draft objects in <think> and prose can carry stray
+    # braces, so slicing first "{" to last "}" glues unrelated text together.
+    # Decode each top-level object and keep the last one that fits the type.
+    text = content
+    expected_keys = set(getattr(response_type, "__dataclass_fields__", {}))
+    # Reasoning alone can be prose; any task-specific field is an answer
+    # attempt, even when most required fields are missing.
+    answer_keys = expected_keys - {"reasoning"}
+    decoder = json.JSONDecoder()
+    parsed: T | None = None
+    pos = 0
+    while token := _RESPONSE_TOKEN_RE.search(text, pos):
+        pos = token.end()
+        if token.group() == "</think>":
+            # Some chat templates put "<think>" in the prompt, so only the
+            # closer shows up: everything before it was reasoning.
+            parsed = None
+        # Only skip reasoning markup between objects, never inside JSON strings.
+        if token.group() != "{":
+            continue
+        try:
+            data, pos = decoder.raw_decode(text, token.start())
+        except json.JSONDecodeError:
+            # Prose braces such as {tweet text} or { ... } are not answers.
+            if not _looks_like_json(text, token.start(), expected_keys):
+                continue
+            # Broken JSON fails closed: scanning inside it could keep a stale
+            # approval or promote a nested draft from a revision. The exception
+            # is broken JSON in reasoning whose opener was in the prompt.
+            parsed = None
+            closer = text.find("</think>", pos)
+            if closer < 0 or "<think>" in text[pos:closer]:
+                break
+            pos = closer
+            continue
+        if isinstance(data, dict):
+            try:
+                parsed = response_type.from_dict(data)
+            except (KeyError, ValueError, TypeError, AttributeError):
+                # A partial answer supersedes an earlier accepted object:
+                # keeping the stale one could resurrect a revised approval.
+                if answer_keys & data.keys():
+                    parsed = None
+    if parsed is not None:
+        return parsed
+    console.print(f"[red]Error: Could not parse LLM response for {task.value}")
+    console.print(content)
+    logging.error(f"No {response_type.__name__} JSON object in LLM {task.value} reply")
+    return response_type.default()
 
 
 def _resolve_openrouter_api_key() -> str:
@@ -825,5 +917,26 @@ def process_tweet(
 def verify_draft(draft: Dict) -> Tuple[bool, ReviewResponse]:
     """Verify a draft tweet"""
     review_result = review_draft(draft)
-    approved = review_result.recommendation == "approve"
+    if WRITING_STYLE_CHECK not in review_result.criteria_results:
+        # The response examples also use snake_case criterion names.
+        style_key = next(
+            (
+                key
+                for key in review_result.criteria_results
+                if re.sub(r"[^a-z]", "", key.lower()) == "naturalwritingstyle"
+            ),
+            None,
+        )
+        style = (
+            review_result.criteria_results.pop(style_key)
+            if style_key is not None
+            else None
+        )
+        review_result.criteria_results[WRITING_STYLE_CHECK] = style or ReviewResult(
+            notes="Writing style was not reviewed; request an explicit style decision.",
+            passed=False,
+        )
+    approved = review_result.recommendation == "approve" and all(
+        result.passed for result in review_result.criteria_results.values()
+    )
     return approved, review_result

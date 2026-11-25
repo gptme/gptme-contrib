@@ -65,6 +65,8 @@ _AGENT_ID_ENV = ("AGENT_ID", "BOB_AUTONOMOUS_AGENT_ID")
 # ``_get_marker_agent_id``).
 _CLAIM_OWNER_ENV = ("CASCADE_SUPPLEMENTAL_AGENT",)
 _GUARD_FORCE_ENV = ("AGENT_WORKTREE_GUARD_FORCE", "BOB_WORKTREE_GUARD_FORCE")
+# Optional identity-aware holder liveness probe; see ``_probe_holder_liveness``.
+_LIVENESS_PROBE_ENV = "AGENT_WORKTREE_LIVENESS_PROBE"
 _PUSH_GUARD_DENY_ENV = (
     "AGENT_WORKTREE_PUSH_GUARD_DENY",
     "BOB_WORKTREE_PUSH_GUARD_DENY",
@@ -374,10 +376,10 @@ def _is_holder_alive(marker: dict[str, Any]) -> bool:
     1. Direct ``/proc/<pid>`` check — fast and conclusive when the pid is fresh.
     2. No authoritative ``agent_id`` recorded → the dead PID is conclusive:
        treat the holder as dead so dead-holder takeover can proceed.
-    3. Authoritative ``agent_id`` present → fail-safe-alive. The brain repo
-       additionally probes claim-shape-aware liveness via ``coordination.health``
-       (sentinel scans for autonomous session ids); until that lands upstream,
-       an unverifiable holder is treated as alive rather than stolen.
+    3. Authoritative ``agent_id`` present → ask the workspace liveness probe
+       named by ``AGENT_WORKTREE_LIVENESS_PROBE`` (see ``_probe_holder_liveness``).
+       Without a probe, or when it has no verdict, fail-safe-alive: an
+       unverifiable holder is treated as alive rather than stolen.
 
     The marker only records an env-provided ``agent_id`` (see
     ``_get_marker_agent_id``), so a synthesized id can never mask a dead PID.
@@ -388,7 +390,42 @@ def _is_holder_alive(marker: dict[str, Any]) -> bool:
 
     # PID is dead. Only an authoritative agent id can keep the holder "alive"
     # for further probing; otherwise the dead PID is conclusive.
-    return bool(marker.get("agent_id", ""))
+    if not marker.get("agent_id", ""):
+        return False
+    verdict = _probe_holder_liveness(marker)
+    return True if verdict is None else verdict
+
+
+def _probe_holder_liveness(marker: dict[str, Any]) -> bool | None:
+    """Ask the workspace's identity-aware liveness probe, if one is configured.
+
+    ``AGENT_WORKTREE_LIVENESS_PROBE`` names a Python file (absolute path) that
+    defines ``is_holder_alive(marker) -> bool | None``. Agents whose session
+    identities carry a liveness signal (a launcher PID, a process sentinel)
+    can prove a dead holder dead instead of leaving the worktree pinned.
+
+    The file is loaded by path, so it works under the hooks' ``python3 -I``.
+    Returns None (no verdict, so the caller stays fail-safe-alive) when the
+    variable is unset or relative, the file is missing, it raises, or it
+    returns anything other than a bool.
+    """
+    probe_path = os.environ.get(_LIVENESS_PROBE_ENV, "")
+    if not probe_path or not os.path.isabs(probe_path):
+        return None
+    try:
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "_agent_worktree_liveness_probe", probe_path
+        )
+        if spec is None or spec.loader is None:
+            return None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        verdict = module.is_holder_alive(dict(marker))
+    except Exception:  # noqa: BLE001 — a broken probe must not steal a worktree
+        return None
+    return verdict if isinstance(verdict, bool) else None
 
 
 def _claim_expired(claim: Any) -> bool:
@@ -484,6 +521,7 @@ def run_push_guard(
     brain_root: Path | None = None,
     remote_url: str | None = None,
     upstream_url: str | None = None,
+    origin_url: str | None = None,
     session_id: str | None = None,
     agent_id: str | None = None,
     deny: bool | None = None,
@@ -507,7 +545,8 @@ def run_push_guard(
     # brain repo stays exempt because it pushes master directly (via
     # git-safe-push-master) and must not auto-claim pr-branch:...#master.
     _brain_root = brain_root if brain_root is not None else _get_brain_root()
-    if root == _brain_root:
+    # The git toplevel is resolved; the workspace env value may be a symlink.
+    if root.resolve() == _brain_root.resolve():
         return 0
 
     sid = session_id if session_id is not None else _get_session_id()
@@ -546,25 +585,47 @@ def run_push_guard(
         return 0
 
     # Fork-based PRs push to the fork while ``worktree-create`` claims the
-    # branch under the base repo's slug. Treat the ``upstream`` remote's slug as
-    # an alias so both keys meet (offline; any failure leaves no alias).
-    alias_slugs: list[str] = []
-    if upstream_url is None:
+    # branch under the base repo's slug. Two remote layouts occur:
+    #   * a fork clone, where ``origin`` is the fork and ``upstream`` the base;
+    #   * a ``worktree-create`` checkout, where ``origin`` is the base and
+    #     ``fork`` the fork — there is no ``upstream`` remote.
+    # Prefer the explicit ``upstream`` relationship. Without it, only alias
+    # ``origin`` for a push to the configured ``fork`` remote, not an arbitrary
+    # destination (offline; remote names declare the relationship).
+    def _remote_slugs(remote: str, *, push: bool = False) -> list[str]:
         import subprocess
 
         try:
-            upstream_url = subprocess.run(
-                ["git", "remote", "get-url", "upstream"],
+            url = subprocess.run(
+                [
+                    "git",
+                    "remote",
+                    "get-url",
+                    *(["--push", "--all"] if push else []),
+                    remote,
+                ],
                 capture_output=True,
                 text=True,
                 check=True,
                 timeout=5,
             ).stdout.strip()
         except Exception:
-            upstream_url = ""
-    upstream_slug = origin_slug(upstream_url or "")
-    if upstream_slug and upstream_slug != slug:
-        alias_slugs.append(upstream_slug)
+            return []
+        return [parsed for line in url.splitlines() if (parsed := origin_slug(line))]
+
+    upstream_slug = (
+        next(iter(_remote_slugs("upstream")), None)
+        if upstream_url is None
+        else origin_slug(upstream_url or "")
+    )
+    base_slug = upstream_slug
+    if not base_slug and slug in _remote_slugs("fork", push=True):
+        base_slug = (
+            next(iter(_remote_slugs("origin")), None)
+            if origin_url is None
+            else origin_slug(origin_url or "")
+        )
+    alias_slugs = [base_slug] if base_slug and base_slug != slug else []
 
     should_deny = deny if deny is not None else _env_flag(*_PUSH_GUARD_DENY_ENV)
     try:
@@ -577,6 +638,9 @@ def run_push_guard(
         resolved_db = db_path or resolve_coordination_db_path(_brain_root)
         with CoordinationDB(resolved_db) as db:
             work = WorkClaimManager(db)
+            # Per push, not per branch: a deny on a later branch must also
+            # release the keys newly claimed for earlier branches of this push.
+            newly_claimed: list[str] = []
             for branch in pushed_branches(refspec_lines):
                 key = f"pr-branch:{slug}#{branch}"
                 legacy_key = legacy_pr_branch_key(key)
@@ -613,7 +677,6 @@ def run_push_guard(
                         f"informational only); claiming {key}",
                         file=sys.stderr,
                     )
-                newly_claimed: list[str] = []
                 for claim_key in [
                     key,
                     *(f"pr-branch:{a}#{branch}" for a in alias_slugs),
@@ -718,7 +781,10 @@ def run_guard(
     """
     # 1. Scope
     root = worktree_root if worktree_root is not None else _get_worktree_root()
-    if root is None or not str(root).startswith(_WORKTREE_PREFIX):
+    # Resolve both sides: on macOS /tmp is a symlink to /private/tmp.
+    if root is None or not os.path.realpath(root).startswith(
+        os.path.realpath(_WORKTREE_PREFIX) + os.sep
+    ):
         return 0
 
     _brain_root = brain_root if brain_root is not None else _get_brain_root()

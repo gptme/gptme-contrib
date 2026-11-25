@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import hmac
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from gptme_coordination.auth import compute_hmac as _compute_hmac
@@ -80,19 +80,40 @@ class MessageBus:
         since: datetime | None = None,
         channel: str | None = None,
         secrets: dict[str, bytes] | None = None,
+        since_id: int | None = None,
     ) -> list[Message]:
         """Get messages for an agent (targeted + broadcasts), optionally filtered.
 
         If ``secrets`` is provided, messages with mismatched HMACs are marked
         as ``verified=False`` rather than being dropped (advisory verification).
+
+        Cursor semantics: ``created_at`` is stored at second granularity, so a
+        plain ``since`` bound cannot distinguish two messages sent in the same
+        second. ``since`` is therefore an **inclusive** lower bound: anything
+        stored at or after that second is returned, which means the message at
+        the boundary may be delivered again (at-least-once, never lossy). For
+        an exact resume with no duplicates, pass the last delivered message's
+        ``id`` as ``since_id``; combined with ``since`` it resumes strictly
+        after that row, and on its own ``since_id`` is a plain ``id >`` cursor.
         """
         query = """SELECT * FROM messages
             WHERE (recipient = ? OR recipient IS NULL)"""
-        params: list[str | None] = [agent_id]
+        params: list[str | int | None] = [agent_id]
 
-        if since is not None:
-            query += " AND created_at > ?"
+        # created_at is naive UTC; naive input is taken to be UTC already.
+        if since is not None and since.tzinfo is not None:
+            since = since.astimezone(timezone.utc)
+
+        if since is not None and since_id is not None:
+            stamp = since.strftime("%Y-%m-%d %H:%M:%S")
+            query += " AND (created_at > ? OR (created_at = ? AND id > ?))"
+            params.extend([stamp, stamp, since_id])
+        elif since is not None:
+            query += " AND created_at >= ?"
             params.append(since.strftime("%Y-%m-%d %H:%M:%S"))
+        elif since_id is not None:
+            query += " AND id > ?"
+            params.append(since_id)
 
         if channel is not None:
             query += " AND channel = ?"

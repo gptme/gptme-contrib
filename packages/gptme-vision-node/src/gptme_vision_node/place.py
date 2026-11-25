@@ -316,6 +316,7 @@ class PlaceRecognizer:
         saved_places = payload.get("places", {})
         if not isinstance(saved_places, dict):
             raise ValueError("gallery places must be a JSON object")
+        expected_shape = self.embedder.embed(np.zeros((1, 1, 3), np.uint8)).shape
         places: dict[str, list[PlaceSample]] = {}
         for name, samples in saved_places.items():
             if not isinstance(samples, list) or not all(
@@ -331,13 +332,20 @@ class PlaceRecognizer:
                     raise ValueError(
                         f"gallery place {name!r} sample wifi must be a JSON object"
                     )
+                embedding = (
+                    np.asarray(s["embedding"], dtype=np.float64)
+                    if s.get("embedding") is not None
+                    else None
+                )
+                if embedding is not None and embedding.shape != expected_shape:
+                    raise ValueError(
+                        f"gallery place {name!r} embedding has shape "
+                        f"{embedding.shape}, expected {expected_shape} "
+                        "for the current embedder"
+                    )
                 loaded_samples.append(
                     PlaceSample(
-                        embedding=(
-                            np.asarray(s["embedding"], dtype=np.float64)
-                            if s.get("embedding") is not None
-                            else None
-                        ),
+                        embedding=embedding,
                         wifi={k: float(v) for k, v in wifi_raw.items()},
                     )
                 )

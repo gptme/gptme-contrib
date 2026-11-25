@@ -59,6 +59,15 @@ class TestIsBotUser:
         assert is_bot_user("john_doe") is False
         assert is_bot_user("roberto") is False  # Contains 'bot' but not as pattern
 
+    @pytest.mark.parametrize(
+        "username",
+        ["abbott", "Abbott", "talbot", "Talbot", "botanist-jane", "Botanist-Jane"],
+    )
+    def test_human_names_containing_bot(self, username):
+        """Human names containing "bot" are not detected as bots (#2508)."""
+        assert is_bot_user(username, user_type="User") is False
+        assert is_bot_user(username) is False
+
     def test_case_insensitive(self):
         """Bot detection is case-insensitive."""
         assert is_bot_user("DEPENDABOT") is True

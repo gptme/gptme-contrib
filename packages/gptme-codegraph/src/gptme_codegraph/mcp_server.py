@@ -52,7 +52,10 @@ from gptme_codegraph.core import (
     build_index,
     build_repo_map,
     extract_symbols,
+    find_symbol,
+    find_symbols,
     impact_radius,
+    lookup_index_entries,
 )
 from gptme_codegraph.search import (
     LexicalScorer,
@@ -68,51 +71,63 @@ mcp = FastMCP("codegraph", log_level="WARNING")
 # In-memory + SQLite index cache
 # ---------------------------------------------------------------------------
 
-_index_cache: dict[str, tuple[SymbolIndex, SqliteIndexCache | None]] = {}
+# directory -> (index, sqlite cache, generation of the SQLite index it came from)
+_index_cache: dict[str, tuple[SymbolIndex, SqliteIndexCache | None, str | None]] = {}
 
 
 def _get_or_build_index(directory: str) -> SymbolIndex:
     """Get a cached index (SQLite-backed, falling through to in-memory).
 
     When SQLite is available, freshness is re-checked on every call so file
-    edits between calls are detected automatically.  Without SQLite backing
+    edits between calls are detected automatically, and so is another
+    process saving a newer index for the same directory.  Without SQLite backing
     (i.e. the ``[treesitter]`` extra is not installed) the in-memory snapshot
     is returned unconditionally — restart the server to pick up changes.
     """
     dir_path = str(Path(directory).resolve())
 
     if dir_path in _index_cache:
-        cached_index, cached_sqlite = _index_cache[dir_path]
+        cached_index, cached_sqlite, cached_generation = _index_cache[dir_path]
         if cached_sqlite is None:
             # No freshness oracle available — return the snapshot as-is.
             return cached_index
+        # Check both sides of the load: a save in between must not pair a
+        # newer index with an older token (and its stale search documents).
+        generation = cached_sqlite.generation()
         # Re-check SQLite freshness; returns None when any indexed file changed.
-        if cached_sqlite.load() is not None:
-            return cached_index
-        # Stale — drop and fall through to rebuild.
+        loaded = cached_sqlite.load()
+        if loaded is not None and generation == cached_sqlite.generation():
+            if generation == cached_generation:
+                return cached_index
+            # Another process saved a newer index; adopt it.
+            _index_cache[dir_path] = (loaded, cached_sqlite, generation)
+            return loaded
+        # Stale or replaced during load — drop and try SQLite again below.
         del _index_cache[dir_path]
 
     # Try SQLite first
     sqlite_cache: SqliteIndexCache | None = None
     try:
         sqlite_cache = SqliteIndexCache(dir_path)
+        generation = sqlite_cache.generation()
         cached = sqlite_cache.load()
-        if cached is not None:
-            _index_cache[dir_path] = (cached, sqlite_cache)
+        if cached is not None and generation == sqlite_cache.generation():
+            _index_cache[dir_path] = (cached, sqlite_cache, generation)
             return cached
     except Exception:
         pass
 
     # Build fresh and save to SQLite
     index = build_index(Path(dir_path))
+    generation = None
     if sqlite_cache is not None:
         try:
-            sqlite_cache.save(index)
+            generation = sqlite_cache.save(index)
             # Clear stale search-document cache so next search re-extracts from the new index
             _clear_search_docs_db(sqlite_cache.db_path, dir_path)
         except Exception:
             pass
-    _index_cache[dir_path] = (index, sqlite_cache)
+    _index_cache[dir_path] = (index, sqlite_cache, generation)
     return index
 
 
@@ -262,33 +277,34 @@ def codegraph_def(
         if not fp.exists():
             return json.dumps({"error": f"File not found: {filepath}"})
         symbols = extract_symbols(fp)
-        for s in symbols:
-            if s.name == name:
-                result = {
-                    "found": True,
-                    "matches": [
-                        {
-                            "name": s.name,
-                            "kind": s.kind,
-                            "file": fp.name,
-                            "start_line": s.start_line,
-                            "end_line": s.end_line,
-                            "parent_class": s.parent_class,
-                            "docstring": s.docstring[:200] if s.docstring else None,
-                        }
-                    ],
-                }
-                # Cross-file fallback
-                if directory:
-                    index = _get_or_build_index(directory)
-                    if index.has(name):
-                        entries = index.lookup(name)
-                        result["definitions"] = len(entries)
-                        result["cross_file"] = [
-                            {"file": e.file, "line": e.start_line, "kind": e.kind}
-                            for e in entries[:10]
-                        ]
-                return json.dumps(result, indent=2)
+        matches = find_symbols(symbols, name)
+        if matches:
+            s = matches[0]
+            result = {
+                "found": True,
+                "matches": [
+                    {
+                        "name": s.name,
+                        "kind": s.kind,
+                        "file": fp.name,
+                        "start_line": s.start_line,
+                        "end_line": s.end_line,
+                        "parent_class": s.parent_class,
+                        "docstring": s.docstring[:200] if s.docstring else None,
+                    }
+                ],
+            }
+            # Cross-file fallback
+            if directory:
+                index = _get_or_build_index(directory)
+                entries = lookup_index_entries(index, name)
+                if entries:
+                    result["definitions"] = len(entries)
+                    result["cross_file"] = [
+                        {"file": e.file, "line": e.start_line, "kind": e.kind}
+                        for e in entries[:10]
+                    ]
+            return json.dumps(result, indent=2)
 
         # Not found locally; try cross-file if directory given
         if directory:
@@ -297,8 +313,8 @@ def codegraph_def(
 
     if directory:
         index = _get_or_build_index(directory)
-        if index.has(name):
-            entries = index.lookup(name)
+        entries = lookup_index_entries(index, name)
+        if entries:
             return json.dumps(
                 {
                     "found": True,
@@ -329,15 +345,18 @@ def codegraph_def(
 def _cross_file_callers_mcp(name: str, directory: str) -> str:
     """Cross-file caller lookup using the index-based call graph."""
     index = _get_or_build_index(directory)
-    if not index.has(name):
+    entries = lookup_index_entries(index, name)
+    if not entries:
         return json.dumps({"error": f"Symbol '{name}' not found in index"})
 
-    dir_path = Path(directory)
+    # Resolve like _get_or_build_index so graph module paths are relative
+    # to the indexed root (``app::Server.start``), not the absolute path.
+    dir_path = Path(directory).resolve()
     callees_graph, callers_graph = build_cross_file_call_graph(index, dir_path)
 
     resolved = _resolve_graph_key(name, callers_graph)
     direct_callers = sorted(callers_graph.get(resolved, set())) if resolved else []
-    files = {e.file for e in index.lookup(name)}
+    files = {e.file for e in entries}
 
     return json.dumps(
         {
@@ -345,7 +364,7 @@ def _cross_file_callers_mcp(name: str, directory: str) -> str:
             "callers": direct_callers,
             "caller_count": len(direct_callers),
             "defined_in": sorted(files),
-            "search_directory": str(dir_path),
+            "search_directory": directory,
         },
         indent=2,
     )
@@ -354,10 +373,11 @@ def _cross_file_callers_mcp(name: str, directory: str) -> str:
 def _cross_file_callees_mcp(name: str, directory: str) -> str:
     """Cross-file callee lookup using the index-based call graph."""
     index = _get_or_build_index(directory)
-    if not index.has(name):
+    entries = lookup_index_entries(index, name)
+    if not entries:
         return json.dumps({"error": f"Symbol '{name}' not found in index"})
 
-    dir_path = Path(directory)
+    dir_path = Path(directory).resolve()
     callees_graph, _callers_graph = build_cross_file_call_graph(index, dir_path)
 
     resolved = _resolve_graph_key(name, callees_graph)
@@ -368,7 +388,7 @@ def _cross_file_callees_mcp(name: str, directory: str) -> str:
             "symbol": name,
             "callees": direct_callees,
             "callee_count": len(direct_callees),
-            "search_directory": str(dir_path),
+            "search_directory": directory,
         },
         indent=2,
     )
@@ -403,10 +423,9 @@ def codegraph_callers(
         return json.dumps({"error": f"File not found: {filepath}"})
 
     symbols = extract_symbols(fp)
-    name_map = {s.name: s for s in symbols}
     _callees_graph, callers_graph = build_call_graph(symbols)
 
-    if name not in name_map:
+    if find_symbol(symbols, name) is None:
         # Try cross-file as fallback
         if directory:
             return _cross_file_callers_mcp(name, directory)
@@ -421,8 +440,8 @@ def codegraph_callers(
 
     if directory:
         index = _get_or_build_index(directory)
-        if index.has(name):
-            entries = index.lookup(name)
+        entries = lookup_index_entries(index, name)
+        if entries:
             result["definitions"] = len(entries)
             result["cross_file_defs"] = [
                 {"file": e.file, "line": e.start_line} for e in entries[:10]
@@ -465,19 +484,19 @@ def codegraph_callees(
         return json.dumps({"error": f"File not found: {filepath}"})
 
     symbols = extract_symbols(fp)
-    name_map = {s.name: s for s in symbols}
     callees_graph, _callers_graph = build_call_graph(symbols)
 
-    if name not in name_map:
+    if find_symbol(symbols, name) is None:
         if directory:
             index = _get_or_build_index(directory)
-            if index.has(name):
+            entries = lookup_index_entries(index, name)
+            if entries:
                 return json.dumps(
                     {
                         "symbol": name,
                         "note": "Symbol found in cross-file index but callee"
                         " analysis is single-file only.",
-                        "definitions": len(index.lookup(name)),
+                        "definitions": len(entries),
                     },
                     indent=2,
                 )
@@ -492,8 +511,9 @@ def codegraph_callees(
 
     if directory:
         index = _get_or_build_index(directory)
-        if index.has(name):
-            result["definitions"] = len(index.lookup(name))
+        entries = lookup_index_entries(index, name)
+        if entries:
+            result["definitions"] = len(entries)
 
     return json.dumps(result, indent=2)
 
@@ -555,13 +575,14 @@ def codegraph_blast(
         if not directory:
             return json.dumps({"error": "Either filepath or directory is required"})
         index = _get_or_build_index(directory)
-        dir_path = Path(directory)
+        dir_path = Path(directory).resolve()
         callees_graph, _callers_graph = build_cross_file_call_graph(index, dir_path)
         resolved = _resolve_graph_key(name, callees_graph)
+        entries = lookup_index_entries(index, name)
         if resolved is None:
-            if not index.has(name):
+            if not entries:
                 return json.dumps({"error": f"Symbol '{name}' not found in index"})
-            files = {e.file for e in index.lookup(name)}
+            files = {e.file for e in entries}
             return json.dumps(
                 {
                     "symbol": name,
@@ -574,7 +595,7 @@ def codegraph_blast(
             )
         radius = blast_radius(resolved, callees_graph, max_depth=max_depth)
         total = sum(len(names) for names in radius.values())
-        files = {e.file for e in index.lookup(name)}
+        files = {e.file for e in entries}
         return json.dumps(
             {
                 "symbol": name,
@@ -591,19 +612,19 @@ def codegraph_blast(
         return json.dumps({"error": f"File not found: {filepath}"})
 
     symbols = extract_symbols(fp)
-    name_map = {s.name: s for s in symbols}
     callees_graph, _callers_graph = build_call_graph(symbols)
 
-    if name not in name_map:
+    if find_symbol(symbols, name) is None:
         if directory:
             index = _get_or_build_index(directory)
-            if index.has(name):
+            entries = lookup_index_entries(index, name)
+            if entries:
                 return json.dumps(
                     {
                         "symbol": name,
                         "note": "Symbol in index but blast radius requires"
                         " single-file call graph.",
-                        "definitions": len(index.lookup(name)),
+                        "definitions": len(entries),
                     }
                 )
         return json.dumps({"error": f"Symbol '{name}' not found in {filepath}"})
@@ -619,8 +640,9 @@ def codegraph_blast(
 
     if directory:
         index = _get_or_build_index(directory)
-        if index.has(name):
-            result["definitions"] = len(index.lookup(name))
+        entries = lookup_index_entries(index, name)
+        if entries:
+            result["definitions"] = len(entries)
 
     return json.dumps(result, indent=2)
 
@@ -657,17 +679,22 @@ def codegraph_search(
 
     # Load search documents from SQLite cache if available; extract and save on miss.
     docs: list[SearchDocument] | None = None
+    # Documents are bound to the generation of the index they came from, so a
+    # cache written for an index another process has since replaced is skipped.
     cached_entry = _index_cache.get(dir_key)
-    sqlite_cache = cached_entry[1] if cached_entry else None
-    if sqlite_cache is not None:
+    sqlite_cache = None
+    generation = None
+    if cached_entry is not None and cached_entry[0] is index:
+        _, sqlite_cache, generation = cached_entry
+    if sqlite_cache is not None and generation is not None:
         try:
             with sqlite3.connect(sqlite_cache.db_path) as conn:
-                loaded = load_search_documents(conn, dir_key)
+                loaded = load_search_documents(conn, dir_key, generation=generation)
                 if loaded:
                     docs = loaded
                 else:
                     docs = extract_search_documents(index, dir_path)
-                    save_search_documents(conn, dir_key, docs)
+                    save_search_documents(conn, dir_key, docs, generation=generation)
         except Exception:
             docs = None
 
@@ -730,13 +757,14 @@ def codegraph_impact(
         if not directory:
             return json.dumps({"error": "Either filepath or directory is required"})
         index = _get_or_build_index(directory)
-        dir_path = Path(directory)
+        dir_path = Path(directory).resolve()
         _callees_graph, callers_graph = build_cross_file_call_graph(index, dir_path)
         resolved = _resolve_graph_key(name, callers_graph)
+        entries = lookup_index_entries(index, name)
         if resolved is None:
-            if not index.has(name):
+            if not entries:
                 return json.dumps({"error": f"Symbol '{name}' not found in index"})
-            files = {e.file for e in index.lookup(name)}
+            files = {e.file for e in entries}
             return json.dumps(
                 {
                     "symbol": name,
@@ -749,7 +777,7 @@ def codegraph_impact(
             )
         radius = impact_radius(resolved, callers_graph, max_depth=max_depth)
         total = sum(len(names) for names in radius.values())
-        files = {e.file for e in index.lookup(name)}
+        files = {e.file for e in entries}
         return json.dumps(
             {
                 "symbol": name,
@@ -766,19 +794,19 @@ def codegraph_impact(
         return json.dumps({"error": f"File not found: {filepath}"})
 
     symbols = extract_symbols(fp)
-    name_map = {s.name: s for s in symbols}
     _callees_graph, callers_graph = build_call_graph(symbols)
 
-    if name not in name_map:
+    if find_symbol(symbols, name) is None:
         if directory:
             index = _get_or_build_index(directory)
-            if index.has(name):
+            entries = lookup_index_entries(index, name)
+            if entries:
                 return json.dumps(
                     {
                         "symbol": name,
                         "note": "Symbol in index but impact radius requires"
                         " single-file call graph.",
-                        "definitions": len(index.lookup(name)),
+                        "definitions": len(entries),
                     }
                 )
         return json.dumps({"error": f"Symbol '{name}' not found in {filepath}"})
@@ -794,8 +822,9 @@ def codegraph_impact(
 
     if directory:
         index = _get_or_build_index(directory)
-        if index.has(name):
-            result["definitions"] = len(index.lookup(name))
+        entries = lookup_index_entries(index, name)
+        if entries:
+            result["definitions"] = len(entries)
 
     return json.dumps(result, indent=2)
 

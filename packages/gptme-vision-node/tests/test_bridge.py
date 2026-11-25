@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 from gptme_vision_node.bridge import VisionBridge
 from gptme_vision_node.detect import Detection
-from gptme_vision_node.pipeline import PERSON_APPEARED, VisionEvent
+from gptme_vision_node.pipeline import MOTION, PERSON_APPEARED, VisionEvent
 
 
 class _Source:
@@ -102,7 +102,7 @@ async def test_event_send_queue_is_bounded(caplog) -> None:
 
     bridge._loop = asyncio.get_running_loop()
     bridge._send_message = blocked_send
-    event = VisionEvent(PERSON_APPEARED)
+    event = VisionEvent(MOTION)
     for _ in range(10):
         bridge._schedule_event(event)
 

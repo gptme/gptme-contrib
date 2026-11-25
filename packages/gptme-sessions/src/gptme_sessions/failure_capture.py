@@ -89,6 +89,29 @@ def _mentions_http_429(error_text: str) -> bool:
     return _HTTP_429_RE.search(error_text) is not None
 
 
+# HTTP/API 401/403 as a status, not an incidental digit run. The bare
+# ``"401" in error_text`` test fired on `gh issue view 1403`, a count like
+# 14030, or a model id with a 20240401 date — any of which turned an unrelated
+# failure (e.g. an empty provider stream) into a credential failure.
+_HTTP_AUTH_RE = re.compile(
+    r"(?:"
+    r"error\s*code\s*[:=]\s*40[13]\b"
+    r"|status(?:\s*code)?\s*[:=]\s*40[13]\b"
+    r"|api_error_status\s*[:=]\s*40[13]\b"
+    r"|http(?:/\d+\.\d+)?\s+(?:error:\s*)?40[13]\b"
+    r"|\b40[13]\s+(?:unauthorized|forbidden)\b"
+    r"|\berror:\s*40[13]\b"
+    r"|[\"']?http_status[\"']?\s*:\s*40[13]\b"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _mentions_http_auth(error_text: str) -> bool:
+    """True for an HTTP/API 401/403, not an incidental number in the tail."""
+    return _HTTP_AUTH_RE.search(error_text) is not None
+
+
 def _mentions_http_402(error_text: str) -> bool:
     """True for an HTTP/API 402 payment failure."""
     return _HTTP_402_RE.search(error_text) is not None
@@ -100,13 +123,23 @@ def _mentions_http_400(error_text: str) -> bool:
 
 
 def _mentions_model_stream_crash(lower: str) -> bool:
-    """gptme OpenAI-stream IndexError — not an unrelated list-index crash.
+    """gptme OpenAI-stream IndexError — a harness/parser crash.
 
-    ``llm_openai`` is the observed production marker (module path in the
-    traceback / harness stderr). A bare ``in stream`` substring also matches
-    "in streaming mode" / "requests in stream" and is not used.
+    ``llm_openai`` is the observed marker (module path in the traceback /
+    harness stderr). A bare ``in stream`` substring also matches "in streaming
+    mode" / "requests in stream" and is not used.
     """
     return "list index out of range" in lower and "llm_openai" in lower
+
+
+def _mentions_empty_provider_stream(lower: str) -> bool:
+    """gptme ``EmptyStreamError``: "Provider stream for MODEL ended without any output".
+
+    A terminal symptom that commonly follows a provider-side failure (overload,
+    throttling, credentials) in the same stderr tail, so it is checked only
+    after those more specific causes.
+    """
+    return "provider stream for " in lower and "ended without any output" in lower
 
 
 # HTTP status codes must stand alone: a bare ``402`` alternation matched the
@@ -428,18 +461,20 @@ def classify_failure_reason(
             return FAILURE_REASON_UPSTREAM_OVERLOADED
         if _RATE_LIMIT_PHRASE_RE.search(lower):
             return FAILURE_REASON_RATE_LIMIT
-        if (
-            "authentication" in lower
-            or "unauthorized" in lower
-            or "401" in error_text
-            or "403" in error_text
-        ):
+        if "authentication" in lower or "unauthorized" in lower or _mentions_http_auth(error_text):
             return FAILURE_REASON_AUTH
     # has_assistant_turn is definitive: if the trajectory has a response, model ran.
     # input_tokens==0 alone can't override it — token accounting can be missing on CC.
     no_model_tokens = not has_assistant_turn and (input_tokens == 0 or input_tokens is None)
     if exit_code != 0 and no_model_tokens and duration_seconds < 120:
         return FAILURE_REASON_PRE_RESPONSE
+    # An empty provider stream is usually the terminal symptom of a
+    # provider-side failure, so it only classifies once quota, 429, overload,
+    # rate-limit and auth causes have been ruled out. It also yields to the
+    # pre-response bucket above: a fast empty stream before any token was
+    # accounted is a pre-response API failure, not a model-stream crash.
+    if error_text and _mentions_empty_provider_stream(error_text.lower()):
+        return FAILURE_REASON_MODEL_STREAM_CRASH
     return FAILURE_REASON_NONZERO
 
 

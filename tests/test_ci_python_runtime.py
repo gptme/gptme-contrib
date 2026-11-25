@@ -43,7 +43,10 @@ def test_workspace_matrix_is_explicit_and_bound_to_setup_python():
         (ROOT / ".github/workflows/test-packages.yml").read_text()
     )
     job = workflow["jobs"]["test"]
-    assert job["strategy"]["matrix"]["python-version"] == ["3.11", "3.12"]
+    assert job["strategy"]["matrix"]["python-version"] == (
+        "${{ github.event_name == 'pull_request' && fromJSON('[\"3.11\"]')"
+        ' || fromJSON(\'["3.11", "3.12"]\') }}'
+    )
     assert job["env"]["CI_EXPECTED_PYTHON"] == "${{ matrix.python-version }}"
     assert job["env"]["UV_PYTHON_DOWNLOADS"] == "never"
     setup = next(step for step in job["steps"] if step.get("id") == "python")

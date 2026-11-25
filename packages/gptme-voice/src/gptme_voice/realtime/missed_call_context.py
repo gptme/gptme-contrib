@@ -88,7 +88,12 @@ def _timestamp(value: object) -> datetime:
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     if parsed.tzinfo is None:
         raise ValueError("timestamp must include timezone")
-    return parsed.astimezone(timezone.utc)
+    try:
+        return parsed.astimezone(timezone.utc)
+    except OverflowError as exc:
+        # An offset near datetime.min/max can fall outside the UTC range; callers
+        # treat that like any other unparseable timestamp.
+        raise ValueError("timestamp out of range") from exc
 
 
 def _as_utc(now: datetime | None) -> datetime:
@@ -759,7 +764,8 @@ def load_callback_history_index(
             placed = _timestamp(placed_raw)
             placed_str = placed.strftime("%Y-%m-%d %H:%MZ")
         except ValueError:
-            placed_str = placed_raw[:16] if placed_raw else "unknown"
+            # Unparseable values are untrusted text like every other field.
+            placed_str = _sanitize_index_field(placed_raw or "")[:16] or "unknown"
         caller = _sanitize_index_field(entry.get("caller", "unknown"))
         direction = _sanitize_index_field(entry.get("direction", "outbound"))
         direction_tag = f" ({direction})" if direction != "outbound" else ""

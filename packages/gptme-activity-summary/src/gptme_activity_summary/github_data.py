@@ -424,6 +424,24 @@ def get_commit_count(start: date, end: date, repo_path: str | None = None) -> in
         return 0
 
 
+def _submitted_in_window(submitted_at: object, start: date, end: date) -> bool:
+    """Whether a review's ``submittedAt`` falls within ``[start, end]`` (UTC days).
+
+    A PR updated in-window carries all of its historical reviews, so old
+    reviews must be dropped. Reviews without a parseable timestamp are kept,
+    since they cannot be placed outside the window.
+    """
+    if not isinstance(submitted_at, str) or not submitted_at:
+        return True
+    try:
+        ts = datetime.fromisoformat(submitted_at.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    if ts.tzinfo is not None:
+        ts = ts.astimezone(timezone.utc)
+    return start <= ts.date() <= end
+
+
 def get_reviews_received(
     start: date, end: date, repos: list[str], author: str | None = None
 ) -> list[PRReview]:
@@ -461,6 +479,8 @@ def get_reviews_received(
                 pr_author = (pr.get("author") or {}).get("login", "")
                 for review in pr.get("reviews", []):
                     reviewer = (review.get("author") or {}).get("login", "")
+                    if not _submitted_in_window(review.get("submittedAt"), start, end):
+                        continue
                     if reviewer and reviewer not in (pr_author, "bot"):
                         reviews.append(
                             PRReview(

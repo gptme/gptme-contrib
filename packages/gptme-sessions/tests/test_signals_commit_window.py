@@ -196,3 +196,60 @@ def test_two_commits_with_two_stated_subjects_are_both_credited() -> None:
     assert len(signals["git_commits"]) == 2
     assert any("aaaaaaa" in c for c in signals["git_commits"])
     assert any("bbbbbbb" in c for c in signals["git_commits"])
+
+
+def test_combined_short_flags_state_the_subject() -> None:
+    """`git commit -am` / `-qm` state a subject too (contrib#2384, #1959)."""
+    for flag in ("-am", "-qm", "-aqm"):
+        cmd = f"tail -18 README.md && git commit {flag} 'docs(collaboration): scope pilot'"
+        msgs = [
+            _msg("user", "commit it", "2026-01-01T10:00:00+00:00"),
+            _msg(
+                "assistant",
+                '@shell(call_1): {"command": "%s"}' % cmd,
+                "2026-01-01T10:00:01+00:00",
+            ),
+            _msg(
+                "system",
+                f"Ran command: `tail -18 README.md... (1 line)`\n{_PAD}\n{_COMMIT_LINE}\n",
+                "2026-01-01T10:00:02+00:00",
+                call_id="call_1",
+            ),
+        ]
+        signals = extract_signals(msgs)
+        assert len(signals["git_commits"]) == 1, flag
+        assert "8e8df11cb9" in signals["git_commits"][0]
+
+
+def test_combined_short_flags_state_the_heredoc_subject() -> None:
+    """`git commit -am "$(cat <<'EOF' ...)"` states the heredoc subject, not the `$(cat` opener."""
+    from gptme_sessions.signals import _commit_subject, _stated_commit_subjects
+
+    for flag in ("-m", "-am", "-qm", "-aqm"):
+        cmd = f"git commit {flag} \"$(cat <<'EOF'\nfeat: x\n\nbody line\nEOF\n)\""
+        assert _commit_subject(cmd) == "feat: x", flag
+        assert _stated_commit_subjects(cmd) == ["feat: x"], flag
+
+
+def test_empty_heredoc_body_states_no_subject() -> None:
+    """An empty or whitespace-only heredoc message states no subject instead of raising."""
+    from gptme_sessions.signals import _stated_commit_subjects
+
+    for flag in ("-m", "-am"):
+        for body in ("", "   \n\t"):
+            cmd = f"git commit {flag} \"$(cat <<'EOF'\n{body}\nEOF\n)\""
+            assert _stated_commit_subjects(cmd) == [], (flag, body)
+
+
+def test_empty_commit_message_has_no_subject() -> None:
+    """Empty -m values and empty heredocs yield no subject in either extractor."""
+    from gptme_sessions.signals import _commit_subject, _stated_commit_subjects
+
+    cmds = [
+        "git commit -m ''",
+        'git commit -am ""',
+        "git commit -m \"$(cat <<'EOF'\n\nEOF\n)\"",
+    ]
+    for cmd in cmds:
+        assert _commit_subject(cmd) is None, cmd
+        assert _stated_commit_subjects(cmd) == [], cmd

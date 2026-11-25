@@ -290,7 +290,9 @@ def streak_cooldown_gate(
     Returns:
         A :class:`StreakCooldownDecision`.
     """
-    if force_session or noop_streak < toggle_threshold:
+    if force_session:
+        return StreakCooldownDecision(True, "gate inactive (forced session)")
+    if noop_streak < toggle_threshold:
         return StreakCooldownDecision(
             True, "gate inactive (streak below toggle threshold)"
         )

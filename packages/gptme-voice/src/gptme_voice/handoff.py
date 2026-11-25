@@ -191,6 +191,10 @@ def validate(
         return ValidationResult(False, "initiated_at is not valid ISO 8601")
     if expires is None:
         return ValidationResult(False, "expires_at is not valid ISO 8601")
+    if initiated.tzinfo is None or expires.tzinfo is None:
+        return ValidationResult(
+            False, "initiated_at and expires_at must include a timezone"
+        )
     if expires <= initiated:
         return ValidationResult(False, "expires_at must be after initiated_at")
 

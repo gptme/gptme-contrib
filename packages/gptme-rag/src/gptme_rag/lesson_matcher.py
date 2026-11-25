@@ -85,6 +85,11 @@ _SKIP_DIR_PARTS: frozenset[str] = frozenset(
 _REPO_SLUG_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 #: SSH remote form: git@github.com:owner/repo.git
 _REPO_SSH_RE = re.compile(r"git@[^:]+:([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?$")
+#: URL-scheme remote form: ssh://[user@]host[:port]/owner/repo(.git), also
+#: git+ssh:// and git://. The path must be exactly owner/repo.
+_REPO_SCHEME_RE = re.compile(
+    r"(?:ssh|git\+ssh|git)://(?:[^@/]+@)?[^/]+/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?/?$"
+)
 #: HTTPS remote form: https://github.com/owner/repo(.git)
 _REPO_HTTPS_RE = re.compile(r"https?://[^/]+/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?(?:/.*)?$")
 
@@ -119,8 +124,8 @@ def _skill_name_pattern(name: str) -> re.Pattern[str]:
 def normalize_repo_slug(value: str) -> str | None:
     """Normalise *value* to a lowercase ``owner/repo`` slug or return ``None``.
 
-    Accepts bare slugs (``gptme/gptme``), HTTPS GitHub URLs, and SSH remote
-    strings.  Anything that does not resolve to exactly two non-empty path
+    Accepts bare slugs (``gptme/gptme``), HTTPS GitHub URLs, SSH remote
+    strings, and ``ssh://``/``git://`` URLs.  Anything that does not resolve to exactly two non-empty path
     segments is returned as ``None`` — callers treat ``None`` as *unknown*.
 
     Examples::
@@ -130,6 +135,7 @@ def normalize_repo_slug(value: str) -> str | None:
         normalize_repo_slug("gptme/gptme.git")           -> "gptme/gptme"
         normalize_repo_slug("https://github.com/A/B")   -> "a/b"
         normalize_repo_slug("git@github.com:A/B.git")   -> "a/b"
+        normalize_repo_slug("ssh://git@github.com/A/B") -> "a/b"
         normalize_repo_slug("./local")                   -> None
         normalize_repo_slug("gptme")                     -> None  (one segment)
     """
@@ -139,6 +145,11 @@ def normalize_repo_slug(value: str) -> str | None:
 
     # SSH form
     m = _REPO_SSH_RE.match(value)
+    if m:
+        return m.group(1).lower()
+
+    # ssh://, git+ssh:// and git:// URL forms
+    m = _REPO_SCHEME_RE.match(value)
     if m:
         return m.group(1).lower()
 
@@ -193,6 +204,26 @@ def _string_list(value: object) -> list[str]:
     if isinstance(value, list):
         return [str(item).strip() for item in value if str(item).strip()]
     return []
+
+
+def _match_terms(value: object, *, split_commas: bool) -> list[str]:
+    """Normalise a ``keywords``/``patterns`` field to a list of strings.
+
+    Accepts a string or a list. Numeric and date YAML scalars are kept as
+    source text; booleans, mappings and nulls are dropped. A bare string is split on
+    commas only when ``split_commas`` is set: keyword lists use that
+    shorthand, but a comma inside a regex (``x{1,3}``) is part of the pattern.
+    """
+    items = value if isinstance(value, list) else [value]
+    terms: list[str] = []
+    for item in items:
+        if isinstance(item, bool) or not isinstance(item, str | int | float):
+            continue
+        if split_commas and isinstance(item, str) and not isinstance(value, list):
+            terms.extend(item.split(","))
+        else:
+            terms.append(str(item))
+    return [term.strip() for term in terms if term.strip()]
 
 
 def _clean_plain_scalar(raw: str) -> str:
@@ -459,7 +490,46 @@ def extract_frontmatter(content: str) -> tuple[dict[str, Any], str]:
     try:
         import yaml
 
-        fm_yaml = yaml.safe_load(fm_str)
+        class MatchTermLoader(yaml.SafeLoader):
+            """Keep numeric and date match terms as written.
+
+            YAML 1.1 reads ``3.10`` as the float 3.1. Only the root and
+            ``match`` mappings, where match terms are read from, are adjusted;
+            every other field keeps SafeLoader semantics.
+            """
+
+            def construct_document(self, node):
+                document = super().construct_document(node)
+                if isinstance(document, dict):
+                    self._keep_term_text(node, document)
+                    if isinstance(document.get("match"), dict):
+                        written = {key.value: value for key, value in node.value}
+                        # A plain alias (``match: *base``) shares the anchor's dict.
+                        document["match"] = match = dict(document["match"])
+                        self._keep_term_text(written["match"], match)
+                return document
+
+            @staticmethod
+            def _keep_term_text(node, mapping):
+                source_tags = {
+                    "tag:yaml.org,2002:int",
+                    "tag:yaml.org,2002:float",
+                    "tag:yaml.org,2002:timestamp",
+                }
+                # Construction has already flattened merge keys into
+                # ``node.value``; as in the mapping, the last duplicate wins.
+                written = {key.value: value for key, value in node.value}
+                for field in ("keywords", "patterns"):
+                    value = written.get(field)
+                    if isinstance(value, yaml.SequenceNode):
+                        mapping[field] = [
+                            item.value if item.tag in source_tags else parsed
+                            for item, parsed in zip(value.value, mapping[field])
+                        ]
+                    elif value is not None and value.tag in source_tags:
+                        mapping[field] = value.value
+
+        fm_yaml = yaml.load(fm_str, Loader=MatchTermLoader)
         return (fm_yaml if isinstance(fm_yaml, dict) else {}), body
     except ImportError:
         pass
@@ -537,16 +607,18 @@ def extract_frontmatter(content: str) -> tuple[dict[str, Any], str]:
         + (
             []
             if top_level_patterns
-            else _string_list(
-                _extract_scalar_frontmatter_field(top_level_without_match, "patterns")
+            else _match_terms(
+                _extract_scalar_frontmatter_field(top_level_without_match, "patterns"),
+                split_commas=False,
             )
         )
         + nested_patterns
         + (
             []
             if nested_patterns
-            else _string_list(
-                _extract_scalar_frontmatter_field(match_block, "patterns", allow_indented=True)
+            else _match_terms(
+                _extract_scalar_frontmatter_field(match_block, "patterns", allow_indented=True),
+                split_commas=False,
             )
         )
     )
@@ -790,8 +862,8 @@ def _score_skill_descriptor(lesson: dict[str, Any], prompt_lower: str) -> tuple[
 # Lesson scanning
 # ---------------------------------------------------------------------------
 
-#: On-disk cache schema. Bump when the lesson dict shape changes.
-_CACHE_VERSION = 2
+#: On-disk cache schema. Bump when the lesson dict shape or parsing semantics change.
+_CACHE_VERSION = 3
 
 # resolved path -> (mtime_ns, size, lesson_or_None). None means parsed-but-skipped.
 _parse_cache: dict[str, tuple[int, int, dict[str, Any] | None]] = {}
@@ -969,13 +1041,18 @@ def _parse_lesson_file(path: Path) -> dict[str, Any] | None:
         raw_keywords = []
         raw_patterns = []
 
-    if isinstance(raw_keywords, str):
-        raw_keywords = [raw_keywords]
-    keywords = _dedupe_strings([*raw_keywords, *_string_list(fm.get("keywords"))])
-
-    if isinstance(raw_patterns, str):
-        raw_patterns = [raw_patterns]
-    patterns = _dedupe_strings([*raw_patterns, *_string_list(fm.get("patterns"))])
+    keywords = _dedupe_strings(
+        [
+            *_match_terms(raw_keywords, split_commas=True),
+            *_match_terms(fm.get("keywords"), split_commas=True),
+        ]
+    )
+    patterns = _dedupe_strings(
+        [
+            *_match_terms(raw_patterns, split_commas=False),
+            *_match_terms(fm.get("patterns"), split_commas=False),
+        ]
+    )
 
     skill_name = fm.get("name") if isinstance(fm.get("name"), str) else None
     lesson_id = fm.get("id") if isinstance(fm.get("id"), str) else None

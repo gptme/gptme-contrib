@@ -43,7 +43,7 @@ oauth = [
     "python-dotenv>=0.19",
 ]
 bridge = [
-    "mcp>=1.2",
+    "mcp>=1.2,<2",
     "starlette>=0.27",
     "uvicorn>=0.23",
 ]
@@ -57,6 +57,7 @@ secrets = [
     "gptme-redact>=0.1; python_version >= '3.11'",
 ]
 test = [
+    "gptme-redact>=0.1; python_version >= '3.11'",
     "packaging>=23.0",
     "tomli>=2.0; python_version < '3.11'",
     "pytest>=7.0",

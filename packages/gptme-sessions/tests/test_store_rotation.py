@@ -167,3 +167,14 @@ def test_rewrite_after_rotation_does_not_resurrect_archived_records(store):
         "old",
         "recent",
     }
+
+
+def test_rotated_rows_visible_for_non_jsonl_store_name(tmp_path):
+    """rotate() and archive_paths() must agree on the archive prefix (gptme/gptme-contrib#2331 item 5)."""
+    p = tmp_path / "records.json"
+    p.write_text(
+        json.dumps({"session_id": "eeeeeeee", "timestamp": "2020-01-01T00:00:00+00:00"}) + "\n"
+    )
+    store = SessionStore(sessions_dir=tmp_path, sessions_file="records.json")
+    store.rotate(keep_days=30)
+    assert [r.session_id for r in store.load_all(include_archives=True)] == ["eeeeeeee"]

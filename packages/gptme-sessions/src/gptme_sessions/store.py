@@ -225,12 +225,12 @@ class SessionStore:
         the whole point — the active file stays small enough that a
         read-modify-write cycle is cheap.
         """
-        stem = (
-            self.path.name[: -len(".jsonl")]
-            if self.path.name.endswith(".jsonl")
-            else self.path.stem
-        )
-        return sorted(self.sessions_dir.glob(f"{stem}-archive-*.jsonl"))
+        return sorted(self.sessions_dir.glob(f"{self._archive_stem()}-archive-*.jsonl"))
+
+    def _archive_stem(self) -> str:
+        """Name prefix shared by ``rotate()`` writes and ``archive_paths()`` reads."""
+        name = self.path.name
+        return name[: -len(".jsonl")] if name.endswith(".jsonl") else self.path.stem
 
     def _load_path(self, path: Path) -> list[SessionRecord]:
         """Parse one JSONL file, skipping malformed lines."""
@@ -447,9 +447,7 @@ class SessionStore:
             archived = 0
             skipped = 0
             for month, entries in sorted(by_month.items()):
-                archive_path = (
-                    self.sessions_dir / f"{self.path.name[: -len('.jsonl')]}-archive-{month}.jsonl"
-                )
+                archive_path = self.sessions_dir / f"{self._archive_stem()}-archive-{month}.jsonl"
                 archive_created = not archive_path.exists()
                 existing = self._archive_line_hashes(archive_path)
                 # Append first, fsync, and only then drop from the active file.

@@ -1,6 +1,7 @@
 """File watcher for automatic index updates."""
 
 import logging
+import os
 import time
 from pathlib import Path
 from threading import Lock, Timer
@@ -52,10 +53,56 @@ class IndexEventHandler(FileSystemEventHandler):
             self._queue_update(Path(src))
 
     def on_deleted(self, event: FileSystemEvent) -> None:
-        """Handle file deletion events."""
+        """Handle file deletion events.
+
+        Moving a directory out of the watched tree produces only a
+        ``DirDeletedEvent`` (no per-file events), so a deleted directory
+        removes every indexed source beneath it.
+        """
         src = str(event.src_path)
-        if not event.is_directory and self._should_process(src):
+        if event.is_directory:
+            # No ignore-pattern filter here: neither the initial index nor the
+            # file-event filters exclude by ancestor, so any directory (even
+            # node_modules or __pycache__) may hold indexed sources.
+            if not self._is_persist_path(Path(src)):
+                self._delete_directory(Path(src).resolve())
+        elif self._should_process(src):
             self._queue_deletion(Path(src))
+
+    def _delete_directory(self, directory: Path) -> None:
+        """Remove every indexed source under ``directory`` from the index."""
+        prefix = os.path.join(str(directory), "")
+        with self._lock:
+            for pending in [p for p in self._timers if str(p).startswith(prefix)]:
+                self._timers.pop(pending).cancel()
+            self._remove_directory_sources(directory, prefix)
+
+    def _remove_directory_sources(self, directory: Path, prefix: str) -> None:
+        """Scan and remove sources while serialized with timer callbacks."""
+        sources: set[str] = set()
+        page_size = 1000
+        offset = 0
+        try:
+            while True:
+                page = self.indexer.collection.get(
+                    include=["metadatas"], limit=page_size, offset=offset
+                )
+                ids = page["ids"] or []
+                for meta in page["metadatas"] or []:
+                    source = str((meta or {}).get("source", ""))
+                    if source.startswith(prefix):
+                        sources.add(source)
+                if len(ids) < page_size:
+                    break
+                offset += len(ids)
+            if not sources:
+                return
+            logger.info(f"Removing {len(sources)} file(s) under deleted directory {directory}")
+            for source in sorted(sources):
+                self.indexer.delete_documents({"source": source})
+            self.indexer.cache.clear()
+        except Exception as e:
+            logger.error(f"Error removing directory {directory} from index: {e}", exc_info=True)
 
     def _should_process(self, path: str) -> bool:
         """Check if a file should be processed based on pattern and ignore patterns."""
@@ -77,12 +124,12 @@ class IndexEventHandler(FileSystemEventHandler):
             if self._should_skip_file(path, set()):
                 return
 
-            # Cancel any existing timer for this path
+            # Cancel any existing timer for this path.
             if resolved_path in self._timers:
                 self._timers[resolved_path].cancel()
 
             # Schedule update after delay (debouncing)
-            timer = Timer(self._update_delay, self._process_update, args=[resolved_path])
+            timer = Timer(self._update_delay, lambda: self._process_update(resolved_path, timer))
             self._timers[resolved_path] = timer
             timer.start()
             logger.debug(f"Queued update for {path} (delay: {self._update_delay}s)")
@@ -97,32 +144,39 @@ class IndexEventHandler(FileSystemEventHandler):
                 self._timers[resolved_path].cancel()
 
             # Schedule deletion after delay (debouncing)
-            timer = Timer(self._update_delay, self._process_deletion, args=[resolved_path])
+            timer = Timer(self._update_delay, lambda: self._process_deletion(resolved_path, timer))
             self._timers[resolved_path] = timer
             timer.start()
             logger.debug(f"Queued deletion for {path} (delay: {self._update_delay}s)")
 
-    def _process_deletion(self, path: Path) -> None:
-        """Process a queued file deletion."""
-        with self._lock:
-            self._timers.pop(path, None)
-
+    def _process_deletion(self, path: Path, timer: Timer | None = None) -> None:
+        """Process a deletion only if this exact timer is still current."""
         canonical_path = str(path)
-        logger.info(f"Removing deleted file from index: {canonical_path}")
-
-        try:
-            self.indexer.delete_documents({"source": canonical_path})
-            self.indexer.cache.clear()
-            logger.debug(f"Successfully removed {canonical_path} from index")
-        except Exception as e:
-            logger.error(f"Error removing {canonical_path} from index: {e}", exc_info=True)
-
-    def _process_update(self, path: Path) -> None:
-        """Process a queued file update."""
+        # Keep validation and mutation atomic with moves and new events.
         with self._lock:
-            # Remove timer reference
+            if timer is not None and self._timers.get(path) is not timer:
+                logger.debug(f"Skipping superseded deletion for {path}")
+                return
             self._timers.pop(path, None)
+            logger.info(f"Removing deleted file from index: {canonical_path}")
+            try:
+                self.indexer.delete_documents({"source": canonical_path})
+                self.indexer.cache.clear()
+                logger.debug(f"Successfully removed {canonical_path} from index")
+            except Exception as e:
+                logger.error(f"Error removing {canonical_path} from index: {e}", exc_info=True)
 
+    def _process_update(self, path: Path, timer: Timer | None = None) -> None:
+        """Process an update only if this exact timer is still current."""
+        with self._lock:
+            if timer is not None and self._timers.get(path) is not timer:
+                logger.debug(f"Skipping superseded update for {path}")
+                return
+            self._timers.pop(path, None)
+            self._update_file(path)
+
+    def _update_file(self, path: Path) -> None:
+        """Update the index while serialized with moves and deletions."""
         logger.debug(f"Processing update for {path}")
 
         try:
@@ -164,7 +218,12 @@ class IndexEventHandler(FileSystemEventHandler):
             logger.error(f"Error updating {path}: {e}", exc_info=True)
 
     def on_moved(self, event: FileSystemEvent) -> None:
-        """Handle file move events."""
+        """Serialize file moves with callbacks that may already have fired."""
+        with self._lock:
+            self._process_move(event)
+
+    def _process_move(self, event: FileSystemEvent) -> None:
+        """Replace source and destination while holding the mutation lock."""
         if not event.is_directory:
             src_str = str(event.src_path)
             dest_str = str(event.dest_path)
@@ -172,11 +231,19 @@ class IndexEventHandler(FileSystemEventHandler):
             src_path = Path(src_str).resolve()
             dest_path = Path(dest_str).resolve()
 
+            # Removing the registration also supersedes an already-fired timer.
+            pending_src = self._timers.pop(src_path, None)
+            if pending_src is not None:
+                pending_src.cancel()
+
             # Remove old file from index if it was being tracked
             if self._should_process(src_str):
                 logger.debug(f"Removing old path from index: {src_path}")
                 try:
                     self.indexer.delete_documents({"source": str(src_path)})
+                    # The search cache may still hold results for the old path,
+                    # and nothing below clears it when dest is not indexed.
+                    self.indexer.cache.clear()
                     logger.debug(f"Deleted old documents for: {src_path}")
                 except Exception as e:
                     logger.warning(f"Error removing old path {src_path} from index: {e}")
@@ -184,6 +251,22 @@ class IndexEventHandler(FileSystemEventHandler):
             # Index the file at its new location if it matches our patterns
             if self._should_process(dest_str):
                 logger.info(f"Indexing moved file at new location: {dest_path}")
+
+                # A pending or already-fired timer belongs to the old dest.
+                # Callbacks check their own identity, not a path tombstone,
+                # so later events cannot accidentally re-enable an old timer.
+                pending = self._timers.pop(dest_path, None)
+                if pending is not None:
+                    pending.cancel()
+
+                # Renaming over an existing file (an atomic save) replaces its
+                # content, so drop the old chunks before indexing the new ones.
+                try:
+                    self.indexer.delete_documents({"source": str(dest_path)})
+                    # Invalidate even if the replacement cannot be read/indexed.
+                    self.indexer.cache.clear()
+                except Exception as e:
+                    logger.warning(f"Error removing replaced content for {dest_path}: {e}")
 
                 # Wait for the file to be fully moved and readable
                 max_attempts = 3
@@ -453,17 +536,44 @@ class FileWatcher:
 
     def start(self) -> None:
         """Start watching for file changes."""
-        # Reset collection and prepare paths
-        self.indexer.reset_collection()
-
+        # Do not reset the collection: a persistent index holds documents for
+        # other directories too. Re-indexing each watched path replaces its
+        # files' chunks; files deleted while the watcher was down are pruned.
         for path in self.paths:
             path.mkdir(parents=True, exist_ok=True)
+            self._prune_missing_sources(path)
             self.indexer.index_directory(path, self.event_handler.pattern)
             self.observer.schedule(self.event_handler, str(path), recursive=True)
 
         # Start observer and wait for it to be ready
         self.observer.start()
         time.sleep(self.startup_delay)
+
+    def _prune_missing_sources(self, path: Path) -> None:
+        """Drop indexed sources under ``path`` whose file no longer exists."""
+        root = str(path.resolve())
+        prefix = root.rstrip(os.sep) + os.sep
+        # A symlinked file is stored under its target, which may lie outside
+        # root; a dangling link is what still ties that source to this root.
+        # realpath, unlike Path.resolve, does not raise on symlink loops.
+        dangling = {
+            os.path.realpath(link)
+            for link in path.rglob("*")
+            if link.is_symlink() and not os.path.exists(link)
+        }
+        metadatas = self.indexer.collection.get(include=["metadatas"])["metadatas"] or []
+        missing = {
+            source
+            for meta in metadatas
+            if meta
+            and isinstance(source := meta.get("source"), str)
+            and (source == root or source.startswith(prefix) or source in dangling)
+            and not os.path.isfile(source)
+        }
+        for source in sorted(missing):
+            self.indexer.delete_documents({"source": source})
+        if missing:
+            logger.info(f"Pruned {len(missing)} deleted file(s) under {root}")
 
     def stop(self) -> None:
         """Stop watching for file changes."""

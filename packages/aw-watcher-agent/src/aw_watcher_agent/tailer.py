@@ -21,7 +21,7 @@ import json
 import os
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, cast
 
@@ -30,6 +30,19 @@ from . import core
 
 # Codex marks shell exits as "Process exited with code N" / "exited with code N".
 _EXIT_CODE_RE = re.compile(r"exited with code (\d+)")
+
+# How long an unpaired call that precedes a paired one is held back before it
+# is emitted as a zero-duration crash orphan. Codex can write a slow call's
+# output after a later call's, and the positional cursor never revisits an
+# emitted call, so emitting at once would make the 0 ms stub permanent
+# (gptme/gptme-contrib#2366, AC1). Past the window it is treated as a genuine
+# orphan, so one lost output cannot block the rest of the file forever.
+#
+# Accepted limit: the window runs from the call's start, so a call that is
+# still running after it (with a later call already paired) also becomes a
+# stub. The transcript alone cannot tell "slow" from "lost" at that point:
+# neither writes anything until an output arrives.
+ORPHAN_GRACE = timedelta(minutes=10)
 
 
 # ---------------------------------------------------------------------------
@@ -122,9 +135,11 @@ def _status_from_output(output: Any) -> str:
 def _parse_ts(ts: str) -> datetime | None:
     try:
         # Codex stamps RFC3339 with a trailing 'Z'; fromisoformat wants +00:00.
-        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
     except (ValueError, AttributeError):
         return None
+    # A naive stamp next to an aware one would make the duration raise.
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
 def _iter_records(lines: Iterable[str]) -> Iterable[dict[str, Any]]:
@@ -212,6 +227,7 @@ def emit_file(
     path: Path,
     *,
     pulsetime: float = 5.0,
+    now: datetime | None = None,
 ) -> int:
     """Parse one rollout file and emit **new** tool activities since the last run.
 
@@ -226,7 +242,9 @@ def emit_file(
     last_index = cursor.get("last_index", -1) if cursor else -1
 
     text = path.read_text(encoding="utf-8", errors="replace")
-    _, activities = parse_rollout(text.splitlines())
+    # Split on "\n" only: splitlines() also breaks on U+2028/U+0085, which JSON
+    # encoders leave unescaped inside strings, and would cut a row in two.
+    _, activities = parse_rollout(text.split("\n"))
 
     # Only emit calls that are new since the last cursor position.
     new = activities[last_index + 1 :]
@@ -234,23 +252,34 @@ def emit_file(
         return 0
 
     # Stop short of trailing unpaired (in-flight) calls so the cursor never
-    # advances past a call whose output hasn't arrived yet.  Unpaired calls in
-    # the middle of the list (orphaned by a crash) are still emitted.
+    # advances past a call whose output hasn't arrived yet.
     last_paired_pos = len(new) - 1
     while last_paired_pos >= 0 and not new[last_paired_pos].paired:
         last_paired_pos -= 1
 
-    to_emit = new[: last_paired_pos + 1]
+    # An unpaired call in the middle may still get its output (out-of-order
+    # writes): hold it, and everything after it, for ORPHAN_GRACE. Older ones
+    # are crash orphans and are emitted with zero duration.
+    now = now or datetime.now(timezone.utc)
+    cutoff = last_paired_pos + 1
+    for pos in range(cutoff):
+        if new[pos].paired:
+            continue
+        started = _parse_ts(new[pos].timestamp)
+        if started is not None and now - started < ORPHAN_GRACE:
+            cutoff = pos
+            break
+
+    to_emit = new[:cutoff]
     if not to_emit:
         return 0
 
     bucket = core.activity_bucket_id(hostname)
     client.ensure_bucket(bucket, core.ACTIVITY_BUCKET_TYPE, core.CLIENT_NAME, hostname)
-    for activity in to_emit:
+    # Checkpoint after each accepted heartbeat: if a later one fails, a re-run
+    # must not resend calls the server already stored (older timestamps do not
+    # merge, so they would become duplicate events).
+    for offset, activity in enumerate(to_emit, start=1):
         client.heartbeat(bucket, activity.to_event(), pulsetime=pulsetime)
-
-    # Advance the cursor to the last emitted (paired) activity.
-    final_index = last_index + len(to_emit)
-    final_ts = to_emit[-1].timestamp
-    _write_cursor(path, final_index, final_ts)
+        _write_cursor(path, last_index + offset, activity.timestamp)
     return len(to_emit)

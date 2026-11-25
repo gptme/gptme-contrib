@@ -322,7 +322,11 @@ def run_item_cmd(
     import logging
     import signal
 
-    from gptme_runloops.run_item import build_execution_plan, run_work_file
+    from gptme_runloops.run_item import (
+        RunnerEnvContractError,
+        build_execution_plan,
+        run_work_file,
+    )
     from gptme_runloops.run_item_config import assemble_hooks, load_run_item_config
 
     # Progress lines (the bash-echo mirror) go to stderr so --dry-run stdout
@@ -381,17 +385,22 @@ def run_item_cmd(
     hooks = assemble_hooks(config, raw)
 
     if dry_run:
-        plan = build_execution_plan(
-            work_file,
-            config,
-            hooks,
-            backend=backend,
-            model=model,
-            lane=lane,
-            dispatch_id=dispatch_id,
-            slot_key=slot_key,
-            claim_mode=claim_mode,
-        )
+        try:
+            plan = build_execution_plan(
+                work_file,
+                config,
+                hooks,
+                backend=backend,
+                model=model,
+                lane=lane,
+                dispatch_id=dispatch_id,
+                slot_key=slot_key,
+                claim_mode=claim_mode,
+            )
+        except RunnerEnvContractError as exc:
+            # Same fail-closed exit as a real run, without a traceback.
+            click.echo(f"ERROR: {exc}", err=True)
+            sys.exit(78)
         click.echo(plan.to_json())
         sys.exit(0)
 
@@ -980,6 +989,33 @@ def run_cmd(
             }
     click.echo(_json.dumps(out))
     sys.exit(1 if out["is_error"] else 0)
+
+
+@main.command("tick-coverage")
+@click.argument("path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option(
+    "--since-hours",
+    type=float,
+    default=None,
+    help="Only count ticks newer than this many hours (default: all rows)",
+)
+def tick_coverage(path: Path, since_hours: float | None):
+    """Share of behind-pace dispatcher ticks where bindable >= granted.
+
+    PATH is a dispatcher tick log (JSONL); see gptme_runloops.dispatch_ticks
+    for the row contract. Prints one JSON object.
+    """
+    import json as _json
+    from datetime import datetime, timedelta, timezone
+
+    from gptme_runloops.dispatch_ticks import bindable_coverage, read_ticks
+
+    since = (
+        datetime.now(timezone.utc) - timedelta(hours=since_hours)
+        if since_hours is not None
+        else None
+    )
+    click.echo(_json.dumps(bindable_coverage(read_ticks(path, since)).to_dict()))
 
 
 if __name__ == "__main__":

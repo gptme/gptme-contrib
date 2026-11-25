@@ -2233,17 +2233,94 @@ BACKEND_MODEL_UNAVAIL_MARKERS: tuple[str, ...] = (
 )
 
 
+def _parse_jsonl_records(text: str) -> list[dict] | None:
+    """Return the JSON objects in a JSONL ``text`` tail, or ``None`` if it is not JSONL.
+
+    A gptme trajectory is one JSON object per line. Callers read only the last
+    few KiB, so the first line is usually a fragment cut mid-record; that
+    leading fragment is tolerated (and dropped). Any later unparseable line
+    means the text is a free-form log, not a trajectory.
+    """
+    lines = [line for line in text.split("\n") if line.strip()]
+    if not lines:
+        return None
+    records: list[dict] = []
+    for index, line in enumerate(lines):
+        try:
+            record = json.loads(line)
+        except ValueError:
+            if index == 0:
+                continue
+            return None
+        if not isinstance(record, dict):
+            return None
+        records.append(record)
+    return records or None
+
+
+def _terminal_error_evidence(records: list[dict]) -> str:
+    """Text from the trajectory records that are gptme's own terminal-error events.
+
+    gptme writes one structured record when a session dies on a classified
+    provider failure (``gptme/cli/main.py::_write_terminal_error_to_log``):
+    ``role: "system"`` with ``metadata.error`` / ``metadata.error_class`` and an
+    ``"error: <class>\\n<message>"`` content prefix. Legacy ``role: "error"``
+    records carry the same evidence in ``content``.
+
+    Tool output, user prompts and assistant prose are deliberately excluded: a
+    failed shell command printing ``Authentication failed`` or source code
+    defining ``RateLimitError`` is ordinary work failure, not provider infra.
+    """
+    parts: list[str] = []
+    for record in records:
+        metadata = record.get("metadata")
+        error_class: str | None = None
+        is_terminal = record.get("role") == "error"
+        if record.get("role") == "system" and isinstance(metadata, dict):
+            if metadata.get("error") is True:
+                is_terminal = True
+            candidate = metadata.get("error_class")
+            if isinstance(candidate, str) and candidate:
+                error_class = candidate
+                is_terminal = True
+        if not is_terminal:
+            continue
+        content = record.get("content")
+        if isinstance(content, str) and content:
+            parts.append(content)
+        if error_class:
+            parts.append(f"error: {error_class}")
+    return "\n".join(parts)
+
+
 def _classify_backend_error_text(text: str, backend: str) -> str | None:
-    """Classify an infra error from free-form backend log / trajectory text.
+    """Classify an infra error from backend log / trajectory text.
 
     Returns ``"<backend>_quota"``, ``"<backend>_auth"``, ``"<backend>_rate_limit"``,
     or ``"<backend>_model_unavailable"`` when a known infrastructure error is found;
     ``None`` when the text carries no recognisable infra signal.
 
+    A structured JSONL trajectory (the gptme path) is classified only from
+    gptme's own terminal-error records; ordinary tool output and prose in the
+    same trajectory are not provider-failure evidence. Free-form text — the
+    Grok Build session log and callers passing a raw message — keeps the marker
+    scan.
+
     ``backend`` is the raw backend name (``"grok-build"``, ``"gptme"``);
     hyphens are replaced with underscores in the returned key so the result
     is valid as a JSONL field fragment.
     """
+    if backend.replace("-", "_") == "gptme":
+        records = _parse_jsonl_records(text)
+        if records is not None:
+            text = _terminal_error_evidence(records)
+            if not text:
+                return None
+    return _classify_backend_error_markers(text, backend)
+
+
+def _classify_backend_error_markers(text: str, backend: str) -> str | None:
+    """Scan already-selected evidence without interpreting it as a trajectory."""
     lower = text.lower()
     backend_slug = backend.replace("-", "_")
     # Quota/payment takes priority (more specific than auth).
@@ -2314,14 +2391,31 @@ def _inspect_gptme_failure(
     if traj_path is None or not traj_path.is_file():
         return None
     try:
-        with traj_path.open(encoding="utf-8", errors="replace") as fh:
+        with traj_path.open("rb") as fh:
             fh.seek(0, 2)
-            size = fh.tell()
-            fh.seek(max(0, size - 4096))
-            tail = fh.read(4096)
+            start = max(0, fh.tell() - 4096)
+            fh.seek(start)
+            chunks = [fh.read()]
+            # Expand back to a record boundary: provider error bodies can be
+            # longer than 4 KiB, but their structured metadata must survive.
+            while start:
+                previous = max(0, start - 4096)
+                fh.seek(previous)
+                prefix = fh.read(start - previous)
+                if b"\n" in prefix:
+                    chunks.append(prefix.rsplit(b"\n", 1)[-1])
+                    break
+                chunks.append(prefix)
+                start = previous
+            tail = b"".join(reversed(chunks)).decode("utf-8", errors="replace")
     except OSError:
         return None
-    result = _classify_backend_error_text(tail, "gptme")
+    # This input is known to be a trajectory, even when the entire tail is
+    # one incomplete record. Never let an unparseable tool-output fragment
+    # fall back to the free-form provider-error scan.
+    records = _parse_jsonl_records(tail)
+    evidence = _terminal_error_evidence(records or [])
+    result = _classify_backend_error_markers(evidence, "gptme") if evidence else None
     if result:
         _log(f"ERROR: gptme infra failure detected: {result}")
     return result
@@ -3484,15 +3578,28 @@ def _ambient_env(config: RunItemConfig, backend: str, model: str) -> dict[str, s
     return env
 
 
+class RunnerEnvContractError(ValueError):
+    """``config.runner_env`` is misdeclared or unsatisfiable (exit code 78)."""
+
+
 def _resolve_runner_base_env(
     config: RunItemConfig, backend: str
 ) -> dict[str, str] | None:
     """Resolve ``config.runner_env`` once per work file (before lock/claim).
 
     Returns ``None`` for legacy inheritance, the explicit mapping otherwise.
-    Raises :class:`MissingRunnerEnv` or ``ValueError`` on a misdeclared
-    contract; the caller turns that into a fail-closed exit code 78.
+    Raises :class:`RunnerEnvContractError` on a misdeclared contract; the
+    caller turns that into a fail-closed exit code 78.
     """
+    try:
+        return _resolve_runner_base_env_unchecked(config, backend)
+    except (MissingRunnerEnv, ValueError) as exc:
+        raise RunnerEnvContractError(str(exc)) from exc
+
+
+def _resolve_runner_base_env_unchecked(
+    config: RunItemConfig, backend: str
+) -> dict[str, str] | None:
     spec = config.runner_env
     if not isinstance(spec, Mapping):
         raise ValueError("runner_env must be a table")
@@ -3560,9 +3667,12 @@ def run_work_file(
 
     try:
         runner_base_env = _resolve_runner_base_env(config, backend)
-    except (MissingRunnerEnv, ValueError) as exc:
+    except ValueError as exc:
         # Fail closed before claiming or locking: a misdeclared contract must
-        # never silently degrade to ambient inheritance.
+        # never silently degrade to ambient inheritance. The resolver wraps
+        # its own failures in :class:`RunnerEnvContractError` (a ``ValueError``
+        # subclass); catching the base class keeps every resolution failure on
+        # the 78 path instead of letting an unwrapped one escape as a traceback.
         _log(f"ERROR: {exc}")
         return 78
 

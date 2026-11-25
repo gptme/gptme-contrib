@@ -50,7 +50,8 @@ def search_wisdom(
     """Search the wisdom-layer book index via BM25.
 
     Args:
-        query: Free-text search query. Supports multi-word phrases.
+        query: Free-text search query. Every term must match; FTS5 operators
+               and phrase syntax are not supported.
         source: Optional slug to restrict results (e.g. "sicp", "ostep", "pro-git").
                 Use list_wisdom_sources() to see all available slugs.
         top_k: Number of results to return (1–20). Default 5.

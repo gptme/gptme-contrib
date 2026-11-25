@@ -24,14 +24,16 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import posixpath
 import sqlite3
 import subprocess
 import sys
+import uuid
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import cast
+from typing import TypeVar, cast
 
 # ---------------------------------------------------------------------------
 # Language mapping
@@ -520,8 +522,29 @@ class SqliteIndexCache:
 
         return True
 
-    def save(self, index: SymbolIndex) -> None:
-        """Persist a SymbolIndex to SQLite."""
+    def generation(self) -> str | None:
+        """Return the token of the last ``save()``, or None if never saved.
+
+        Every save writes a fresh token, so a reader can tell that another
+        process replaced the index even when the file mtimes it checks are
+        unchanged since then. Include ``last_updated`` even when a token exists:
+        older writers update that timestamp but leave an existing token intact.
+        Databases written before tokens existed use the timestamp alone.
+        """
+        conn = self._connect()
+        self._init_schema()
+        metadata = dict(
+            conn.execute(
+                "SELECT key, value FROM metadata "
+                "WHERE key IN ('index_generation', 'last_updated')"
+            ).fetchall()
+        )
+        token = metadata.get("index_generation")
+        last_updated = metadata.get("last_updated")
+        return f"{token}:{last_updated}" if token else last_updated
+
+    def save(self, index: SymbolIndex) -> str:
+        """Persist a SymbolIndex to SQLite and return its generation token."""
         conn = self._connect()
         self._init_schema()
 
@@ -581,11 +604,18 @@ class SqliteIndexCache:
                     (fp_str, _file_mtime(fp), self._directory),
                 )
 
+        last_updated = datetime.now(timezone.utc).isoformat()
         conn.execute(
             "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
-            ("last_updated", datetime.now(timezone.utc).isoformat()),
+            ("last_updated", last_updated),
+        )
+        generation = uuid.uuid4().hex
+        conn.execute(
+            "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+            ("index_generation", generation),
         )
         conn.commit()
+        return f"{generation}:{last_updated}"
 
     def load(self) -> SymbolIndex | None:
         """Load a persisted SymbolIndex from SQLite, or None if empty or stale."""
@@ -3340,6 +3370,129 @@ def _resolve_imported_symbol(
     return None
 
 
+def _import_modules_for_call(call: str, file_imports: list[ImportInfo]) -> list[str]:
+    """Return the modules a call's leading name may have been imported from.
+
+    ``from beta import helper; helper()`` and ``import beta; beta.helper()``
+    both give ``["beta"]``. Module strings are returned as written in the
+    source, most specific first.
+    """
+    head = call.split(".")[0]
+    dotted = "." in call
+    # ``import pkg.alpha`` and ``import pkg.beta`` both bind ``pkg``.
+    for imp in sorted(file_imports, key=lambda i: not call.startswith(f"{i.module}.")):
+        if not imp.module:
+            continue
+        if imp.is_from and local_binding(imp) == head:
+            if not dotted:
+                return [imp.module]
+            # ``from pkg import sub; sub.f()``: ``sub`` is either a submodule
+            # or an object defined in ``pkg``.
+            separator = "" if imp.module.endswith(".") else "."
+            return [f"{imp.module}{separator}{imp.name}", imp.module]
+        if (
+            not imp.is_from
+            and dotted
+            and head in (local_binding(imp), imp.module.split(".")[0])
+        ):
+            # ``import pkg.alpha`` binds ``pkg``: ``pkg.f()`` is not in ``alpha``.
+            if (
+                head != imp.alias
+                and imp.module.startswith(f"{head}.")
+                and not call.startswith(f"{imp.module}.")
+            ):
+                return [head]
+            return [imp.module]
+    return []
+
+
+_JS_LANGS = ("javascript", "typescript", "tsx")
+# Languages where a bare call in a method means the class's own method first.
+_IMPLICIT_THIS_LANGS = ("java", "csharp", "cpp", "kotlin", "ruby", "swift")
+# File stems that stand for their directory when imported.
+_PACKAGE_STEMS = {"python": "__init__", "rust": "mod"} | dict.fromkeys(
+    _JS_LANGS, "index"
+)
+
+
+def _import_matches(
+    candidates: list[Symbol], module: str, importer: Path, directory: Path
+) -> list[Symbol]:
+    """Return the candidates defined in ``module`` as imported by ``importer``.
+
+    ``module`` is the source-level import string, so its syntax depends on the
+    importer's language: ``./beta`` (JS/TS), ``..beta`` (Python),
+    ``crate::beta`` (Rust), ``github.com/org/repo/beta`` (Go, a directory).
+    """
+    lang = _detect_language(importer)
+
+    def relative_parts(path: Path) -> list[str]:
+        if path.is_relative_to(directory):
+            path = path.relative_to(directory)
+        return list(path.with_suffix("").parts)
+
+    def file_parts(symbol: Symbol) -> list[str]:
+        parts = relative_parts(Path(symbol.file))
+        stem = _PACKAGE_STEMS.get(_detect_language(Path(symbol.file)) or "")
+        return parts[:-1] if parts and parts[-1] == stem else parts
+
+    here = relative_parts(importer)[:-1]
+    target: list[str] | None = None  # set for relative imports: exact match
+    if lang in _JS_LANGS and module.startswith("."):
+        joined = posixpath.normpath(posixpath.join(*here, module))
+        target = [] if joined == "." else joined.split("/")
+    elif lang == "python" and module.startswith("."):
+        rest = module.lstrip(".")
+        up = len(module) - len(rest) - 1
+        if up > len(here):
+            return []
+        target = here[: len(here) - up] + (rest.split(".") if rest else [])
+
+    if lang in _JS_LANGS and _LANG_MAP.get(Path(module).suffix) in _JS_LANGS:
+        # ``./beta.js`` names ``beta.ts``; ``./user.service`` keeps its dot.
+        suffix = Path(module).suffix[1:]
+        if target:
+            target[-1] = target[-1].removesuffix(f".{suffix}")
+        else:
+            module = module.removesuffix(f".{suffix}")
+
+    if target is not None:
+        if lang in _JS_LANGS and target and target[-1] == "index":
+            target.pop()
+        return [c for c in candidates if file_parts(c) == target]
+
+    if "::" in module:
+        wanted = module.split("::")
+    elif "/" in module or "\\" in module:
+        wanted = module.replace("\\", "/").split("/")
+    else:
+        wanted = module.split(".")
+    while wanted and wanted[0] in ("", "crate", "self", "super", "@", "~"):
+        wanted = wanted[1:]
+    if not wanted:
+        return []
+
+    if lang != "go":
+        matches = [c for c in candidates if file_parts(c)[-len(wanted) :] == wanted]
+        if matches or lang != "kotlin":
+            # An exact module beats a deeper one that only ends the same way.
+            return sorted(matches, key=lambda c: len(file_parts(c)))
+
+    # Go and Kotlin import a package, which is a directory. The import path
+    # may carry a repository or root-package prefix: the longest shared tail wins.
+    def shared_tail(symbol: Symbol) -> int:
+        package = relative_parts(Path(symbol.file))[:-1]
+        count = 0
+        for ours, theirs in zip(reversed(package), reversed(wanted)):
+            if ours != theirs:
+                break
+            count += 1
+        return count
+
+    best = max(map(shared_tail, candidates), default=0)
+    return [c for c in candidates if best and shared_tail(c) == best]
+
+
 def build_cross_file_call_graph(
     index: SymbolIndex,
     directory: Path,
@@ -3360,7 +3513,8 @@ def build_cross_file_call_graph(
         for entry in entries:
             seen_files.add(entry.file)
 
-    for file_path in seen_files:
+    # Sorted so graph construction does not depend on set iteration order.
+    for file_path in sorted(seen_files):
         fp = Path(file_path)
         if fp.exists():
             result = parse_file(fp)
@@ -3372,15 +3526,58 @@ def build_cross_file_call_graph(
                 file_symbols.setdefault(file_path, []).append(sym)
 
     known_names = {s.name for s in all_symbols}
-    # Build name → qualified ID map for cross-file resolution.
-    # When multiple files define the same bare name, the first entry is
-    # the default (one-to-many names are rare and the index handles them
-    # separately via ``index.lookup()``).
-    name_to_qid: dict[str, str] = {}
-    for sym in all_symbols:
-        qid = sym.qualified_id()
-        if sym.name not in name_to_qid:
-            name_to_qid[sym.name] = qid
+    # Bare name → every definition with that name, in a deterministic order.
+    # Same-named symbols in different files stay separate graph nodes.
+    defs_by_name: dict[str, list[Symbol]] = defaultdict(list)
+    for sym in sorted(all_symbols, key=lambda s: s.qualified_id()):
+        defs_by_name[sym.name].append(sym)
+
+    def _qid_for(
+        name: str,
+        file_path: str,
+        modules: list[str],
+        caller_class: str | None = None,
+        owner: str | None = None,
+    ) -> str:
+        """Pick the definition a call to ``name`` from ``file_path`` refers to.
+
+        Methods of ``owner`` (the ``Type`` in ``Type::name``), when there are
+        any, are the only candidates.
+        Order: the only definition; the caller's own method (implicit-``this``
+        languages); a definition in an imported module (``modules``); a
+        same-file definition (top-level, then the caller's class); otherwise
+        the first definition in qualified-ID order.
+        """
+        candidates = defs_by_name.get(name)
+        if not candidates:
+            return name
+        if owner:
+            # Rust generic impls record ``Foo<T>`` as the class.
+            bare = owner.split("<")[0]
+            owned = [
+                c for c in candidates if (c.parent_class or "").split("<")[0] == bare
+            ]
+            candidates = owned or candidates
+        if len(candidates) == 1:
+            return candidates[0].qualified_id()
+        same_file = [c for c in candidates if c.file == file_path]
+        own = [c for c in same_file if caller_class and c.parent_class == caller_class]
+        if own and _detect_language(Path(file_path)) in _IMPLICIT_THIS_LANGS:
+            return own[0].qualified_id()
+        for module in modules:
+            imported = _import_matches(candidates, module, Path(file_path), directory)
+            if imported:
+                # An import names a top-level symbol, not a method.
+                return min(
+                    imported, key=lambda c: c.parent_class is not None
+                ).qualified_id()
+        if same_file:
+            return min(
+                same_file,
+                key=lambda c: (c.parent_class is not None, c not in own),
+            ).qualified_id()
+        return candidates[0].qualified_id()
+
     # All qualified IDs — used for precise Rust path-qualified resolution.
     known_qids = {sym.qualified_id() for sym in all_symbols}
 
@@ -3392,11 +3589,12 @@ def build_cross_file_call_graph(
         for sym in symbols:
             if sym.kind == "class":
                 continue
-            resolved_calls: set[str] = set()
+            qid_calls: set[str] = set()
             for call in sym.calls:
                 if call in known_names:
-                    # Local or same-file call
-                    resolved_calls.add(call)
+                    # Bare call: an imported name or a same-file definition.
+                    modules = _import_modules_for_call(call, imports)
+                    qid_calls.add(_qid_for(call, file_path, modules, sym.parent_class))
                 else:
                     # Try import resolution for both dotted (``mod.func``)
                     # and plain (``alias_local``) calls. Plain calls matter for
@@ -3404,7 +3602,8 @@ def build_cross_file_call_graph(
                     # in ``known_names`` but resolution maps it back to ``f``.
                     resolved = _resolve_imported_symbol(call, imports, directory)
                     if resolved and resolved in known_names:
-                        resolved_calls.add(resolved)
+                        modules = _import_modules_for_call(call, imports)
+                        qid_calls.add(_qid_for(resolved, file_path, modules))
                     elif "::" in call:
                         # Rust path-qualified call: ``crate::module::fn()`` or
                         # ``super::util::parse()`` — no explicit ``use`` import.
@@ -3419,25 +3618,130 @@ def build_cross_file_call_graph(
                             f"{parts[-2]}::{last_segment}" if len(parts) >= 2 else None
                         )
                         if candidate_qid and candidate_qid in known_qids:
-                            resolved_calls.add(candidate_qid)
+                            qid_calls.add(candidate_qid)
                         elif last_segment in known_names:
-                            resolved_calls.add(last_segment)
+                            # ``parts[-2]`` is a module or a type.
+                            owner = (
+                                sym.parent_class if parts[-2] == "Self" else parts[-2]
+                            )
+                            modules = [
+                                "::".join(parts[:-1]),
+                                "::".join(parts[:-2]),
+                                *_import_modules_for_call(parts[0], imports),
+                            ]
+                            qid_calls.add(
+                                _qid_for(last_segment, file_path, modules, owner=owner)
+                            )
                     # else: external builtin/library — ignore
-            qid = name_to_qid.get(sym.name, sym.qualified_id())
-            qid_calls = {name_to_qid.get(c, c) for c in resolved_calls}
-            callees[qid] = qid_calls
+            qid = sym.qualified_id()
+            callees.setdefault(qid, set()).update(qid_calls)
             for called in qid_calls:
                 callers[called].add(qid)
 
     return callees, callers
 
 
+def _split_symbol_ref(name: str) -> tuple[str | None, str | None, str]:
+    """Split a user-supplied symbol reference into its parts.
+
+    Returns ``(module_path, parent_class, bare_name)``:
+
+    - ``app::Server.start`` → ``("app", "Server", "start")``
+    - ``Server.start`` → ``(None, "Server", "start")``
+    - ``::helper`` → ``("", None, "helper")``
+    - ``helper`` → ``(None, None, "helper")``
+    """
+    module: str | None = None
+    local = name
+    if "::" in name:
+        module, _, local = name.rpartition("::")
+    parent, dot, bare = local.rpartition(".")
+    return module, (parent if dot and parent else None), bare
+
+
+def _module_matches(ref_module: str | None, item_module: str) -> bool:
+    """Return True when a reference's module part is compatible with an item's.
+
+    An absent/empty reference module or an unknown item module (single-file
+    parses leave ``module_path`` empty) matches anything; otherwise the module
+    must be equal or a dotted suffix (``app`` matches ``src.app``).
+    """
+    if not ref_module or not item_module:
+        return True
+    return item_module == ref_module or item_module.endswith("." + ref_module)
+
+
+_SymbolLike = TypeVar("_SymbolLike", Symbol, IndexEntry)
+
+
+def _filter_by_symbol_ref(items: list[_SymbolLike], name: str) -> list[_SymbolLike]:
+    """Return the items (Symbols or IndexEntries) a symbol reference denotes.
+
+    ``name`` may be a bare name (``start``), ``Class.method``, or a qualified
+    ID (``module::name`` / ``module::Class.method``). Bare names match on
+    name alone, so a bare method name resolves to the method; ``module::name``
+    is the qualified-ID form of a top-level symbol, so it does not match
+    methods.
+    """
+    module, parent, bare = _split_symbol_ref(name)
+    return [
+        item
+        for item in items
+        if item.name == bare
+        and (
+            item.parent_class == parent
+            if parent is not None or module is not None
+            else True
+        )
+        and _module_matches(module, item.module_path)
+    ]
+
+
+def find_symbols(symbols: list[Symbol], name: str) -> list[Symbol]:
+    """Return parsed symbols matching a bare name, ``Class.method``, or qualified ID.
+
+    Exact name matches win; otherwise qualified references are reduced to
+    their bare name and filtered by class and module.
+    """
+    exact = [s for s in symbols if s.name == name]
+    return exact or _filter_by_symbol_ref(symbols, name)
+
+
+def find_symbol(symbols: list[Symbol], name: str) -> Symbol | None:
+    """Find a parsed symbol by bare name, ``Class.method``, or qualified ID.
+
+    Keeps the historical last-definition-wins behaviour of the CLI's
+    ``{s.name: s}`` lookup.
+    """
+    matches = find_symbols(symbols, name)
+    return matches[-1] if matches else None
+
+
+def lookup_index_entries(index: SymbolIndex, name: str) -> list[IndexEntry]:
+    """Look up index entries by bare name, ``Class.method``, or qualified ID.
+
+    ``SymbolIndex`` is keyed by bare name, so ``index.lookup("app::Server.start")``
+    finds nothing; this strips the ``module::Class.`` prefix for the lookup and
+    filters the candidates by class and module.
+    """
+    if index.has(name):
+        return index.lookup(name)
+    _module, _parent, bare = _split_symbol_ref(name)
+    if bare == name:
+        return []
+    return _filter_by_symbol_ref(index.lookup(bare), name)
+
+
 def _resolve_graph_key(name: str, graph: dict[str, set[str]]) -> str | None:
-    """Resolve a user-provided bare name to a qualified graph key.
+    """Resolve a user-provided symbol reference to a qualified graph key.
 
     Tries exact match first, then ``::name`` (common for symbols from
     temp/single files with empty module_path), then scans all keys
-    for a ``::name`` suffix.
+    for a ``::name`` suffix (handles ``Class.method`` too). A bare name that
+    matches no top-level symbol falls back to a method key ending in
+    ``.name`` (``start`` → ``app::Server.start``). A qualified ID whose module
+    is a dotted suffix of the key's module (``app::f`` → ``src.app::f``) also
+    resolves.
     Returns the resolved key or None.
     """
     if name in graph:
@@ -3449,6 +3753,20 @@ def _resolve_graph_key(name: str, graph: dict[str, set[str]]) -> str | None:
     for key in graph:
         if key.endswith("::" + name):
             return key
+    module, parent, bare = _split_symbol_ref(name)
+    if module is None and parent is None:
+        # Bare method name: match the ``Class.method`` local part of a key.
+        for key in graph:
+            if key.rpartition("::")[2].endswith("." + bare):
+                return key
+    elif module is not None:
+        # Qualified ID relative to a different index root (or ``::name`` from
+        # a single-file graph looked up in a cross-file one).
+        local = f"{parent}.{bare}" if parent else bare
+        for key in graph:
+            key_module, _, key_local = key.rpartition("::")
+            if key_local == local and _module_matches(module, key_module):
+                return key
     return None
 
 
@@ -4033,8 +4351,6 @@ def main():
             print("No symbols found.")
         return
 
-    name_map = {s.name: s for s in symbols}
-
     # Cross-file index: build if --directory is given
     index: SymbolIndex | None = None
     if args.directory is not None:
@@ -4062,12 +4378,19 @@ def main():
         callees_graph, callers_graph = build_call_graph(symbols)
 
     # Helper: resolve a symbol locally or from the cross-file index
+    # Accepts bare names, ``Class.method`` and qualified IDs such as
+    # ``app::Server.start`` (the form graph keys and callers/callees use).
     def resolve(name: str) -> Symbol | None:
-        found = name_map.get(name)
-        if found is not None:
-            return found
-        if index is not None and index.has(name):
-            entry = index.lookup(name)[0]
+        entries = lookup_index_entries(index, name) if index is not None else []
+        # Local symbols carry no module path, so with an index present a
+        # module-qualified ID resolves only through the index (which honours
+        # its module part).
+        if index is None or "::" not in name:
+            found = find_symbol(symbols, name)
+            if found is not None:
+                return found
+        if entries:
+            entry = entries[0]
             return Symbol(
                 name=entry.name,
                 kind=entry.kind,
@@ -4077,6 +4400,12 @@ def main():
                 parent_class=entry.parent_class,
             )
         return None
+
+    # Cross-file definitions of the queried symbol (qualified names included).
+    query = getattr(args, "name", None)
+    def_entries = (
+        lookup_index_entries(index, query) if index is not None and query else []
+    )
 
     if args.command == "parse":
         if args.json:
@@ -4088,8 +4417,8 @@ def main():
         found = resolve(args.name)
         if not found:
             sys.exit(f"Symbol not found: {args.name}")
-        if index is not None and index.has(args.name):
-            entries = index.lookup(args.name)
+        if def_entries:
+            entries = def_entries
             cross_file_info = f"\n  Defined in {len(entries)} file(s):" + "".join(
                 f"\n    {e.file}:L{e.start_line}" for e in entries[:10]
             )
@@ -4099,10 +4428,9 @@ def main():
         callers = sorted(callers_graph.get(resolved_key, set())) if resolved_key else []
         if args.json:
             output: dict = {"symbol": args.name, "callers": callers}
-            if index and index.has(args.name):
+            if def_entries:
                 output["definitions"] = [
-                    {"file": e.file, "line": e.start_line}
-                    for e in index.lookup(args.name)
+                    {"file": e.file, "line": e.start_line} for e in def_entries
                 ]
             print(format_json(output))
         else:
@@ -4129,10 +4457,9 @@ def main():
         callees = sorted(callees_graph.get(resolved_key, set())) if resolved_key else []
         if args.json:
             output = {"symbol": args.name, "callees": callees}
-            if index and index.has(args.name):
+            if def_entries:
                 output["definitions"] = [
-                    {"file": e.file, "line": e.start_line}
-                    for e in index.lookup(args.name)
+                    {"file": e.file, "line": e.start_line} for e in def_entries
                 ]
             print(format_json(output))
         else:
@@ -4235,21 +4562,17 @@ def main():
         if not found:
             sys.exit(f"Symbol not found: {args.name}")
         if args.json:
-            if (
-                index
-                and index.has(args.name)
-                and (not found or found.file != str(filepath))
-            ):
+            if def_entries and (not found or found.file != str(filepath)):
                 all_defs = [
                     {
-                        "name": args.name,
+                        "name": e.name,
                         "kind": e.kind,
                         "file": e.file,
                         "start_line": e.start_line,
                         "end_line": e.end_line,
                         "parent_class": e.parent_class,
                     }
-                    for e in index.lookup(args.name)
+                    for e in def_entries
                 ]
                 print(format_json(all_defs if len(all_defs) > 1 else all_defs[0]))
             else:
@@ -4262,8 +4585,8 @@ def main():
             )
             if found.docstring:
                 print(f"  {found.docstring[:200]}")
-            if index and index.has(args.name):
-                entries = [e for e in index.lookup(args.name) if e.file != found.file]
+            if def_entries:
+                entries = [e for e in def_entries if e.file != found.file]
                 if entries:
                     print(f"\n  Also defined in {len(entries)} other file(s):")
                     for e in entries[:10]:
@@ -4273,8 +4596,8 @@ def main():
         found = resolve(args.name)
         if not found:
             sys.exit(f"Symbol not found: {args.name}")
-        if index is not None and index.has(args.name):
-            entries = index.lookup(args.name)
+        if def_entries:
+            entries = def_entries
             cross_file_info = f"\n  Defined in {len(entries)} file(s):" + "".join(
                 f"\n    {e.file}:L{e.start_line}" for e in entries[:10]
             )
@@ -4287,10 +4610,9 @@ def main():
                 "symbol": args.name,
                 "references": callers,
             }
-            if index and index.has(args.name):
+            if def_entries:
                 output["definitions"] = [
-                    {"file": e.file, "line": e.start_line}
-                    for e in index.lookup(args.name)
+                    {"file": e.file, "line": e.start_line} for e in def_entries
                 ]
             print(format_json(output))
         else:

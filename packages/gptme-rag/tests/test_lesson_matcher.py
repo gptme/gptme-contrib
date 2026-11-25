@@ -306,11 +306,10 @@ class TestExtractFrontmatter:
             "nested one",
             "nested two",
         ]
+        # A scalar pattern is one regex, even if it contains commas.
         assert fm["match"]["patterns"] == [
-            "legacy-a",
-            "legacy-b",
-            "nested-a",
-            "nested-b",
+            "legacy-a, legacy-b",
+            "nested-a, nested-b",
         ]
 
     def test_regex_fallback_session_categories_block(self, monkeypatch):
@@ -1786,6 +1785,24 @@ class TestNormalizeRepoSlug:
 
     def test_ssh_remote_no_git_suffix(self):
         assert normalize_repo_slug("git@github.com:gptme/gptme") == "gptme/gptme"
+
+    @pytest.mark.parametrize(
+        "remote",
+        [
+            "ssh://git@github.com/gptme/gptme.git",
+            "ssh://git@github.com/gptme/gptme",
+            "ssh://git@github.com:22/gptme/gptme.git",
+            "git+ssh://git@github.com/gptme/gptme.git",
+            "git://github.com/gptme/gptme.git",
+        ],
+    )
+    def test_url_scheme_remotes(self, remote):
+        # #2356 L4: ``ssh://`` remotes were rejected, so repo-scoped lessons
+        # never matched in clones that use them.
+        assert normalize_repo_slug(remote) == "gptme/gptme"
+
+    def test_ssh_url_with_extra_segments_is_none(self):
+        assert normalize_repo_slug("ssh://git@host/group/sub/repo.git") is None
 
     def test_single_segment_is_none(self):
         assert normalize_repo_slug("gptme") is None

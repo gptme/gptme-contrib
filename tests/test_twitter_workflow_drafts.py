@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WORKFLOW_PATH = REPO_ROOT / "scripts" / "twitter" / "workflow.py"
@@ -92,7 +93,16 @@ def _load_workflow_module() -> tuple[Any, dict[str, Any]]:
     twitter_llm_stub.EvaluationResponse = type("EvaluationResponse", (), {})
     twitter_llm_stub.TweetResponse = type("TweetResponse", (), {})
     twitter_llm_stub.process_tweet = lambda *args, **kwargs: None
-    twitter_llm_stub.verify_draft = lambda *args, **kwargs: (True, None)
+    twitter_llm_stub.verify_draft = lambda *args, **kwargs: (
+        True,
+        SimpleNamespace(
+            criteria_results={
+                "Natural writing style": SimpleNamespace(passed=True, notes="clear")
+            },
+            recommendation="approve",
+            improvements=[],
+        ),
+    )
     twitter_llm_stub._unescape_literal_newlines = lambda text: text.replace("\\n", "\n")
 
     twitter_api_stub: Any = types.ModuleType("twitter.twitter")
@@ -739,7 +749,9 @@ def test_auto_does_not_rereview_already_reviewed_draft(
     _set_status_dirs(workflow_module, tmp_path)
     reviewed_path = workflow_module.NEW_DIR / "already-reviewed.yml"
     workflow_module.TweetDraft(
-        text="reviewed earlier", quality_score=quality_score
+        text="reviewed earlier",
+        quality_score=quality_score,
+        scored_digest=workflow_module.draft_content_digest("reviewed earlier"),
     ).save(reviewed_path)
     reviews: list[Any] = []
 
@@ -861,9 +873,11 @@ def test_auto_does_not_auto_approve_saved_three_star_without_flag(
 ) -> None:
     _set_status_dirs(workflow_module, tmp_path)
     reviewed_path = workflow_module.NEW_DIR / "three-star.yml"
-    workflow_module.TweetDraft(text="reviewed earlier", quality_score=3).save(
-        reviewed_path
-    )
+    workflow_module.TweetDraft(
+        text="reviewed earlier",
+        quality_score=3,
+        scored_digest=workflow_module.draft_content_digest("reviewed earlier"),
+    ).save(reviewed_path)
     reviews: list[Any] = []
 
     def fail_if_called(*args: Any, **kwargs: Any) -> Any:
@@ -1004,7 +1018,11 @@ def test_review_status_review_reuses_saved_score(
     present them, without paying for a second LLM review of unchanged text."""
     _set_status_dirs(workflow_module, tmp_path)
     parked = workflow_module.REVIEW_DIR / "needs-human.yml"
-    workflow_module.TweetDraft(text="needs a human", quality_score=2).save(parked)
+    workflow_module.TweetDraft(
+        text="needs a human",
+        quality_score=2,
+        scored_digest=workflow_module.draft_content_digest("needs a human"),
+    ).save(parked)
 
     def fail_if_called(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError("verify_draft must not run on an already-scored draft")
@@ -1084,7 +1102,11 @@ def test_review_status_review_auto_approves_three_star(
 ) -> None:
     _set_status_dirs(workflow_module, tmp_path)
     parked = workflow_module.REVIEW_DIR / "three-star.yml"
-    workflow_module.TweetDraft(text="good enough", quality_score=3).save(parked)
+    workflow_module.TweetDraft(
+        text="good enough",
+        quality_score=3,
+        scored_digest=workflow_module.draft_content_digest("good enough"),
+    ).save(parked)
 
     monkeypatch.setattr(
         workflow_module,
@@ -1322,7 +1344,11 @@ def test_review_status_approved_auto_approve_keeps_the_draft(
 ) -> None:
     _set_status_dirs(workflow_module, tmp_path)
     parked = workflow_module.APPROVED_DIR / "already-approved.yml"
-    workflow_module.TweetDraft(text="fine", quality_score=3).save(parked)
+    workflow_module.TweetDraft(
+        text="fine",
+        quality_score=3,
+        scored_digest=workflow_module.draft_content_digest("fine"),
+    ).save(parked)
 
     monkeypatch.setattr(
         workflow_module,
@@ -1489,11 +1515,13 @@ def test_trusted_user_autopost_quarantines_permanent_reply_failure(
 
 
 @pytest.mark.parametrize("post_succeeds", [False, True])
+@pytest.mark.parametrize("style_passed", [True, False])
 def test_trusted_user_autopost_persists_posting_outcome(
     workflow_module: Any,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     post_succeeds: bool,
+    style_passed: bool,
 ) -> None:
     _set_status_dirs(workflow_module, tmp_path)
 
@@ -1560,6 +1588,21 @@ def test_trusted_user_autopost_persists_posting_outcome(
         workflow_module, "load_twitter_client", lambda *a, **k: PostingClient()
     )
     monkeypatch.setattr(workflow_module, "_git_commit_posted", lambda *a: None)
+    reviews = []
+
+    def review(draft):
+        reviews.append(draft)
+        return style_passed, SimpleNamespace(
+            criteria_results={
+                "Natural writing style": SimpleNamespace(
+                    passed=style_passed, notes="style verdict"
+                )
+            },
+            recommendation="approve" if style_passed else "revise",
+            improvements=[],
+        )
+
+    monkeypatch.setattr(workflow_module, "verify_draft", review)
 
     drafts_generated = workflow_module.process_timeline_tweets(
         [tweet],
@@ -1571,6 +1614,12 @@ def test_trusted_user_autopost_persists_posting_outcome(
         max_drafts=10,
     )
 
+    assert len(reviews) == 1
+    if not style_passed:
+        assert drafts_generated == 1
+        assert list(workflow_module.POSTED_DIR.glob("*.yml")) == []
+        assert len(list(workflow_module.REVIEW_DIR.glob("*.yml"))) == 1
+        return
     assert drafts_generated == (0 if post_succeeds else 1)
     new_paths = list(workflow_module.NEW_DIR.glob("*.yml"))
     posted_paths = list(workflow_module.POSTED_DIR.glob("*.yml"))
@@ -2909,3 +2958,75 @@ def test_budget_exhaustion_defers_reply_without_posting(
     assert posted == []
     assert approved.exists()  # retryable, not rejected as a known duplicate
     assert list(workflow_module.REJECTED_DIR.iterdir()) == []
+
+
+@pytest.mark.parametrize("publisher", ["post", "auto"])
+def test_publisher_requeues_approval_that_predates_style_review(
+    workflow_module: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    publisher: str,
+) -> None:
+    _set_status_dirs(workflow_module, tmp_path)
+    approved_path = workflow_module.APPROVED_DIR / "old-style.yml"
+    draft = workflow_module.TweetDraft(
+        text="One point — another point.", quality_score=3
+    )
+    draft.save(approved_path)
+    data = yaml.safe_load(approved_path.read_text())
+    # The pre-style policy digest was text + NUL + thread, without a revision.
+    import hashlib
+
+    data["scored_digest"] = hashlib.sha256((draft.text + "\x00").encode()).hexdigest()[
+        :16
+    ]
+    approved_path.write_text(yaml.safe_dump(data))
+    posts: list[Any] = []
+    client = SimpleNamespace(
+        create_tweet=lambda **kw: posts.append(kw),
+        get_home_timeline=lambda **kw: SimpleNamespace(data=None),
+    )
+    monkeypatch.setattr(workflow_module, "load_twitter_client", lambda **kw: client)
+    monkeypatch.setattr(
+        workflow_module,
+        "cached_get_me",
+        lambda *a, **kw: SimpleNamespace(data=SimpleNamespace(id="me", username="bob")),
+    )
+    if publisher == "post":
+        workflow_module.post(
+            dry_run=False, yes=True, draft_id=None, max_posts=1, skip_url_check=True
+        )
+    else:
+        workflow_module.auto(
+            list_id=None,
+            auto_approve=True,
+            post_approved=True,
+            dry_run=False,
+            max_tweets=1,
+            max_drafts=1,
+            skip_mentions=True,
+            skip_timeline=False,
+        )
+    assert posts == []
+    assert not approved_path.exists()
+    replacement = workflow_module.TweetDraft.load(
+        workflow_module.NEW_DIR / approved_path.name
+    )
+    assert replacement.quality_score is None
+    assert replacement.text == draft.text
+
+
+@pytest.mark.parametrize("destination", [None, "approved"])
+@pytest.mark.parametrize("digest", [None, "", "old-policy-digest"])
+def test_saving_or_moving_an_old_review_does_not_launder_its_digest(
+    workflow_module: Any, tmp_path: Path, destination: str | None, digest: str | None
+) -> None:
+    _set_status_dirs(workflow_module, tmp_path)
+    path = workflow_module.NEW_DIR / "old.yml"
+    draft = workflow_module.TweetDraft(
+        text="Old reviewed text", quality_score=3, scored_digest=digest
+    )
+    draft.save(path)
+    if destination:
+        path = workflow_module.move_draft(path, destination)
+    assert workflow_module.TweetDraft.load(path).scored_digest == digest

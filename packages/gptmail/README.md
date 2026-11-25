@@ -409,17 +409,36 @@ Run `gptmail --help` or `gptmail <command> --help` for full option details.
 
 | Command | What it does |
 |---|---|
-| `send TO SUBJECT [CONTENT] [--no-reply] [--mailbox NAME]` | Send to one agent (body from stdin if CONTENT is omitted). `--no-reply` marks it informational. |
+| `send TO SUBJECT [CONTENT] [--no-reply] [--force] [--mailbox NAME]` | Send to one agent (body from stdin if CONTENT is omitted). `--no-reply` marks it informational. A send whose subject already went to the same agent in the last hour is skipped (exit 0) unless `--force`. `--watch [--timeout 2h]` blocks until the threaded reply arrives. |
 | `broadcast SUBJECT [CONTENT] [--no-reply] [--mailbox NAME]` | Send to every agent in the registry except yourself. |
 | `list [FOLDER] [-a/--all] [--mailbox NAME \| --all-mailboxes]` | List messages (inbox shows unread only unless `--all`). |
 | `read MESSAGE_ID [--thread] [--mailbox NAME]` | Print a message and mark it read. |
-| `reply MESSAGE_ID [CONTENT] [--mailbox NAME]` | Reply to the sender. Refuses if the message is already marked replied. |
+| `reply MESSAGE_ID [CONTENT] [--mailbox NAME]` | Reply to the sender. Skips (exit 0) if the message is already marked replied. |
+| `ack MESSAGE_ID [--mailbox NAME]` | Mark an inbox message handled without replying (stamps `replied: true` and `read: true`), so it leaves `pending` but stays in `list`. |
 | `pending [--as ID] [--include-stale] [--mailbox NAME \| --all-mailboxes]` | Inbox messages awaiting your reply. |
 | `pending --for NAME [--fleet] [--json]` | Messages addressed to NAME in your outbox (with `--fleet`, in every registered agent's outbox). |
-| `receive [--workspace PATH] [--mailbox NAME] [--expect-sender NAME]` | Receive one message on stdin and publish it atomically to the inbox. The recipient side of the receive-only transport; safe to pin as a forced command (`command="gptmail agent receive",restrict`). Refuses a foreign client command, oversized input or invalid frontmatter. |
+| `receive [--workspace PATH] [--mailbox NAME] [--expect-sender NAME] [--max-bytes N]` | Receive one message on stdin and publish it atomically to the inbox. The recipient side of the receive-only transport; safe to pin as a forced command (`command="gptmail agent receive",restrict`). Refuses a foreign client command, input over `--max-bytes` (default 4 MiB) or invalid frontmatter. |
 | `pull [--as ID] [--from NAME] [--json] [--dry-run] [--notify-cmd CMD]` | Fetch messages addressed to you from every SSH-reachable agent's outbox, or only `NAME` with `--from`. Thread watches pull only the matching sender, so unrelated offline peers cannot delay delivery. `--notify-cmd` runs CMD with `NEW_COUNT` and `SUMMARY` set. |
 | `watch [--to NAME] [--from A,B] [--interval SECS] [--once] [--pull]` | Poll agents' outboxes and print one line per new message. Works with systemd/launchd or a terminal. |
 | `status [--mailbox NAME \| --all-mailboxes]` | Identity, registry and inbox/outbox/pending counts. |
+| `doctor` | Check that this install can deliver: reports whether the outbound secret scanner `send` requires is importable. |
+
+### ChatGPT bridge (`gptmail chatgpt-bridge`)
+
+A remote MCP server (HTTP/SSE) that lets a ChatGPT chat read the agent's replies.
+Each chat maps to its own mailbox (`cgpt-<hash>`), and the exposed tools
+(`<agent-name>_status`, `<agent-name>_replies`) are read-only. It needs the
+`bridge` extra:
+
+```bash
+uv pip install -e 'gptme-contrib/packages/gptmail[bridge]'   # or add --with to the uv tool install above
+CHATGPT_BRIDGE_TOKEN=... gptmail chatgpt-bridge --host 0.0.0.0 --port 8080 \
+  --messages-dir ~/my-agent/messages --agent-name myagent
+```
+
+Every option also reads a `CHATGPT_BRIDGE_*` variable (`HOST`, `PORT`,
+`MESSAGES_DIR`, `AGENT_NAME`, `SEND_INSTRUCTIONS`, `TOKEN`). Without a token the
+server only binds a loopback address; it refuses any other host.
 
 `scripts/agent-msg.py` at the repo root is a compatibility shim for the older
 `agent-msg.py` command surface. It maps `list --needs-reply` to `pending` and passes

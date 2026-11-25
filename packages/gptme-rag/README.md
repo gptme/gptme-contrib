@@ -111,9 +111,29 @@ Beyond the CLI, the package exposes building blocks for agents that assemble the
 - `gptme_rag.sources` — declarative source registry for collecting a reproducible corpus.
 - `gptme_rag.knowledge_source.KnowledgeEntrySource` — indexes the store written by
   `gptme-util knowledge save` as `memory_type="knowledge_entry"` documents.
+  Both import `tiktoken`, so they need the `full` or `lexical` extra; a base install raises
+  `ModuleNotFoundError: No module named 'tiktoken'`.
 - `gptme_rag.memory_type` — caller-supplied rules for classifying documents (identity, project,
   preference, …) and boosting matching results.
 - `gptme_rag.observability` — injection logging and index-health ("is my index stale?") checks.
+
+### Lesson match-term compatibility
+
+Both top-level and nested `match` fields accept keyword/pattern lists or a single
+string. A scalar `keywords: "foo, bar"` is shorthand for two keywords. A scalar
+`patterns` value is **one regex**, including any commas: `patterns: "x{1,3}y"`
+remains intact.
+
+**Migration:** older versions split top-level scalar patterns on commas (and did
+the same in the no-PyYAML fallback). Replace `patterns: "foo, bar"` with an explicit
+list, `patterns: ["foo", "bar"]`, to keep matching either expression independently.
+Do not split commas that belong to a regex quantifier or literal. Lists work at
+both frontmatter levels and with either parser backend.
+
+Numeric and date match terms retain their source spelling (`3.10`, `2026-08-05`).
+With PyYAML, boolean/null values are excluded; quote literal terms such as `"on"`,
+`"true"`, or `"null"`. The lightweight fallback is a YAML subset, not a complete
+YAML type resolver; quoting these terms makes intent explicit across backends.
 
 ## Development
 

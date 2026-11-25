@@ -252,3 +252,37 @@ emits one JSONL `utterance_trace` with `asr_ms` (speech stopped → transcript),
 - **Subagent latency**: each subagent call starts a full gptme process, which
   takes a few seconds. The conversation continues and the result is injected
   when ready.
+
+### Early inbound calls and prepared purposes
+
+A scheduler can register a prepared call before dial time with the stdlib-only
+`realtime.planned_calls.register_planned_call(workspace, plan_id, caller,
+scheduled_at, purpose, context)` API. Use a distinct ID per scheduled occurrence;
+`scheduled_at` and `context.generated_at` must include timezones. Context contains
+`text` plus optional provenance and grounded answer notes, up to 16 KB. Registration
+stores an immutable snapshot at `state/voice-calls/planned/<plan_id>.json`; retrying
+an ID keeps its original context and rejects a different caller, time or purpose.
+
+On a Twilio inbound call, a signed caller grant and an operator people-file role
+are required before loading plans. The server offers up to three plans scheduled
+in the next 24 hours whose context is at most 24 hours old. It injects the actual
+prepared summary, independently of missed-call callback history. Stale, absent,
+corrupt and fulfilled plans are omitted. Keep the purpose short and concrete,
+for example `Daily standup`.
+
+Loading a brief or ending a call never fulfills a planned purpose. After covering
+its whole purpose, the voice agent can ask whether it covers that planned call and
+makes the later call unnecessary. The `fulfill_planned_call` tool requires the
+exact caller confirmation from the current transcript, after assistant content,
+and a summary of what was covered. A natural yes qualifies only after an explicit
+question confirming both coverage of the named purpose and skipping the later call.
+Otherwise confirmation must explicitly name the purpose, confirm coverage and say
+the later call is unnecessary. Assent after a greeting, partial coverage or an
+unrelated call leaves the schedule intact. Only IDs offered to this authenticated
+caller are accepted. Successful fulfillment writes an immutable receipt under
+`state/voice-calls/fulfilled/`; repeated processing preserves the first receipt.
+The voice agent remains responsible for assessing full-purpose coverage; transcript
+validation is a conservative confirmation gate, not semantic proof of delivery.
+The scheduler must check `is_planned_call_fulfilled(workspace, plan_id)` immediately
+before dialing and suppress only that occurrence. The voice package does not
+change system timers or infer fulfillment from call duration or a hangup.

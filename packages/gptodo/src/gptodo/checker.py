@@ -15,9 +15,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, TypedDict
 
+from .frontmatter_compat import frontmatter
 from .utils import (
+    SubtaskCount,
     TaskInfo,
     build_dependency_universe,
+    count_subtasks,
     load_tasks,
 )
 
@@ -128,6 +131,24 @@ VALID_TRANSITIONS: dict[str, list[str]] = {
 }
 
 
+def _gate_subtask_counts(task: TaskInfo) -> SubtaskCount:
+    """Count checklist entries the way the CLI done gate does.
+
+    ``TaskInfo.subtasks`` also counts checkbox text inside fenced code examples,
+    so a done task with an example ``- [ ]`` would fail here while the done
+    gate accepts it. Recount with ``checklist_only=True``; fall back to the
+    loaded counts if the file cannot be read.
+    """
+    path = getattr(task, "path", None)
+    if path is None:
+        return task.subtasks
+    try:
+        content = frontmatter.load(path).content
+    except (OSError, ValueError):
+        return task.subtasks
+    return count_subtasks(content, checklist_only=True)
+
+
 def check_subtask_completion(task: TaskInfo) -> CheckResultDict:
     """Check if all subtasks are completed for a task marked as done/ready_for_review."""
     details: CheckDetails = {}
@@ -138,31 +159,30 @@ def check_subtask_completion(task: TaskInfo) -> CheckResultDict:
         "details": details,
     }
 
-    if task.subtasks.total == 0:
+    subtasks = _gate_subtask_counts(task)
+    if subtasks.total == 0:
         result["message"] = "No subtasks defined"
         return result
 
     # ``total`` includes intentionally-skipped items on purpose, so marking the
     # hard criteria skipped cannot drive this to 100% (see count_subtasks).
-    completion_pct = (task.subtasks.completed / task.subtasks.total) * 100
-    details["completed"] = task.subtasks.completed
-    details["total"] = task.subtasks.total
-    details["skipped"] = task.subtasks.skipped
+    completion_pct = (subtasks.completed / subtasks.total) * 100
+    details["completed"] = subtasks.completed
+    details["total"] = subtasks.total
+    details["skipped"] = subtasks.skipped
     details["percentage"] = completion_pct
 
-    skipped_note = (
-        f", {task.subtasks.skipped} intentionally skipped" if task.subtasks.skipped else ""
-    )
+    skipped_note = f", {subtasks.skipped} intentionally skipped" if subtasks.skipped else ""
 
     if task.state in ["done", "ready_for_review"] and completion_pct < 100:
         result["passed"] = False
         result["message"] = (
-            f"Task marked as {task.state} but only {task.subtasks.completed}/{task.subtasks.total} "
+            f"Task marked as {task.state} but only {subtasks.completed}/{subtasks.total} "
             f"subtasks completed ({completion_pct:.0f}%){skipped_note}"
         )
     else:
         result["message"] = (
-            f"{task.subtasks.completed}/{task.subtasks.total} subtasks completed{skipped_note}"
+            f"{subtasks.completed}/{subtasks.total} subtasks completed{skipped_note}"
         )
 
     return result
