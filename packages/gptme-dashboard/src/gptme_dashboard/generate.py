@@ -2292,10 +2292,14 @@ def generate(
     if effective_base_url:
         sitemap_xml = generate_sitemap(data, effective_base_url)
         (output / "sitemap.xml").write_text(sitemap_xml)
-        print(f"Generated sitemap at {output / 'sitemap.xml'} ({effective_base_url})")
+        print(
+            f"Generated sitemap at {output / 'sitemap.xml'} ({effective_base_url})", file=sys.stderr
+        )
         feed_xml = generate_atom_feed(data, effective_base_url, data["workspace_name"])
         (output / "feed.xml").write_text(feed_xml)
-        print(f"Generated Atom feed at {output / 'feed.xml'} ({effective_base_url})")
+        print(
+            f"Generated Atom feed at {output / 'feed.xml'} ({effective_base_url})", file=sys.stderr
+        )
 
     stats = data["stats"]
     journal_count = len(data["journals"])
@@ -2304,7 +2308,7 @@ def generate(
     package_page_count = len(packages_with_pages)
     summary_count = len(data["summaries"])
     session_msg = f", {stats['total_sessions']} sessions" if include_sessions else ""
-    print(f"Generated dashboard at {output / 'index.html'}")
+    print(f"Generated dashboard at {output / 'index.html'}", file=sys.stderr)
     print(
         f"  {stats['total_lessons']} lessons ({stats['total_lessons']} detail pages), "
         f"{stats['total_plugins']} plugins ({plugin_page_count} detail pages), "
@@ -2313,7 +2317,8 @@ def generate(
         f"{journal_count} journals ({journal_count} detail pages), "
         f"{task_count} tasks ({task_count} detail pages), "
         f"{summary_count} summaries ({summary_count} detail pages)"
-        f"{session_msg}"
+        f"{session_msg}",
+        file=sys.stderr,
     )
 
     return data
@@ -2389,6 +2394,6 @@ def generate_json(
     if output is not None:
         output.mkdir(parents=True, exist_ok=True)
         (output / "data.json").write_text(json_str)
-        print(f"Generated data dump at {output / 'data.json'}")
+        print(f"Generated data dump at {output / 'data.json'}", file=sys.stderr)
 
     return json_str

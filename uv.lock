@@ -2760,6 +2760,7 @@ dependencies = [
 [package.optional-dependencies]
 test = [
     { name = "pytest" },
+    { name = "pytest-asyncio" },
 ]
 
 [package.metadata]
@@ -2769,6 +2770,7 @@ requires-dist = [
     { name = "numpy", specifier = ">=1.24", index = "https://pypi.org/simple" },
     { name = "opencv-python-headless", specifier = ">=4.8,<5" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=7.0" },
+    { name = "pytest-asyncio", marker = "extra == 'test'", specifier = ">=0.23" },
 ]
 provides-extras = ["test"]
 

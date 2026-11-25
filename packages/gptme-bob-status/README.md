@@ -38,7 +38,7 @@ not a cap on opening PRs.
 
 ## Install
 
-Requires `gptme>=0.29`. From a gptme-contrib checkout:
+Requires `gptme>=0.33` (the `gptme.status_providers` entry-point group first ships in 0.33.0). From a gptme-contrib checkout:
 
 ```bash
 uv pip install -e packages/gptme-bob-status

@@ -1,5 +1,6 @@
 """Tests for CLI backward compatibility and subcommands."""
 
+import json
 import textwrap
 from pathlib import Path
 
@@ -27,6 +28,29 @@ def test_cli_generate_subcommand(tmp_path: Path):
     result = runner.invoke(main, ["generate", "--workspace", str(ws), "--json"])
     assert result.exit_code == 0
     assert "CLITest" in result.output
+
+
+def test_cli_generate_output_json_keeps_stdout_parseable(tmp_path: Path):
+    """With --output and --json, status messages must not corrupt stdout JSON."""
+    ws = _make_workspace(tmp_path)
+    out = tmp_path / "out"
+    result = CliRunner().invoke(
+        main,
+        [
+            "generate",
+            "--workspace",
+            str(ws),
+            "--output",
+            str(out),
+            "--base-url",
+            "https://example.com",
+            "--json",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["workspace_name"] == "CLITest"
+    assert "Generated sitemap" in result.stderr
+    assert (out / "sitemap.xml").exists()
 
 
 def test_cli_backward_compat_no_subcommand(tmp_path: Path):
