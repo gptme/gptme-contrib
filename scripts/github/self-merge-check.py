@@ -2695,6 +2695,26 @@ _GPTME_CORE_AUTH_SURFACE_PREFIXES = (
 _GPTME_CORE_AUTH_BILLING_RE = re.compile(
     r"(?i)(auth|bearer|api[_-]?key|credential|secret|billing|credit|pricing|price)"
 )
+# Removed-line shapes that carry a default value, whether or not the word
+# "default" appears: an annotated field (`model: str = "a"`), a module-level
+# constant (`TIMEOUT = 30`), a `def` signature with a keyword default
+# (`def f(x, t=0.7)`), and a parameter or keyword line in a multi-line
+# signature or call (`    temperature: float = 0.7,`). A plain `x = y`
+# statement inside a function body matches none of them, so ordinary fixes on
+# this surface still do not hold.
+_GPTME_CORE_DEFAULT_SHAPE_RES = (
+    re.compile(r"^\s*[A-Za-z_]\w*\s*:\s*[^=\n]+?=(?!=)\s*\S"),
+    re.compile(r"^[A-Z][A-Z0-9_]*\s*(?::[^=\n]+)?=(?!=)\s*\S"),
+    re.compile(r"^\s*(?:async\s+)?def\s+\w+\s*\(.*\b\w+\s*(?::[^=,)]+)?=(?!=)"),
+    re.compile(r"^\s+[A-Za-z_]\w*\s*(?::[^=\n]+)?=(?!=)[^=].*,\s*(?:#.*)?$"),
+)
+
+
+def _gptme_core_carries_default(line: str) -> bool:
+    """Whether a removed line declares a default value (see the shapes above)."""
+    return "default" in line.lower() or any(
+        rx.match(line) for rx in _GPTME_CORE_DEFAULT_SHAPE_RES
+    )
 
 
 def _iter_json_documents(text: str) -> Iterator[Any]:
@@ -2857,7 +2877,8 @@ def gptme_core_route_to_erik_reasons(
         elif path.startswith(_GPTME_CORE_SENSITIVE_SURFACE_PREFIXES) and (
             any(_GPTME_CORE_AUTH_BILLING_RE.search(line) for line in added_lines)
             or any(
-                _GPTME_CORE_AUTH_BILLING_RE.search(line) or "default" in line.lower()
+                _GPTME_CORE_AUTH_BILLING_RE.search(line)
+                or _gptme_core_carries_default(line)
                 for line in removed_lines
             )
         ):

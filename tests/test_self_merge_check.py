@@ -3500,6 +3500,40 @@ def test_gptme_core_llm_changed_default_routes() -> None:
     assert any("auth, billing or defaults" in r for r in reasons)
 
 
+@pytest.mark.parametrize(
+    "removed",
+    [
+        '    model: str = "claude-sonnet-4"',
+        "def complete(msgs, max_tokens=4096, temperature=0.7):",
+        "    temperature: float = 0.7,",
+        "TIMEOUT_S = 30",
+        '        default="shadow",',
+    ],
+)
+def test_gptme_core_default_without_the_word_routes(removed: str) -> None:
+    patch = f"@@ -1 +1 @@\n-{removed}\n+{removed.replace('7', '9')}\n"
+    reasons = self_merge_check.gptme_core_route_to_erik_reasons(
+        "fix(llm): tune", "", [_shape("gptme/llm/llm_openai.py", patch)]
+    )
+    assert any("auth, billing or defaults" in r for r in reasons)
+
+
+@pytest.mark.parametrize(
+    "removed",
+    [
+        "        result = parse(msg)",
+        "    if x == 1:",
+        "        return foo(bar)",
+    ],
+)
+def test_gptme_core_plain_body_edit_does_not_route(removed: str) -> None:
+    patch = f"@@ -1 +1 @@\n-{removed}\n+{removed}  # tweak\n"
+    reasons = self_merge_check.gptme_core_route_to_erik_reasons(
+        "fix(server): edge case", "", [_shape("gptme/server/api.py", patch)]
+    )
+    assert reasons == []
+
+
 def test_gptme_core_auth_file_always_routes() -> None:
     reasons = self_merge_check.gptme_core_route_to_erik_reasons(
         "fix: typo", "", [_shape("gptme/oauth/flow.py", "@@ -1 +1 @@\n+x = 1\n")]
