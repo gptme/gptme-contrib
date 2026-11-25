@@ -516,3 +516,25 @@ def test_ttl_expiry_does_not_shrink_effective_capacity():
     cache.put(k1, _ttl_entry())
     cache.put(k2, _ttl_entry())
     assert cache.get(k1) is not None, "fresh entry evicted by leaked size accounting"
+
+
+def test_memory_limit_counts_cached_document_contents():
+    """The cached document contents count toward max_memory_bytes (#2356 W2)."""
+    cache = SmartRAGCache(max_memory_bytes=1_000_000)
+    big = "y" * 500_000
+    for i in range(10):
+        cache.put(CacheKey.from_search(f"q{i}"), _ttl_entry(content=big))
+    held = sum(len(c) for e in cache.cache.values() for c in e.document_contents)
+    assert held <= 1_000_000, f"cache holds {held} bytes of content, limit 1_000_000"
+    assert cache.get_stats()["entries"] >= 1
+
+
+def test_entry_larger_than_memory_limit_is_not_held():
+    """An entry that alone exceeds the budget is evicted, not held over it."""
+    cache = SmartRAGCache(max_memory_bytes=10_000)
+    key = CacheKey.from_search("huge")
+    cache.put(key, _ttl_entry(content="z" * 50_000))
+    assert cache.get(key) is None
+    stats = cache.get_stats()
+    assert stats["entries"] == 0
+    assert stats["total_size_bytes"] == 0
