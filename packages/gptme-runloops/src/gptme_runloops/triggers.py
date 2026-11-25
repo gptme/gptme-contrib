@@ -52,6 +52,7 @@ tests so the eventual cut-over from the bash/inline gates is provably behaviour-
 from __future__ import annotations
 
 import json
+import math
 import time
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
@@ -103,8 +104,9 @@ class TriggerState:
         """Build a state from decoded JSON, rejecting shapes it cannot honour.
 
         A missing or ``null`` field degrades to its default, but a field of the
-        wrong type raises :class:`ValueError` rather than being coerced into
-        nonsense — ``load_state`` treats that as a corrupt file and fails open.
+        wrong type, or a timestamp that is not a finite float, raises
+        :class:`ValueError` rather than being coerced into nonsense —
+        ``load_state`` treats that as a corrupt file and fails open.
         """
         if not isinstance(data, Mapping):
             raise ValueError(
@@ -119,13 +121,20 @@ class TriggerState:
 
 
 def _state_float(data: Mapping[str, Any], key: str) -> float:
-    """Read a numeric field; ``null`` defaults, any other type is a shape error."""
+    """Read a finite numeric field; ``null`` defaults, anything else is a shape error."""
     value = data.get(key)
     if value is None:
         return 0.0
     if isinstance(value, bool) or not isinstance(value, int | float):
         raise ValueError(f"{key} must be a number, got {type(value).__name__}")
-    return float(value)
+    try:
+        number = float(value)
+    except OverflowError as exc:  # JSON integers are unbounded
+        raise ValueError(f"{key} is too large for a float") from exc
+    if not math.isfinite(number):
+        # NaN would silence max_skip_trigger; inf would never leave a backoff window.
+        raise ValueError(f"{key} must be finite, got {number}")
+    return number
 
 
 def _state_reasons(data: Mapping[str, Any]) -> tuple[str, ...]:
