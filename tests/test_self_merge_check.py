@@ -3358,7 +3358,7 @@ def test_contrib_agent_literal_skips_docs_and_comment_lines() -> None:
                 "+    \"\"\"Extract @mentions (e.g. '@Alice' -> ['alice']).\n"
                 "+    # a value like team/bob must not escape the forum\n"
                 "+    // erik\n"
-                "+    * gordon\n"
+                "+    /* gordon */\n"
             ),
         },
     ]
@@ -3367,6 +3367,37 @@ def test_contrib_agent_literal_skips_docs_and_comment_lines() -> None:
     reasons = self_merge_check.contrib_agent_literal_reasons(file_shapes)
     assert len(reasons) == 1 and '"sven"' in reasons[0]
     assert "alice" not in reasons[0] and "README" not in reasons[0]
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        '    **{"default_agent": "bob"},',
+        '    *["bob", "alice"],',
+        '    * ["bob", "alice"],',
+    ],
+)
+def test_contrib_agent_literal_unpacking_still_routes(line: str) -> None:
+    reasons = self_merge_check.contrib_agent_literal_reasons(
+        [{"path": "packages/gptme-example/src/config.py", "patch": f"+{line}\n"}]
+    )
+    assert len(reasons) == 1 and '"bob"' in reasons[0]
+
+
+@pytest.mark.parametrize("suffix", ["md", "rst", "txt", "adoc"])
+@pytest.mark.parametrize("line", ["You are Bob, Erik's agent.", "# Bob defaults"])
+def test_contrib_agent_literal_packaged_resource_still_routes(
+    suffix: str, line: str
+) -> None:
+    reasons = self_merge_check.contrib_agent_literal_reasons(
+        [
+            {
+                "path": f"packages/gptme-example/src/gptme_example/prompts/system.{suffix}",
+                "patch": f"+{line}\n",
+            }
+        ]
+    )
+    assert len(reasons) == 1 and '"bob"' in reasons[0]
 
 
 def _evaluate_contrib(

@@ -2867,7 +2867,8 @@ _CONTRIB_AGENT_LITERAL_RE = re.compile(
 )
 # Lines that open as a comment or docstring. Only the line START counts: code
 # with a trailing comment (``X = 1  # bob``) is still code.
-_CONTRIB_PROSE_LINE_PREFIXES = ("#", "//", "/*", "*", '"""', "'''")
+# A leading '*' (even '* ') can be executable Python unpacking, not prose.
+_CONTRIB_PROSE_LINE_PREFIXES = ("#", "//", "/*", '"""', "'''")
 
 
 def _contrib_repo_root() -> Path:
@@ -3195,12 +3196,13 @@ def contrib_agent_literal_reasons(file_shapes: list[dict[str, Any]]) -> list[str
     hits: dict[str, set[str]] = {}
     for entry in file_shapes:
         path = _contrib_normalize(str(entry.get("path", "")))
-        # Docs are not code, and a name in an example or comment configures
-        # nothing (contrib#2375 README, contrib#2387 docstring examples).
-        if is_test_file(path) or is_doc_file(path):
+        # Packaged prose under src/ may be runtime prompts or configuration,
+        # not documentation. Keep scanning it, including Markdown headings.
+        doc_file = is_doc_file(path)
+        if is_test_file(path) or (doc_file and "src" not in Path(path).parts):
             continue
         for line in _contrib_added_lines(cast("str | None", entry.get("patch"))):
-            if line.lstrip().startswith(_CONTRIB_PROSE_LINE_PREFIXES):
+            if not doc_file and line.lstrip().startswith(_CONTRIB_PROSE_LINE_PREFIXES):
                 continue
             for match in _CONTRIB_AGENT_LITERAL_RE.finditer(line):
                 hits.setdefault(match.group(1).lower(), set()).add(path)
