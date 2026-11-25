@@ -109,10 +109,31 @@ def _has_mature_arm(document: object) -> bool:
         for arm in arms.values():
             if not isinstance(arm, dict):
                 continue
-            selections = arm.get("total_selections", 0)
-            if isinstance(selections, (int, float)) and selections > MATURE_ARM_MIN_SELECTIONS:
+            if _arm_evidence(arm) > MATURE_ARM_MIN_SELECTIONS:
                 return True
     return False
+
+
+def _arm_evidence(arm: dict) -> float:
+    """Observations a raw arm document claims, whatever its writer called the counter.
+
+    A newer ``arm_class`` may rename or drop ``total_selections``, so the
+    posterior itself counts as evidence too: ``alpha + beta - 2`` is how far it
+    moved from the Beta(1, 1) prior.  Unknown maturity must read as mature.
+    """
+    evidence = 0.0
+    selections = arm.get("total_selections")
+    if isinstance(selections, (int, float)) and not isinstance(selections, bool):
+        evidence = float(selections)
+    alpha, beta = arm.get("alpha"), arm.get("beta")
+    if (
+        isinstance(alpha, (int, float))
+        and isinstance(beta, (int, float))
+        and not isinstance(alpha, bool)
+        and not isinstance(beta, bool)
+    ):
+        evidence = max(evidence, float(alpha) + float(beta) - 2.0)
+    return evidence
 
 
 @dataclass

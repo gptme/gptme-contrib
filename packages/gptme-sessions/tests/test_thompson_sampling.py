@@ -1331,6 +1331,28 @@ def test_undecodable_mature_history_is_never_overwritten(tmp_path, contextual):
     assert (bandit.state_file.read_text(), bandit.backup_file.read_text()) == before
 
 
+@pytest.mark.parametrize("contextual", [False, True])
+@pytest.mark.parametrize("counter", [None, "selections"])
+def test_undecodable_arm_without_known_counter_counts_as_mature(tmp_path, contextual, counter):
+    """A renamed or absent selection counter must not make unreadable history look fresh."""
+    arm = {"arm_id": "a", "alpha": 20.0, "beta": 1.0, "extra": "from a richer arm_class"}
+    if counter:
+        arm[counter] = 19
+    document = (
+        {"arms": {}, "contextual_arms": {"a": {"ctx": arm}}} if contextual else {"arms": {"a": arm}}
+    )
+    bandit = Bandit(state_dir=tmp_path)
+    for path in (bandit.state_file, bandit.backup_file):
+        path.write_text(json.dumps(document))
+    before = (bandit.state_file.read_text(), bandit.backup_file.read_text())
+
+    reader = Bandit(state_dir=tmp_path)
+    with pytest.raises(ValueError, match="cannot be decoded"):
+        reader.update(["a"], outcome=1.0)
+
+    assert (bandit.state_file.read_text(), bandit.backup_file.read_text()) == before
+
+
 def test_undecodable_mature_backup_is_not_rotated_over(tmp_path, capsys):
     """A reader that already reset the state file must not erase .bak too (#2321)."""
     bandit = Bandit(state_dir=tmp_path)
