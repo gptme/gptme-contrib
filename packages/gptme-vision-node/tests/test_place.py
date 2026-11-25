@@ -306,6 +306,24 @@ def test_embedder_rejects_negative_v_bins():
 # -- atomic save (gptme-contrib#2381) ----------------------------------------
 
 
+def test_save_through_symlink_updates_target_and_preserves_link(tmp_path):
+    target = tmp_path / "shared" / "gallery.json"
+    rec = PlaceRecognizer()
+    rec.enroll("kitchen", KITCHEN)
+    rec.save(target)
+    link = tmp_path / "places.json"
+    link.symlink_to("shared/gallery.json")
+
+    loaded = PlaceRecognizer.from_file(link)
+    loaded.enroll("office", OFFICE)
+    loaded.save(link)
+
+    assert link.is_symlink()
+    assert set(PlaceRecognizer.from_file(target).places) == {"kitchen", "office"}
+    assert link.read_bytes() == target.read_bytes()
+    assert list(target.parent.glob("*.tmp")) == []
+
+
 def test_save_failure_keeps_existing_gallery(tmp_path, monkeypatch):
     path = tmp_path / "places.json"
     rec = PlaceRecognizer()

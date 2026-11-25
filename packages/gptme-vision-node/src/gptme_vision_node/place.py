@@ -322,7 +322,9 @@ class PlaceRecognizer:
                 for name, samples in self.places.items()
             },
         }
-        path = Path(path)
+        # Follow gallery symlinks as load() does, then atomically replace the
+        # target rather than replacing the link with a separate gallery.
+        path = Path(path).resolve()
         path.parent.mkdir(parents=True, exist_ok=True)
         # Write-then-rename so a crash or full disk never truncates the
         # existing gallery (every enrolled sample would be lost).
