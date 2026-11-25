@@ -335,3 +335,25 @@ def test_file_watcher_start_prunes_files_deleted_while_stopped(tmp_path, indexer
 
     assert str(kept.resolve()) in sources
     assert str(gone.resolve()) not in sources
+
+
+def test_file_watcher_start_prunes_deleted_symlink_targets(tmp_path, indexer):
+    """A symlinked file is indexed under its target, outside the watched root."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    target = outside / "target.txt"
+    target.write_text("Reached through a symlink in the watched directory")
+    watched = tmp_path / "watched"
+    watched.mkdir()
+    (watched / "link.txt").symlink_to(target)
+    # A symlink loop must not stop the watcher from starting.
+    (watched / "loop.txt").symlink_to(watched / "loop.txt")
+    indexer.index_directory(watched, "**/*.*")
+    indexed_target = str(target.resolve())
+    assert indexed_target in _indexed_sources(indexer)
+    target.unlink()
+
+    with FileWatcher(indexer, [str(watched)], update_delay=0):
+        sources = _indexed_sources(indexer)
+
+    assert indexed_target not in sources

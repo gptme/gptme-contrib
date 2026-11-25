@@ -471,13 +471,21 @@ class FileWatcher:
         """Drop indexed sources under ``path`` whose file no longer exists."""
         root = str(path.resolve())
         prefix = root.rstrip(os.sep) + os.sep
+        # A symlinked file is stored under its target, which may lie outside
+        # root; a dangling link is what still ties that source to this root.
+        # realpath, unlike Path.resolve, does not raise on symlink loops.
+        dangling = {
+            os.path.realpath(link)
+            for link in path.rglob("*")
+            if link.is_symlink() and not os.path.exists(link)
+        }
         metadatas = self.indexer.collection.get(include=["metadatas"])["metadatas"] or []
         missing = {
             source
             for meta in metadatas
             if meta
             and isinstance(source := meta.get("source"), str)
-            and (source == root or source.startswith(prefix))
+            and (source == root or source.startswith(prefix) or source in dangling)
             and not os.path.isfile(source)
         }
         for source in sorted(missing):
