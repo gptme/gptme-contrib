@@ -246,3 +246,21 @@ def test_no_failures_is_a_noop() -> None:
     result = run_fallback([], {}, host, engine="subscription", emit=lambda _: None)
     assert host.executed == []
     assert (result.attempted, result.recovered, result.skipped) == (0, 0, 0)
+
+
+def test_transient_mix_retries_only_primary_provider_failures() -> None:
+    # gptme/gptme-contrib#2331 item 4: a rate-limit + capacity mix used to be
+    # "systemic" and retried every row. The rate-limited row still deserves the
+    # fallback; a capacity refusal would hit the same consensus contract again.
+    rate_limited = {**PROVIDER, "pr": "o/r#3", "rate_limited": True}
+    capacity = {
+        "pr": "o/r#4",
+        "engine": "llm",
+        "reason": "consensus needs 2 but only 1 independent reviewer(s) are available",
+        "capacity_shortfall": True,
+    }
+    assert select_fallback_failures(
+        failure_class="transient_mix",
+        review_failures=[rate_limited, capacity],
+        too_large_failures=0,
+    ) == ("transient_mix", [rate_limited])

@@ -62,6 +62,9 @@ def select_fallback_failures(
       Concurrency can mask a provider outage behind partial success. A
       co-occurring too-large PR does not block this: the provider filter
       already excludes too-large rows, so they stay failed either way.
+    * A ``transient_mix`` run (a capacity refusal mixed with rate-limited or
+      too-large PRs) retries only its primary-provider failures. A capacity
+      refusal would meet the same consensus contract on the fallback.
     * Anything else (mixed PR-local failures) retries nothing: that is not a
       transport outage, so the fallback stays fail-closed.
     """
@@ -69,6 +72,12 @@ def select_fallback_failures(
         failure_class == "systemic" and not too_large_failures
     ):
         return failure_class, list(review_failures)
+    if failure_class == "transient_mix":
+        return failure_class, [
+            f
+            for f in review_failures
+            if is_primary_provider_failure(f) and not f.get("capacity_shortfall")
+        ]
     if failure_class is None:
         provider = [f for f in review_failures if is_primary_provider_failure(f)]
         return ("provider_outage" if provider else None), provider
