@@ -21,6 +21,16 @@ from gptme_activity_summary.traces import create_trace_dir
 
 logger = logging.getLogger(__name__)
 
+# Prompt-size budget for the daily summary. A fanout day can produce hundreds
+# of journal files (journal/2026-11-24 held 600 files / 2.4 MB, ~700k tokens),
+# which pushed the assembled prompt past the 1M-token model ceiling and made
+# every scheduled run fail with "prompt is too long". The budget is also a
+# latency guard: a 391 KiB daily summary measured 259 s on the subscription
+# fallback, so an unbounded prompt would time out even when it fits.
+_MAX_JOURNAL_PROMPT_CHARS = 300_000
+_MAX_EXTRA_CONTEXT_CHARS = 100_000
+_ENTRY_SEPARATOR = "\n\n---\n\n"
+
 # Retry configuration for empty CC responses (nesting detection, transient failures)
 _MAX_RETRIES = 3
 _RETRY_DELAY_S = 5
@@ -626,6 +636,57 @@ Return ONLY the JSON, no additional text."""
     return result
 
 
+def _truncate_block(text: str, limit: int) -> str:
+    """Keep the head and tail of an over-budget block, marking the cut.
+
+    Journals put context first and conclusions last, so keeping both ends
+    preserves more signal than a head-only cut.
+    """
+    if len(text) <= limit:
+        return text
+    marker = f"\n\n[... truncated {len(text) - limit:,} of {len(text):,} chars ...]\n\n"
+    keep = max(limit - len(marker), 0)
+    head = keep * 3 // 5
+    tail = keep - head
+    return text[:head] + marker + (text[-tail:] if tail else "")
+
+
+def _bound_journal_entries(entries: list[tuple[Path, str]], max_chars: int) -> tuple[str, int]:
+    """Join journal entries into one prompt block, capped at ``max_chars``.
+
+    Entries that fit an even share of the budget are kept whole; the remaining
+    budget is redistributed across the larger entries, so one oversized journal
+    cannot crowd out the rest of the day. Returns the joined text and the
+    number of entries that were truncated.
+    """
+    blocks = [f"### Entry: {filepath.name}\n\n{content}" for filepath, content in entries]
+    if not blocks:
+        return "", 0
+    overhead = len(_ENTRY_SEPARATOR) * (len(blocks) - 1)
+    budget = max(max_chars - overhead, 0)
+    if sum(len(block) for block in blocks) <= budget:
+        return _ENTRY_SEPARATOR.join(blocks), 0
+
+    caps = [0] * len(blocks)
+    pending = list(range(len(blocks)))
+    remaining = budget
+    while pending:
+        share = remaining // len(pending)
+        small = [i for i in pending if len(blocks[i]) <= share]
+        if not small:
+            for i in pending:
+                caps[i] = share
+            break
+        for i in small:
+            caps[i] = len(blocks[i])
+            remaining -= len(blocks[i])
+            pending.remove(i)
+
+    bounded = [_truncate_block(blocks[i], caps[i]) for i in range(len(blocks))]
+    truncated = sum(1 for i in range(len(blocks)) if caps[i] < len(blocks[i]))
+    return _ENTRY_SEPARATOR.join(bounded), truncated
+
+
 def summarize_daily_with_cc(
     entries: list[tuple[Path, str]],
     target_date: str,
@@ -654,10 +715,29 @@ def summarize_daily_with_cc(
             "narrative": "",
         }
 
-    # Combine all entries for the day
-    combined_content = "\n\n---\n\n".join(
-        [f"### Entry: {filepath.name}\n\n{content}" for filepath, content in entries]
+    # Combine all entries for the day, bounded so a high-volume fanout day
+    # cannot overflow the model context window.
+    combined_content, truncated_entries = _bound_journal_entries(entries, _MAX_JOURNAL_PROMPT_CHARS)
+    if truncated_entries:
+        logger.warning(
+            "Daily prompt bounded: truncated %d of %d journal entries to %d chars",
+            truncated_entries,
+            len(entries),
+            _MAX_JOURNAL_PROMPT_CHARS,
+        )
+    truncation_note = (
+        f"\nNote: {truncated_entries} oversized entries are truncated (head and tail kept)."
+        if truncated_entries
+        else ""
     )
+
+    if extra_context and len(extra_context) > _MAX_EXTRA_CONTEXT_CHARS:
+        logger.warning(
+            "Daily prompt context bounded: truncated extra context from %d to %d chars",
+            len(extra_context),
+            _MAX_EXTRA_CONTEXT_CHARS,
+        )
+        extra_context = _truncate_block(extra_context, _MAX_EXTRA_CONTEXT_CHARS)
 
     context_section = ""
     if extra_context:
@@ -702,7 +782,7 @@ Guidelines:
 - DO NOT include a "metrics" field — metrics are tracked separately from real data
 - The FIRST non-empty assistant message must be the final JSON object with a top-level "narrative" field. Do not emit any thinking preamble or reasoning text before the JSON — output the JSON object as the very first assistant message.
 
-Journal Entries ({len(entries)} total):
+Journal Entries ({len(entries)} total):{truncation_note}
 ---
 {combined_content}
 ---
