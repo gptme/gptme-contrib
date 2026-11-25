@@ -17,7 +17,7 @@ import warnings
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator, Literal
 
@@ -208,7 +208,17 @@ def transform_post(
             post.content = "\n".join(lines)
         elif field in CANONICAL_LIST_FIELDS and op in ("add", "remove"):
             # Handle incremental list edits (after normalization via FIELD_ALIASES).
-            current = post.metadata.get(field, [])
+            current = post.metadata.get(field)
+            # A null field or a hand-written scalar ("tags: infra") is a list of
+            # zero or one items, not a crash.
+            if current is None:
+                current = []
+            elif isinstance(current, str):
+                current = [current]
+            elif not isinstance(current, list):
+                raise TransitionError(
+                    f"Cannot {op} {field}: expected a list, got {type(current).__name__}"
+                )
             if op == "add":
                 post.metadata[field] = list(dict.fromkeys(current + [value]))
             else:
@@ -293,8 +303,15 @@ def transform_post(
             # first_waiting_since is stamped once and never overwritten — it
             # is the cumulative blocker age that survives re-parks.
             _since = post.metadata.get("waiting_since")
+            # YAML loads an unquoted timestamp as a datetime; str() would write
+            # it with a space separator, unlike waiting_since.
             post.metadata.setdefault(
-                "first_waiting_since", str(_since) if _since is not None else _now_iso
+                "first_waiting_since",
+                _now_iso
+                if _since is None
+                else _since.isoformat()
+                if isinstance(_since, datetime | date)
+                else str(_since),
             )
 
             # waiting_spell_count counts distinct waiting spells; >= 3 is the

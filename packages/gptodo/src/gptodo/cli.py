@@ -44,6 +44,7 @@ from rich.console import Console
 from rich.markup import escape as markup_escape
 from rich.table import Table
 from tabulate import tabulate
+import yaml  # type: ignore[import-untyped]
 
 # Import agent registry (Phase 1 of multi-agent coordination)
 from gptodo.agents import (
@@ -6257,7 +6258,20 @@ def add(
     lines.append(f"created: {frontmatter_data['created']}")
     lines.append(f"priority: {frontmatter_data['priority']}")
     lines.append(f"task_type: {frontmatter_data['task_type']}")
-    lines.append(f"assigned_to: {frontmatter_data['assigned_to']}")
+    assigned_yaml = frontmatter_data["assigned_to"]
+    # Quote only when the plain scalar would not load back as the same string
+    # ("x: y", "#ops", "yes", "[team]"); plain ids stay unquoted.
+    try:
+        plain_ok = yaml.safe_load(f"v: {assigned_yaml}") == {"v": assigned_yaml}
+    except yaml.YAMLError:
+        plain_ok = False
+    if not plain_ok:
+        # Not json.dumps: it writes non-BMP characters as surrogate pairs,
+        # which YAML loads back as two lone surrogates.
+        assigned_yaml = yaml.safe_dump(
+            assigned_yaml, default_style='"', allow_unicode=True, width=sys.maxsize
+        ).rstrip("\n")
+    lines.append(f"assigned_to: {assigned_yaml}")
     if "tags" in frontmatter_data:
         lines.append(f"tags: {json.dumps(frontmatter_data['tags'])}")
     stamp = now.isoformat()
