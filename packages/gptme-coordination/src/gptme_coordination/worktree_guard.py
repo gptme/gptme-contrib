@@ -551,14 +551,15 @@ def run_push_guard(
     #   * a fork clone, where ``origin`` is the fork and ``upstream`` the base;
     #   * a ``worktree-create`` checkout, where ``origin`` is the base and
     #     ``fork`` the fork — there is no ``upstream`` remote.
-    # Alias both ``upstream`` and ``origin`` so a fork push meets the base-repo
-    # claim in either layout (offline; any failure leaves no alias).
-    def _remote_slug(remote: str) -> str | None:
+    # Prefer the explicit ``upstream`` relationship. Without it, only alias
+    # ``origin`` for a push to the configured ``fork`` remote, not an arbitrary
+    # destination (offline; remote names declare the relationship).
+    def _remote_slug(remote: str, *, push: bool = False) -> str | None:
         import subprocess
 
         try:
             url = subprocess.run(
-                ["git", "remote", "get-url", remote],
+                ["git", "remote", "get-url", *(["--push"] if push else []), remote],
                 capture_output=True,
                 text=True,
                 check=True,
@@ -573,13 +574,14 @@ def run_push_guard(
         if upstream_url is None
         else origin_slug(upstream_url or "")
     )
-    base_origin_slug = (
-        _remote_slug("origin") if origin_url is None else origin_slug(origin_url or "")
-    )
-    alias_slugs: list[str] = []
-    for candidate in (upstream_slug, base_origin_slug):
-        if candidate and candidate != slug and candidate not in alias_slugs:
-            alias_slugs.append(candidate)
+    base_slug = upstream_slug
+    if not base_slug and _remote_slug("fork", push=True) == slug:
+        base_slug = (
+            _remote_slug("origin")
+            if origin_url is None
+            else origin_slug(origin_url or "")
+        )
+    alias_slugs = [base_slug] if base_slug and base_slug != slug else []
 
     should_deny = deny if deny is not None else _env_flag(*_PUSH_GUARD_DENY_ENV)
     try:
