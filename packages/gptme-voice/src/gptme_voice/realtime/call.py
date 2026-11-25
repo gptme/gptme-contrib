@@ -90,7 +90,7 @@ def main(
         return
 
     persist_workspace = str(workspace) if workspace is not None else None
-    if context_file and persist_workspace is None:
+    if context_file is not None and persist_workspace is None:
         persist_workspace = str(Path.cwd())
 
     try:
