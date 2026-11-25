@@ -232,8 +232,10 @@ def log_injection(
         log_file.parent.mkdir(parents=True, exist_ok=True)
         with open(log_file, "a", encoding="utf-8") as f:
             f.write(payload)
-    except (OSError, TypeError, ValueError) as exc:
+    except (OSError, TypeError, ValueError, RecursionError) as exc:
         # Best-effort: a full disk or an unserializable hit must never break injection.
+        # ``_json_safe`` recurses without a cycle check, so cyclic or very deeply
+        # nested metadata surfaces as RecursionError rather than json's ValueError.
         logger.debug("injection log write failed (%s): %s", log_file, exc)
         return None
     return record

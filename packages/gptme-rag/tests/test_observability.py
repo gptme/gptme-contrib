@@ -761,3 +761,39 @@ def test_log_injection_sanitizes_non_finite_metadata(tmp_path, bad, source):
     else:
         assert written["hits"][0]["state"] is None
         assert record["hits"][0]["state"] is None
+
+
+def _cyclic_list():
+    value: list = []
+    value.append(value)
+    return value
+
+
+def _cyclic_dict():
+    value: dict = {}
+    value["self"] = value
+    return value
+
+
+@pytest.mark.parametrize("make_cyclic", [_cyclic_list, _cyclic_dict])
+def test_log_injection_cyclic_metadata_stays_best_effort(tmp_path, make_cyclic):
+    """Cyclic metadata must not escape the best-effort logger.
+
+    ``_json_safe`` recurses until ``RecursionError``, which json's own circular
+    check used to turn into a caught ``ValueError``. The write is skipped and
+    the existing log is left untouched.
+    """
+    log = tmp_path / "injections.jsonl"
+    assert log_injection(log, "valid", _hits(0.5), backend="tfidf", harness="test")
+    before = log.read_text()
+
+    record = log_injection(
+        log,
+        "cyclic",
+        _hits(0.5),
+        backend="tfidf",
+        harness="test",
+        extra={"metadata": make_cyclic()},
+    )
+    assert record is None
+    assert log.read_text() == before
