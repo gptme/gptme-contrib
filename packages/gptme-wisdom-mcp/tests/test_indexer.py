@@ -1,6 +1,7 @@
 """Basic smoke tests for gptme-wisdom-mcp indexer and parsers."""
 
 import json
+import sqlite3
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -91,6 +92,59 @@ def test_changed_document_drops_stale_terms(tmp_path: Path):
         assert len(idx.search("narwhal")) == 1
         # The FTS index stays consistent with the stored rows
         idx.conn.execute(
+            "INSERT INTO sessions_fts (sessions_fts, rank) VALUES ('integrity-check', 1)"
+        )
+
+
+def test_overlapping_updates_do_not_delete_stale_fts_values(tmp_path: Path):
+    """A second connection cannot update between the stored-value read and write."""
+    from gptme_wisdom_mcp.indexer import SessionIndex
+    from gptme_wisdom_mcp.parsers import SessionDocument
+
+    def doc(content: str) -> SessionDocument:
+        return SessionDocument(
+            source="journal",
+            path="/journal/session.md",
+            date=datetime(2026, 1, 1),
+            title="Session",
+            content=content,
+            summary="summary",
+        )
+
+    with SessionIndex(tmp_path / "s.db") as first, SessionIndex(tmp_path / "s.db") as second:
+        assert first.add(doc("walrus")) is True
+        second.conn.execute("PRAGMA busy_timeout=0")
+        concurrent_results = []
+        attempted = False
+
+        def interleave_after_read(cursor, row):
+            nonlocal attempted
+            stored = sqlite3.Row(cursor, row)
+            if not attempted:
+                attempted = True
+                # The first connection has already read the old FTS values.
+                # Let another real connection try to replace them before it writes.
+                try:
+                    concurrent_results.append(second.add(doc("narwhal")))
+                except sqlite3.OperationalError as exc:
+                    assert "locked" in str(exc)
+            return stored
+
+        first.conn.row_factory = interleave_after_read
+        assert first.add(doc("narwhal")) is True
+        first.conn.row_factory = sqlite3.Row
+        assert attempted
+        if not concurrent_results:
+            # A serialized writer retries after the first transaction commits.
+            concurrent_results.append(second.add(doc("narwhal")))
+        assert concurrent_results == [False]
+        assert first.count() == 1
+        assert first.search("walrus") == []
+        assert len(first.search("narwhal")) == 1
+        assert first.add(doc("dolphin")) is True
+        assert first.search("narwhal") == []
+        assert len(first.search("dolphin")) == 1
+        first.conn.execute(
             "INSERT INTO sessions_fts (sessions_fts, rank) VALUES ('integrity-check', 1)"
         )
 

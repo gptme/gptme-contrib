@@ -112,6 +112,9 @@ class SessionIndex:
 
     def _upsert(self, doc: SessionDocument, values: tuple) -> bool:
         with self.conn:
+            # Lock before reading: a contentless FTS delete must use values
+            # that no other writer can replace between this read and our write.
+            self.conn.execute("BEGIN IMMEDIATE")
             existing = self.conn.execute(
                 "SELECT id, title, content, summary FROM sessions WHERE path = ?",
                 (doc.path,),
