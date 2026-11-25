@@ -1522,3 +1522,67 @@ def test_auth_expiry_raised_when_first_fallback_auth_expires_and_second_fallback
     ):
         with pytest.raises(ClaudeAuthExpiredError):
             call_claude_code("test prompt", max_retries=1)
+
+
+def test_bound_entries_leaves_small_input_untouched():
+    """Entries under budget pass through byte-for-byte."""
+    from pathlib import Path
+
+    from gptme_activity_summary.cc_backend import _bound_entries
+
+    entries = [(Path("a.md"), "x" * 100), (Path("b.md"), "y" * 200)]
+    assert _bound_entries(entries, 1_000) == entries
+
+
+def test_bound_entries_truncates_oversized_with_marker():
+    """A high-volume day is bounded and every entry is marked as partial."""
+    from pathlib import Path
+
+    from gptme_activity_summary.cc_backend import _bound_entries
+
+    entries = [(Path(f"s{i}.md"), "z" * 5_000) for i in range(600)]
+    bounded = _bound_entries(entries, 600_000)
+
+    assert len(bounded) == len(entries)
+    assert sum(len(content) for _, content in bounded) <= 600_000
+    for path, content in bounded:
+        assert content.startswith("z" * 10), "entry head must be preserved"
+        assert "truncated:" in content, f"{path} lost its truncation marker"
+
+
+def test_bound_entries_redistributes_leftover_budget():
+    """Short entries stay whole; their unused budget goes to the long ones."""
+    from pathlib import Path
+
+    from gptme_activity_summary.cc_backend import _bound_entries
+
+    entries = [(Path("short.md"), "s" * 100), (Path("long.md"), "l" * 1_000)]
+    bounded = _bound_entries(entries, 500)
+
+    by_name = {path.name: content for path, content in bounded}
+    assert by_name["short.md"] == "s" * 100
+    assert len(by_name["long.md"]) <= 400 + 200  # slice + marker text
+    assert by_name["long.md"].startswith("l" * 10)
+    assert "truncated:" in by_name["long.md"]
+
+
+def test_summarize_daily_prompt_stays_bounded():
+    """The assembled daily prompt never exceeds the model context ceiling."""
+    from pathlib import Path
+
+    from gptme_activity_summary import cc_backend
+
+    entries = [(Path(f"session-{i}.md"), "z" * 5_000) for i in range(600)]
+    captured: dict[str, str] = {}
+
+    def fake_call(prompt: str, **kwargs: object) -> str:
+        captured["prompt"] = prompt
+        return '{"accomplishments": []}'
+
+    with patch.object(cc_backend, "call_claude_code", fake_call):
+        cc_backend.summarize_daily_with_cc(entries, "2026-11-24", extra_context="c" * 50_000)
+
+    prompt = captured["prompt"]
+    # ~4 chars/token: keep a wide margin under the 1M-token window.
+    assert len(prompt) < 900_000
+    assert "truncated:" in prompt

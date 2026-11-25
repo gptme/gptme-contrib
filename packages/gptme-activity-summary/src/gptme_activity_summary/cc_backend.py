@@ -30,6 +30,81 @@ _RETRY_DELAY_S = 5
 # floor so a caller's shorter Claude timeout does not starve the fallback.
 _GPTME_FALLBACK_TIMEOUT_S = 360
 
+# Prompt size bounds. A fanout day can produce hundreds of journal entries
+# (journal/2026-11-24: 600 files / 2.4 MB), which pushed the daily prompt past
+# the 1M-token ceiling and failed every run with "prompt is too long". Bound the
+# combined entry text and the reference context so the prompt stays well under
+# the window regardless of journal volume.
+# ~600k chars is ~150k tokens, leaving ample headroom for the prompt template.
+DAILY_ENTRY_CHAR_BUDGET = 600_000
+DAILY_CONTEXT_CHAR_BUDGET = 200_000
+
+
+def _truncation_marker(omitted: int, total: int) -> str:
+    return (
+        f"\n\n[... truncated: {omitted:,} of {total:,} characters omitted "
+        f"from this entry to fit the summary prompt budget ...]"
+    )
+
+
+# Upper bound on a marker's length (12-digit counts), reserved from the share so
+# the bounded output never exceeds the budget because of marker text.
+_MARKER_RESERVE = len(_truncation_marker(10**12, 10**12))
+
+
+def _bound_text(text: str, budget: int, label: str) -> str:
+    """Truncate ``text`` to ``budget`` characters with an explicit marker."""
+    if len(text) <= budget:
+        return text
+    logger.warning(
+        "%s is %d chars; truncating to %d to keep the prompt bounded",
+        label,
+        len(text),
+        budget,
+    )
+    return text[:budget] + _truncation_marker(len(text) - budget, len(text))
+
+
+def _bound_entries(entries: list[tuple[Path, str]], budget: int) -> list[tuple[Path, str]]:
+    """Bound combined entry text to ``budget`` characters.
+
+    Short entries are kept whole; leftover budget is redistributed across the
+    remaining (oversized) entries so no capacity is wasted. Every oversized
+    entry keeps its head — which carries the heading, outcome and category —
+    followed by an explicit truncation marker, so the model knows the content
+    is partial rather than silently missing.
+    """
+    total = sum(len(content) for _, content in entries)
+    if total <= budget:
+        return entries
+
+    bounded: dict[int, str] = {}
+    remaining = list(range(len(entries)))
+    remaining_budget = budget
+    while remaining:
+        share = remaining_budget // len(remaining)
+        small = [i for i in remaining if len(entries[i][1]) <= share]
+        if not small:
+            keep = max(0, share - _MARKER_RESERVE)
+            for i in remaining:
+                content = entries[i][1]
+                bounded[i] = content[:keep] + _truncation_marker(len(content) - keep, len(content))
+            break
+        for i in small:
+            content = entries[i][1]
+            bounded[i] = content
+            remaining_budget -= len(content)
+            remaining.remove(i)
+
+    logger.warning(
+        "Daily entries total %d chars; bounded to %d (budget %d)",
+        total,
+        sum(len(bounded[i]) for i in range(len(entries))),
+        budget,
+    )
+    return [(entries[i][0], bounded[i]) for i in range(len(entries))]
+
+
 # Truly permanent subscription failures — quota resets require waiting until
 # the next billing period; org blocks require admin action. Retrying the same
 # slot is futile. Keep prefixes narrow so transient errors use the normal retry path.
@@ -654,17 +729,22 @@ def summarize_daily_with_cc(
             "narrative": "",
         }
 
-    # Combine all entries for the day
+    # Combine all entries for the day, bounded so a high-volume journal day
+    # cannot overflow the model's context window.
+    bounded_entries = _bound_entries(entries, DAILY_ENTRY_CHAR_BUDGET)
     combined_content = "\n\n---\n\n".join(
-        [f"### Entry: {filepath.name}\n\n{content}" for filepath, content in entries]
+        [f"### Entry: {filepath.name}\n\n{content}" for filepath, content in bounded_entries]
     )
 
     context_section = ""
     if extra_context:
+        bounded_context = _bound_text(
+            extra_context, DAILY_CONTEXT_CHAR_BUDGET, "daily extra context"
+        )
         context_section = f"""
 The following real data is available for reference. DO NOT count or estimate metrics — those are provided separately.
 
-{extra_context}
+{bounded_context}
 """
 
     prompt = f"""Analyze these journal entries from {target_date} and create a unified daily summary.
