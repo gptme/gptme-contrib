@@ -10,13 +10,18 @@ Created: 2025-10-29 (Session 370)
 """
 
 import json
+import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Set, Tuple
 
+import frontmatter
+
 from gptme_lessons_extras.similarity import NON_LESSON_FILES
+
+logger = logging.getLogger(__name__)
 
 # Try importing sklearn, but provide fallback
 try:
@@ -93,16 +98,26 @@ class LessonDiscovery:
 
         content = lesson_path.read_text()
 
-        # Extract frontmatter keywords
-        keywords: Set[str] = set()
-        frontmatter_match = re.search(r"---\n(.*?)\n---", content, re.DOTALL)
-        if frontmatter_match:
-            frontmatter = frontmatter_match.group(1)
-            # Look for keywords: [keyword1, keyword2] format
-            keywords_match = re.search(r"keywords:\s*\[(.*?)\]", frontmatter)
-            if keywords_match:
-                keyword_list = keywords_match.group(1)
-                keywords.update(k.strip().lower() for k in keyword_list.split(","))
+        # Extract frontmatter keywords. Parse the YAML rather than regex-match
+        # it: block lists (the template's format) and quoted items must work.
+        try:
+            metadata = frontmatter.loads(content).metadata
+            match = metadata.get("match", {})
+            raw_keywords = match.get("keywords", []) if isinstance(match, dict) else []
+        except Exception as e:
+            # One bad field anywhere in the frontmatter loses every keyword,
+            # so name the file for the author.
+            logger.warning(
+                "Ignoring keywords, invalid frontmatter in %s: %s", lesson_path, e
+            )
+            raw_keywords = []
+        if isinstance(raw_keywords, str):
+            raw_keywords = [raw_keywords]
+        keywords: Set[str] = {
+            k.strip().lower()
+            for k in (raw_keywords if isinstance(raw_keywords, list) else [])
+            if isinstance(k, str) and k.strip()
+        }
 
         # Extract category from path
         category = lesson_path.parent.name
