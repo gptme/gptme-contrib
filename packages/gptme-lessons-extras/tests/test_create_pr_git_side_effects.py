@@ -259,3 +259,32 @@ def test_lesson_directly_under_lessons_uses_default_category(repo, create_pr):
 
     assert create_pr.create_lesson_pr(lesson) is True
     assert git(repo, "branch", "--list", "lesson/workflow-git-careful").strip()
+
+
+def test_failed_checkout_hook_does_not_block_retry(repo, create_pr):
+    hook = repo / ".git" / "hooks" / "post-checkout"
+    hook.write_text('#!/bin/sh\nrm -- "$0"\nexit 1\n')
+    hook.chmod(0o755)
+    lesson = repo / "lessons" / "tools" / "git-careful.md"
+    git(repo, "add", str(lesson))
+    index_before = git(repo, "write-tree")
+
+    assert create_pr.create_lesson_pr(lesson) is False
+    assert git(repo, "branch", "--show-current").strip() == "master"
+    assert git(repo, "branch", "--list", "lesson/*") == ""
+    assert git(repo, "write-tree") == index_before
+    assert lesson.read_text() == LESSON
+    assert create_pr.create_lesson_pr(lesson) is True
+
+
+@pytest.mark.parametrize("fail_push", [False, True])
+def test_intent_to_add_is_preserved(repo, create_pr, fail_push):
+    lesson = repo / "lessons" / "tools" / "git-careful.md"
+    git(repo, "add", "-N", str(lesson))
+    before = git(repo, "diff", "--raw")
+    if fail_push:
+        git(repo, "remote", "set-url", "origin", str(repo.parent / "missing.git"))
+
+    assert create_pr.create_lesson_pr(lesson) is not fail_push
+    assert git(repo, "diff", "--raw") == before
+    assert lesson.read_text() == LESSON

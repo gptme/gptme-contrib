@@ -91,6 +91,7 @@ def _undo_lesson_branch(
     branch_name: str,
     relative_path: Path,
     original_index: str,
+    intent_to_add: bool,
     lesson_commit: str | None = None,
 ) -> None:
     """Return to the original ref, preserving lesson contents and staging.
@@ -106,6 +107,7 @@ def _undo_lesson_branch(
         ["reset", "-q", start_sha, "--", str(relative_path)],
         ["checkout", original_ref],
         ["reset", "-q", original_index, "--", str(relative_path)],
+        *([["add", "-N", "--", str(relative_path)]] if intent_to_add else []),
         ["branch", "-f", branch_name, lesson_commit]
         if lesson_commit
         else ["branch", "-D", branch_name],
@@ -230,14 +232,27 @@ def create_lesson_pr(
             cwd=repo_root,
         ).stdout.strip()
 
-        # Create and checkout branch
-        print(f"📌 Creating branch: {branch_name}")
-        subprocess.run(
-            ["git", "checkout", "-b", branch_name],
-            check=True,
-            cwd=repo_root,
+        # A tree omits intent-to-add entries; preserve that flag separately.
+        intent_to_add = bool(
+            subprocess.check_output(
+                [
+                    "git",
+                    "diff",
+                    "--name-only",
+                    "--diff-filter=A",
+                    "--",
+                    str(relative_path),
+                ],
+                text=True,
+                cwd=repo_root,
+            ).strip()
         )
+
+        # Create separately: checkout hooks may fail after switching branches.
+        print(f"📌 Creating branch: {branch_name}")
+        subprocess.run(["git", "branch", branch_name], check=True, cwd=repo_root)
         branch_created = True
+        subprocess.run(["git", "checkout", branch_name], check=True, cwd=repo_root)
 
         # Add the lesson file
         print(f"➕ Adding file: {relative_path}")
@@ -336,6 +351,7 @@ def create_lesson_pr(
                 branch_name,
                 relative_path,
                 original_index,
+                intent_to_add,
             )
         if pushed:
             print(
@@ -359,6 +375,7 @@ def create_lesson_pr(
         branch_name,
         relative_path,
         original_index,
+        intent_to_add,
         lesson_commit,
     )
 
