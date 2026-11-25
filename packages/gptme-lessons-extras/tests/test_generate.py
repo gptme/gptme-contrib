@@ -5,6 +5,8 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
+
 # Only stub gptme when the real package is absent. Installing a bare
 # types.ModuleType (which has no __path__) unconditionally pollutes sys.modules
 # across multi-package test runs: the stub shadows the real package for all
@@ -266,3 +268,149 @@ def test_generate_lessons_from_analysis_uses_default_lessons_dir(
 
     assert seen["existing_lessons_dir"].resolve() == lessons_dir.resolve()
     assert generated == [output_dir / "patterns" / "generated.md"]
+
+
+def _raise_401(*args, **kwargs):
+    raise RuntimeError("401 invalid x-api-key")
+
+
+def test_generate_cli_exits_nonzero_when_every_generation_errors(
+    monkeypatch, tmp_path: Path
+) -> None:
+    # #2362 E9: an LLM outage was reported as "No lessons generated", exit 0.
+    from click.testing import CliRunner
+
+    analysis_file = tmp_path / "analysis.json"
+    _write_author_analysis(analysis_file, "Use patch tool", "ctx")
+    monkeypatch.setattr(generate, "llm_author_reflect", _raise_401)
+
+    result = CliRunner().invoke(
+        generate.cli,
+        [
+            "generate",
+            str(analysis_file),
+            "-o",
+            str(tmp_path / "out"),
+            "--no-check-existing",
+            "--existing-lessons-dir",
+            str(tmp_path),
+        ],
+    )
+
+    assert "Usage:" not in result.output
+    assert result.exit_code == 1
+    assert "401 invalid x-api-key" in result.output
+
+
+def test_generate_lessons_with_evolution_raises_when_every_generation_errors(
+    monkeypatch, tmp_path: Path
+) -> None:
+    analysis_file = tmp_path / "analysis.json"
+    _write_analysis(analysis_file, "Use patch tool", "ctx")
+    monkeypatch.setattr(generate, "gepa_lite_evolve", _raise_401)
+
+    with pytest.raises(RuntimeError, match="all 1 lesson generation attempt"):
+        generate.generate_lessons_with_evolution(
+            analysis_file=analysis_file,
+            output_dir=tmp_path / "out",
+            check_existing=False,
+        )
+
+
+@pytest.mark.parametrize("evolution", [False, True])
+@pytest.mark.parametrize("outcome", ["duplicate", "low_quality", "saved"])
+def test_generation_error_with_completed_moment_is_not_total_failure(
+    monkeypatch, tmp_path: Path, capsys, evolution: bool, outcome: str
+) -> None:
+    analysis_file = tmp_path / "analysis.json"
+    moments = [
+        {"title": title, "context": "ctx", "confidence": 0.95}
+        for title in ["Completed moment", "Failed moment"]
+    ]
+    analysis_file.write_text(
+        json.dumps(
+            {
+                "conversation_id": "conv-123",
+                "experiences": moments,
+                "metadata": {"experiences": moments},
+            }
+        ),
+        encoding="utf-8",
+    )
+    lessons_dir = tmp_path / "lessons"
+    lessons_dir.mkdir()
+
+    def similarity(**kwargs):
+        if outcome == "duplicate" and kwargs["title"] == "Completed moment":
+            return [
+                {
+                    "title": "Existing lesson",
+                    "similarity": 1.0,
+                    "filepath": lessons_dir / "existing.md",
+                }
+            ]
+        return []
+
+    def reflect(moment, conversation_id):
+        if moment["title"] == "Failed moment":
+            raise RuntimeError("401 invalid x-api-key")
+        return _fake_lesson_markdown(moment, conversation_id)
+
+    def evolve(**kwargs):
+        return (
+            reflect(kwargs["moment"], kwargs["conversation_id"]),
+            {"scores": {"quality": 0.1}},
+            [],
+        )
+
+    monkeypatch.setattr(generate, "_check_existing_lesson_similarity", similarity)
+    monkeypatch.setattr(generate, "llm_author_reflect", reflect)
+    monkeypatch.setattr(generate, "gepa_lite_evolve", evolve)
+    monkeypatch.setattr(
+        generate, "llm_judge_score", lambda *args: {"scores": {"quality": 0.1}}
+    )
+    monkeypatch.setattr(generate, "save_lesson_draft", _fake_save_lesson_draft)
+    function = (
+        generate.generate_lessons_with_evolution
+        if evolution
+        else generate.generate_lessons_from_analysis
+    )
+
+    result = function(
+        analysis_file,
+        tmp_path / "out",
+        existing_lessons_dir=lessons_dir,
+        judge_threshold=0.75 if outcome == "low_quality" else None,
+    )
+
+    assert result == (
+        [tmp_path / "out" / "patterns" / "generated.md"] if outcome == "saved" else []
+    )
+    if not evolution and outcome == "low_quality":
+        assert "Skipped 1 lessons due to low quality scores" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("evolution", [False, True])
+def test_total_generation_failure_preserves_original_cause(
+    monkeypatch, tmp_path: Path, evolution: bool
+) -> None:
+    analysis_file = tmp_path / "analysis.json"
+    writer = _write_analysis if evolution else _write_author_analysis
+    writer(analysis_file, "Use patch tool", "ctx")
+    original = KeyError("scores")
+
+    def fail(*args, **kwargs):
+        raise original
+
+    monkeypatch.setattr(
+        generate, "gepa_lite_evolve" if evolution else "llm_author_reflect", fail
+    )
+    function = (
+        generate.generate_lessons_with_evolution
+        if evolution
+        else generate.generate_lessons_from_analysis
+    )
+    with pytest.raises(RuntimeError, match="all 1 lesson generation attempt") as exc:
+        function(analysis_file, tmp_path / "out", check_existing=False)
+
+    assert exc.value.__cause__ is original
