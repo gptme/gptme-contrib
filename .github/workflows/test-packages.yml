@@ -80,6 +80,7 @@ jobs:
       actions: read
     outputs:
       packages: ${{ steps.discover.outputs.packages }}
+      shards: ${{ steps.shard.outputs.shards }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -173,12 +174,44 @@ jobs:
           echo "packages=$packages" >> $GITHUB_OUTPUT
           echo "Discovered packages: $packages"
 
-  # Test each package in parallel
+      # Bundle the packages into a few shards for the test matrix. A package's
+      # tests take ~0.5 min, while each job pays its own runner provisioning,
+      # checkout and uv/Python setup and holds one of the org's 20 shared
+      # concurrent job slots, so one job per package mostly queued overhead.
+      # Shards: min(5, ceil(n/8)); round-robin over the sorted list so a
+      # package keeps its shard between runs. Timeout: ~1.5 min per package
+      # plus setup, capped at 25.
+      - name: Shard packages
+        id: shard
+        env:
+          ITEMS: ${{ steps.discover.outputs.packages }}
+        run: |
+          python3 - <<'PY'
+          import json, math, os
+          items = sorted(json.loads(os.environ["ITEMS"]))
+          count = min(5, math.ceil(len(items) / 8))
+          shards = []
+          for i in range(count):
+              members = items[i::count]
+              shards.append({
+                  "id": i + 1,
+                  "of": count,
+                  "packages": " ".join(members),
+                  "timeout": min(25, 10 + math.ceil(1.5 * len(members))),
+              })
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f"shards={json.dumps(shards)}\n")
+          for shard in shards:
+              print(f"shard {shard['id']}/{shard['of']}: {shard['packages']}")
+          PY
+
+  # Test the packages in a few shards (see "Shard packages" in discover)
   test:
+    name: test (${{ matrix.python-version }}, shard ${{ matrix.shard.id }}/${{ matrix.shard.of }})
     needs: discover
     if: needs.discover.result == 'success' && needs.discover.outputs.packages != '[]'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: ${{ matrix.shard.timeout }}
     strategy:
       fail-fast: false
       matrix:
@@ -191,7 +224,7 @@ jobs:
         # dispatch keep the full matrix, so 3.12-only breaks surface on
         # master or in the nightly run.
         python-version: ${{ github.event_name == 'pull_request' && fromJSON('["3.11"]') || fromJSON('["3.11", "3.12"]') }}
-        package: ${{ fromJson(needs.discover.outputs.packages) }}
+        shard: ${{ fromJson(needs.discover.outputs.shards) }}
     env:
       CI_EXPECTED_PYTHON: ${{ matrix.python-version }}
       UV_PYTHON_DOWNLOADS: never
@@ -212,14 +245,41 @@ jobs:
         run: |
           uv sync --all-packages --python "${{ steps.python.outputs.python-path }}"
 
-      - name: Run tests for ${{ matrix.package }}
+      - name: Run tests for each package in the shard
         env:
           UV_PYTHON: ${{ steps.python.outputs.python-path }}
+          SHARD_PACKAGES: ${{ matrix.shard.packages }}
         run: |
+          # Same per-package command as the old one-job-per-package matrix.
           # test-package falls back to a generic pytest run for packages
           # without their own Makefile, so a package is never skipped for
-          # lacking a Makefile.
-          make test-package PKG=${{ matrix.package }}
+          # lacking a Makefile. Every package runs even after a failure; the
+          # step fails at the end and names the failed packages.
+          failed=()
+          summary=()
+          for pkg in $SHARD_PACKAGES; do
+            echo "::group::$pkg"
+            start=$SECONDS
+            if make test-package PKG="$pkg"; then
+              result=pass
+            else
+              result=FAIL
+              failed+=("$pkg")
+            fi
+            echo "::endgroup::"
+            summary+=("$(printf '%-32s %-4s %4ss' "$pkg" "$result" "$((SECONDS - start))")")
+          done
+          echo "Shard summary:"
+          printf '  %s\n' "${summary[@]}"
+          {
+            echo '```'
+            printf '%s\n' "${summary[@]}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if (( ${#failed[@]} > 0 )); then
+            echo "::error::Package tests failed: ${failed[*]}"
+            exit 1
+          fi
 
   # A workspace sync can mask missing dependencies with other members' installs.
   rag-lightweight:
@@ -410,7 +470,7 @@ jobs:
 
       - name: Run script tests
         run: |
-          uv run --with pytest --with pyyaml pytest tests/test_check_install_size.py tests/test_ci_python_runtime.py -v
+          uv run --with pytest --with pyyaml pytest tests/test_check_install_size.py tests/test_ci_python_runtime.py tests/test_ci_test_shards.py -v
 
       - name: Run install-size check
         run: |
