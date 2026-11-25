@@ -42,9 +42,6 @@ class IndexEventHandler(FileSystemEventHandler):
         self._update_delay = 1.0  # seconds
         self._lock = Lock()
         self._timers: dict[Path, Timer] = {}
-        # Paths whose already-fired timer must not touch the index (a move
-        # superseded it). Entries are dropped when the path is queued again.
-        self._invalidated: set[Path] = set()
 
     def on_modified(self, event: FileSystemEvent) -> None:
         """Handle file modification events."""
@@ -81,8 +78,10 @@ class IndexEventHandler(FileSystemEventHandler):
         with self._lock:
             for pending in [p for p in self._timers if str(p).startswith(prefix)]:
                 self._timers.pop(pending).cancel()
-                self._invalidated.add(pending)
+            self._remove_directory_sources(directory, prefix)
 
+    def _remove_directory_sources(self, directory: Path, prefix: str) -> None:
+        """Scan and remove sources while serialized with timer callbacks."""
         sources: set[str] = set()
         page_size = 1000
         offset = 0
@@ -124,8 +123,9 @@ class IndexEventHandler(FileSystemEventHandler):
         would not match ``.git`` without walking the ancestors. The walk stops
         at the watch root so a directory above it cannot silence events.
         """
+        path = path.resolve()
         candidates = [path]
-        for parent in path.parents:
+        for parent in () if path in self.watch_roots else path.parents:
             candidates.append(parent)
             if parent in self.watch_roots:
                 break
@@ -144,14 +144,12 @@ class IndexEventHandler(FileSystemEventHandler):
             if self._should_skip_file(path, set()):
                 return
 
-            # Cancel any existing timer for this path; a fresh event also
-            # un-invalidates the path for later timers.
-            self._invalidated.discard(resolved_path)
+            # Cancel any existing timer for this path.
             if resolved_path in self._timers:
                 self._timers[resolved_path].cancel()
 
             # Schedule update after delay (debouncing)
-            timer = Timer(self._update_delay, self._process_update, args=[resolved_path])
+            timer = Timer(self._update_delay, lambda: self._process_update(resolved_path, timer))
             self._timers[resolved_path] = timer
             timer.start()
             logger.debug(f"Queued update for {path} (delay: {self._update_delay}s)")
@@ -161,28 +159,25 @@ class IndexEventHandler(FileSystemEventHandler):
         resolved_path = path.resolve()
 
         with self._lock:
-            self._invalidated.discard(resolved_path)
             # Cancel any pending update timer for this path
             if resolved_path in self._timers:
                 self._timers[resolved_path].cancel()
 
             # Schedule deletion after delay (debouncing)
-            timer = Timer(self._update_delay, self._process_deletion, args=[resolved_path])
+            timer = Timer(self._update_delay, lambda: self._process_deletion(resolved_path, timer))
             self._timers[resolved_path] = timer
             timer.start()
             logger.debug(f"Queued deletion for {path} (delay: {self._update_delay}s)")
 
-    def _process_deletion(self, path: Path) -> None:
-        """Process a queued file deletion."""
+    def _process_deletion(self, path: Path, timer: Timer | None = None) -> None:
+        """Process a deletion only if this exact timer is still current."""
         canonical_path = str(path)
-        # The delete runs under the lock: a move that supersedes this timer
-        # invalidates the path and replaces the destination under the same
-        # lock, so the two critical sections cannot interleave.
+        # Keep validation and mutation atomic with moves and new events.
         with self._lock:
-            self._timers.pop(path, None)
-            if path in self._invalidated:
+            if timer is not None and self._timers.get(path) is not timer:
                 logger.debug(f"Skipping superseded deletion for {path}")
                 return
+            self._timers.pop(path, None)
             logger.info(f"Removing deleted file from index: {canonical_path}")
             try:
                 self.indexer.delete_documents({"source": canonical_path})
@@ -191,15 +186,17 @@ class IndexEventHandler(FileSystemEventHandler):
             except Exception as e:
                 logger.error(f"Error removing {canonical_path} from index: {e}", exc_info=True)
 
-    def _process_update(self, path: Path) -> None:
-        """Process a queued file update."""
+    def _process_update(self, path: Path, timer: Timer | None = None) -> None:
+        """Process an update only if this exact timer is still current."""
         with self._lock:
-            # Remove timer reference
-            self._timers.pop(path, None)
-            if path in self._invalidated:
+            if timer is not None and self._timers.get(path) is not timer:
                 logger.debug(f"Skipping superseded update for {path}")
                 return
+            self._timers.pop(path, None)
+            self._update_file(path)
 
+    def _update_file(self, path: Path) -> None:
+        """Update the index while serialized with moves and deletions."""
         logger.debug(f"Processing update for {path}")
 
         try:
@@ -241,7 +238,12 @@ class IndexEventHandler(FileSystemEventHandler):
             logger.error(f"Error updating {path}: {e}", exc_info=True)
 
     def on_moved(self, event: FileSystemEvent) -> None:
-        """Handle file move events."""
+        """Serialize file moves with callbacks that may already have fired."""
+        with self._lock:
+            self._process_move(event)
+
+    def _process_move(self, event: FileSystemEvent) -> None:
+        """Replace source and destination while holding the mutation lock."""
         if not event.is_directory:
             src_str = str(event.src_path)
             dest_str = str(event.dest_path)
@@ -249,10 +251,8 @@ class IndexEventHandler(FileSystemEventHandler):
             src_path = Path(src_str).resolve()
             dest_path = Path(dest_str).resolve()
 
-            # A timer that already fired for src must not re-index it.
-            with self._lock:
-                self._invalidated.add(src_path)
-                pending_src = self._timers.pop(src_path, None)
+            # Removing the registration also supersedes an already-fired timer.
+            pending_src = self._timers.pop(src_path, None)
             if pending_src is not None:
                 pending_src.cancel()
 
@@ -272,14 +272,10 @@ class IndexEventHandler(FileSystemEventHandler):
             if self._should_process(dest_str):
                 logger.info(f"Indexing moved file at new location: {dest_path}")
 
-                # A pending timer for dest (e.g. `rm b; mv a b` inside the
-                # debounce window) would act on the file it replaced; the move
-                # supersedes it. Invalidating also covers a timer that has
-                # already fired but has not reached its critical section yet:
-                # _process_* re-check the marker under this same lock.
-                with self._lock:
-                    self._invalidated.add(dest_path)
-                    pending = self._timers.pop(dest_path, None)
+                # A pending or already-fired timer belongs to the old dest.
+                # Callbacks check their own identity, not a path tombstone,
+                # so later events cannot accidentally re-enable an old timer.
+                pending = self._timers.pop(dest_path, None)
                 if pending is not None:
                     pending.cancel()
 

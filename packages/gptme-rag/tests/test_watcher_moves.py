@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
-from watchdog.events import DirDeletedEvent, FileDeletedEvent, FileMovedEvent
+from watchdog.events import DirDeletedEvent, FileDeletedEvent, FileModifiedEvent, FileMovedEvent
 
 from gptme_rag.indexing.watcher import IndexEventHandler
 
@@ -194,14 +194,13 @@ def test_already_fired_deletion_cannot_remove_moved_file(tmp_path):
     b.unlink()
     handler.on_deleted(FileDeletedEvent(str(b)))
     os.replace(a, b)
-    # Simulate the timer having fired already: it has removed itself from
-    # _timers and is waiting to run _process_deletion.
-    with handler._lock:
-        fired = handler._timers.pop(b)
+    # Cancellation cannot stop a callback that already started. Save its
+    # actual invocation so it can resume after the move's critical section.
+    fired = handler._timers[b]
     fired.cancel()
     handler.on_moved(FileMovedEvent(str(a), str(b)))
 
-    handler._process_deletion(b)  # the late, already-fired timer body
+    fired.function(*fired.args, **fired.kwargs)
 
     assert str(b) in indexer.sources, "stale deletion removed the moved-in file"
     assert str(a) not in indexer.sources
@@ -227,3 +226,147 @@ def test_deletion_after_move_is_still_honoured(tmp_path):
     time.sleep(0.3)
 
     assert str(b) not in indexer.sources
+
+
+def test_old_deletion_stays_superseded_after_fresh_update(tmp_path):
+    """A fresh modification must not re-enable a deletion from before a move."""
+    a = (tmp_path / "a.md").resolve()
+    b = (tmp_path / "b.md").resolve()
+    a.write_text("A")
+    b.write_text("B")
+    indexer = _SourceTrackingIndexer(tmp_path / "index")
+    indexer.sources = {str(a), str(b)}
+    handler = IndexEventHandler(indexer)
+    handler._update_delay = 60
+    try:
+        b.unlink()
+        handler.on_deleted(FileDeletedEvent(str(b)))
+        old = handler._timers[b]
+        old.cancel()
+        os.replace(a, b)
+        handler.on_moved(FileMovedEvent(str(a), str(b)))
+        handler.on_modified(FileModifiedEvent(str(b)))
+        fresh = handler._timers[b]
+        fresh.cancel()
+
+        # The obsolete callback must neither delete the replacement nor pop
+        # the fresh timer's registration, even if it runs before that timer.
+        old.function(*old.args, **old.kwargs)
+        assert str(b) in indexer.sources, "old deletion removed the replacement"
+        assert handler._timers[b] is fresh
+        fresh.function(*fresh.args, **fresh.kwargs)
+        old.function(*old.args, **old.kwargs)
+        assert indexer.sources == {str(b)}
+        assert not handler._timers
+    finally:
+        handler.cancel_pending_updates()
+
+
+def test_directory_delete_through_symlink_stops_at_watch_root(tmp_path):
+    """Resolved roots must bound raw watchdog paths, even below ignored ancestors."""
+    real_root = tmp_path / "real" / "project"
+    real_root.mkdir(parents=True)
+    alias = tmp_path / "node_modules"
+    alias.symlink_to(real_root, target_is_directory=True)
+    indexer = _SourceTrackingIndexer(tmp_path / "index")
+    indexer.collection = _CountingCollection()
+    handler = IndexEventHandler(indexer, watch_roots=[str(alias)], ignore_patterns=["node_modules"])
+
+    handler.on_deleted(DirDeletedEvent(str(alias / "removed")))
+    assert indexer.collection.gets == 1, "ancestor above the watch root silenced deletion"
+    handler.on_deleted(DirDeletedEvent(str(alias / "node_modules" / "pkg")))
+    assert indexer.collection.gets == 1, "ignored directory inside the root was scanned"
+
+
+def test_atomic_saves_do_not_retain_unique_temp_paths(tmp_path):
+    """Finished moves must not accumulate path tombstones for unique temp files."""
+    indexer = _SourceTrackingIndexer(tmp_path / "index")
+    handler = IndexEventHandler(indexer, pattern="**/*.md")
+    target = tmp_path / "notes.md"
+    for i in range(30):
+        temp = tmp_path / f"notes.md.tmp.{i}"
+        temp.write_text(f"save {i}")
+        os.replace(temp, target)
+        handler.on_moved(FileMovedEvent(str(temp), str(target)))
+
+    assert indexer.sources == {str(target)}
+    assert not handler._timers
+    assert not getattr(handler, "_invalidated", set()), "unique save paths retained forever"
+
+
+def test_move_waits_for_update_that_already_started_indexing(tmp_path):
+    """An in-flight update must finish before a move removes its source."""
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    a = (tmp_path / "a.md").resolve()
+    b = (tmp_path / "b.md").resolve()
+    a.write_text("A")
+    indexer = _SourceTrackingIndexer(tmp_path / "index")
+    entered = Event()
+    release = Event()
+    moving = Event()
+    moved = Event()
+    original_index_file = indexer.index_file
+
+    def blocking_index_file(path):
+        if path == a:
+            entered.set()
+            assert release.wait(5), "test did not release the in-flight update"
+        return original_index_file(path)
+
+    indexer.index_file = blocking_index_file
+    handler = IndexEventHandler(indexer)
+    handler._update_delay = 60
+    handler.on_modified(FileModifiedEvent(str(a)))
+    timer = handler._timers[a]
+    timer.cancel()
+
+    def move():
+        moving.set()
+        handler.on_moved(FileMovedEvent(str(a), str(b)))
+        moved.set()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        update = pool.submit(timer.function, *timer.args, **timer.kwargs)
+        try:
+            assert entered.wait(5)
+            os.replace(a, b)
+            movement = pool.submit(move)
+            assert moving.wait(5)
+            assert not moved.wait(0.1), "move interleaved with an active index mutation"
+        finally:
+            release.set()
+        update.result(timeout=5)
+        movement.result(timeout=5)
+
+    assert indexer.sources == {str(b)}, "an old update reintroduced the moved-away source"
+    assert not handler._timers
+
+
+def test_old_update_cannot_consume_new_timer_after_move(tmp_path):
+    """The identity check applies to stale updates as well as stale deletes."""
+    a = (tmp_path / "a.md").resolve()
+    b = (tmp_path / "b.md").resolve()
+    a.write_text("A")
+    b.write_text("B")
+    indexer = _SourceTrackingIndexer(tmp_path / "index")
+    handler = IndexEventHandler(indexer)
+    handler._update_delay = 60
+    try:
+        handler.on_modified(FileModifiedEvent(str(b)))
+        old = handler._timers[b]
+        old.cancel()
+        os.replace(a, b)
+        handler.on_moved(FileMovedEvent(str(a), str(b)))
+        handler.on_modified(FileModifiedEvent(str(b)))
+        fresh = handler._timers[b]
+        fresh.cancel()
+        old.function(*old.args, **old.kwargs)
+        assert handler._timers[b] is fresh, "obsolete update consumed the fresh timer"
+        handler.cancel_pending_updates()
+        fresh.function(*fresh.args, **fresh.kwargs)
+        assert not handler._timers
+        assert indexer.sources == {str(b)}
+    finally:
+        handler.cancel_pending_updates()
