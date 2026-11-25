@@ -89,6 +89,29 @@ def _mentions_http_429(error_text: str) -> bool:
     return _HTTP_429_RE.search(error_text) is not None
 
 
+# HTTP/API 401/403 as a status, not an incidental digit run. The bare
+# ``"401" in error_text`` test fired on `gh issue view 1403`, a count like
+# 14030, or a model id with a 20240401 date — any of which turned an unrelated
+# failure (e.g. an empty provider stream) into a credential failure.
+_HTTP_AUTH_RE = re.compile(
+    r"(?:"
+    r"error\s*code\s*[:=]\s*40[13]\b"
+    r"|status(?:\s*code)?\s*[:=]\s*40[13]\b"
+    r"|api_error_status\s*[:=]\s*40[13]\b"
+    r"|http(?:/\d+\.\d+)?\s+(?:error:\s*)?40[13]\b"
+    r"|\b40[13]\s+(?:unauthorized|forbidden)\b"
+    r"|\berror:\s*40[13]\b"
+    r"|[\"']?http_status[\"']?\s*:\s*40[13]\b"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _mentions_http_auth(error_text: str) -> bool:
+    """True for an HTTP/API 401/403, not an incidental number in the tail."""
+    return _HTTP_AUTH_RE.search(error_text) is not None
+
+
 def _mentions_http_402(error_text: str) -> bool:
     """True for an HTTP/API 402 payment failure."""
     return _HTTP_402_RE.search(error_text) is not None
@@ -438,12 +461,7 @@ def classify_failure_reason(
             return FAILURE_REASON_UPSTREAM_OVERLOADED
         if _RATE_LIMIT_PHRASE_RE.search(lower):
             return FAILURE_REASON_RATE_LIMIT
-        if (
-            "authentication" in lower
-            or "unauthorized" in lower
-            or "401" in error_text
-            or "403" in error_text
-        ):
+        if "authentication" in lower or "unauthorized" in lower or _mentions_http_auth(error_text):
             return FAILURE_REASON_AUTH
     # has_assistant_turn is definitive: if the trajectory has a response, model ran.
     # input_tokens==0 alone can't override it — token accounting can be missing on CC.
