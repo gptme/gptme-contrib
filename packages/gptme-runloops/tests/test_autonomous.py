@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 import pytest
 from gptme_runloops.autonomous import (
+    CASCADE_EMPTY_FIELD,
     AutonomousRun,
     is_capable_backend,
     parse_cascade_intent,
@@ -233,14 +234,20 @@ def test_autonomous_timeout():
 # --- parse_cascade_selector_output ---
 
 
-def _parse(data: dict) -> list:  # type: ignore[type-arg]
-    """Parse output string back into a list of 7 tokens."""
+def _parse_raw(data: dict) -> list:  # type: ignore[type-arg]
+    """Split the wire line into its 7 raw tokens, sentinel included."""
     raw = parse_cascade_selector_output(data)
-    # Split on first 6 spaces (intent_json is the 7th token and may have no spaces
-    # since it uses compact separators, but guard by splitting on max 6)
+    # Split on first 6 spaces (intent_json is the 7th token and may contain
+    # spaces inside JSON strings, so split on max 6)
     parts = raw.split(" ", 6)
     assert len(parts) == 7, f"Expected 7 tokens, got {len(parts)}: {raw!r}"
     return parts
+
+
+def _parse(data: dict) -> list:  # type: ignore[type-arg]
+    """Parse the wire line into 7 fields, decoding the empty-field sentinel."""
+    parts = _parse_raw(data)
+    return ["" if part == CASCADE_EMPTY_FIELD else part for part in parts]
 
 
 def test_parse_cascade_standard_task():
@@ -263,7 +270,7 @@ def test_parse_cascade_standard_task():
     assert cat == "code"
     assert exec_cat == "code"
     assert all_blocked == "false"
-    assert sel_mode == "-"  # empty sentinel
+    assert sel_mode == ""  # decoded from the empty-field sentinel
     intent = json.loads(intent_json)
     assert intent["task_id"] == "my-task"
     assert intent["task_state"] == "backlog"
@@ -429,9 +436,88 @@ def test_parse_cascade_minimal_empty_selected():
     assert cat == ""
     assert exec_cat == ""
     assert all_blocked == "false"  # tier 3 but blocked_tasks is empty
-    assert sel_mode == "-"
+    assert sel_mode == ""  # decoded from the wire sentinel
     intent = json.loads(intent_json)
     assert intent["reasons"] == []
+    assert intent["tier"] == 3
+
+    # The wire still carries a non-whitespace token per position, or bash
+    # `read` would shift the remaining fields left (gptme/gptme-contrib#2506).
+    raw = _parse_raw(data)
+    assert raw[1] == CASCADE_EMPTY_FIELD
+    assert raw[2] == CASCADE_EMPTY_FIELD
+    assert raw[3] == CASCADE_EMPTY_FIELD
+    assert raw[5] == CASCADE_EMPTY_FIELD
+    assert raw[0] == "standard"
+    assert raw[4] == "false"
+
+
+def test_parse_cascade_no_empty_wire_tokens():
+    """Every emitted token must be non-empty so bash `read` keeps positions."""
+    for data in (
+        {"tier": 3, "blocked_tasks": [{}], "selected": {}, "selector_mode": ""},
+        {
+            "tier": 3,
+            "blocked_tasks": [{}],
+            "selected": {"id": "", "category": "strategic"},
+            "selector_mode": "synthetic_calibration",
+        },
+        {
+            "tier": 1,
+            "recommended_scope": "",
+            "selector_mode": "",
+            "blocked_tasks": [],
+            "selected": {"id": "t", "category": "", "state": "todo"},
+        },
+    ):
+        raw = _parse_raw(data)
+        assert all(token.strip() for token in raw), raw
+
+
+def test_bash_read_contract_preserves_empty_fields():
+    """The documented bash consumer must not see shifted routing fields.
+
+    Reproduces gptme/gptme-contrib#2506: a space-joined line with an empty
+    selected id made ``read -r`` collapse the run and put the category into
+    CASCADE_SELECTED_ID, the blocked flag into the execution category, and so
+    on. The consumer (autonomous-run.sh) decodes the sentinel back to empty;
+    this test exercises the real wire line through real bash.
+    """
+    data = {
+        "tier": 3,
+        "blocked_tasks": [{}],
+        "selected": {"id": "", "category": "strategic"},
+        "selector_mode": "synthetic_calibration",
+    }
+    line = parse_cascade_selector_output(data)
+    script = """
+set -euo pipefail
+sentinel="-"
+read -r scope selected category execution blocked mode intent
+for _name in scope selected category execution blocked mode intent; do
+    if [ "${!_name}" = "$sentinel" ]; then printf -v "$_name" '%s' ""; fi
+done
+printf '[%s][%s][%s][%s][%s][%s]\\n' "$scope" "$selected" "$category" "$execution" "$blocked" "$mode"
+printf '%s' "$intent"
+"""
+    result = subprocess.run(
+        ["bash", "-c", script],
+        input=line + "\n",
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    fields, intent_json = result.stdout.split("\n", 1)
+    parts = fields.strip().strip("[]").split("][")
+    assert parts == [
+        "standard",  # scope
+        "",  # selected id stays empty, not the category
+        "strategic",
+        "strategic",
+        "true",
+        "synthetic_calibration",
+    ]
+    intent = json.loads(intent_json)
     assert intent["tier"] == 3
 
 

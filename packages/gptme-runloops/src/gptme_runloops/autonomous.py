@@ -43,17 +43,33 @@ def self_review_cooldown_active(state_path: Path, cooldown_hours: float = 6.0) -
     return self_review_hours_since_last(state_path) < cooldown_hours
 
 
+# Sentinel for a routing field that is empty. bash ``read`` with the default IFS
+# collapses runs of whitespace, so an empty middle token is not merely empty: it
+# silently shifts every later field left (gptme/gptme-contrib#2506). A
+# non-whitespace sentinel keeps the field positions stable; the consumer maps it
+# back to an empty string. ``selector_mode`` has used this convention since the
+# seven-field contract was introduced.
+CASCADE_EMPTY_FIELD = "-"
+
+
 def parse_cascade_selector_output(data: dict) -> str:
     """Parse cascade-selector JSON output into space-separated shell fields.
 
     Extracts 7 space-separated tokens for bash ``read -r`` consumption:
     ``scope selected_id category execution_category all_blocked selector_mode intent_json``
 
+    Empty routing fields are emitted as :data:`CASCADE_EMPTY_FIELD` (``-``) so
+    that bash ``read`` — whose default IFS collapses whitespace runs — cannot
+    shift later fields left. The consumer must map the sentinel back to an empty
+    string for every field except ``all_blocked`` and ``intent_json``, which are
+    never empty.
+
     This is the shared implementation used by Bob's production
     ``scripts/runs/autonomous/autonomous-run.sh`` caller. That caller lives in
     the agent workspace (not this reusable package repository) and invokes the
     ``parse-cascade-json`` module command below. Keep the shell integration
-    contract covered by ``test_bob_runtime_invokes_parse_cascade_cli``.
+    contract covered by ``test_bob_runtime_invokes_parse_cascade_cli`` and
+    ``test_bash_read_contract_preserves_empty_fields``.
     """
     tier = data.get("tier", 0)
     blocked = len(data.get("blocked_tasks", []))
@@ -135,14 +151,18 @@ def parse_cascade_selector_output(data: dict) -> str:
         if value not in (None, ""):
             intent[key] = value
 
-    scope = data.get("recommended_scope", "standard")
-    selected_id = sel.get("id", "")
-    category = sel.get("category", "")
-    execution_category_out = execution_category or category
-    selector_mode_out = data.get("selector_mode", "") or "-"
+    # Empty fields become the sentinel: a bare empty token is indistinguishable
+    # from a whitespace run to bash `read`, which would shift every later field.
+    scope_out = data.get("recommended_scope", "standard") or CASCADE_EMPTY_FIELD
+    selected_id = sel.get("id", "") or CASCADE_EMPTY_FIELD
+    category = sel.get("category", "") or CASCADE_EMPTY_FIELD
+    execution_category_out = (
+        execution_category or sel.get("category", "") or CASCADE_EMPTY_FIELD
+    )
+    selector_mode_out = data.get("selector_mode", "") or CASCADE_EMPTY_FIELD
     intent_json = json.dumps(intent, separators=(",", ":"))
 
-    return f"{scope} {selected_id} {category} {execution_category_out} {all_blocked} {selector_mode_out} {intent_json}"
+    return f"{scope_out} {selected_id} {category} {execution_category_out} {all_blocked} {selector_mode_out} {intent_json}"
 
 
 def parse_cascade_intent(data: dict) -> dict[str, str]:
