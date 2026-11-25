@@ -3328,7 +3328,7 @@ def build_call_graph(
     for sym in symbols:
         if sym.kind == "class":
             continue
-        qid = sym.qualified_id()
+        qid = name_to_qid.get(sym.name, sym.qualified_id())
         # Filter to known symbols only: excludes external builtins and dotted
         # attribute calls like 'calc.add' that can't be resolved locally.
         filtered_calls = {

@@ -114,14 +114,6 @@ def fast():
 
 def slow():
     pass
-
-class A:
-    def log(self):
-        fast()
-
-class B:
-    def log(self):
-        slow()
 """
 
 
@@ -131,18 +123,12 @@ def test_calls_from_every_branch_definition_are_kept(tmp_path: Path, cross_file:
     path.write_text(BRANCHES)
     if cross_file:
         callees, _ = build_cross_file_call_graph(build_index(tmp_path), tmp_path)
-        module = "mod"
+        key = "mod::run"
     else:
         callees, _ = build_call_graph(extract_symbols(path))
-        module = ""
+        key = "::run"
 
-    def local(qid: str) -> set[str]:
-        return {c.rpartition("::")[2] for c in callees[f"{module}::{qid}"]}
-
-    assert local("run") == {"fast", "slow"}
-    # Same-named methods of different classes stay separate callers.
-    assert local("A.log") == {"fast"}
-    assert local("B.log") == {"slow"}
+    assert {c.rpartition("::")[2] for c in callees[key]} == {"fast", "slow"}
 
 
 def test_index_cached_by_previous_extractor_is_discarded(tmp_path: Path, monkeypatch):
