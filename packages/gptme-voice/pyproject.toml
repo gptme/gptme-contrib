@@ -15,6 +15,11 @@ dependencies = [
     "gptme",
     "gptme-body-protocol",
     "httpx>=0.27",
+    # rag.py imports gptme_rag and relies on its lexical ranker for content
+    # matching. Without the `lexical` extra the ranker raises
+    # LexicalDependencyMissing on every query and workspace_search silently
+    # degrades to a newest-first slice of recent journals.
+    "gptme-rag[lexical]>=0.5.1",
 ]
 
 [project.optional-dependencies]
