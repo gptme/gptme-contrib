@@ -36,6 +36,23 @@ The reusable workflow fetches its own resolver scripts from gptme-contrib at
 runtime (into `$RUNNER_TEMP`, outside your workspace), so your repo stays
 clean.
 
+## Provider credential
+
+For direct `issues` / `issue_comment` triggers in gptme-contrib, store a provider
+key as the repository secret `GPTME_RESOLVER_PROVIDER_KEY`. Repository secret
+names cannot contain hyphens; `gptme-provider-key` is the reusable-workflow
+parameter, not a name to create in repository settings.
+
+Reusable callers keep passing `secrets.gptme-provider-key` as shown above. That
+explicit mapping takes precedence over `GPTME_RESOLVER_PROVIDER_KEY` if both
+are available. An empty mapping falls back to the stored name. If neither
+has a value, the job fails with a configuration
+error before checkout or installing gptme, without starting an agent run.
+
+Use a dedicated provider credential with its own budget and a data policy
+appropriate for the issue and repository context. Do not reuse a key whose
+exhaustion would interrupt other working traffic.
+
 ## Design invariants (Phase 1)
 
 - **Opt-in only.** The workflow's `if:` gate only fires on an explicit
