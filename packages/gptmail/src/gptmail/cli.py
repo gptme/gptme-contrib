@@ -8,7 +8,6 @@
 # ///
 """CLI interface for the email system."""
 
-import functools
 import os
 import subprocess
 import sys
@@ -93,18 +92,12 @@ def edit_content() -> str:
         return Path(tf.name).read_text()
 
 
-def _value_errors_as_cli_errors(func):
-    """Report the library's ValueErrors (unknown id, already sent, refused
-    recipient) as CLI errors instead of tracebacks."""
-
-    @functools.wraps(func)
-    def wrapper(*args, **kwargs):
-        try:
-            return func(*args, **kwargs)
-        except ValueError as exc:
-            raise click.ClickException(str(exc)) from exc
-
-    return wrapper
+def _value_errors_as_cli_errors(func, *args, **kwargs):
+    """Report a library operation's validation errors without a traceback."""
+    try:
+        return func(*args, **kwargs)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 @click.group()
@@ -230,12 +223,11 @@ def compose(
     is_flag=True,
     help="Send a reply even if the original is already marked replied/no-reply-needed.",
 )
-@_value_errors_as_cli_errors
 def send(message_id: str, force: bool) -> None:
     """Send draft email."""
     workspace_dir = get_workspace_dir()
     email = AgentEmail(workspace_dir)
-    email.send(message_id, force=force)
+    _value_errors_as_cli_errors(email.send, message_id, force=force)
 
 
 @cli.command(name="list")
@@ -314,7 +306,6 @@ def read(message_id: str, thread: bool = False, thread_only: bool = False) -> No
     "from_address",
     help="Custom sender address (uses AGENT_EMAIL env var if not specified)",
 )
-@_value_errors_as_cli_errors
 def reply(message_id: str, content: str | None = None, from_address: str | None = None) -> None:
     """Reply to message.
 
@@ -325,7 +316,7 @@ def reply(message_id: str, content: str | None = None, from_address: str | None 
     email = AgentEmail(workspace_dir)
 
     # Get original message details
-    original = email.read_message(message_id)
+    original = _value_errors_as_cli_errors(email.read_message, message_id)
 
     # Parse headers from original message
     headers = {}
@@ -413,7 +404,8 @@ def reply(message_id: str, content: str | None = None, from_address: str | None 
     full_content = content + quoted_original
 
     # Create reply draft with proper threading
-    reply_id = email.compose(
+    reply_id = _value_errors_as_cli_errors(
+        email.compose,
         to=to,
         subject=subject,
         content=full_content,

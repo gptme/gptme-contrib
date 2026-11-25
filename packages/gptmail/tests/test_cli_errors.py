@@ -40,3 +40,36 @@ def test_value_error_is_a_clean_cli_error(
     assert result.exit_code == 1
     assert message in result.output
     assert isinstance(result.exception, SystemExit)
+
+
+@pytest.mark.parametrize("command", ["send", "reply"])
+def test_initialization_value_error_is_not_hidden(monkeypatch, tmp_path, command):
+    def broken_email(*_args, **_kwargs):
+        raise ValueError("broken initialization")
+
+    monkeypatch.setattr(cli_module, "get_workspace_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli_module, "AgentEmail", broken_email)
+    result = CliRunner().invoke(cli, [command, "<id@local>"])
+
+    assert isinstance(result.exception, ValueError)
+    assert "Error:" not in result.output
+
+
+def test_editor_value_error_is_not_hidden(monkeypatch, tmp_path):
+    class FakeEmail:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def read_message(self, _message_id):
+            return "From: sender@local\nSubject: hello\n\nbody"
+
+    def broken_editor():
+        raise ValueError("broken editor")
+
+    monkeypatch.setattr(cli_module, "get_workspace_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli_module, "AgentEmail", FakeEmail)
+    monkeypatch.setattr(cli_module, "edit_content", broken_editor)
+    result = CliRunner().invoke(cli, ["reply", "<id@local>"])
+
+    assert isinstance(result.exception, ValueError)
+    assert "Error:" not in result.output
