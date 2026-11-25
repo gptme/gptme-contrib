@@ -1441,3 +1441,49 @@ def test_search_paths_filter_applies_before_top_k(indexer, tmp_path):
     results, _, _ = indexer.search("pelican pelican pelican beak", n_results=1, paths=[inside])
 
     assert [Path(r.metadata["source"]).name for r in results] == ["notes.txt"]
+
+
+@pytest.mark.parametrize("filter_kind", ["paths", "path_filters", "both"])
+@pytest.mark.parametrize("where_kind", ["category", "source", "compound"])
+def test_search_path_filters_preserve_where(tmp_path, filter_kind, where_kind):
+    """Path restrictions intersect caller metadata predicates without mutating them."""
+    from copy import deepcopy
+
+    indexer = Indexer(
+        persist_directory=tmp_path / "index",
+        collection_name="where-intersection",
+        enable_persist=True,
+    )
+    inside = tmp_path / "inside"
+    wanted = inside / "wanted.txt"
+    other = inside / "other.txt"
+    outside = tmp_path / "outside.txt"
+    indexer.add_documents(
+        [
+            Document(
+                content="pelican habitat",
+                metadata={"source": str(path), "category": category},
+                doc_id=str(i),
+            )
+            for i, (path, category) in enumerate(
+                [(wanted, "birds"), (other, "other"), (outside, "birds")]
+            )
+        ]
+    )
+    clauses = {
+        "category": {"category": "birds"},
+        "source": {"source": str(wanted)},
+        "compound": {"$or": [{"source": str(wanted)}, {"source": str(outside)}]},
+    }
+    where = clauses[where_kind]
+    original = deepcopy(where)
+
+    results, _, _ = indexer.search(
+        "pelican",
+        paths=[inside] if filter_kind in ("paths", "both") else None,
+        path_filters=(str(inside / "*.txt"),) if filter_kind in ("path_filters", "both") else None,
+        where=where,
+    )
+
+    assert [r.metadata["source"] for r in results] == [str(wanted)]
+    assert where == original

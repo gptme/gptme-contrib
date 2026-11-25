@@ -1310,7 +1310,10 @@ class Indexer:
 
             if matching_sources:
                 logger.debug(f"Found {len(matching_sources)} matching files")
-                search_where["source"] = {"$in": list(matching_sources)}
+                source_clause = {"source": {"$in": list(matching_sources)}}
+                search_where = (
+                    {"$and": [search_where, source_clause]} if search_where else source_clause
+                )
             else:
                 logger.debug("No files matched the filter patterns")
                 return [], [], [] if explain else None
