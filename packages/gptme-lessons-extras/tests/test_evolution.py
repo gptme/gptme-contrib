@@ -401,22 +401,28 @@ def test_failed_write_keeps_previous_file(tmp_path, monkeypatch, target):
     assert sorted((tmp_path / "hist").rglob("*")) == files_before  # no temp file
 
 
-def test_rewrite_keeps_file_mode(tmp_path):
-    # A temp file is created 0600; the rename must not carry that to the history,
-    # which other agents sharing the directory need to read.
+@pytest.mark.parametrize(("umask", "new_mode"), [(0o077, 0o600), (0o002, 0o664)])
+def test_file_mode_follows_umask_then_survives_rewrite(tmp_path, umask, new_mode):
+    # New files get the umask default, as a plain open() would. A rewrite keeps
+    # the mode the file has: the temp file's 0600 must not replace it.
     from gptme_lessons_extras.evolution import EvolutionTracker
 
-    t = EvolutionTracker(history_dir=tmp_path / "hist")
-    t.initialize_lesson("bob-tools-git", "bob", "v1 body")
-    t.suggest_refinement("bob-tools-git", "alice", "clarity", "first")
-    paths = [
-        tmp_path / "hist" / "bob-tools-git.json",
-        tmp_path / "hist" / "refinements" / "bob-tools-git.json",
-    ]
-    assert [stat.S_IMODE(p.stat().st_mode) for p in paths] == [0o644, 0o644]
+    previous = os.umask(umask)
+    try:
+        t = EvolutionTracker(history_dir=tmp_path / "hist")
+        t.initialize_lesson("bob-tools-git", "bob", "v1 body")
+        t.suggest_refinement("bob-tools-git", "alice", "clarity", "first")
+        paths = [
+            tmp_path / "hist" / "bob-tools-git.json",
+            tmp_path / "hist" / "refinements" / "bob-tools-git.json",
+        ]
+        assert [stat.S_IMODE(p.stat().st_mode) for p in paths] == [new_mode] * 2
 
-    for p in paths:
-        p.chmod(0o664)
-    t.track_change("bob-tools-git", "alice", "tighten rule", "v2 body")
-    t.update_refinement_status("bob-tools-git", 0, "accepted")
-    assert [stat.S_IMODE(p.stat().st_mode) for p in paths] == [0o664, 0o664]
+        for p in paths:
+            p.chmod(0o640)
+        t.track_change("bob-tools-git", "alice", "tighten rule", "v2 body")
+        t.update_refinement_status("bob-tools-git", 0, "accepted")
+        assert [stat.S_IMODE(p.stat().st_mode) for p in paths] == [0o640] * 2
+        assert os.umask(umask) == umask  # the writer restored the process umask
+    finally:
+        os.umask(previous)

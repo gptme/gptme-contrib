@@ -11,6 +11,7 @@ Tracks:
 """
 
 import json
+import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -349,9 +350,16 @@ class EvolutionTracker:
 
 def _write_json_atomic(path: Path, data: object) -> None:
     """Write JSON via a temp file and rename, so a failed write (disk full,
-    crash) leaves the previous file intact instead of truncated JSON."""
+    crash) leaves the previous file intact instead of truncated JSON.
+
+    An existing file keeps its mode; a new one gets the umask default.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    safe_write(path, json.dumps(data, indent=2))
+    # The umask can only be read by setting it. 0o077 is the restrictive choice
+    # for the instant it is in effect.
+    umask = os.umask(0o077)
+    os.umask(umask)
+    safe_write(path, json.dumps(data, indent=2), mode=0o666 & ~umask)
 
 
 def main():
