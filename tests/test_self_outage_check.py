@@ -1200,3 +1200,102 @@ def test_access_key_structured_value_replaced_outright(
     for leaked in ("alpha", "beta"):
         assert leaked not in sample
         assert leaked not in body
+
+
+def test_reopen_client_error_but_issue_is_open_does_not_duplicate(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    # A timeout kills `gh`, not the request it already sent: the reopen can land
+    # (with the details) while rc=1 comes back. Re-querying before the fallback
+    # create is what keeps one continuous outage on one thread (#97/#98).
+    calls: list[list[str]] = []
+    closed_at = (NOW - timedelta(hours=5)).isoformat()
+    state = {"reopened": False}
+
+    def fake_gh(args: list[str]):
+        calls.append(args)
+
+        class R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        if args[:2] == ["issue", "list"]:
+            if "closed" in args:
+                R.stdout = json.dumps(
+                    [
+                        {
+                            "number": 97,
+                            "title": cfg_for(tmp_path).issue_title,
+                            "closedAt": closed_at,
+                        }
+                    ]
+                )
+            elif state["reopened"]:
+                R.stdout = json.dumps(
+                    [{"number": 97, "title": cfg_for(tmp_path).issue_title}]
+                )
+            else:
+                R.stdout = "[]"
+        elif args[:2] == ["issue", "reopen"]:
+            # Server-side success, client-side timeout.
+            state["reopened"] = True
+            R.returncode = 1
+            R.stderr = "Command 'gh' timed out after 30 seconds"
+        return R()
+
+    monkeypatch.setattr(soc, "_gh", fake_gh)
+    monkeypatch.setattr(soc, "_supplementary_notify", lambda cfg, status: None)
+    cfg = cfg_for(tmp_path)
+    write_records(
+        tmp_path,
+        [rec(40, "productive")]
+        + [rec(h, "failed", "auth_failure") for h in (1, 2, 3, 4)],
+    )
+    status = assess(tmp_path)
+    soc.escalate(cfg, status, dry_run=False, now=NOW)
+
+    out = capsys.readouterr()
+    assert not any(
+        a[:2] == ["issue", "create"] for a in calls
+    ), "a reopen that landed despite the client error must not mint a duplicate"
+    assert "is open again" in out.out
+
+
+def test_failed_close_is_not_reported_as_recovered(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    # `_gh` converts a timeout/missing binary into a failed result, so the close
+    # caller must check it: printing "Closed issue #N (recovered)" while the
+    # issue is still open turns a live outage into a false recovery.
+    calls: list[list[str]] = []
+
+    def fake_gh(args: list[str]):
+        calls.append(args)
+
+        class R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        if args[:2] == ["issue", "list"]:
+            R.stdout = json.dumps(
+                [{"number": 97, "title": cfg_for(tmp_path).issue_title}]
+            )
+        elif args[:2] == ["issue", "close"]:
+            R.returncode = 1
+            R.stderr = "HTTP 502: Bad Gateway"
+        return R()
+
+    monkeypatch.setattr(soc, "_gh", fake_gh)
+    cfg = cfg_for(tmp_path)
+    # Productive work resumed: outage is false, productive_in_window > 0.
+    write_records(tmp_path, [rec(1, "productive"), rec(2, "productive")])
+    status = assess(tmp_path)
+    assert status["outage"] is False and status["productive_in_window"] > 0
+    soc.escalate(cfg, status, dry_run=False, now=NOW)
+
+    out = capsys.readouterr()
+    assert "Closed issue" not in out.out
+    assert "close of #97 failed" in out.err
+    assert any(a[:2] == ["issue", "close"] for a in calls)

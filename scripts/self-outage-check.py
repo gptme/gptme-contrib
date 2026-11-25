@@ -839,6 +839,18 @@ def escalate(cfg: Config, status: dict, dry_run: bool, now: datetime) -> None:
                             "filing a new issue instead.",
                             file=sys.stderr,
                         )
+                        # A client-side failure is not proof the request failed: a
+                        # 30s timeout kills gh, not the call it already made, so
+                        # the issue can be reopened (and carry the details) while
+                        # rc=1 comes back. Re-query before minting a duplicate —
+                        # #97/#98 is exactly the outcome this path prevents.
+                        if find_open_issue(cfg) is not None:
+                            reopened = True
+                            print(
+                                f"Issue #{reopen['number']} is open again — its "
+                                "reopen landed despite the client error."
+                            )
+                            _supplementary_notify_pending = True
                     else:
                         reopened = True
                         print(
@@ -929,8 +941,19 @@ def escalate(cfg: Config, status: dict, dry_run: bool, now: datetime) -> None:
                 recovery,
             ]
         )
-        _gh(["issue", "close", str(existing["number"]), "--repo", cfg.repo])
-        print(f"Closed issue #{existing['number']} (recovered).")
+        closed = _gh(["issue", "close", str(existing["number"]), "--repo", cfg.repo])
+        if closed.returncode != 0:
+            # `_gh` turns a timeout or a missing binary into a failed result, so
+            # the success message must not be printed unconditionally: the issue
+            # can still be open, and a false "recovered" hides a live outage.
+            print(
+                f"[self-outage-check] close of #{existing['number']} failed "
+                f"(rc={closed.returncode}): "
+                f"{(closed.stderr or closed.stdout).strip()}; issue remains open.",
+                file=sys.stderr,
+            )
+        else:
+            print(f"Closed issue #{existing['number']} (recovered).")
 
 
 def _resolve_config(args: argparse.Namespace) -> Config:
