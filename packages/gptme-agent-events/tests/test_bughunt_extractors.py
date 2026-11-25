@@ -532,3 +532,92 @@ def test_codex_single_quoted_workdir(two_repos):
     (commit,) = ex.feed(exec_output("start", 0, "[master 6528ea53] x"))
     assert commit.detail["dir"] == str(two_repos["wt"])
     assert commit.detail["repo"] == "gptme/gptme-contrib"
+
+
+def _result_rec(call_id: str, *blocks: str | dict):
+    return codex(
+        "response_item",
+        {
+            "type": "custom_tool_call_output",
+            "call_id": call_id,
+            "output": [b if isinstance(b, str) else json.dumps(b) for b in blocks],
+        },
+    )
+
+
+def _poll(call_id: str, name: str, **args: int | str):
+    return codex(
+        "response_item",
+        {
+            "type": "function_call",
+            "name": name,
+            "call_id": call_id,
+            "arguments": json.dumps(args),
+        },
+    )
+
+
+@pytest.mark.parametrize("push_exit", [0, 128])
+def test_codex_yielded_cell_with_completed_sibling_waits_for_the_cell(push_exit):
+    """The outer cell yielded after printing one finished result: the push it is
+    still running has not landed."""
+    ex = CodexExtractor("r")
+    ex.feed(exec_call("start", "git status; git push"))
+    header = "Script running with cell ID 22\nWall time 10.0 seconds\nOutput:\n"
+    out = ex.feed(_result_rec("start", header, {"exit_code": 0, "output": "clean"}))
+    assert landings(out) == []
+    ex.feed(_poll("poll", "wait", cell_id="22"))
+    assert landings(ex.feed(exec_output("poll", push_exit, "done"))) == (
+        ["push"] if push_exit == 0 else ["error"]
+    )
+
+
+@pytest.mark.parametrize("order", [(7, 8), (8, 7)])
+@pytest.mark.parametrize("exits", [(0, 0), (128, 0), (0, 128)])
+@pytest.mark.parametrize("parallel_polls", [False, True])
+def test_codex_cell_with_two_running_commands_lands_once_both_finish(order, exits, parallel_polls):
+    ex = CodexExtractor("r")
+    ex.feed(exec_call("start", "git commit -m x; git push"))
+    out = ex.feed(
+        _result_rec(
+            "start",
+            {"session_id": 7, "output": "[master 6528ea53] x"},
+            {"session_id": 8, "output": "running push"},
+        )
+    )
+    assert landings(out) == []
+    codes = dict(zip((7, 8), exits))
+    if parallel_polls:
+        for sid in order:
+            ex.feed(_poll(f"p{sid}", "write_stdin", session_id=sid))
+    seen = []
+    for sid in order:
+        if not parallel_polls:
+            ex.feed(_poll(f"p{sid}", "write_stdin", session_id=sid))
+        events = ex.feed(exec_output(f"p{sid}", codes[sid], "done"))
+        seen.append(landings(events))
+        if events and events[0].kind == "commit":
+            assert events[0].detail["sha"] == "6528ea53"
+    if exits == (0, 0):
+        assert seen == [[], ["commit", "push"]]
+    elif codes[order[0]]:
+        # A failure is final: report it at once, and only once.
+        assert seen == [["error"], []]
+    else:
+        assert seen == [[], ["error"]]
+
+
+def test_codex_yielded_cell_keeps_waiting_for_its_inner_process():
+    ex = CodexExtractor("r")
+    ex.feed(exec_call("start", "git commit -m x; git push"))
+    ex.feed(
+        _result_rec(
+            "start",
+            "Script running with cell ID 22\nOutput:\n",
+            {"session_id": 7, "output": "running hooks"},
+        )
+    )
+    ex.feed(_poll("w", "wait", cell_id="22"))
+    assert landings(ex.feed(exec_output("w", 0, "pushed"))) == []
+    ex.feed(_poll("p", "write_stdin", session_id=7))
+    assert landings(ex.feed(exec_output("p", 0, "done"))) == ["commit", "push"]

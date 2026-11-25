@@ -15,6 +15,7 @@ import json
 import os
 import re
 import subprocess
+from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any
 
@@ -386,8 +387,13 @@ def _codex_output(out: Any) -> tuple[int | None, bool, str]:
         texts.append(block_text)
     text = "\n".join(texts)
     # A completed sibling says nothing about a command that is still running.
-    running = inner_running or (
-        code is None and text.lstrip().startswith(("Script running", "Process running"))
+    # The first block is the harness's own header: a yielded cell is running even
+    # when results it already printed carry an exit code.
+    cell_yielded = bool(blocks) and _CODEX_RUNNING_RE.match(blocks[0].lstrip()) is not None
+    running = (
+        inner_running
+        or cell_yielded
+        or (code is None and text.lstrip().startswith(("Script running", "Process running")))
     )
     return code, running, text
 
@@ -451,6 +457,17 @@ def _codex_continuation(name: str, text: str) -> tuple[str, str] | None:
     return (kind, str(sid)) if isinstance(sid, (int, str)) and not isinstance(sid, bool) else None
 
 
+@dataclass
+class _Suspended:
+    """A call whose commands outlived it, waiting on every continuation handle."""
+
+    pending: tuple[str, list[str], str | None, str | None]
+    open: set[tuple[str, str]] = field(default_factory=set)
+    failed: bool = False
+    output: str = ""
+    reported: bool = False
+
+
 class CodexExtractor(Extractor):
     """Codex rollouts: ``~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl``."""
 
@@ -458,11 +475,9 @@ class CodexExtractor(Extractor):
 
     def __init__(self, session: str, agent: str = "", subagent: bool = False) -> None:
         super().__init__(session, agent, subagent)
-        self._running: dict[
-            tuple[str, str], tuple[tuple[str, list[str], str | None, str | None], bool, str]
-        ] = {}
-        self._continued_failed: set[str] = set()
-        self._continued_output: dict[str, str] = {}
+        # handle -> the command waiting on it; poll call id -> (command, handle)
+        self._running: dict[tuple[str, str], _Suspended] = {}
+        self._continued: dict[str, tuple[_Suspended, tuple[str, str]]] = {}
 
     def feed(self, rec: dict[str, Any]) -> list[AgentEvent]:
         rtype = rec.get("type")
@@ -505,37 +520,59 @@ class CodexExtractor(Extractor):
                     self._pending[call_id] = (*self._pending[call_id][:3], workdir)
             continuation = _codex_continuation(name, text)
             if call_id and continuation is not None and continuation in self._running:
-                pending, failed, previous_output = self._running.pop(continuation)
-                self._pending[call_id] = pending
-                self._continued_output[call_id] = previous_output
-                if failed:
-                    self._continued_failed.add(call_id)
+                suspended = self._running.pop(continuation)
+                self._pending[call_id] = suspended.pending
+                self._continued[call_id] = (suspended, continuation)
             if name == "apply_patch":
                 m = _CODEX_PATCH_PATH_RE.search(text)
                 if m:
                     ev.detail["path"] = m.group(1).strip()
             return [ev]
         if ptype in ("function_call_output", "custom_tool_call_output") and call_id:
-            code, running, text = _codex_output(payload.get("output"))
-            failed = (code is not None and code != 0) or call_id in self._continued_failed
-            self._continued_failed.discard(call_id)
-            text = self._continued_output.pop(call_id, "") + text
-            if running:
-                # Transfer the original command/workdir to its continuation
-                # handle. A poll gets a new call id, not a new command.
-                suspended = self._pending.pop(call_id, None)
-                keys = _codex_running_keys(payload.get("output"))
-                if suspended and len(keys) == 1:
-                    # Retain only public-linkable identity lines across polls,
-                    # not an unbounded buffer of command stdout.
-                    identity = "\n".join(
-                        [m.group(0) for m in _COMMIT_LINE_RE.finditer(text)]
-                        + [m.group(0) for m in _PR_URL_RE.finditer(text)]
-                    )
-                    self._running[keys.pop()] = (suspended, failed, identity + "\n")
-                return []
-            return self._result(ts, call_id, failed, text)
+            return self._codex_result(ts, call_id, payload.get("output"))
         return []
+
+    def _codex_result(self, ts: Any, call_id: str, output: Any) -> list[AgentEvent]:
+        """Report a call's outcome once every command it started has finished."""
+        code, running, text = _codex_output(output)
+        failed = code is not None and code != 0
+        polled: tuple[str, str] | None = None
+        if call_id in self._continued:
+            suspended, polled = self._continued.pop(call_id)
+            if suspended.reported:
+                self._pending.pop(call_id, None)
+                return []
+            failed = failed or suspended.failed
+            text = suspended.output + text
+        elif running and call_id in self._pending:
+            suspended = _Suspended(self._pending[call_id])
+        else:
+            return [] if running else self._result(ts, call_id, failed, text)
+
+        if failed and not running:
+            # No sibling can turn a failure into a landing, and it may never be
+            # polled on its own: report the error now, once.
+            suspended.reported = True
+            self._running = {k: v for k, v in self._running.items() if v is not suspended}
+            return self._result(ts, call_id, True, text)
+        suspended.failed = failed
+        # Retain only public-linkable identity lines across polls, not an
+        # unbounded buffer of command stdout.
+        identity = [m.group(0) for m in _COMMIT_LINE_RE.finditer(text)]
+        identity += [m.group(0) for m in _PR_URL_RE.finditer(text)]
+        suspended.output = "\n".join(identity) + "\n"
+        # Transfer the original command/workdir to every continuation handle. A
+        # poll gets a new call id, not a new command. A running result that lists
+        # no handle leaves the polled one open, so the call is never reported.
+        keys = _codex_running_keys(output) if running else set()
+        if polled and (keys or not running):
+            suspended.open.discard(polled)
+        suspended.open |= keys
+        self._running.update(dict.fromkeys(keys, suspended))
+        if running or suspended.open:
+            self._pending.pop(call_id, None)
+            return []
+        return self._result(ts, call_id, failed, text)
 
     @staticmethod
     def _command(text: str) -> str | None:
