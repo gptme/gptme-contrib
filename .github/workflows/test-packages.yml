@@ -32,6 +32,7 @@ jobs:
   changes:
     name: Packages / detect changes
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       pull-requests: read
     outputs:
@@ -73,6 +74,7 @@ jobs:
     # package code changed
     if: (github.event_name != 'pull_request' && github.event_name != 'merge_group') || needs.changes.outputs.packages == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       contents: read
       actions: read
@@ -176,6 +178,7 @@ jobs:
     needs: discover
     if: needs.discover.result == 'success' && needs.discover.outputs.packages != '[]'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
@@ -226,6 +229,7 @@ jobs:
     # dispatch always run it.
     if: (github.event_name != 'pull_request' && github.event_name != 'merge_group') || needs.changes.outputs.rag == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     strategy:
       matrix:
         python-version: ['3.10', '3.12']
@@ -262,6 +266,7 @@ jobs:
       (github.event_name != 'pull_request' ||
        (needs.discover.result == 'success' && needs.discover.outputs.packages != '[]')) }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -341,6 +346,7 @@ jobs:
     # package code changed
     if: (github.event_name != 'pull_request' && github.event_name != 'merge_group') || needs.changes.outputs.packages == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -390,6 +396,7 @@ jobs:
     # package code changed
     if: (github.event_name != 'pull_request' && github.event_name != 'merge_group') || needs.changes.outputs.packages == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -420,6 +427,7 @@ jobs:
     needs: [changes, discover, test, rag-lightweight, typecheck, install-size]
     if: always()
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Check needed jobs
         env:

@@ -26,6 +26,7 @@ jobs:
   changes:
     name: Integration / detect changes
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       pull-requests: read
     outputs:
@@ -58,6 +59,7 @@ jobs:
     # code changed
     if: github.event_name == 'push' || needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
@@ -99,6 +101,7 @@ jobs:
     needs: [changes, integration-tests]
     if: always()
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Check needed jobs
         env:
