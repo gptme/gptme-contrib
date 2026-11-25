@@ -679,3 +679,21 @@ def test_search_min_relevance_filters_results(populated_index):
         assert none_left_data["total_results"] == 0
     else:
         assert all(r["relevance"] == 1.0 for r in none_left_data["results"])
+
+
+def test_search_filter_without_paths_searches_whole_index(populated_index, tmp_path, monkeypatch):
+    """--filter without PATHS filters the whole index rather than narrowing the
+    search to the current directory (#2356 Q1)."""
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    runner = CliRunner()
+    base = ["search", "Python programming", "--persist-dir", str(populated_index), "--json"]
+
+    plain = json.loads(runner.invoke(cli, base, catch_exceptions=False).output)
+    assert plain["total_results"] > 0
+    filtered = json.loads(
+        runner.invoke(cli, base + ["--filter", "*.txt"], catch_exceptions=False).output
+    )
+    # Every indexed document is a .txt file, so the filter must not drop any.
+    assert filtered["total_results"] == plain["total_results"]
