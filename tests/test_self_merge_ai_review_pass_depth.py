@@ -87,9 +87,6 @@ def _finding_thread(severity: str, *, resolved: bool = False, total: int = 1) ->
 @pytest.fixture(autouse=True)
 def _enable_ai_review(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SELF_MERGE_ACCEPT_AI_REVIEW", "1")
-    # These tests exercise disposition of sub-5 markers, which only a
-    # repository owner's relaxed hook still accepts (Erik 2026-11-24).
-    monkeypatch.setattr(smc, "ai_review_requires_clean_score", lambda repo: False)
 
 
 def _status(marker: dict[str, Any], threads: list[dict[str, Any]]) -> dict[str, Any]:

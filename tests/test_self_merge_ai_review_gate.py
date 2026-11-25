@@ -291,17 +291,15 @@ def test_clean_single_pass_review_is_accepted(gh_comments: Any) -> None:
     assert "single-pass review" in (status["detail"] or "")
 
 
-def test_explicit_single_pass_consensus_below_clean_is_rejected(
-    gh_comments: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Below 5/5, a serialized 1/1 record is still a single sample, not consensus."""
-    monkeypatch.setattr(smc, "ai_review_requires_clean_score", lambda repo: False)
+def test_explicit_single_pass_disposed_review_is_accepted(gh_comments: Any) -> None:
+    """Complete one-pass evidence is not weakened by a disposed P2's score."""
     status = _status(
         gh_comments,
         [_comment(_marker(score=4, consensus=SINGLE_PASS_CONSENSUS))],
+        review_data=([], [_finding_thread("P2", resolved=True, total=2)]),
     )
-    assert status["accepted"] is False
-    assert "at least 2 requested passes" in (status["detail"] or "")
+    assert status["accepted"] is True
+    assert "single-pass review" in (status["detail"] or "")
 
 
 @pytest.mark.parametrize(
@@ -323,12 +321,22 @@ def test_incoherent_single_pass_is_rejected_even_at_clean(
     assert status["refusal"] == "consensus_shortfall"
 
 
-def test_disposed_sub_clean_score_is_refused_by_default(gh_comments: Any) -> None:
-    """Off a repository owner's relaxed hook, only a clean 5/5 merges."""
+def test_disposed_sub_clean_score_is_accepted_by_default(gh_comments: Any) -> None:
+    """Erik 2026-11-25: disposed findings, not a literal 5/5, define clean."""
+    status = _status(
+        gh_comments,
+        [_comment(_marker(score=4))],
+        review_data=([], [_finding_thread("P2", resolved=True, total=2)]),
+    )
+    assert status["accepted"] is True
+
+
+def test_explicit_clean_score_policy_can_still_hold(
+    gh_comments: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(smc, "ai_review_requires_clean_score", lambda repo: True)
     status = _status(gh_comments, [_comment(_marker(score=4))])
-    assert status["accepted"] is False
     assert status["refusal"] == "below_clean_score"
-    assert "requires a clean 5/5" in (status["detail"] or "")
 
 
 @pytest.mark.parametrize(
@@ -1319,14 +1327,65 @@ def test_resolved_without_reply_but_auto_resolved_is_accepted(
 
 
 @pytest.mark.usefixtures("relaxed_clean_score")
-def test_surviving_p2_never_blocks(gh_comments: Any) -> None:
-    """Even an OPEN P2 finding thread must not block — P2s regenerate on
-    unchanged code, so gating on them is the treadmill failure mode."""
+@pytest.mark.parametrize("resolved,total", [(False, 1), (False, 2), (True, 1)])
+def test_surviving_p2_needs_a_recorded_disposition(
+    gh_comments: Any, resolved: bool, total: int
+) -> None:
+    """A P2 needs a reply and resolution, not another code/review round."""
     status = _status(
         gh_comments,
         [_comment(_marker(score=4))],
-        review_data=([], [_finding_thread("P2", resolved=False, total=1)]),
+        review_data=([], [_finding_thread("P2", resolved=resolved, total=total)]),
     )
+    assert status["accepted"] is False
+    assert status["refusal"] == "disposition_shortfall"
+
+
+@pytest.mark.parametrize("score", [4, 5])
+def test_disposed_p2_does_not_require_a_perfect_score(
+    gh_comments: Any, score: int
+) -> None:
+    status = _status(
+        gh_comments,
+        [_comment(_marker(score=score))],
+        review_data=([], [_finding_thread("P2", resolved=True, total=2)]),
+    )
+    assert status["accepted"] is True
+
+
+@pytest.mark.parametrize(
+    "thread_fp,author",
+    [(None, AUTHOR), ("abcdef111111", AUTHOR), ("abcdef222222", "outsider")],
+)
+def test_current_p2_fingerprint_requires_its_own_disposed_thread(
+    gh_comments: Any, thread_fp: str | None, author: str
+) -> None:
+    threads = []
+    if thread_fp:
+        thread = _finding_thread("P2", resolved=True, total=2, fp=thread_fp)
+        thread["comments"]["nodes"][0]["author"]["login"] = author
+        threads.append(thread)
+    marker = _marker(score=4, findings=[{"fp": "abcdef222222", "severity": "P2"}])
+    status = _status(gh_comments, [_comment(marker)], review_data=([], threads))
+    assert status["refusal"] == "disposition_shortfall"
+    assert "P2" in status["detail"]
+
+
+@pytest.mark.parametrize("retired", [False, True])
+def test_current_p2_disposed_or_reviewer_retired_is_accepted(
+    gh_comments: Any, retired: bool
+) -> None:
+    marker = _marker(
+        score=4,
+        findings=[{"fp": "abcdef222222", "severity": "P2"}],
+        auto_resolved=["abcdef222222"] if retired else [],
+    )
+    threads = [
+        _finding_thread(
+            "P2", resolved=True, total=1 if retired else 2, fp="abcdef222222"
+        )
+    ]
+    status = _status(gh_comments, [_comment(marker)], review_data=([], threads))
     assert status["accepted"] is True
 
 

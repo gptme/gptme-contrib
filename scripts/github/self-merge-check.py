@@ -1720,20 +1720,64 @@ def _fetch_ai_review_marker(
 def ai_review_requires_clean_score(repo: str) -> bool:
     """Whether a disposed sub-5 AI review is refused on *repo*.
 
-    Erik's merge rules (2026-11-24): off Bob's own repositories a self-merge
-    needs a clean 5/5 at the exact head. This returns True for every
-    repository; a wrapper that owns a repository (Bob's, for TimeToBuildBob/*)
-    replaces it to keep the disposition-based acceptance there.
+    Erik's 2026-11-25 correction defines clean by finding dispositions, not
+    a literal score. Retain the hook for consumers with a stricter policy.
     """
     del repo
-    return True
+    return False
+
+
+def _ai_review_p2_disposition_shortfall(
+    review_data: tuple[list[dict[str, Any]], list[dict[str, Any]]],
+    marker: dict[str, Any],
+    expected_author: str,
+) -> str | None:
+    """P2s need an answer and resolution, not a code or re-review round.
+
+    The blocking-finding checker already validates the marker and thread read.
+    Match current P2 fingerprints too, so an unanchored finding cannot vanish
+    merely because no inline thread was published for it.
+    """
+    retired = {
+        fp for fp in (marker.get("auto_resolved") or []) if isinstance(fp, str) and fp
+    }
+    disposed: set[str] = set()
+    for thread in review_data[1]:
+        comments = thread.get("comments") or {}
+        nodes = comments.get("nodes") or []
+        if not nodes or (nodes[0].get("author") or {}).get("login") != expected_author:
+            continue
+        body = str(nodes[0].get("body") or "")
+        severity = _AI_REVIEW_SEVERITY_RE.search(body)
+        if (
+            _AI_REVIEW_FINDING_MARKER not in body
+            or severity is None
+            or severity.group(1) != "P2"
+        ):
+            continue
+        fp = _ai_review_fp_from_body(body)
+        if fp and fp in retired:
+            continue
+        total = comments.get("totalCount")
+        if not thread.get("isResolved") or type(total) is not int or total < 2:
+            return (
+                "P2 finding needs a reply and resolution (fix, follow-up, or decline)"
+            )
+        if fp:
+            disposed.add(fp)
+    for finding in marker.get("findings") or []:
+        if finding.get("severity") == "P2":
+            fp = finding.get("fp")
+            if fp not in disposed and fp not in retired:
+                return "current marker P2 finding lacks a disposed thread"
+    return None
 
 
 def _single_pass_consensus_coherent(consensus: Any) -> bool:
     """A one-pass consensus record that answered fully and was not clamped.
 
     The sweep's single-pass reviews serialize ``requested=1``. That is not
-    consensus, but with a clean score it is the review Erik accepts. Anything
+    consensus, but with disposed findings it is the review Erik accepts. Anything
     degraded, clamped or malformed is still refused by ``_consensus_shortfall``.
     """
     if not isinstance(consensus, dict):
@@ -1786,8 +1830,9 @@ def fetch_ai_review_status(
     of demanding a literal 5/5 (a per-round sample that passes or fails the
     same commit depending on which pass the gate reads), it requires that no
     P0/P1 finding is open and every P0/P1 finding is disposed against real
-    thread state, while surviving P2s do not block. See
-    ``_ai_review_disposition_shortfall`` for the exact predicate and the
+    thread state. P2s require an answer and resolution, but never a perfect
+    score or another fix round. See ``_ai_review_p2_disposition_shortfall`` and
+    ``_ai_review_disposition_shortfall`` for the exact predicates and the
     measured evidence behind it. ``review_data`` (the ``(reviews, threads)``
     tuple) supplies the thread state; pass it to avoid a duplicate GraphQL
     round-trip, matching the other review-data helpers.
@@ -1918,9 +1963,19 @@ def fetch_ai_review_status(
             "refusal": "disposition_shortfall",
         }
 
-    # Erik's merge rules (2026-11-24): off Bob's own repositories only a clean
-    # 5/5 at the exact head merges. A disposed 3-4/5 is still a refusal there;
-    # wrappers that own a repository may relax it via the hook below.
+    # Erik 2026-11-25: no open P0/P1 AND every P2 disposed is clean. The
+    # score remains diagnostic; consumers may explicitly retain a score floor.
+    p2_shortfall = _ai_review_p2_disposition_shortfall(
+        cast("tuple[list[dict[str, Any]], list[dict[str, Any]]]", review_data),
+        marker,
+        expected_author,
+    )
+    if p2_shortfall:
+        return {
+            "accepted": False,
+            "detail": f"AI review {p2_shortfall}",
+            "refusal": "disposition_shortfall",
+        }
     if score < AI_REVIEW_CLEAN_SCORE and ai_review_requires_clean_score(repo):
         return {
             "accepted": False,
@@ -1934,12 +1989,8 @@ def fetch_ai_review_status(
     consensus = marker.get("consensus")
     shortfall = _consensus_shortfall(consensus)
     single_pass = False
-    if (
-        shortfall
-        and score == AI_REVIEW_CLEAN_SCORE
-        and _single_pass_consensus_coherent(consensus)
-    ):
-        # Erik 2026-11-24: "single-pass is fine" for a clean review at head.
+    if shortfall and _single_pass_consensus_coherent(consensus):
+        # Erik 2026-11-25: clean means disposed, not a literal 5/5.
         # Only a coherent one-pass record qualifies; degraded, clamped or
         # malformed records keep their consensus refusal.
         shortfall = None
@@ -2658,21 +2709,29 @@ def classify_category(
 # bot-config/spec-like-doc hard stops that classify_category also enforces
 # still apply — those are the one thing Erik has said belongs to a human
 # every time (auto-merge-analysis §3 cluster 3). In their place, these
-# detectors flag the diff *shapes* Erik has asked to see himself: new public
-# CLI surface, new required config or a changed config default, auth files,
-# and auth/billing/default changes on LLM/server/provider routing (narrowed to
-# his merge rules on 2026-11-24). A PR triggering none of these — and
+# detectors flag the diff *shapes* Erik has repeatedly asked to see himself:
+# new public CLI surface, new config schema, a wholly new module, a new docs
+# page, an unmotivated `feat` with no linked issue, and anything touching
+# LLM/server/provider routing or auth. A PR triggering none of these — and
 # otherwise clean on CI, AI review, Greptile, and human threads — is eligible
 # regardless of which directory it touches. Every other repo's
 # classify_category call is untouched by this block.
 _GPTME_CORE_REPO = "gptme/gptme"
 
+# A newly *added* .py file at most one subdirectory below gptme/ — deep
+# enough to catch a new subpackage module (gptme/hooks/guardrails.py,
+# gptme#3695) as well as a bare top-level one (gptme/error_hintkit.py,
+# gptme#3706), shallow enough that it doesn't also match a test file three
+# levels down (gptme/hooks/tests/test_x.py — is_test_file already excludes
+# those, but the depth bound keeps this detector's own intent legible).
+_GPTME_CORE_NEW_MODULE_RE = re.compile(r"^gptme/(?:[^/]+/)?[^/]+\.py$")
 # A dataclass-style attribute declaration added inside gptme/config/ — how
 # gptme declares its config schema (gptme/config/models.py: `field_name: Type
 # = field(...)` at class scope, indented). Matched against the added line's
 # *own* indentation, so a top-level statement (import, function def) does not
 # false-positive.
 _GPTME_CORE_CONFIG_FIELD_RE = re.compile(r"^\s{4,}[A-Za-z_][A-Za-z0-9_]*\s*:\s*\S")
+_GPTME_CORE_ISSUE_REF_RE = re.compile(r"#\d+")
 # gptme/llm/ (model calls), gptme/server/ (HTTP surface + auth), gptme/oauth/
 # and gptme/credentials.py (auth), gptme/providers/ and gptme/cli/auth.py
 # (provider routing / auth). Generic auth/oauth keyword matching already
@@ -2682,106 +2741,10 @@ _GPTME_CORE_SENSITIVE_SURFACE_PREFIXES = (
     "gptme/llm/",
     "gptme/server/",
     "gptme/providers/",
-)
-# Always held: these files *are* auth.
-_GPTME_CORE_AUTH_SURFACE_PREFIXES = (
     "gptme/oauth/",
     "gptme/credentials.py",
     "gptme/cli/auth.py",
 )
-# On the llm/server/providers surface, only a change touching auth, billing or
-# a default holds (Erik 2026-11-24: not every fix there). Defaults are matched
-# on removed lines only, so adding a parameter with a default does not hold.
-_GPTME_CORE_AUTH_BILLING_RE = re.compile(
-    r"(?i)(auth|bearer|api[_-]?key|credential|secret|billing|credit|pricing|price)"
-)
-# Removed-line shapes that carry a default value, whether or not the word
-# "default" appears: an annotated field (`model: str = "a"`), a module-level
-# constant (`TIMEOUT = 30`), a `def` signature with a keyword default
-# (`def f(x, t=0.7)`), and a parameter or keyword line in a multi-line
-# signature or call (`    temperature: float = 0.7,`). A plain `x = y`
-# statement inside a function body matches none of them. Two shapes are
-# deliberately broad and do match routine edits: an annotated local
-# (`result: list[str] = []`) and any keyword line in a multi-line call
-# (`messages=msgs,`). Those hold, so the detector is conservative here — a
-# fix that removes such a line still routes to Erik rather than being missed.
-_GPTME_CORE_DEFAULT_SHAPE_RES = (
-    re.compile(r"^\s*[A-Za-z_]\w*\s*:\s*[^=\n]+?=(?!=)\s*\S"),
-    re.compile(r"^[A-Z][A-Z0-9_]*\s*(?::[^=\n]+)?=(?!=)\s*\S"),
-    re.compile(r"^\s*(?:async\s+)?def\s+\w+\s*\(.*\b\w+\s*(?::[^=,)]+)?=(?!=)"),
-    re.compile(r"^\s+[A-Za-z_]\w*\s*(?::[^=\n]+)?=(?!=)[^=].*,\s*(?:#.*)?$"),
-)
-
-
-def _gptme_core_carries_default(line: str) -> bool:
-    """Whether a removed line declares a default value (see the shapes above)."""
-    return "default" in line.lower() or any(
-        rx.match(line) for rx in _GPTME_CORE_DEFAULT_SHAPE_RES
-    )
-
-
-# Value-only lines inside a `[...]`/`{...}` literal: a changed default in a
-# multi-line mapping or list removes `    "anthropic": "claude-sonnet-4",` or
-# `    "openai/gpt-5",`, which carries no identifier and no "default" keyword,
-# so the line shapes above miss it. Bracket depth is tracked over the patch, so
-# only removals from inside a bracketed literal count — a stray string removed
-# from a function body or a test does not (plain `(...)` calls are not
-# brackets; a keyword line in a multi-line call already holds via shape 4).
-_GPTME_CORE_LITERAL_SHAPE_RES = (
-    re.compile(r"""^\s*["'][^"'\n]+["']\s*:\s*\S"""),
-    re.compile(r"""^\s*["'][^"'\n]*["']\s*,?\s*(?:#.*)?$"""),
-    re.compile(r"^\s*-?\d+(?:\.\d+)?\s*,?\s*(?:#.*)?$"),
-    re.compile(r"^\s*(?:True|False|None)\s*,?\s*(?:#.*)?$"),
-)
-
-
-def _bracket_delta(line: str) -> int:
-    """Net `[`/`{` minus `]`/`}` in a line, ignoring string and comment text."""
-    depth = 0
-    quote: str | None = None
-    escaped = False
-    for ch in line:
-        if quote is not None:
-            if escaped:
-                escaped = False
-            elif ch == "\\":
-                escaped = True
-            elif ch == quote:
-                quote = None
-            continue
-        if ch in "\"'":
-            quote = ch
-        elif ch == "#":
-            break
-        elif ch in "[{":
-            depth += 1
-        elif ch in "]}":
-            depth -= 1
-    return depth
-
-
-def _gptme_core_removed_literal_lines(patch: str | None) -> list[str]:
-    """Removed literal lines that sit inside a `[...]`/`{...}` in the patch.
-
-    Walks every line (context included) tracking bracket depth, so a removal is
-    only reported once the diff has opened a bracketed literal above it.
-    """
-    if not patch:
-        return []
-    depth = 0
-    found: list[str] = []
-    for line in patch.splitlines():
-        if line.startswith(("---", "+++", "@@")):
-            continue
-        body = line[1:] if line[:1] in "+- " else line
-        if (
-            line.startswith("-")
-            and depth > 0
-            and any(rx.match(body) for rx in _GPTME_CORE_LITERAL_SHAPE_RES)
-        ):
-            found.append(body)
-        depth = max(0, depth + _bracket_delta(body))
-    return found
 
 
 def _iter_json_documents(text: str) -> Iterator[Any]:
@@ -2883,58 +2846,30 @@ def _gptme_core_added_lines(patch: str | None) -> list[str]:
     ]
 
 
-def _gptme_core_removed_lines(patch: str | None) -> list[str]:
-    """Removed (`-`-prefixed, non-header) lines of a unified diff patch."""
-    if not patch:
-        return []
-    return [
-        line[1:]
-        for line in patch.splitlines()
-        if line.startswith("-") and not line.startswith("---")
-    ]
-
-
 def gptme_core_route_to_erik_reasons(
     title: str, body: str, file_shapes: list[dict[str, Any]]
 ) -> list[str]:
     """Diff-shape checks that route a gptme/gptme PR to Erik.
 
-    Narrowed to Erik's merge rules (2026-11-24): features merge on a clean
-    review unless they add user-visible surface, *required* config or a
-    changed default, or touch auth, billing or defaults. New modules, new
-    docs pages and an unlinked `feat:` title no longer route on their own.
-    Returns an empty list when none of the shapes are present — evaluate_pr
-    then treats the PR as eligible on diff shape, regardless of which
-    directory it touches (subject to CI/AI-review/Greptile/human-thread checks
-    elsewhere).
+    Each reason quotes, in one clause, the cluster of Erik's block reasons it
+    encodes (workspace brain repo,
+    knowledge/strategic/2026-09-07-auto-merge-analysis.md §3). Returns an
+    empty list when none of the shapes are present — evaluate_pr then treats
+    the PR as eligible on diff shape, regardless of which directory it
+    touches (subject to CI/AI-review/Greptile/human-thread checks elsewhere).
     """
-    del title, body  # kept for callers; no title/body rule remains
     reasons: list[str] = []
 
     new_click_surface: set[str] = set()
     new_cli_files: set[str] = set()
-    required_config: set[str] = set()
-    changed_config: set[str] = set()
-    sensitive_surface: set[str] = set()
-    unknown_patch: set[str] = set()
+    new_config_keys: set[str] = set()
+    new_modules: set[str] = set()
+    new_docs_pages: set[str] = set()
 
     for entry in file_shapes:
         path = str(entry.get("path", "")).replace("\\", "/").removeprefix("./")
         status = entry.get("status", "")
-        patch = cast("str | None", entry.get("patch"))
-        added_lines = _gptme_core_added_lines(patch)
-        removed_lines = _gptme_core_removed_lines(patch)
-        changed_literal = bool(_gptme_core_removed_literal_lines(patch))
-        removed_lines.extend(_gptme_core_removed_literal_lines(patch))
-        # GitHub omits `patch` for large diffs, binary files and pure renames.
-        # No evidence is read as "no auth/default change", which is exactly the
-        # class Erik asked to keep held, so a missing patch is unknown and holds
-        # on every surface these shape detectors read.
-        if patch is None and (
-            path.startswith("gptme/config/")
-            or path.startswith(_GPTME_CORE_SENSITIVE_SURFACE_PREFIXES)
-        ):
-            unknown_patch.add(path)
+        added_lines = _gptme_core_added_lines(cast("str | None", entry.get("patch")))
 
         if status == "added" and path.startswith("gptme/cli/"):
             new_cli_files.add(path)
@@ -2943,30 +2878,18 @@ def gptme_core_route_to_erik_reasons(
             for line in added_lines
         ):
             new_click_surface.add(path)
-        if path.startswith("gptme/config/"):
-            if any(
-                _GPTME_CORE_CONFIG_FIELD_RE.match(line) and "=" not in line
-                for line in added_lines
-            ):
-                required_config.add(path)
-            if changed_literal or any(
-                _GPTME_CORE_CONFIG_FIELD_RE.match(line)
-                or _gptme_core_carries_default(line)
-                for line in removed_lines
-            ):
-                changed_config.add(path)
-        if path.startswith(_GPTME_CORE_AUTH_SURFACE_PREFIXES):
-            sensitive_surface.add(path)
-        elif path.startswith(_GPTME_CORE_SENSITIVE_SURFACE_PREFIXES) and (
-            any(_GPTME_CORE_AUTH_BILLING_RE.search(line) for line in added_lines)
-            or changed_literal
-            or any(
-                _GPTME_CORE_AUTH_BILLING_RE.search(line)
-                or _gptme_core_carries_default(line)
-                for line in removed_lines
-            )
+        if path.startswith("gptme/config/") and any(
+            _GPTME_CORE_CONFIG_FIELD_RE.match(line) for line in added_lines
         ):
-            sensitive_surface.add(path)
+            new_config_keys.add(path)
+        if (
+            status == "added"
+            and not is_test_file(path)
+            and _GPTME_CORE_NEW_MODULE_RE.match(path)
+        ):
+            new_modules.add(path)
+        if status == "added" and path.startswith("docs/"):
+            new_docs_pages.add(path)
 
     if new_click_surface or new_cli_files:
         reasons.append(
@@ -2976,37 +2899,58 @@ def gptme_core_route_to_erik_reasons(
             "the default gptme CLI\" / \"can't justify a whole 'nother CLI "
             'flag" (auto-merge-analysis §3 cluster 4, e.g. gptme#3209, #3296)'
         )
-    if required_config:
+    if new_config_keys:
         reasons.append(
-            "New required config key ("
-            + ", ".join(sorted(required_config))
-            + "): a config field with no default is new required config, "
-            "Erik's call (merge rules 2026-11-24)"
+            "New config schema key ("
+            + ", ".join(sorted(new_config_keys))
+            + "): core config surface is Erik's call, same cluster as new CLI "
+            "flags (auto-merge-analysis §3 cluster 4)"
         )
-    if changed_config:
+    if new_modules:
         reasons.append(
-            "Changed or removed config field ("
-            + ", ".join(sorted(changed_config))
-            + "): a changed default is user-visible, Erik's call (merge rules "
-            "2026-11-24)"
+            "New module under gptme/ ("
+            + ", ".join(sorted(new_modules))
+            + "): Erik — public-surface proliferation and naming/placement is "
+            "his taste to set (auto-merge-analysis §3 cluster 4, e.g. #3529 "
+            "\"'harness' is kinda vague\")"
         )
+    if new_docs_pages:
+        reasons.append(
+            "New docs page under docs/ ("
+            + ", ".join(sorted(new_docs_pages))
+            + "): Erik has flagged duplicate/misplaced doc pages before "
+            "(auto-merge-analysis §3 cluster 4, e.g. #3178)"
+        )
+
+    normalized_title = title.strip()
+    if re.match(r"(?i)^feat[:(]", normalized_title):
+        if not _GPTME_CORE_ISSUE_REF_RE.search(title) and not (
+            body and _GPTME_CORE_ISSUE_REF_RE.search(body)
+        ):
+            reasons.append(
+                "feat: title with no #issue reference in title or body: Erik — "
+                '"Idk if this is an actually useful feature" / "kinda low '
+                'value" (auto-merge-analysis §3 cluster 5, e.g. gptme#2836, '
+                "#2979)"
+            )
+
+    sensitive_surface = sorted(
+        {
+            str(entry.get("path", "")).replace("\\", "/").removeprefix("./")
+            for entry in file_shapes
+            if str(entry.get("path", ""))
+            .replace("\\", "/")
+            .removeprefix("./")
+            .startswith(_GPTME_CORE_SENSITIVE_SURFACE_PREFIXES)
+        }
+    )
     if sensitive_surface:
         reasons.append(
-            "Touches auth, billing or defaults on gptme/llm/, gptme/server/ or "
-            "provider routing ("
-            + ", ".join(sorted(sensitive_surface))
+            "Touches gptme/llm/, gptme/server/, auth, or provider routing ("
+            + ", ".join(sensitive_surface)
             + '): Erik — "avoid making too much auth cloud-specific"; silent '
             "auth/provider misrouting is exactly this class (auto-merge-"
             "analysis §3 cluster 3, e.g. gptme#2820, #2901)"
-        )
-    if unknown_patch:
-        reasons.append(
-            "Diff text unavailable for ("
-            + ", ".join(sorted(unknown_patch))
-            + "): GitHub omits `patch` for large diffs, binary files and pure "
-            "renames, so the auth/billing/default shapes cannot be read; a "
-            "missing patch is unknown, not clean, and holds (merge rules "
-            "2026-11-24)"
         )
 
     return reasons
@@ -4138,40 +4082,6 @@ def path_classifier() -> merge_policy.PathClassifier:
     )
 
 
-#: Erik's merge rules (2026-11-24): a gptme or gptme-contrib feature merges on
-#: a clean review only under about this many counted lines. Tests and lockfiles
-#: are not counted, matching merge_policy.toml's size_exempt_classes.
-FEATURE_COUNTED_LINE_CAP = 800
-_FEATURE_LINE_CAP_REPOS = frozenset({"gptme/gptme", "gptme/gptme-contrib"})
-_FEATURE_TITLE_RE = re.compile(r"(?i)^feat(?:\([^)]*\))?!?:")
-
-
-def feature_size_reasons(repo: str, number: int, title: str) -> list[str]:
-    """Refuse a gptme/gptme-contrib ``feat`` PR above the counted-line cap."""
-    if repo not in _FEATURE_LINE_CAP_REPOS or not _FEATURE_TITLE_RE.match(
-        title.strip()
-    ):
-        return []
-    changes = fetch_pr_file_changes(repo, number)
-    if changes is None:
-        return [
-            "Feature size unknown (PR file list unavailable); the "
-            f"{FEATURE_COUNTED_LINE_CAP}-line feature cap fails closed"
-        ]
-    counted = sum(
-        c.additions + c.deletions
-        for c in changes
-        if not (is_test_file(c.path) or is_lockfile(c.path))
-    )
-    if counted <= FEATURE_COUNTED_LINE_CAP:
-        return []
-    return [
-        f"Feature is {counted} counted lines (> {FEATURE_COUNTED_LINE_CAP}, tests "
-        "and lockfiles excluded): large features are Erik's call (merge rules "
-        "2026-11-24)"
-    ]
-
-
 def merge_policy_tier_waiver(
     reasons: list[str], *, repo: str, number: int, files: list[str]
 ) -> tuple[list[str], str | None, dict[str, Any] | None]:
@@ -4697,12 +4607,6 @@ def evaluate_pr(
     else:
         category, category_reasons = classify_category(files, repo=repo)
         result.category = category
-
-    if result.category is not None:
-        size_reasons = feature_size_reasons(repo, number, title)
-        if size_reasons:
-            result.category = None
-            category_reasons.extend(size_reasons)
 
     # ErikBjare/bob#1480: a tier-0 PR in a rollout repo of gptme_contrib_lib/merge_policy.toml
     # needs no category. Evaluated before operator approval so the tier is
