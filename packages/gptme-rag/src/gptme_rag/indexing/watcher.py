@@ -1,6 +1,7 @@
 """File watcher for automatic index updates."""
 
 import logging
+import os
 import time
 from pathlib import Path
 from threading import Lock, Timer
@@ -52,10 +53,50 @@ class IndexEventHandler(FileSystemEventHandler):
             self._queue_update(Path(src))
 
     def on_deleted(self, event: FileSystemEvent) -> None:
-        """Handle file deletion events."""
+        """Handle file deletion events.
+
+        Moving a directory out of the watched tree produces only a
+        ``DirDeletedEvent`` (no per-file events), so a deleted directory
+        removes every indexed source beneath it.
+        """
         src = str(event.src_path)
-        if not event.is_directory and self._should_process(src):
+        if event.is_directory:
+            if not self._is_persist_path(Path(src)):
+                self._delete_directory(Path(src).resolve())
+        elif self._should_process(src):
             self._queue_deletion(Path(src))
+
+    def _delete_directory(self, directory: Path) -> None:
+        """Remove every indexed source under ``directory`` from the index."""
+        prefix = os.path.join(str(directory), "")
+        with self._lock:
+            for pending in [p for p in self._timers if str(p).startswith(prefix)]:
+                self._timers.pop(pending).cancel()
+
+        sources: set[str] = set()
+        page_size = 1000
+        offset = 0
+        try:
+            while True:
+                page = self.indexer.collection.get(
+                    include=["metadatas"], limit=page_size, offset=offset
+                )
+                ids = page["ids"] or []
+                for meta in page["metadatas"] or []:
+                    source = str((meta or {}).get("source", ""))
+                    if source.startswith(prefix):
+                        sources.add(source)
+                if len(ids) < page_size:
+                    break
+                offset += len(ids)
+            if not sources:
+                return
+            logger.info(f"Removing {len(sources)} file(s) under deleted directory {directory}")
+            for source in sorted(sources):
+                self.indexer.delete_documents({"source": source})
+            self.indexer.cache.clear()
+        except Exception as e:
+            logger.error(f"Error removing directory {directory} from index: {e}", exc_info=True)
 
     def _should_process(self, path: str) -> bool:
         """Check if a file should be processed based on pattern and ignore patterns."""
@@ -177,6 +218,9 @@ class IndexEventHandler(FileSystemEventHandler):
                 logger.debug(f"Removing old path from index: {src_path}")
                 try:
                     self.indexer.delete_documents({"source": str(src_path)})
+                    # The search cache may still hold results for the old path,
+                    # and nothing below clears it when dest is not indexed.
+                    self.indexer.cache.clear()
                     logger.debug(f"Deleted old documents for: {src_path}")
                 except Exception as e:
                     logger.warning(f"Error removing old path {src_path} from index: {e}")
@@ -184,6 +228,21 @@ class IndexEventHandler(FileSystemEventHandler):
             # Index the file at its new location if it matches our patterns
             if self._should_process(dest_str):
                 logger.info(f"Indexing moved file at new location: {dest_path}")
+
+                # A pending timer for dest (e.g. `rm b; mv a b` inside the
+                # debounce window) would act on the file it replaced; the move
+                # supersedes it.
+                with self._lock:
+                    pending = self._timers.pop(dest_path, None)
+                if pending is not None:
+                    pending.cancel()
+
+                # Renaming over an existing file (an atomic save) replaces its
+                # content, so drop the old chunks before indexing the new ones.
+                try:
+                    self.indexer.delete_documents({"source": str(dest_path)})
+                except Exception as e:
+                    logger.warning(f"Error removing replaced content for {dest_path}: {e}")
 
                 # Wait for the file to be fully moved and readable
                 max_attempts = 3
