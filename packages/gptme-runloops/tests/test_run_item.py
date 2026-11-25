@@ -3913,6 +3913,45 @@ class TestClassifyBackendErrorText:
     def test_empty_text_returns_none(self) -> None:
         assert _classify_backend_error_text("", "gptme") is None
 
+    def test_structured_ordinary_messages_are_not_infra_evidence(self) -> None:
+        # Tool output and printed source code inside a trajectory are task
+        # material, not provider failure evidence (#2507).
+        for content in (
+            "fatal: Authentication failed for 'https://github.com/example/repo'",
+            "class RateLimitError(Exception): pass",
+        ):
+            trajectory = json.dumps(
+                {
+                    "role": "system",
+                    "content": content,
+                    "tool_use_id": "ordinary-tool-output",
+                }
+            )
+            assert _classify_backend_error_text(trajectory, "gptme") is None
+
+    def test_structured_terminal_error_still_detected(self) -> None:
+        event = json.dumps(
+            {
+                "role": "system",
+                "content": "error: auth_error\nError code: 401 - invalid credentials",
+                "metadata": {
+                    "error": True,
+                    "error_class": "auth_error",
+                    "exit_code": 76,
+                },
+            }
+        )
+        assert _classify_backend_error_text(event, "gptme") == "gptme_auth"
+
+    def test_grok_free_form_log_keeps_substring_matching(self) -> None:
+        # Grok Build logs are free-form text, so substring matching stays.
+        assert (
+            _classify_backend_error_text(
+                "class RateLimitError(Exception): pass", "grok-build"
+            )
+            == "grok_build_rate_limit"
+        )
+
     def test_backend_slug_replaces_hyphens(self) -> None:
         # Hyphens in backend names become underscores so the result is
         # a valid field-fragment in JSON/JSONL.
@@ -3987,6 +4026,29 @@ class TestInspectGptmeFailure:
         session_id = "gptme-session-222"
         traj = tmp_path / "gptme-clean.jsonl"
         traj.write_text('{"role": "assistant", "content": "Done."}\n')
+        ref = tmp_path / f"gptme-traj-{session_id}.path"
+        ref.write_text(str(traj))
+        result = _inspect_gptme_failure(_make_plan_stub(session_id), tmp_dir=tmp_path)
+        assert result is None
+
+    def test_ignores_ordinary_tool_output(self, tmp_path) -> None:
+        session_id = "gptme-session-444"
+        traj = tmp_path / "gptme-tool-output.jsonl"
+        traj.write_text(
+            '{"role": "assistant", "content": "Running the tests."}\n'
+            + json.dumps(
+                {
+                    "role": "system",
+                    "content": (
+                        "fatal: Authentication failed for "
+                        "'https://github.com/example/repo'"
+                    ),
+                    "tool_use_id": "call-1",
+                }
+            )
+            + "\n"
+            '{"role": "assistant", "content": "Task failed: config invalid."}\n'
+        )
         ref = tmp_path / f"gptme-traj-{session_id}.path"
         ref.write_text(str(traj))
         result = _inspect_gptme_failure(_make_plan_stub(session_id), tmp_dir=tmp_path)

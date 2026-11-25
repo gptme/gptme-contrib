@@ -2233,6 +2233,68 @@ BACKEND_MODEL_UNAVAIL_MARKERS: tuple[str, ...] = (
 )
 
 
+def _structured_error_evidence(text: str) -> str | None:
+    """Extract terminal provider-error evidence from structured trajectory text.
+
+    gptme appends a terminal failure as a ``role="system"`` message carrying
+    ``metadata.error: true`` (and often ``metadata.error_class``); older logs
+    used ``role="error"``. Everything else in a trajectory — tool output,
+    printed source code, a failed git command — is ordinary task material and
+    must not be read as provider evidence, or a genuine failure earns a free
+    re-arm.
+
+    Returns the concatenated error evidence for structured input, ``None``
+    when structured input holds no such event, and ``text`` unchanged when the
+    input is not structured (free-form log text, e.g. the Grok Build path).
+    """
+    stripped = text.strip()
+    if not stripped:
+        return text
+
+    def _parse(fragment: str) -> object | None:
+        try:
+            return json.loads(fragment)
+        except (json.JSONDecodeError, ValueError):
+            return None
+
+    looks_structured = stripped.startswith(("{", "["))
+    whole = _parse(stripped)
+    events: list[dict] = []
+    parsed = False
+    if isinstance(whole, dict):
+        events, parsed = [whole], True
+    elif isinstance(whole, list):
+        events = [e for e in whole if isinstance(e, dict)]
+        parsed = True
+    else:
+        # A trajectory tail often begins mid-line; keep every complete event.
+        for line in stripped.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            looks_structured = looks_structured or line.startswith("{")
+            event = _parse(line)
+            if isinstance(event, dict):
+                events.append(event)
+                parsed = True
+    if not parsed:
+        return None if looks_structured else text
+
+    evidence: list[str] = []
+    for event in events:
+        metadata = event.get("metadata")
+        metadata = metadata if isinstance(metadata, dict) else {}
+        if event.get("role") != "error" and metadata.get("error") is not True:
+            continue
+        error_class = metadata.get("error_class")
+        if isinstance(error_class, str) and error_class:
+            evidence.append(f"error: {error_class}")
+        content = event.get("content")
+        if isinstance(content, str) and content:
+            evidence.append(content)
+    return "\n".join(evidence) or None
+
+
 def _classify_backend_error_text(text: str, backend: str) -> str | None:
     """Classify an infra error from free-form backend log / trajectory text.
 
@@ -2240,11 +2302,18 @@ def _classify_backend_error_text(text: str, backend: str) -> str | None:
     or ``"<backend>_model_unavailable"`` when a known infrastructure error is found;
     ``None`` when the text carries no recognisable infra signal.
 
+    Structured trajectory text (JSON/JSONL events) is narrowed to its terminal
+    provider-error evidence first, so ordinary tool output cannot classify a
+    session as an infrastructure failure.
+
     ``backend`` is the raw backend name (``"grok-build"``, ``"gptme"``);
     hyphens are replaced with underscores in the returned key so the result
     is valid as a JSONL field fragment.
     """
-    lower = text.lower()
+    evidence = _structured_error_evidence(text)
+    if not evidence:
+        return None
+    lower = evidence.lower()
     backend_slug = backend.replace("-", "_")
     # Quota/payment takes priority (more specific than auth).
     if any(m.lower() in lower for m in BACKEND_QUOTA_MARKERS):
