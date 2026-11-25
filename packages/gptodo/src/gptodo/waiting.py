@@ -387,22 +387,27 @@ def _pending_task_entries(waiting_for: object) -> list:
     ]
 
 
-def clear_resolved_conditions(task_path: Path) -> None:
+def clear_resolved_conditions(task_path: Path, expected_waiting_for: object) -> bool:
     """Drop resolved external conditions after every one of them resolved.
 
     Unresolved ``type: task`` entries (handled by unblock.py) are kept, and so
     is waiting_since while any remain. The write goes through ``mutate_task``
-    (per-path lock, fresh read, atomic replace).
+    (per-path lock, fresh read, atomic replace). If waiting_for differs from
+    the snapshot that was checked, leave the file untouched and return False;
+    the caller must recheck the new conditions before clearing them.
     """
     from gptodo.lifecycle import mutate_task
 
     def prepare(post: Any) -> list:
+        if post.metadata.get("waiting_for") != expected_waiting_for:
+            return []
         remaining = _pending_task_entries(post.metadata.get("waiting_for"))
         if remaining:
             return [("set", "waiting_for", remaining)]
         return [("set", "waiting_for", None), ("set", "waiting_since", None)]
 
-    mutate_task(task_path, prepare=prepare, completion_effects=False)
+    result = mutate_task(task_path, prepare=prepare, completion_effects=False)
+    return result.written
 
 
 def check_task_waiting(task_path: Path) -> tuple[bool, str]:
@@ -428,8 +433,9 @@ def check_task_waiting(task_path: Path) -> tuple[bool, str]:
     all_resolved, updated = check_all_conditions(checkable)
 
     if all_resolved:
-        clear_resolved_conditions(task_path)
-        return True, "All conditions resolved - task unblocked"
+        if not clear_resolved_conditions(task_path, post.metadata.get("waiting_for")):
+            return False, "Waiting conditions changed during check - recheck required"
+        return True, "External conditions resolved (task dependencies handled by unblock.py)"
 
     # Report status
     pending = [c for c in updated if not c.resolved]

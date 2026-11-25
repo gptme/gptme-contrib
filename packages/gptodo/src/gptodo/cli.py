@@ -2357,13 +2357,17 @@ def check_waiting(fix: bool, verbose: bool):
         # Report status
         status_str = ", ".join(status_parts)
         if all_resolved:
+            if fix:
+                if not clear_resolved_conditions(task.path, task.metadata.get("waiting_for")):
+                    pending_count += 1
+                    console.print(f"[yellow]⏳ {task.id}: Conditions changed; recheck required[/]")
+                    continue
+                changes_made.append(task.id)
+                console.print(
+                    "  [cyan]→ Removed resolved external conditions; task deps retained[/]"
+                )
             resolved_count += 1
             console.print(f"[green]✓ {task.id}[/]: {status_str}")
-            if fix:
-                # Clear waiting_for from task
-                clear_resolved_conditions(task.path)
-                changes_made.append(task.id)
-                console.print("  [cyan]→ Cleared waiting_for[/]")
         else:
             pending_count += 1
             console.print(f"[yellow]⏳ {task.id}[/]: {status_str}")
@@ -2376,7 +2380,9 @@ def check_waiting(fix: bool, verbose: bool):
         console.print(f"  Skipped (task deps): [dim]{skipped_count}[/]")
 
     if changes_made:
-        console.print(f"\n[cyan]Cleared waiting_for on {len(changes_made)} task(s):[/]")
+        console.print(
+            f"\n[cyan]Removed resolved external conditions on {len(changes_made)} task(s):[/]"
+        )
         for task_id in changes_made:
             console.print(f"  • {task_id}")
 
@@ -2476,10 +2482,12 @@ def watch(interval: int, fix: bool, once: bool, verbose: bool):
                 previous_state[task.id][key] = checked.resolved
 
             if all_resolved:
-                resolved_count += 1
                 if fix:
-                    clear_resolved_conditions(task.path)
+                    if not clear_resolved_conditions(task.path, task.metadata.get("waiting_for")):
+                        pending_count += 1
+                        continue
                     changes.append((task.id, task_changes))
+                resolved_count += 1
             else:
                 pending_count += 1
 

@@ -96,3 +96,40 @@ def test_cli_check_waiting_survives_unknown_type(workspace: Path) -> None:
     _write(workspace / "tasks" / "t.md", "  - type: pr-merged\n    ref: o/r#1\n")
     result = CliRunner().invoke(cli, ["check-waiting"])
     assert result.exit_code == 0, result.output
+
+
+@pytest.mark.parametrize("entrypoint", ["library", "check-waiting", "watch"])
+@pytest.mark.parametrize("edit", ["add-ci", "add-unknown", "change-ref"])
+def test_fix_preserves_conditions_changed_during_check(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, entrypoint: str, edit: str
+) -> None:
+    from gptodo import waiting
+
+    path = _write(workspace / "tasks" / "t.md", f"  - type: time\n    ref: '{PAST}'\n")
+    real_check = waiting.check_condition
+    edited_text = ""
+
+    def check_with_concurrent_edit(condition: WaitCondition) -> WaitCondition:
+        nonlocal edited_text
+        post = frontmatter.load(path)
+        if edit == "change-ref":
+            post.metadata["waiting_for"][0]["ref"] = "2999-01-01T00:00:00+00:00"
+        else:
+            post.metadata["waiting_for"].append(
+                {"type": "pr_ci" if edit == "add-ci" else "pr-merged", "ref": "o/r#2"}
+            )
+        edited_text = frontmatter.dumps(post)
+        path.write_text(edited_text)
+        return real_check(condition)
+
+    monkeypatch.setattr(waiting, "check_condition", check_with_concurrent_edit)
+    if entrypoint == "library":
+        resolved, message = check_task_waiting(path)
+        assert not resolved, message
+    else:
+        args = ["check-waiting", "--fix"] if entrypoint == "check-waiting" else ["watch", "--once"]
+        result = CliRunner().invoke(cli, args)
+        assert result.exit_code == 0, result.output
+        assert "Cleared waiting_for" not in result.output
+        assert "1 pending" in result.output or "Pending: 1" in result.output
+    assert path.read_text() == edited_text
