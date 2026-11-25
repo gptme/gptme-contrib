@@ -168,7 +168,48 @@ _SYNC_HEADERS = (
     "Authentication-Results",
 )
 
-_AUTH_RESULT_RE = re.compile(r"\b(spf|dkim|dmarc)\s*=\s*([a-z]+)", re.IGNORECASE)
+_AUTH_RESULT_RE = re.compile(r"^\s*(spf|dkim|dmarc)\s*=\s*([a-z]+)(?=\s|$)", re.IGNORECASE)
+
+
+def _authentication_methods(value: str) -> list[str]:
+    """Split result clauses, ignoring RFC comments and quoted property values.
+
+    A semicolon inside either is data, not a new method. Comments can nest and
+    both comments and quoted strings allow backslash-escaped delimiters.
+    """
+    clauses = []
+    current: list[str] = []
+    depth = 0
+    quoted = False
+    escaped = False
+    for char in value:
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\" and (depth or quoted):
+            escaped = True
+        elif depth:
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+        elif quoted:
+            if char == '"':
+                quoted = False
+        elif char == "(":
+            depth = 1
+            current.append(" ")
+        elif char == '"':
+            quoted = True
+            current.append(" ")
+        elif char == ";":
+            clauses.append("".join(current))
+            current = []
+        else:
+            current.append(char)
+    clauses.append("".join(current))
+    # The first clause is the authserv-id, not an authentication method.
+    return clauses[1:]
 
 
 def authentication_failed(auth_results: str) -> bool:
@@ -180,8 +221,11 @@ def authentication_failed(auth_results: str) -> bool:
     This is a negative filter, not proof that the sender is authenticated.
     """
     verdicts: dict[str, set[str]] = {}
-    for method, result in _AUTH_RESULT_RE.findall(auth_results or ""):
-        verdicts.setdefault(method.lower(), set()).add(result.lower())
+    for clause in _authentication_methods(auth_results or ""):
+        match = _AUTH_RESULT_RE.match(clause)
+        if match:
+            method, result = match.groups()
+            verdicts.setdefault(method.lower(), set()).add(result.lower())
     if "fail" in verdicts.get("dmarc", set()):
         return True
     return bool({"fail", "softfail"} & verdicts.get("spf", set())) and "pass" not in verdicts.get(
@@ -1390,6 +1434,10 @@ class AgentEmail:
         filename = self._format_filename(message_id)
         existing = self._message_folder_of(filename)
         if existing is not None:
+            # Delivery retries are idempotent, without rewriting or resurrecting
+            # a message already moved out of inbox. Different content is refused.
+            if (self.email_dir / existing / filename).read_bytes() == message_data.encode("utf-8"):
+                return message_id
             raise ValueError(f"Message {message_id} already exists in {existing}")
         inbox_path = self.email_dir / "inbox" / filename
         write_private_text(inbox_path, message_data)
@@ -1770,7 +1818,8 @@ class AgentEmail:
             # Save previous header if any. Empty current_value is a valid
             # empty-value header (e.g. "X-GitHub-Labels:") and must be stored.
             if current_key:
-                headers[current_key] = " ".join(current_value)
+                if current_key != "Authentication-Results" or current_key not in headers:
+                    headers[current_key] = " ".join(current_value)
                 current_value = []
 
             # Parse new header — partition on ":" handles both "Key: value" and
@@ -1780,6 +1829,10 @@ class AgentEmail:
             # that do not strip (e.g. _send_unlocked Message-ID/References).
             if ":" in line:
                 current_key, _, value = line.partition(":")
+                # The receiving MTA prepends its verdict. A later, sender-added
+                # duplicate must not override it, regardless of header casing.
+                if current_key.lower() == "authentication-results":
+                    current_key = "Authentication-Results"
                 current_value = [value.lstrip()] if value.strip() else []
             else:
                 print(f"Warning: Invalid header line: {line}", file=sys.stderr)
@@ -1787,7 +1840,8 @@ class AgentEmail:
 
         # Save last header (including empty-value)
         if current_key:
-            headers[current_key] = " ".join(current_value)
+            if current_key != "Authentication-Results" or current_key not in headers:
+                headers[current_key] = " ".join(current_value)
 
         return headers
 

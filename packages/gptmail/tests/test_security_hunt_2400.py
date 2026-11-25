@@ -357,3 +357,70 @@ def test_archive_identical_all_mail_copy_preserves_original(mail: AgentEmail) ->
     assert not inbox.exists()
     assert archived.read_text() == content
     assert archived.stat().st_ino == original_inode
+
+
+@pytest.mark.parametrize("ingest", ["receive", "import"])
+@pytest.mark.parametrize("first_key", ["Authentication-Results", "authentication-results"])
+def test_raw_ingest_keeps_first_authentication_verdict(
+    mail: AgentEmail, tmp_path: Path, ingest: str, first_key: str
+) -> None:
+    source = tmp_path / "raw-maildir"
+    (source / "new").mkdir(parents=True)
+    raw = source / "new" / "forged"
+    _maildir_msg(
+        raw,
+        message_id="<raw-forged@example.com>",
+        body="forged",
+        extra=(
+            f"{first_key}: mx.example;\n\tdmarc=fail header.from=example.com\n"
+            "Authentication-Results: attacker; dmarc=pass; spf=pass\n"
+        ),
+    )
+    if ingest == "receive":
+        mail.receive(raw.read_text())
+    else:
+        assert mail.import_from_maildir(source, "inbox")["success"] == 1
+    assert mail.get_unreplied_emails() == []
+
+
+@pytest.mark.parametrize(
+    "auth_results",
+    [
+        "mx.example; spf=softfail (domain of dmarc=pass@evil.example); dmarc=none",
+        "mx.example; spf=softfail smtp.mailfrom=dmarc=pass@evil.example; dmarc=none",
+        'mx.example; spf=fail reason="; dmarc=pass"; dmarc=none',
+        "mx.example; spf=fail (nested (comment; dmarc=pass)); dmarc=none",
+        r"mx.example; spf=fail (escaped \) ; dmarc=pass); dmarc=none",
+    ],
+)
+def test_authentication_verdicts_ignore_comments_and_properties(auth_results: str) -> None:
+    assert authentication_failed(auth_results)
+
+
+@pytest.mark.parametrize("folder", ["inbox", "archive", "sent", "drafts"])
+def test_receive_identical_retry_preserves_stored_message(mail: AgentEmail, folder: str) -> None:
+    message_id = "<retry@example.com>"
+    content = f"Message-ID: {message_id}\nSubject: same\n\nSAME\n"
+    stored = mail.email_dir / folder / mail._format_filename(message_id)
+    stored.write_text(content)
+    inode = stored.stat().st_ino
+    assert mail.receive(content) == message_id
+    assert stored.read_text() == content
+    assert stored.stat().st_ino == inode
+    if folder != "inbox":
+        assert not (mail.email_dir / "inbox" / stored.name).exists()
+
+
+@pytest.mark.parametrize(
+    ("line", "expected"),
+    [
+        (r'KEY="ab\"cd"', 'ab"cd'),
+        (r"KEY='ab\'cd'", "ab'cd"),
+        (r'KEY="ab\\cd" # comment', r"ab\cd"),
+        (r'KEY="ab\ncd"', "ab\ncd"),
+        (r"KEY='ab\ncd'", r"ab\ncd"),
+        (r'KEY="ab\qcd"', r"ab\qcd"),
+    ],
+)
+def test_env_quoted_escapes_are_not_truncated(line: str, expected: str) -> None:
+    assert gptmail_cli._parse_env_line(line) == ("KEY", expected)

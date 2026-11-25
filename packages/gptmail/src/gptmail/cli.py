@@ -76,7 +76,7 @@ def _display_sender_address(sender: str) -> str:
 
 
 def _parse_env_line(line: str) -> tuple[str, str] | None:
-    """Parse one ``.env`` line into ``(key, value)`` the way dotenv does.
+    """Parse one single-line ``.env`` assignment (no variable interpolation).
 
     Strips an ``export`` prefix, matching surrounding quotes and unquoted inline
     ``# comments``. Keeping them would put ``"secret"`` in ``os.environ``, so the
@@ -96,9 +96,32 @@ def _parse_env_line(line: str) -> tuple[str, str] | None:
     value = value.strip()
     if value[:1] in ("'", '"'):
         quote = value[0]
-        end = value.find(quote, 1)
-        if end != -1:
-            return key, value[1:end]
+        escapes = {"\\": "\\", "'": "'"}
+        if quote == '"':
+            escapes.update(
+                {
+                    '"': '"',
+                    "a": "\a",
+                    "b": "\b",
+                    "f": "\f",
+                    "n": "\n",
+                    "r": "\r",
+                    "t": "\t",
+                    "v": "\v",
+                }
+            )
+        parsed: list[str] = []
+        i = 1
+        while i < len(value):
+            char = value[i]
+            if char == quote:
+                return key, "".join(parsed)
+            if char == "\\" and i + 1 < len(value) and value[i + 1] in escapes:
+                parsed.append(escapes[value[i + 1]])
+                i += 2
+            else:
+                parsed.append(char)
+                i += 1
         # Unterminated quote: keep the raw value rather than guess.
         return key, value
     # Unquoted: an inline comment starts at whitespace followed by '#'.
