@@ -1394,3 +1394,38 @@ def test_undecodable_mature_backup_is_not_rotated_over(tmp_path, capsys):
     assert bandit.backup_file.read_text() == history
     assert "backup not rotated" in capsys.readouterr().err
     assert Bandit(state_dir=tmp_path).state.total_sessions == 3
+
+
+def test_undecodable_state_with_decodable_backup_is_kept_aside(tmp_path, capsys):
+    """A decodable .bak does not make an undecodable state file redundant (#2321).
+
+    A richer writer saves on top of a plain history: the newer state file holds
+    more observations than the plain .bak, so ``_load_state()`` recovers the
+    older backup. Returning on the backup's decode let the save overwrite the
+    newer file with that older content. The unreadable file is now kept aside
+    instead, so its observations survive.
+    """
+    bandit = Bandit(state_dir=tmp_path)
+    for _ in range(13):
+        bandit.update(["a"], outcome=1.0)
+    data = json.loads(bandit.state_file.read_text())
+    arm = data["arms"]["a"]
+    arm["extra"] = "from a richer arm_class"
+    arm["total_selections"] = 40
+    data["total_sessions"] = 40
+    state_before = json.dumps(data)
+    bandit.state_file.write_text(state_before)
+    backup_before = bandit.backup_file.read_text()
+    assert json.loads(backup_before)["total_sessions"] == 12
+
+    reader = Bandit(state_dir=tmp_path)
+    # The plain reader recovered the older backup, so the save starts from it.
+    assert reader.state.total_sessions == 12
+    reader.update(["a"], outcome=1.0)
+
+    kept = sorted(tmp_path.glob("bandit-state.json.undecodable-*"))
+    assert len(kept) == 1
+    assert kept[0].read_text() == state_before
+    assert bandit.backup_file.read_text() == backup_before
+    assert json.loads(bandit.state_file.read_text())["total_sessions"] == 13
+    assert "kept unreadable bandit state" in capsys.readouterr().err

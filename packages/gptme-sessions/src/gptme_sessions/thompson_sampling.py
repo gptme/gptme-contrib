@@ -725,6 +725,7 @@ class Bandit:
         if not allow_arm_deletion:
             self._refuse_mature_arm_removal(data)
         self._backup_current()
+        self._set_aside_undecodable_state()
         _atomic_write_text(self.state_file, json.dumps(data, indent=2) + "\n")
 
     def _serialize_state(self) -> dict:
@@ -741,6 +742,36 @@ class Bandit:
                 for arm_id, contexts in self.state.contextual_arms.items()
             }
         return data
+
+    def _set_aside_undecodable_state(self) -> None:
+        """Keep a state file this writer cannot load instead of overwriting it.
+
+        ``_refuse_overwriting_undecodable_history()`` only stops a save when no
+        copy loads at all. When the backup does load, ``_load_state()`` recovers
+        from it — and writing that recovered state back would drop everything a
+        richer writer recorded in its newer state file. Moving the unreadable
+        file aside keeps that evidence without blocking the save.
+        """
+        try:
+            text = self.state_file.read_text()
+        except OSError:
+            return
+        try:
+            self._decode_state(text)
+            return
+        except (ValueError, TypeError, KeyError, AttributeError):
+            pass
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        target = self.state_file.with_name(f"{self.state_file.name}.undecodable-{stamp}")
+        try:
+            self.state_file.replace(target)
+        except OSError:
+            return
+        print(
+            f"Warning: kept unreadable bandit state as {target.name} "
+            "(it may hold observations this reader cannot load)",
+            file=sys.stderr,
+        )
 
     def _persisted_document(self) -> dict:
         """Return the first loadable persisted state document, or ``{}``.
@@ -776,6 +807,10 @@ class Bandit:
         saving that would erase the history, first from the state file and on
         the next save from the backup. Files that are not valid JSON hold
         nothing recoverable here and are still repaired by saving.
+
+        A decodable backup is not enough on its own when the state file is the
+        newer of the two: ``_set_aside_undecodable_state()`` keeps that file
+        before it is replaced, so the observations it holds survive.
         """
         unreadable: list[str] = []
         for path in (self.state_file, self.backup_file):
