@@ -281,6 +281,12 @@ def test_complete_single_pass_is_accepted(gh_comments: Any) -> None:
     status = _status(gh_comments, [_comment(_marker(consensus=consensus))])
     assert status["accepted"] is True, status["detail"]
 
+    # Explicitly asking for agreement 2 is still a clamp, not a complete 1/1.
+    clamped = dict(consensus, min_agreement_requested=2)
+    status = _status(gh_comments, [_comment(_marker(consensus=clamped))])
+    assert status["accepted"] is False
+    assert "clamped" in (status["detail"] or "")
+
     # A single pass that lost its job still reached its score on no evidence.
     degraded = dict(consensus, jobs_requested=3, jobs_answered=1)
     status = _status(gh_comments, [_comment(_marker(consensus=degraded))])

@@ -10,7 +10,7 @@ Policy summary:
   consensus pass and zero open P1 findings (see "Accepting our own review" below).
   A current-head Greptile review with no unresolved threads at the configured
   score floor is accepted as an *alternative* input when the own reviewer has no
-  usable verdict (absent, stale, abstained, or one-pass/degraded consensus). An
+  usable verdict (absent, stale, abstained, or degraded consensus). An
   open P0/P1 from our reviewer is never erased by a positive Greptile score.
   Greptile review uses a 3-branch staleness policy (Erik decision 2026-09-07):
     1. Fresh Greptile on current head → 5/5 floor applies (original gate).
@@ -55,8 +55,9 @@ falls back to requiring Greptile rather than approving:
 - the review is at the current head SHA (a review of an older push says nothing
   about the code about to merge)
 - consensus is present and undegraded — no lost passes, no lost fan-out jobs, no
-  clamped agreement threshold. A complete single pass (1/1) qualifies. A degraded run reached its score on less evidence
-  than it asked for, which is exactly the recall failure. A **missing** consensus
+  clamped agreement threshold. A complete single pass (1/1) qualifies. A degraded
+  run reached its score on less evidence than it asked for, which is exactly the
+  recall failure. A **missing** consensus
   record means no consensus stage ran at all (the hourly sweep's single-pass
   reviews, or the agent engine); the reviewer documents that as "unknown, never
   read as full consensus", so it does not satisfy this gate either. Get a
