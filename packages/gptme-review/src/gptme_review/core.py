@@ -15,9 +15,20 @@ Two review engines live here:
     files, follow callers, and check whether a claim in the diff is actually
     true — the capability Greptile approximates with repo-wide RAG.  Slower.
 
-The prompt builder is a faithful port of ``gptme.cli.cmd_review_pr``'s so that
-both engines review against identical instructions and the comparison between
-them is about *capability*, not prompt drift.
+The prompt builder descends from ``gptme.cli.cmd_review_pr``'s
+``_build_review_prompt`` but is **not** a faithful port: the two have drifted
+and nothing keeps them in step. Compared with the gptme copy this one adds the
+three-clause test-coverage rule, its test-defect criteria, and trusted
+wave/aspect context appended as a suffix so sequential waves share a
+prefix-cached payload; the gptme copy alone carries ``can_read_files`` /
+tool-preset framing and ``extra_instructions``. Both strip fenced JSON/YAML
+blocks out of the PR body.
+
+``gptme_review.core`` is the model-facing diff→findings primitive (the Bob
+workspace's ``knowledge/technical/pr-review-systems-map.md`` says so), which
+makes this copy the duplicate: the intent is to upstream the deltas above into
+``cmd_review_pr`` and leave only the wave/aspect suffix here. Until that lands,
+a prompt edit in either copy is an edit to both.
 """
 
 from __future__ import annotations
