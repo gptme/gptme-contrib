@@ -2814,6 +2814,7 @@ local = [
     { name = "pyaudio" },
 ]
 test = [
+    { name = "packaging" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
 ]
@@ -2828,10 +2829,12 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27" },
     { name = "mavsdk", marker = "extra == 'body'", specifier = ">=2.0" },
     { name = "openai", specifier = ">=1.0.0" },
+    { name = "packaging", marker = "extra == 'test'", specifier = ">=23.0" },
     { name = "pyaudio", marker = "extra == 'local'", specifier = ">=0.2.13" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=7.0" },
     { name = "pytest-asyncio", marker = "extra == 'test'", specifier = ">=0.23.0" },
     { name = "starlette", specifier = ">=0.37.0" },
+    { name = "tomli", marker = "python_full_version < '3.11' and extra == 'test'", specifier = ">=2.0" },
     { name = "twilio", specifier = ">=9.0.0" },
     { name = "uvicorn", specifier = ">=0.30.0" },
     { name = "websockets", specifier = ">=12.0" },
