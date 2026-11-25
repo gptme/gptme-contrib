@@ -1,5 +1,6 @@
 """`make test-changed-packages` must test changed plugins, not only packages (#1824)."""
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -14,6 +15,13 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def _git_env() -> dict[str, str]:
+    # Hooks export repository selectors; never let them redirect fixture writes.
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+    return env
+
+
 def _git(repo: Path, *args: str) -> None:
     subprocess.run(
         [
@@ -23,10 +31,13 @@ def _git(repo: Path, *args: str) -> None:
             "-c",
             "user.email=t@t",
             "-c",
-            "core.hooksPath=/dev/null",
+            f"core.hooksPath={os.devnull}",
+            "-c",
+            "commit.gpgsign=false",
             *args,
         ],
         cwd=repo,
+        env=_git_env(),
         check=True,
         capture_output=True,
     )
@@ -53,6 +64,7 @@ def _run_changed(repo: Path, *paths: str) -> str:
     out = subprocess.run(
         ["make", "-s", "test-changed-packages", "BASE=HEAD~1", "MAKE=echo"],
         cwd=repo,
+        env=_git_env(),
         check=True,
         capture_output=True,
         text=True,
@@ -79,3 +91,35 @@ def test_package_only_change_unchanged(repo: Path) -> None:
     out = _run_changed(repo, "packages/pkg-a/tests/test_x.py")
     assert "test-package PKG=pkg-a" in out
     assert "test-plugin" not in out
+
+
+@pytest.mark.parametrize("path", ["Makefile", "pyproject.toml", "uv.lock", "README.md"])
+def test_fallback_tests_packages_and_plugins(repo: Path, path: str) -> None:
+    # Keep the real Makefile executable when marking shared config as changed.
+    if path == "Makefile":
+        with (repo / path).open("a") as f:
+            f.write("\n# changed\n")
+        out = _run_changed(repo)
+    else:
+        out = _run_changed(repo, path)
+    assert "test-packages" in out
+    assert "test-plugins" in out
+
+
+@pytest.mark.parametrize("repository_selectors", [False, True])
+def test_git_environment_is_isolated(
+    repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    repository_selectors: bool,
+) -> None:
+    config = tmp_path / "host.gitconfig"
+    config.write_text("[commit]\n\tgpgsign = true\n[gpg]\n\tprogram = false\n")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(config))
+    if repository_selectors:
+        # Invalid paths fail safely on the old helper, without touching a real index.
+        monkeypatch.setenv("GIT_DIR", str(tmp_path / "not-a-repository"))
+        monkeypatch.setenv("GIT_WORK_TREE", str(tmp_path / "not-a-worktree"))
+        monkeypatch.setenv("GIT_INDEX_FILE", str(tmp_path / "not-an-index"))
+    out = _run_changed(repo, "plugins/plug-a/tests/test_x.py")
+    assert "test-plugin PLUGIN=plug-a" in out

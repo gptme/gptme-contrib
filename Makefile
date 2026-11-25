@@ -126,11 +126,11 @@ test-changed-packages:  ## Run tests only for packages/plugins changed since BAS
 	CHANGED=$$(echo "$$ALL" | grep -E '^(packages|plugins)/' | cut -d/ -f1-2 | sort -u \
 		| while IFS= read -r p; do [ -d "$$p/tests" ] && echo "$$p"; done); \
 	if echo "$$ALL" | grep -qE '^(Makefile|pyproject\.toml|uv\.lock|\.github/workflows/test-packages\.yml)'; then \
-		echo "Shared workspace config changed vs $(BASE) — running all packages"; \
-		$(MAKE) test-packages; \
+		echo "Shared workspace config changed vs $(BASE) — running all packages and plugins"; \
+		$(MAKE) test-packages && $(MAKE) test-plugins; \
 	elif [ -z "$$CHANGED" ]; then \
-		echo "No changed packages or plugins detected vs $(BASE) — running all packages"; \
-		$(MAKE) test-packages; \
+		echo "No changed packages or plugins detected vs $(BASE) — running all packages and plugins"; \
+		$(MAKE) test-packages && $(MAKE) test-plugins; \
 	else \
 		printf 'Changed packages/plugins:\n'; \
 		echo "$$CHANGED" | sed 's/^/  /'; \
