@@ -536,17 +536,44 @@ class FileWatcher:
 
     def start(self) -> None:
         """Start watching for file changes."""
-        # Reset collection and prepare paths
-        self.indexer.reset_collection()
-
+        # Do not reset the collection: a persistent index holds documents for
+        # other directories too. Re-indexing each watched path replaces its
+        # files' chunks; files deleted while the watcher was down are pruned.
         for path in self.paths:
             path.mkdir(parents=True, exist_ok=True)
+            self._prune_missing_sources(path)
             self.indexer.index_directory(path, self.event_handler.pattern)
             self.observer.schedule(self.event_handler, str(path), recursive=True)
 
         # Start observer and wait for it to be ready
         self.observer.start()
         time.sleep(self.startup_delay)
+
+    def _prune_missing_sources(self, path: Path) -> None:
+        """Drop indexed sources under ``path`` whose file no longer exists."""
+        root = str(path.resolve())
+        prefix = root.rstrip(os.sep) + os.sep
+        # A symlinked file is stored under its target, which may lie outside
+        # root; a dangling link is what still ties that source to this root.
+        # realpath, unlike Path.resolve, does not raise on symlink loops.
+        dangling = {
+            os.path.realpath(link)
+            for link in path.rglob("*")
+            if link.is_symlink() and not os.path.exists(link)
+        }
+        metadatas = self.indexer.collection.get(include=["metadatas"])["metadatas"] or []
+        missing = {
+            source
+            for meta in metadatas
+            if meta
+            and isinstance(source := meta.get("source"), str)
+            and (source == root or source.startswith(prefix) or source in dangling)
+            and not os.path.isfile(source)
+        }
+        for source in sorted(missing):
+            self.indexer.delete_documents({"source": source})
+        if missing:
+            logger.info(f"Pruned {len(missing)} deleted file(s) under {root}")
 
     def stop(self) -> None:
         """Stop watching for file changes."""
