@@ -173,6 +173,10 @@ def test_r3_2b_agent_volume_cannot_exceed_volume_ceiling(tmp_path, monkeypatch):
     )
     if result.exit_code == 2:  # rejected as a usage error: fixed
         return
+    # A crash before the sink runs also leaves `spawned` empty, so an
+    # `all()` over it would pass vacuously. Require a successful run first.
+    assert result.exit_code == 0, f"sound run failed: {result.output!r}"
+    assert spawned, "no player invocation: cannot verify the volume ceiling"
     played = [float(cmd[2]) for cmd in spawned]
     assert all(0.0 <= v <= 1.0 for v in played), f"player volumes out of [0,1]: {spawned}"
 

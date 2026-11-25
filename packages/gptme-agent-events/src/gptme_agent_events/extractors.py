@@ -347,13 +347,20 @@ def _codex_output(out: Any) -> tuple[int | None, bool, str]:
     code: int | None = None
     inner_running = False
     texts = []
+    raw_blocks: list[str] = []
     for block in blocks:
         try:
             data = json.loads(block)
         except ValueError:
             data = None
         if isinstance(data, dict) and ("exit_code" in data or "output" in data):
+            raw_blocks.append(block)
             raw_code = data.get("exit_code")
+            # The legacy ``shell`` tool nests the status under ``metadata``:
+            # {"output": ..., "metadata": {"exit_code": 1}}. Reading only the
+            # top level made a failed push look landed.
+            if raw_code is None and isinstance(data.get("metadata"), dict):
+                raw_code = data["metadata"].get("exit_code")
             if isinstance(raw_code, bool):
                 raw_code = None
             if raw_code is None and data.get("session_id") is not None:
@@ -377,7 +384,9 @@ def _codex_output(out: Any) -> tuple[int | None, bool, str]:
             texts.append(block)
     text = "\n".join(texts)
     if code is None:
-        m = _CODEX_EXIT_RE.search(text)
+        # Scan the payloads first, then the raw blocks: a legacy shell result
+        # that names its code only in nested metadata must still be read.
+        m = _CODEX_EXIT_RE.search(text) or _CODEX_EXIT_RE.search("\n".join(raw_blocks))
         code = int(m.group(1)) if m else None
     running = code is None and (inner_running or text.lstrip().startswith("Script running"))
     return code, running, text

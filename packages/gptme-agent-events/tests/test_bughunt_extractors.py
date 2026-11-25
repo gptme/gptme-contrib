@@ -188,6 +188,26 @@ def test_codex_string_exit_code_is_read_not_reported_as_success():
     assert "failed to push" in text
 
 
+def test_codex_legacy_shell_metadata_exit_code_is_read():
+    """The legacy ``shell`` tool nests the status under ``metadata``.
+
+    Reading only the top level left ``code`` None, and the exit regex scanned
+    the bare ``output`` string, so a failed push was reported as landed.
+    """
+    from gptme_agent_events.extractors import _codex_output
+
+    block = json.dumps(
+        {
+            "output": "error: failed to push some refs",
+            "metadata": {"exit_code": 1, "duration_seconds": 0.2},
+        }
+    )
+    code, running, text = _codex_output([block])
+    assert code == 1
+    assert running is False
+    assert "failed to push" in text
+
+
 def test_codex_unusable_exit_code_keeps_the_block_text():
     """With no ``output`` payload, the raw block stays searchable."""
     from gptme_agent_events.extractors import _codex_output
