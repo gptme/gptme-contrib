@@ -13,15 +13,16 @@ What must stay equal: triggers, top-level ``permissions``/``env``/``defaults``/
 ``secrets.*``/``vars.*`` reference, and the ``owner/repo`` of each ``uses:``.
 Release, publish, deploy, signing and pages workflows or jobs are always out.
 
-Secret-bearing steps are frozen too, because an unchanged reference set says
-nothing about what *consumes* the secret: a ``run:`` edit in the step that holds
-``secrets.X`` can send it anywhere. A step holds a secret when any of its values
-references ``secrets``/``vars``. In a job, every step up to and including the
-last secret-holding step (on either side) must be unchanged, positionally, so an
-earlier step cannot plant a binary or ``$GITHUB_ENV`` entry the secret step then
-runs. When the workflow or job ``env`` references a secret, every step in scope
-sees it, so the whole step list must be unchanged. Only a step's ``@ref`` pin and
-``timeout-minutes`` may differ inside that frozen prefix.
+Secret-bearing workflows are frozen too, because an unchanged reference set
+says nothing about what *consumes* a secret: a ``run:`` edit in a step that
+holds ``secrets.X`` can send it anywhere. A secret does not stay where it is
+declared — it reaches later steps through ``$GITHUB_ENV``, step outputs and
+files written by credential actions, and it reaches other jobs through
+``needs`` outputs, artifacts and caches. So once *any* job (or the workflow
+``env``) references ``secrets``/``vars``, every step body in the workflow must
+be unchanged, positionally, and only a step's ``@ref`` pin and
+``timeout-minutes`` may differ. A workflow with no secret reference keeps the
+useful case: step bodies there are repairable.
 
 Everything fails closed: a missing YAML parser, unparseable YAML or a
 non-mapping document is a violation, never a pass. PyYAML is imported lazily so
@@ -163,32 +164,20 @@ def _guarded_step(step: Any) -> Any:
 def _secret_step_violations(
     job_id: Any, old: dict[str, Any], new: dict[str, Any], scope_wide: bool
 ) -> list[str]:
-    """Steps that can see a secret must be unchanged (see the module docstring)."""
+    """Steps in a secret-bearing workflow must be unchanged (see the module docstring).
+
+    ``scope_wide`` is true once any job or the workflow ``env`` references a
+    secret, because a secret can travel to any step or job (env files, outputs,
+    artifacts, caches). Neither side's step body may then differ; only a
+    ``@ref`` pin and ``timeout-minutes`` survive ``_guarded_step``.
+    """
+    if not scope_wide:
+        return []
     old_steps, new_steps = old.get("steps"), new.get("steps")
     old_steps = old_steps if isinstance(old_steps, list) else []
     new_steps = new_steps if isinstance(new_steps, list) else []
-    if scope_wide or _context_refs({"env": old.get("env"), "x": new.get("env")}):
-        if [_guarded_step(s) for s in old_steps] != [
-            _guarded_step(s) for s in new_steps
-        ]:
-            return [f"job `{job_id}`: a step changed in a secret-scoped job"]
-        return []
-    holders = [
-        i
-        for steps in (old_steps, new_steps)
-        for i, step in enumerate(steps)
-        if _context_refs({"step": step})
-    ]
-    if not holders:
-        return []
-    frozen = max(holders) + 1
-    if (
-        len(old_steps) < frozen
-        or len(new_steps) < frozen
-        or [_guarded_step(s) for s in old_steps[:frozen]]
-        != [_guarded_step(s) for s in new_steps[:frozen]]
-    ):
-        return [f"job `{job_id}`: steps through the last secret-holding step changed"]
+    if [_guarded_step(s) for s in old_steps] != [_guarded_step(s) for s in new_steps]:
+        return [f"job `{job_id}`: a step changed in a secret-scoped job"]
     return []
 
 
@@ -230,6 +219,14 @@ def ci_repair_violations(path: str, base_text: str, head_text: str) -> list[str]
         return violations + ["`jobs` is missing or not a mapping"]
     if set(base_jobs) != set(head_jobs):
         violations.append("job set changed")
+    # A secret anywhere can reach any job: through `needs` outputs, an artifact
+    # or a cache, not only down the same job's step list. Fail closed: once any
+    # job (or the workflow env) references a secret, freeze every step body.
+    secret_scope = workflow_env_secrets or any(
+        _context_refs({"job": job})
+        for jobs in (base_jobs, head_jobs)
+        for job in jobs.values()
+    )
     for job_id in sorted(set(base_jobs) & set(head_jobs), key=str):
         if _PRIVILEGED_NAME_RE.search(str(job_id)):
             violations.append(f"job `{job_id}`: release/publish/deploy/sign/pages job")
@@ -243,5 +240,5 @@ def ci_repair_violations(path: str, base_text: str, head_text: str) -> list[str]
                 violations.append(f"job `{job_id}`: `{key}` changed")
         if _step_actions(old) != _step_actions(new):
             violations.append(f"job `{job_id}`: action set changed (only @ref may)")
-        violations += _secret_step_violations(job_id, old, new, workflow_env_secrets)
+        violations += _secret_step_violations(job_id, old, new, secret_scope)
     return violations

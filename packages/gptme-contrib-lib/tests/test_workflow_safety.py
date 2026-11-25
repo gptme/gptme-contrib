@@ -36,15 +36,30 @@ jobs:
 """
 
 
+# BASE without the secret-bearing step: a workflow with no secret reference may
+# still receive step-body repairs.
+PLAIN = BASE.replace(
+    "        env:\n          TOKEN: ${{ secrets.CODECOV_TOKEN }}\n", ""
+)
+
+
 def check(head: str, base: str = BASE, path: str = PATH) -> list[str]:
     return ci_repair_violations(path, base, head)
 
 
-def test_repair_edits_pass() -> None:
+def test_repair_edits_pass_in_a_secret_free_workflow() -> None:
     head = (
-        BASE.replace("timeout-minutes: 10", "timeout-minutes: 30")
+        PLAIN.replace("timeout-minutes: 10", "timeout-minutes: 30")
         .replace("actions/checkout@v4", "actions/checkout@v5")
         .replace("run: make lint", "run: make lint LINT_ARGS=--fix")
+    )
+    assert check(head, base=PLAIN) == []
+
+
+def test_repair_edits_pass_in_a_secret_bearing_workflow() -> None:
+    # A job timeout and an @ref pin are still allowed; only step bodies freeze.
+    head = BASE.replace("timeout-minutes: 10", "timeout-minutes: 30").replace(
+        "actions/checkout@v4", "actions/checkout@v5"
     )
     assert check(head) == []
 
@@ -118,12 +133,10 @@ def test_bracket_form_matches_its_dotted_equivalent() -> None:
     # Same reference set; the secret-holding step's text still changed, which the
     # frozen-step rule refuses on its own.
     assert "secrets/vars references changed" not in check(head)
-    assert check(head) == [
-        "job `test`: steps through the last secret-holding step changed"
-    ]
+    assert check(head) == ["job `test`: a step changed in a secret-scoped job"]
 
 
-SECRET_STEP = "job `test`: steps through the last secret-holding step changed"
+SECRET_STEP = "job `test`: a step changed in a secret-scoped job"
 
 
 def test_run_edit_in_a_secret_holding_step_is_caught() -> None:
@@ -152,9 +165,35 @@ def test_step_inserted_before_a_secret_holding_step_is_caught() -> None:
     assert SECRET_STEP in check(head)
 
 
-def test_step_after_the_last_secret_holding_step_may_change() -> None:
+def test_step_after_the_last_secret_holding_step_is_caught() -> None:
+    # A secret reaches later steps through $GITHUB_ENV, outputs and files, so a
+    # later step is exfil surface even though the holder is untouched.
     head = BASE + "      - run: make docs\n"
-    assert check(head) == []
+    assert check(head) == [SECRET_STEP]
+
+
+def test_edit_in_a_job_upstream_of_a_secret_job_is_caught() -> None:
+    # `test` holds no secret, but `upload` (which it feeds) does: a `test` step
+    # edit can poison the artifact/output `upload` executes with its secret.
+    base = PLAIN + (
+        "  upload:\n"
+        "    needs: test\n"
+        "    runs-on: ubuntu-24.04\n"
+        "    steps:\n"
+        "      - run: ./tools/publish.sh\n"
+        "        env:\n"
+        "          TOKEN: ${{ secrets.CODECOV_TOKEN }}\n"
+    )
+    head = base.replace("run: make lint", "run: make lint LINT_ARGS=--fix")
+    assert "job `test`: a step changed in a secret-scoped job" in check(head, base=base)
+    # The same edit is fine when no job holds a secret.
+    assert (
+        check(
+            PLAIN.replace("run: make lint", "run: make lint LINT_ARGS=--fix"),
+            base=PLAIN,
+        )
+        == []
+    )
 
 
 def test_job_env_secret_freezes_every_step_in_the_job() -> None:
