@@ -141,3 +141,29 @@ def test_missing_claude_binary_is_a_clean_cli_error():
 
     with pytest.raises(click.ClickException, match="claude not found"):
         cli_module._cli_errors(missing)
+
+
+@pytest.mark.parametrize("filename", ["gh", "/missing/journal.md", None])
+def test_missing_other_file_does_not_recommend_claude(filename):
+    def missing():
+        raise FileNotFoundError(2, "No such file or directory", filename)
+
+    with pytest.raises(click.ClickException) as caught:
+        cli_module._cli_errors(missing)
+
+    assert "Claude Code" not in str(caught.value)
+    assert (filename or "No such file or directory") in str(caught.value)
+
+
+def test_daily_missing_claude_is_a_clean_cli_error(monkeypatch):
+    monkeypatch.setattr(cli_module, "get_journal_entries_for_date", lambda _date: ["entry"])
+
+    def missing(*_args, **_kwargs):
+        raise FileNotFoundError(2, "No such file or directory", "claude")
+
+    monkeypatch.setattr(cli_module, "generate_daily_with_cc", missing)
+    result = CliRunner().invoke(cli_module.cli, ["daily"])
+
+    assert result.exit_code == 1
+    assert "claude not found: install the Claude Code CLI" in result.output
+    assert isinstance(result.exception, SystemExit)
