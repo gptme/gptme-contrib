@@ -94,9 +94,18 @@ def register_planned_call(
         existing = json.loads(path.read_text())
         if not isinstance(existing, dict):
             raise ValueError("existing planned call is invalid")
+        # Compare the scheduled instant, not its spelling: a retry that
+        # recomputes the same occurrence's ISO timestamp a few microseconds
+        # apart is still the same purpose, while a different time is rejected.
+        try:
+            same_instant = _timestamp(existing.get("scheduled_at")) == _timestamp(
+                scheduled_at
+            )
+        except ValueError:
+            same_instant = False
         if (
             existing.get("caller") != caller
-            or existing.get("scheduled_at") != scheduled_at
+            or not same_instant
             or existing.get("purpose") != purpose
         ):
             raise ValueError(
@@ -285,17 +294,30 @@ def fulfill_planned_call(
             )
         )
     )
+    # Confirmations arrive as ordinary speech, so evaluate sentence by sentence:
+    # a caller may answer "Yeah, that covers it." or split coverage from the
+    # skip decision into two sentences ("That covers the standup. No need for
+    # the later call."). Whole-string fullmatches rejected both.
+    sentences = [
+        part for part in re.split(r"(?<=[.!?])\s+", confirmation) if part.strip()
+    ]
     affirmative = bool(
-        re.fullmatch(
-            r"(?:yes|yeah|yep|correct|exactly|that['’]s right)[.! ]*", confirmation
+        sentences
+        and re.fullmatch(
+            r"(?:yes|yeah|yep|correct|exactly|that['’]s right)"
+            r"(?:[.!, ]+(?:that|this) (?:covers|completes|fulfills) [a-z0-9 ,.’'-]+)?"
+            r"[.!]?",
+            sentences[0],
         )
     )
     explicit_coverage = (
-        bool(
+        any(
             re.fullmatch(
-                r"(?:yes[,!. ]+)?(?:that|this) (?:covers|completes|fulfills) [a-z0-9 ,.’'-]+[.!]?",
-                confirmation,
+                r"(?:(?:yes|yeah|yep|correct|exactly|that['’]s right)[.!, ]+)?"
+                r"(?:that|this) (?:covers|completes|fulfills) [a-z0-9 ,.’'-]+[.!]?",
+                sentence,
             )
+            for sentence in sentences
         )
         and all(
             word in re.findall(r"[a-z0-9]+", confirmation) for word in purpose_words

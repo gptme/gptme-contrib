@@ -169,6 +169,13 @@ def test_plan_id_cannot_be_reused_for_another_purpose(tmp_path):
     register(tmp_path)
     with pytest.raises(ValueError, match="different scheduled purpose"):
         register(tmp_path, purpose="Security review")
+    with pytest.raises(ValueError, match="different scheduled purpose"):
+        register(tmp_path, scheduled_at=(NOW + timedelta(hours=2)).isoformat())
+
+
+def test_plan_id_retry_accepts_the_same_instant_spelled_differently(tmp_path):
+    plan = register(tmp_path)
+    assert register(tmp_path, scheduled_at="2026-11-25T10:00:00+01:00") == plan
 
 
 def test_invalid_context_and_naive_timestamps_are_rejected(tmp_path):
@@ -273,6 +280,26 @@ def test_natural_yes_only_answers_explicit_purpose_and_skip_confirmation(
     ]
     result = fulfill(tmp_path, plan, transcript=transcript, caller_confirmation="Yes.")
     assert (result.get("status") == "fulfilled") is expected
+
+
+@pytest.mark.parametrize(
+    "quote",
+    [
+        "Yeah, that covers it.",
+        "That covers the daily standup. No need for the later call.",
+    ],
+)
+def test_ordinary_phrasing_of_a_combined_confirmation_is_accepted(tmp_path, quote):
+    plan = register(tmp_path)
+    transcript = [
+        SimpleNamespace(
+            role="assistant",
+            text="Does that cover the daily standup, so I can skip the later call?",
+        ),
+        SimpleNamespace(role="user", text=quote),
+    ]
+    result = fulfill(tmp_path, plan, transcript=transcript, caller_confirmation=quote)
+    assert result.get("status") == "fulfilled", result
 
 
 def test_yes_after_intervening_user_turn_does_not_answer_an_old_question(tmp_path):
