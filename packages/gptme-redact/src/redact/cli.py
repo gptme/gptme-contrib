@@ -10,7 +10,6 @@ import stat
 import sys
 import tempfile
 from pathlib import Path
-from typing import BinaryIO
 
 from . import (
     DEFAULT_ALLOWLIST,
@@ -83,25 +82,26 @@ def _build_parser() -> argparse.ArgumentParser:
     return ap
 
 
-def _read_input(path: str) -> str | None:
-    """Read the input without newline translation.
+def _read_input(file: str) -> str | None:
+    """The input text, or None (after an error message) when it is not UTF-8.
 
-    Text-mode reads turn ``\r\n`` into ``\n``, which rewrites non-secret bytes
-    of the artifact. Read files with ``newline=""``, and decode real stdin from
-    its byte buffer for the same reason.
+    Newline bytes are preserved. stdin is read as bytes and decoded strictly. `sys.stdin.read()` uses
+    `errors="surrogateescape"`, so an invalid byte survives as a lone surrogate
+    (`0xff` -> "\\udcff") and passed every pattern, while the same bytes from a
+    file were refused; the same payload must not behave differently by how it
+    was supplied.
     """
     try:
-        if path != "-":
-            with open(path, encoding="utf-8", newline="") as fh:
-                return fh.read()
-        buffer: BinaryIO | None = getattr(sys.stdin, "buffer", None)
-        if buffer is None:  # an in-memory replacement such as io.StringIO
-            return sys.stdin.read()
-        # Same encoding and error handler a text-mode read would use; only the
-        # newline translation is skipped.
-        return buffer.read().decode(
-            sys.stdin.encoding or "utf-8", sys.stdin.errors or "strict"
-        )
+        if file == "-":
+            buf = getattr(sys.stdin, "buffer", None)
+            if buf is not None:
+                return bytes(buf.read()).decode("utf-8")
+            # A replaced stdin (tests) has no buffer; round-trip the text back
+            # through the bytes surrogateescape produced.
+            return sys.stdin.read().encode("utf-8", "surrogateescape").decode("utf-8")
+        # Preserve non-secret newline bytes, as on the current base.
+        with open(file, encoding="utf-8", newline="") as fh:
+            return fh.read()
     except UnicodeDecodeError:
         # UTF-16 with a BOM (or other binary) does not decode at all.
         print(
@@ -271,12 +271,28 @@ def _write_atomic(path: Path, text: str) -> None:
         umask = os.umask(0)
         os.umask(umask)
         mode = 0o666 & ~umask
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    try:
+        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    except OSError:
+        # A writable file inside a non-writable directory: the atomic path
+        # needs a temp file beside the target, the in-place write it replaced
+        # did not, so keep the in-place write as the fallback.
+        with open(path, "wb") as fh:
+            fh.write(data)
+        return
     try:
         with os.fdopen(fd, "wb") as fh:
             fh.write(data)
         os.chmod(tmp, mode)
-        os.replace(tmp, path)
+        try:
+            os.replace(tmp, path)
+        except PermissionError:
+            # Sticky world-writable directory (e.g. /tmp) holding another
+            # user's file: replacing is EPERM, writing the file itself is not.
+            with open(path, "wb") as fh:
+                fh.write(data)
+            Path(tmp).unlink(missing_ok=True)
+            return
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise

@@ -225,3 +225,67 @@ def test_url_encoded_comma_joined_emails_are_both_redacted() -> None:
 def test_dash_joined_emails_are_both_redacted() -> None:
     r = redact("a@x.com-bob@y.org", literals=[])
     assert "bob@y.org" not in r.redacted
+
+
+def test_cli_refuses_invalid_utf8_from_stdin(capsys, monkeypatch) -> None:
+    """The same bytes must not behave differently by how they were supplied.
+
+    `sys.stdin.read()` uses surrogateescape, so `0xff` arrived as "\\udcff",
+    matched no pattern and was reported as a clean artifact, while a file with
+    that byte was refused as invalid UTF-8.
+    """
+
+    class _SurrogateStdin(io.TextIOBase):
+        """What a POSIX stdin looks like: text read with surrogateescape."""
+
+        buffer = io.BytesIO(b"plain \xff text\n")
+
+        def read(self, *a):  # noqa: D102 - mirrors TextIOWrapper.read
+            return self.buffer.getvalue().decode("utf-8", "surrogateescape")
+
+    monkeypatch.setattr("sys.stdin", _SurrogateStdin())
+    assert main(["--no-env-secrets", "-"]) == 2
+    assert "not valid UTF-8" in capsys.readouterr().err
+
+
+def test_out_falls_back_to_in_place_write_in_a_non_writable_dir(
+    tmp_path, monkeypatch
+) -> None:
+    """mkstemp beside the target fails on a writable file in a read-only
+    directory; the old in-place write worked, so it stays the fallback."""
+    import tempfile
+    from pathlib import Path
+
+    from redact.cli import _write_atomic
+
+    out = tmp_path / "redacted.txt"
+    out.write_text("old\n", encoding="utf-8")
+
+    def _deny(*a, **kw):
+        raise PermissionError(13, "Permission denied", str(tmp_path))
+
+    monkeypatch.setattr(tempfile, "mkstemp", _deny)
+    _write_atomic(Path(out), "new\n")
+    assert out.read_text(encoding="utf-8") == "new\n"
+    assert [p.name for p in tmp_path.iterdir()] == ["redacted.txt"]
+
+
+def test_out_falls_back_to_in_place_write_when_replace_is_denied(
+    tmp_path, monkeypatch
+) -> None:
+    """Replacing another user's file in a sticky directory is EPERM; writing
+    the file itself is allowed."""
+    import os
+
+    from redact.cli import _write_atomic
+
+    out = tmp_path / "shared.txt"
+    out.write_text("old\n", encoding="utf-8")
+
+    def _deny(*a, **kw):
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(os, "replace", _deny)
+    _write_atomic(out, "new\n")
+    assert out.read_text(encoding="utf-8") == "new\n"
+    assert [p.name for p in tmp_path.iterdir()] == ["shared.txt"]
