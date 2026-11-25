@@ -867,13 +867,18 @@ def verify_draft(draft: Dict) -> Tuple[bool, ReviewResponse]:
     review_result = review_draft(draft)
     if WRITING_STYLE_CHECK not in review_result.criteria_results:
         # The response examples also use snake_case criterion names.
-        style = next(
+        style_key = next(
             (
-                value
-                for key, value in review_result.criteria_results.items()
+                key
+                for key in review_result.criteria_results
                 if re.sub(r"[^a-z]", "", key.lower()) == "naturalwritingstyle"
             ),
             None,
+        )
+        style = (
+            review_result.criteria_results.pop(style_key)
+            if style_key is not None
+            else None
         )
         review_result.criteria_results[WRITING_STYLE_CHECK] = style or ReviewResult(
             notes="Writing style was not reviewed; request an explicit style decision.",

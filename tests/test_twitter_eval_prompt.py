@@ -877,3 +877,4 @@ def test_explicit_style_decision_accepts_normal_criterion_key_formats(
         {"text": "It took 60 seconds — exactly the timeout.", "type": "reply"}
     )
     assert approved
+    assert set(response.criteria_results) == {"Natural writing style"}
