@@ -620,8 +620,15 @@ class AgentEmail:
 
                     # Trust the RFC 5322 addr-spec, never text inside the display
                     # name: '"Erik <erik@x.com>" <mallory@evil.com>' is mallory.
-                    # Unparseable input stays as-is and fails the allowlist.
-                    sender = parseaddr(from_line)[1] or from_line
+                    # Require exactly one mailbox even on Python versions whose
+                    # parseaddr silently picks the first of several addresses.
+                    # Never fall back to raw header text for allowlist matching.
+                    addresses = getaddresses([from_line])
+                    if len(addresses) != 1:
+                        continue
+                    sender = addresses[0][1]
+                    if sender.count("@") != 1 or not all(sender.split("@")):
+                        continue
 
                     # Skip if already completed (replied or marked as no reply needed)
                     if self._is_completed(message_id):

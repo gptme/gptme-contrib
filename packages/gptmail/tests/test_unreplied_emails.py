@@ -2,6 +2,7 @@
 
 import base64
 from datetime import datetime, timezone
+from email._parseaddr import AddressList
 from pathlib import Path
 
 import pytest
@@ -760,15 +761,40 @@ def test_maildir_sync_decoded_subject_cannot_end_header_block(
         # The display name carries an allowlisted address; the real addr-spec is not.
         ('"Friend <friend@example.com>" <mallory@attacker.example>', False),
         ("Friend <friend@example.com> <mallory@attacker.example>", False),
+        ("Mallory <mallory@evil.com>, friend@example.com", False),
+        ("friend@example.com, mallory@evil.com", False),
+        ("invalid@@example.com", False),
+        ("not an address", False),
         # Genuine allowlisted senders keep working in every common shape.
         ("Friend <friend@example.com>", True),
         ('"Friend, The" <friend@example.com>', True),
         ("friend@example.com", True),
     ],
 )
+@pytest.mark.parametrize("sender_allowlist", ["friend@example.com", "example.com", "*"])
+@pytest.mark.parametrize("legacy_parser", [False, True])
 def test_sender_allowlist_uses_the_real_address_not_the_display_name(
-    agent: AgentEmail, from_header: str, expected: bool
+    agent: AgentEmail,
+    monkeypatch: pytest.MonkeyPatch,
+    from_header: str,
+    expected: bool,
+    sender_allowlist: str,
+    legacy_parser: bool,
 ) -> None:
+    monkeypatch.setenv("EMAIL_ALLOWLIST", sender_allowlist)
+    if legacy_parser:
+        # Pre-strict stdlib behaviour: parseaddr silently returns the first
+        # address, while getaddresses exposes the entire ambiguous list.
+        def legacy_getaddresses(values: list[str]) -> list[tuple[str, str]]:
+            return AddressList(", ".join(values)).addresslist
+
+        def legacy_parseaddr(value: str) -> tuple[str, str]:
+            addresses = legacy_getaddresses([value])
+            return addresses[0] if addresses else ("", "")
+
+        monkeypatch.setattr("gptmail.lib.getaddresses", legacy_getaddresses)
+        monkeypatch.setattr("gptmail.lib.parseaddr", legacy_parseaddr)
+
     _write_email(
         agent.email_dir / "inbox" / "m.md",
         message_id="<m@example.com>",
@@ -784,6 +810,11 @@ def test_sender_allowlist_uses_the_real_address_not_the_display_name(
 
     senders = [email.sender for email in agent.get_unreplied_emails()]
 
+    if sender_allowlist == "*" and from_header == (
+        '"Friend <friend@example.com>" <mallory@attacker.example>'
+    ):
+        assert senders == ["mallory@attacker.example"]
+        return
     assert bool(senders) is expected
     if expected:
         assert senders == ["friend@example.com"]
