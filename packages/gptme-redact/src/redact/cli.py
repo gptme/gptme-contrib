@@ -225,6 +225,17 @@ def _write_atomic(path: Path, text: str) -> None:
     would destroy the existing file (e.g. ``redact - --out f < f``).
     """
     data = text.encode("utf-8")
+    # A device, FIFO or /dev/stdout cannot be replaced by a rename: swapping
+    # /dev/null for a regular file would capture every later write to it.
+    # Write through such targets, as open(path, "w") always did.
+    try:
+        existing = os.stat(path)
+    except FileNotFoundError:
+        existing = None
+    if existing is not None and not stat.S_ISREG(existing.st_mode):
+        with open(path, "wb") as fh:
+            fh.write(data)
+        return
     # Replace the symlink's target, not the link, and keep the file's mode
     # (a new file gets the mode open() would give it, not mkstemp's 0600).
     path = Path(os.path.realpath(path))

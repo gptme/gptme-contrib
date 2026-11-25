@@ -149,3 +149,52 @@ def test_long_sk_key_leaves_no_tail() -> None:
     r = redact(key, literals=[])
     assert r.blocked
     assert tail not in r.redacted
+
+
+def test_out_to_dev_null_writes_through_the_device(tmp_path) -> None:
+    import os
+    import stat
+
+    src = tmp_path / "in.txt"
+    src.write_text("plain text, nothing secret\n", encoding="utf-8")
+    assert main(["--no-env-secrets", "--out", os.devnull, str(src)]) == 0
+    assert stat.S_ISCHR(os.stat(os.devnull).st_mode)
+
+
+def test_out_to_fifo_writes_through_the_fifo(tmp_path) -> None:
+    import os
+    import stat
+    import threading
+
+    src = tmp_path / "in.txt"
+    src.write_text("plain text, nothing secret\n", encoding="utf-8")
+    fifo = tmp_path / "pipe"
+    os.mkfifo(fifo)
+    received: list[bytes] = []
+
+    def reader() -> None:
+        with open(fifo, "rb") as fh:
+            received.append(fh.read())
+
+    t = threading.Thread(target=reader, daemon=True)
+    t.start()
+    assert main(["--no-env-secrets", "--out", str(fifo), str(src)]) == 0
+    t.join(timeout=10)
+    assert received == [b"plain text, nothing secret\n"]
+    assert stat.S_ISFIFO(os.stat(fifo).st_mode)
+
+
+def test_short_http_basic_credential_is_redacted() -> None:
+    _contained("Authorization: Basic dTpw", "dTpw")  # base64("u:p")
+
+
+def test_url_encoded_comma_joined_emails_are_both_redacted() -> None:
+    r = redact("mailto:alice@x.com%2Cbob@y.org", literals=[])
+    assert "alice" not in r.redacted
+    assert "bob@y.org" not in r.redacted
+    assert all("bob" not in f.preview for f in r.findings)
+
+
+def test_dash_joined_emails_are_both_redacted() -> None:
+    r = redact("a@x.com-bob@y.org", literals=[])
+    assert "bob@y.org" not in r.redacted

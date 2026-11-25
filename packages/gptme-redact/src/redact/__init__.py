@@ -484,7 +484,7 @@ _PATTERNS: list[Pattern] = [
     # HTTP Basic auth: base64("user:password"), the sibling of the Bearer form.
     Pattern(
         re.compile(
-            r"\bAuthorization:\s*Basic\s+[A-Za-z0-9+/]{8,}={0,2}",
+            r"\bAuthorization:\s*Basic\s+[A-Za-z0-9+/]{4,}={0,2}",
             re.IGNORECASE,
         ),
         Severity.CRITICAL,
@@ -533,8 +533,12 @@ _PATTERNS: list[Pattern] = [
         # The lookbehind anchors matches to the start of a local-part run.
         # Without it every offset of a long @-less run (hex dump, id string)
         # rescans the run to its end: quadratic time on a single blob.
+        # The lookbehind also forbids a match starting right after a previous
+        # address (``a@x.com%2Cb@y.org``, ``a@x.com-b@y.org``), so the repeat
+        # group extends one match over such joined addresses instead.
         re.compile(
-            r"(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
+            r"(?<![A-Za-z0-9._%+-])"
+            r"(?:[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})+"
         ),
         Severity.MEDIUM,
         "email",
@@ -882,7 +886,8 @@ def _mask_preview(
     if "key" in category or "token" in category:
         return "****"
     if category == "email":
-        parts = sample.split("@", 1)
+        # rsplit: a joined match (``a@x.com%2Cb@y.org``) must not leak ``b``.
+        parts = sample.rsplit("@", 1)
         return "****@" + parts[1] if len(parts) == 2 else "****"
     if len(sample) <= 8:
         return "****"
