@@ -122,17 +122,17 @@ def _check_existing_lesson_similarity(
 
 
 def _raise_if_every_generation_failed(
-    generated: list[Path], errors: list[Exception]
+    moment_count: int, errors: list[Exception]
 ) -> None:
     """Turn "every attempt errored" into an error instead of an empty result.
 
     Otherwise an outage (e.g. a 401 from the LLM provider) is reported as
     "no lessons generated" and the CLI exits 0.
     """
-    if errors and not generated:
+    if errors and len(errors) == moment_count:
         raise RuntimeError(
             f"all {len(errors)} lesson generation attempt(s) failed; last error: {errors[-1]}"
-        )
+        ) from errors[-1]
 
 
 def generate_lessons_with_evolution(
@@ -275,7 +275,7 @@ def generate_lessons_with_evolution(
             errors.append(e)
             continue
 
-    _raise_if_every_generation_failed(generated_files, errors)
+    _raise_if_every_generation_failed(len(experiences), errors)
 
     if verbose:
         print(f"\n{'=' * 60}")
@@ -418,7 +418,7 @@ def generate_lessons_from_analysis(
             errors.append(e)
             continue
 
-    _raise_if_every_generation_failed(generated_lessons, errors)
+    _raise_if_every_generation_failed(len(high_confidence_moments), errors)
 
     # Report summary
     if skipped_lessons:
