@@ -92,3 +92,40 @@ async def test_stop_discards_deferred_presence() -> None:
         await asyncio.sleep(0)
     assert delivered == [PERSON_LEFT]
     await bridge.stop()
+
+
+@pytest.mark.asyncio
+async def test_motion_cannot_starve_deferred_presence() -> None:
+    bridge = VisionBridge(_Source(), [])
+    gates = [asyncio.Event() for _ in range(16)]
+    started = 0
+    delivered: list[str] = []
+
+    async def slow_send(message: str) -> None:
+        nonlocal started
+        index = started
+        started += 1
+        if index < len(gates):
+            await gates[index].wait()
+        delivered.append(json.loads(message)["event"])
+
+    bridge._loop = asyncio.get_running_loop()
+    bridge._send_message = slow_send
+    for _ in range(16):
+        bridge._schedule_event(VisionEvent(PERSON_APPEARED))
+    bridge._schedule_event(VisionEvent(PERSON_LEFT))
+    await asyncio.sleep(0)
+    for gate in gates[:13]:
+        gate.set()
+    for _ in range(3):
+        await asyncio.sleep(0)
+    assert len(bridge._pending_sends) == 3
+    bridge._schedule_event(VisionEvent(MOTION))
+    assert len(bridge._pending_sends) == 3
+    for gate in gates[13:]:
+        gate.set()
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert delivered[-1] == PERSON_LEFT
+    assert MOTION not in delivered
+    await bridge.stop()

@@ -93,8 +93,10 @@ class VisionBridge:
             return
         # Coalesce overflow into the latest presence state, then send it only
         # after older events drain so they cannot overwrite it at the host.
-        if event.kind != MOTION and self._deferred_presence is not None:
-            self._deferred_presence = event
+        if self._deferred_presence is not None:
+            if event.kind != MOTION:
+                self._deferred_presence = event
+            # Pause new motion sends until the retained presence is flushed.
             return
         # Motion is expendable; presence changes must survive a bounded backlog.
         limit = (
