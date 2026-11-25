@@ -11,7 +11,7 @@ import pytest
 
 from gptme_sessions import Bandit, BanditArm, BanditState, SessionRecord
 import gptme_sessions.thompson_sampling as ts_module
-from gptme_sessions.thompson_sampling import load_bandit_means
+from gptme_sessions.thompson_sampling import MATURE_ARM_MIN_SELECTIONS, load_bandit_means
 
 
 # ── BanditArm unit tests ─────────────────────────────────────────────────────
@@ -1344,6 +1344,29 @@ def test_undecodable_arm_without_known_counter_counts_as_mature(tmp_path, contex
     bandit = Bandit(state_dir=tmp_path)
     for path in (bandit.state_file, bandit.backup_file):
         path.write_text(json.dumps(document))
+    before = (bandit.state_file.read_text(), bandit.backup_file.read_text())
+
+    reader = Bandit(state_dir=tmp_path)
+    with pytest.raises(ValueError, match="cannot be decoded"):
+        reader.update(["a"], outcome=1.0)
+
+    assert (bandit.state_file.read_text(), bandit.backup_file.read_text()) == before
+
+
+@pytest.mark.parametrize("counter", [None, "selections"])
+def test_undecodable_decayed_arm_without_known_counter_counts_as_mature(tmp_path, counter):
+    """Decay caps alpha + beta - 2 near 1/(1-gamma), so the posterior is no proxy for the count."""
+    decayed = BanditArm(arm_id="a")
+    for _ in range(500):
+        decayed.apply_decay(0.9)  # what Bandit.update(decay_rate=0.9) does first
+        decayed.update(1.0)
+    assert decayed.alpha + decayed.beta - 2 <= MATURE_ARM_MIN_SELECTIONS
+    arm = {"arm_id": "a", "alpha": decayed.alpha, "beta": decayed.beta, "extra": "x"}
+    if counter:
+        arm[counter] = decayed.total_selections
+    bandit = Bandit(state_dir=tmp_path)
+    for path in (bandit.state_file, bandit.backup_file):
+        path.write_text(json.dumps({"arms": {"a": arm}}))
     before = (bandit.state_file.read_text(), bandit.backup_file.read_text())
 
     reader = Bandit(state_dir=tmp_path)

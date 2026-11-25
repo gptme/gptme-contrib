@@ -34,6 +34,7 @@ CLI:
 
 import contextlib
 import json
+import math
 import os
 import random
 import sys
@@ -117,14 +118,19 @@ def _has_mature_arm(document: object) -> bool:
 def _arm_evidence(arm: dict) -> float:
     """Observations a raw arm document claims, whatever its writer called the counter.
 
-    A newer ``arm_class`` may rename or drop ``total_selections``, so the
-    posterior itself counts as evidence too: ``alpha + beta - 2`` is how far it
-    moved from the Beta(1, 1) prior.  Unknown maturity must read as mature.
+    A newer ``arm_class`` may rename or drop ``total_selections``.  Unknown
+    maturity must read as mature, so a missing or non-numeric counter counts as
+    unbounded evidence.  The posterior is no proxy for it: decay keeps
+    ``alpha + beta - 2`` below ``1 / (1 - gamma)`` however many observations
+    the arm has.  It only adds evidence when the counter is known.  An arm
+    that records nothing but its id holds no history to lose.
     """
-    evidence = 0.0
+    if not arm.keys() - {"arm_id"}:
+        return 0.0
     selections = arm.get("total_selections")
-    if isinstance(selections, (int, float)) and not isinstance(selections, bool):
-        evidence = float(selections)
+    if not isinstance(selections, (int, float)) or isinstance(selections, bool):
+        return math.inf
+    evidence = float(selections)
     alpha, beta = arm.get("alpha"), arm.get("beta")
     if (
         isinstance(alpha, (int, float))
