@@ -56,7 +56,7 @@ _BOOK_CHAPTER_RE = re.compile(
 # Fenced code blocks: ``` or ~~~ (three or more), indented by at most three
 # spaces like any other CommonMark block construct. Content inside is code, so
 # a leading "#" there is a comment, not a heading.
-_BOOK_FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+_BOOK_FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 
 
 def _chapter_marker(line: str) -> str | None:
@@ -135,9 +135,9 @@ def parse_book_text(
         elif not keep_overlap:
             buf = []
 
-    # Character that opened the current fence (None outside a fence), so a
-    # "~~~" line inside a ``` block does not close it and desync the state.
-    fence_char: str | None = None
+    # Keep the opening run: a close must use the same character, be at least
+    # as long, and have only spaces/tabs after it. Other runs are literal code.
+    fence: str | None = None
     for raw_line in text.splitlines():
         line = raw_line.strip()
         if not line:
@@ -145,18 +145,21 @@ def parse_book_text(
 
         fm = _BOOK_FENCE_RE.match(raw_line)
         if fm:
-            char = fm.group(1)[0]
-            if fence_char is None:
-                fence_char = char
-            elif char == fence_char:
-                fence_char = None
-            continue
+            run, tail = fm.groups()
+            if fence is None:
+                # Backtick info strings cannot themselves contain backticks.
+                if run[0] != "`" or "`" not in tail:
+                    fence = run
+                    continue
+            elif run[0] == fence[0] and len(run) >= len(fence) and not tail.strip(" \t"):
+                fence = None
+                continue
 
         header_text: str | None = None
         is_chapter = False
         # Inside a fenced code block nothing is a heading: a column-0
         # "# comment" in a listing is code, not an H1 chapter.
-        if fence_char is None:
+        if fence is None:
             # Markdown headers may be indented by up to three spaces; deeper
             # indentation means a code listing, where "# ..." is a comment.
             hm = _BOOK_HEADER_RE.match(raw_line)

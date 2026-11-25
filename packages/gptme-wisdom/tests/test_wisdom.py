@@ -564,4 +564,50 @@ def test_fenced_code_comment_is_not_a_chapter():
     assert "not a heading either" in contents
     # Fence markers are syntax, not prose (an indented one is code, so kept).
     assert "```python" not in contents
-    assert "~~~" not in contents
+    assert "~~~" in contents  # A mismatched fence inside code is literal content.
+
+
+@pytest.mark.parametrize(
+    ("opening", "literal", "closing"),
+    [
+        ("````python", "```", "````"),
+        ("~~~~python", "~~~", "~~~~"),
+        ("```python", "```not a closing fence", "```"),
+        ("~~~python", "~~~not a closing fence", "~~~"),
+        ("```python", "~~~", "````` \t"),
+        ("~~~python", "```", "~~~~~ \t"),
+    ],
+)
+def test_fences_require_matching_length_and_whitespace_close(opening, literal, closing):
+    text = "\n".join(
+        [
+            "# Chapter 1",
+            opening,
+            literal,
+            "# literal code comment",
+            closing,
+            "# Chapter 2",
+            "Body after the real closing fence.",
+            "# Exercises",
+            "This exercise must be skipped.",
+        ]
+    )
+    docs = parse_book_text(text, source="t", title="T", url="u", min_chunk_tokens=1)
+    assert [d.chapter for d in docs] == ["Chapter 1", "Chapter 2"]
+    assert literal in docs[0].content
+    assert "# literal code comment" in docs[0].content
+    assert not any("exercise must" in d.content for d in docs)
+
+
+def test_backtick_info_string_cannot_contain_backticks():
+    text = "\n".join(
+        [
+            "# Chapter 1",
+            "```x``` is inline code",
+            "# Chapter 2",
+            "Body after inline code, not inside a fence.",
+        ]
+    )
+    docs = parse_book_text(text, source="t", title="T", url="u", min_chunk_tokens=1)
+    assert [d.chapter for d in docs] == ["Chapter 1", "Chapter 2"]
+    assert "```x``` is inline code" in docs[0].content
