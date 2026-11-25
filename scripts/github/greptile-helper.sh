@@ -987,6 +987,14 @@ trigger)
                 echo "  [greptile] SKIP: $REPO#$PR_NUMBER has no new commits since our last @greptileai review trigger. Not re-reviewing (nothing was pushed)."
                 exit 0
             fi
+            # A merged or closed PR gets no review. Checked last, so the extra
+            # read only happens when we would otherwise post (gptme/gptme#5121:
+            # re-triggered 3 minutes after Erik merged it). Unreadable → skip.
+            _pr_state=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.state // ""' 2>/dev/null) || _pr_state=""
+            if [ "$_pr_state" != "open" ]; then
+                echo "  [greptile] PR $REPO#$PR_NUMBER is ${_pr_state:-unavailable}, not open. Skipping re-review trigger."
+                exit 0
+            fi
             echo "  [greptile] Re-triggering @greptileai review on $REPO#$PR_NUMBER (new commits landed after the last review)..."
             # Embed the current head SHA so _needs_re_review can later tell whether an
             # in-place Greptile comment update was a response to a trigger for THIS head

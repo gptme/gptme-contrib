@@ -1419,6 +1419,34 @@ def test_trigger_re_reviews_after_score_5_when_new_commits_land():
     assert "@greptileai review" in gh_log
 
 
+def test_trigger_re_review_skips_merged_pr():
+    """A re-review trigger must not post on a PR that already merged or closed.
+
+    Regression for gptme/gptme#5121 (2026-11-25): Erik merged the PR at
+    00:14:55Z and a caller still posted `@greptileai review` at 00:17:43Z. Only
+    the initial-review branch checked the PR state; the re-review branch
+    posted whenever new commits post-dated the last review.
+    """
+    reviewed_at = _iso_ago(minutes=30)
+    fixture = {
+        "pr_number": 779,
+        "raw_comments": [
+            _make_greptile_comment(
+                4, reviewed_at=_iso_ago(minutes=60), updated_at=reviewed_at
+            ),
+        ],
+        "raw_commits": [
+            _make_commit(_iso_ago(minutes=10)),
+        ],
+        "raw_pr": {"state": "closed", "created_at": _iso_ago(minutes=120)},
+        "bot_reaction_count": 0,
+    }
+    result, gh_log = _run_helper("trigger", fixture, capture_gh_log=True)
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert not gh_log, "a merged/closed PR must not receive a re-review trigger"
+    assert "not open" in result.stdout
+
+
 def test_max_retries_guard_blocks_after_repeated_triggers():
     """3 triggers since last review (Greptile acked but never reviewed) → blocked.
 
