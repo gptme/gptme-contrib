@@ -99,10 +99,13 @@ def extract_keywords(lesson_path: Path) -> Set[str]:
             metadata = cast(dict[str, Any], post.metadata)
             if "match" in metadata and "keywords" in metadata["match"]:
                 keywords = metadata["match"]["keywords"]
-                # A scalar is one keyword; set() of a str would yield characters.
-                if isinstance(keywords, str):
-                    return {keywords}
-                return {str(k) for k in keywords or []}
+                if keywords is None:
+                    return set()
+                # Any non-collection value (str, or a YAML int/float/bool/date)
+                # is one keyword; set() of a str would yield characters.
+                if not isinstance(keywords, list | tuple | set | frozenset):
+                    return {str(keywords)}
+                return {str(k) for k in keywords}
     except Exception:
         pass
     return set()

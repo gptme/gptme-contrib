@@ -415,3 +415,27 @@ def test_scalar_keywords_value_is_one_keyword_not_characters(tmp_path):
     ka, kb = extract_keywords(a), extract_keywords(b)
     assert ka == {"git rebase"}
     assert calculate_keyword_overlap(ka, kb) == 0.0
+
+
+@pytest.mark.parametrize(
+    ("yaml_value", "expected"),
+    [
+        ("404", {"404"}),
+        ("2024", {"2024"}),
+        ("1.5", {"1.5"}),
+        ("true", {"True"}),
+        ("false", {"False"}),
+        ("0", {"0"}),
+        ("2024-01-01", {"2024-01-01"}),
+    ],
+)
+def test_non_string_scalar_keywords_value_is_one_keyword(
+    tmp_path, yaml_value, expected
+):
+    # YAML parses these as int/float/bool/date, not str; they must be one
+    # keyword rather than raising TypeError and silently yielding no keywords.
+    from gptme_lessons_extras.similarity import extract_keywords
+
+    lesson = tmp_path / "lesson.md"
+    lesson.write_text(f"---\nmatch:\n  keywords: {yaml_value}\n---\n# L\n")
+    assert extract_keywords(lesson) == expected
