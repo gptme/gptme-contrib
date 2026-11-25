@@ -638,13 +638,10 @@ def search(
                         )
                         assembler = ContextAssembler(max_tokens=max_tokens)
 
-                        # Combine paths and filters for search
+                        # Without PATHS, --filter applies to the whole index; it
+                        # must not narrow the search to the current directory.
                         search_paths = list(paths)
                         if filter:
-                            # If no paths were specified but filters are present,
-                            # search from root and apply filters
-                            if not paths:
-                                search_paths = [Path(".")]
                             logger.debug(f"Using path filters: {filter}")
 
                         explanations: list | None = None
