@@ -882,6 +882,37 @@ def test_rule_7_accepts_inline_rust_unit_tests(alice_io, attribute):
     )
 
 
+@pytest.mark.parametrize("example_path", ["docs/guide.md", "src/app.py"])
+@pytest.mark.parametrize("example_first", [False, True])
+def test_rule_7_ignores_rust_attributes_outside_rust_files(
+    alice_io, example_path, example_first
+):
+    w = writer.bind_io(alice_io)
+    rust_diff = (
+        "diff --git a/src/main.rs b/src/main.rs\n"
+        "--- a/src/main.rs\n"
+        "+++ b/src/main.rs\n"
+        "@@ -1 +1 @@\n"
+        "-fn helper() {}\n"
+        "+fn helper() { fixed(); }\n"
+    )
+    example_diff = (
+        f"diff --git a/{example_path} b/{example_path}\n"
+        f"--- a/{example_path}\n"
+        f"+++ b/{example_path}\n"
+        "@@ -0,0 +1,4 @@\n"
+        "+```rust\n"
+        "+#[test]\n"
+        "+fn example() {}\n"
+        "+```\n"
+    )
+    diff = example_diff + rust_diff if example_first else rust_diff + example_diff
+    findings = w._check_fix_without_test(
+        "fix(helper): handle input", ["src/main.rs", example_path], diff
+    )
+    assert [f["title"] for f in findings] == ["fix PR has no regression test"]
+
+
 def test_rule_7_context_test_attribute_is_not_bridged_by_a_blank_line(alice_io):
     """An added blank line must not reach the next context line's ``#[test]``.
 
