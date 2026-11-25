@@ -323,7 +323,7 @@ _CODEX_EXIT_RE = re.compile(
     r"(?:exited with code|exit_code[\"']?\s*:|Exit code:)\s*(-?\d+)", re.IGNORECASE
 )
 _CODEX_PATCH_PATH_RE = re.compile(r"^\*\*\* (?:Add|Update) File: (.+)$", re.MULTILINE)
-_CODEX_WORKDIR_RE = re.compile(r"""\bworkdir["']?\s*:\s*("(?:\\.|[^"\\])*")""")
+_CODEX_WORKDIR_RE = re.compile(r"""\bworkdir["']?\s*:\s*(["'])((?:\\.|(?!\1).)*)\1""", re.DOTALL)
 _SHELL_WRAPPERS = {"bash", "sh", "zsh", "dash"}
 
 
@@ -386,7 +386,9 @@ def _codex_output(out: Any) -> tuple[int | None, bool, str]:
         texts.append(block_text)
     text = "\n".join(texts)
     # A completed sibling says nothing about a command that is still running.
-    running = inner_running or text.lstrip().startswith(("Script running", "Process running"))
+    running = inner_running or (
+        code is None and text.lstrip().startswith(("Script running", "Process running"))
+    )
     return code, running, text
 
 
@@ -457,9 +459,10 @@ class CodexExtractor(Extractor):
     def __init__(self, session: str, agent: str = "", subagent: bool = False) -> None:
         super().__init__(session, agent, subagent)
         self._running: dict[
-            tuple[str, str], tuple[tuple[str, list[str], str | None, str | None], bool]
+            tuple[str, str], tuple[tuple[str, list[str], str | None, str | None], bool, str]
         ] = {}
         self._continued_failed: set[str] = set()
+        self._continued_output: dict[str, str] = {}
 
     def feed(self, rec: dict[str, Any]) -> list[AgentEvent]:
         rtype = rec.get("type")
@@ -502,8 +505,9 @@ class CodexExtractor(Extractor):
                     self._pending[call_id] = (*self._pending[call_id][:3], workdir)
             continuation = _codex_continuation(name, text)
             if call_id and continuation is not None and continuation in self._running:
-                pending, failed = self._running.pop(continuation)
+                pending, failed, previous_output = self._running.pop(continuation)
                 self._pending[call_id] = pending
+                self._continued_output[call_id] = previous_output
                 if failed:
                     self._continued_failed.add(call_id)
             if name == "apply_patch":
@@ -515,13 +519,20 @@ class CodexExtractor(Extractor):
             code, running, text = _codex_output(payload.get("output"))
             failed = (code is not None and code != 0) or call_id in self._continued_failed
             self._continued_failed.discard(call_id)
+            text = self._continued_output.pop(call_id, "") + text
             if running:
                 # Transfer the original command/workdir to its continuation
                 # handle. A poll gets a new call id, not a new command.
                 suspended = self._pending.pop(call_id, None)
                 keys = _codex_running_keys(payload.get("output"))
                 if suspended and len(keys) == 1:
-                    self._running[keys.pop()] = (suspended, failed)
+                    # Retain only public-linkable identity lines across polls,
+                    # not an unbounded buffer of command stdout.
+                    identity = "\n".join(
+                        [m.group(0) for m in _COMMIT_LINE_RE.finditer(text)]
+                        + [m.group(0) for m in _PR_URL_RE.finditer(text)]
+                    )
+                    self._running[keys.pop()] = (suspended, failed, identity + "\n")
                 return []
             return self._result(ts, call_id, failed, text)
         return []
@@ -565,7 +576,12 @@ class CodexExtractor(Extractor):
         named = 0
         for m in _CODEX_WORKDIR_RE.finditer(text):
             try:
-                found.add(json.loads(m.group(1)))
+                if m.group(1) == '"':
+                    found.add(json.loads('"' + m.group(2) + '"'))
+                else:
+                    # Decode the escapes JS single-quoted paths commonly use,
+                    # without evaluating source or corrupting Unicode paths.
+                    found.add(re.sub(r"\\(['\\])", r"\1", m.group(2)))
             except ValueError:
                 return None
             named += 1

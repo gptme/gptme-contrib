@@ -473,3 +473,62 @@ def test_codex_unknown_continuation_cannot_land_another_process():
         )
         out = ex.feed(exec_output(str(sid), 0, "[master 6528ea53] x"))
         assert landings(out) == ([] if sid == 8 else ["commit"])
+
+
+def test_codex_continuation_keeps_identity_from_early_output():
+    ex = CodexExtractor("r")
+    ex.feed(exec_call("start", "git commit -m x; sleep 60"))
+    assert (
+        ex.feed(
+            codex(
+                "response_item",
+                {
+                    "type": "custom_tool_call_output",
+                    "call_id": "start",
+                    "output": [json.dumps({"session_id": 7, "output": "[master 6528ea53] x"})],
+                },
+            )
+        )
+        == []
+    )
+    ex.feed(
+        codex(
+            "response_item",
+            {
+                "type": "function_call",
+                "name": "write_stdin",
+                "call_id": "poll",
+                "arguments": json.dumps({"session_id": 7}),
+            },
+        )
+    )
+    (commit,) = ex.feed(exec_output("poll", 0, ""))
+    assert commit.detail["sha"] == "6528ea53"
+
+
+@pytest.mark.parametrize("prefix", ["Process running checks", "Script running checks"])
+def test_codex_completed_stdout_is_not_running(prefix):
+    ex = CodexExtractor("r")
+    ex.feed(exec_call("start", "git commit -m x"))
+    assert landings(ex.feed(exec_output("start", 0, prefix + "\n[master 6528ea53] x"))) == [
+        "commit"
+    ]
+
+
+def test_codex_single_quoted_workdir(two_repos):
+    ex = CodexExtractor("r")
+    ex.feed(codex("turn_context", {"cwd": str(two_repos["brain"])}))
+    ex.feed(
+        codex(
+            "response_item",
+            {
+                "type": "custom_tool_call",
+                "name": "exec",
+                "call_id": "start",
+                "input": f"""text(await tools.exec_command({{cmd: "git commit -m x", workdir: '{two_repos["wt"]}'}}));""",
+            },
+        )
+    )
+    (commit,) = ex.feed(exec_output("start", 0, "[master 6528ea53] x"))
+    assert commit.detail["dir"] == str(two_repos["wt"])
+    assert commit.detail["repo"] == "gptme/gptme-contrib"
