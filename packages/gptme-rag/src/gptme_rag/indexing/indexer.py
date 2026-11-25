@@ -34,6 +34,9 @@ def _glob_match_path(path: str, pattern: str) -> bool:
     return GitIgnoreSpecPattern(pattern).match_file(path) is not None
 
 
+# Max entries per collection read/delete call.
+_PAGE_SIZE = 1000
+
 # HuggingFace namespaces used for sentence-transformer / embedding models.
 # Model names in these namespaces contain a slash but are NOT OpenRouter model names.
 # Used by _looks_like_openrouter_model() as a fallback heuristic for legacy
@@ -136,9 +139,16 @@ def _is_tombstone(doc: Document) -> bool:
     return not doc.is_chunk and not (doc.content or "").strip()
 
 
-def _longest_suffix_prefix(left: str, right: str) -> str:
-    """Longest string that is both a suffix of ``left`` and a prefix of ``right``."""
-    for size in range(min(len(left), len(right)), 0, -1):
+def _overlap_near(left: str, right: str, expected: int) -> str:
+    """Suffix of ``left`` that prefixes ``right``, closest to ``expected`` chars.
+
+    Repetitive text matches at many lengths, so the longest match can swallow a
+    whole chunk. Only lengths up to twice the recorded overlap are considered,
+    and never all of ``right`` (every chunk adds new text). With no match,
+    nothing is dropped.
+    """
+    limit = min(len(left), len(right) - 1, 2 * expected)
+    for size in sorted(range(1, limit + 1), key=lambda n: (abs(n - expected), n)):
         if left.endswith(right[:size]):
             return right[:size]
     return ""
@@ -1478,7 +1488,7 @@ class Indexer:
         # Chroma's unbounded get() can exceed SQLite's variable limit on large
         # collections. Read bounded pages instead; callers still receive the
         # complete list.
-        page_size = 1000
+        page_size = _PAGE_SIZE
         result_ids: list[str] = []
         result_docs: list[str] = []
         result_metas: list[dict] = []
@@ -1532,6 +1542,32 @@ class Indexer:
                 for i, doc_id in enumerate(result_ids)
             ]
 
+    def _iter_ids(self, where: dict | None = None) -> Generator[str, None, None]:
+        """Yield all ids (optionally filtered), read in bounded pages.
+
+        Chroma's unbounded get() can exceed SQLite's variable limit on large
+        collections.
+        """
+        offset = 0
+        while True:
+            page = self.collection.get(where=where, include=[], limit=_PAGE_SIZE, offset=offset)[
+                "ids"
+            ]
+            yield from page
+            if len(page) < _PAGE_SIZE:
+                return
+            offset += len(page)
+
+    def _document_ids(self, base_doc_id: str) -> list[str]:
+        """Ids of a document and its chunks.
+
+        Chunk ids are "<base_id>#chunk<i>-<start>" and chroma has no id-prefix
+        filter, so scan the ids. Match the "#chunk" separator too: a bare prefix
+        test also claims any id that merely extends this one.
+        """
+        chunk_prefix = f"{base_doc_id}#chunk"
+        return [i for i in self._iter_ids() if i == base_doc_id or i.startswith(chunk_prefix)]
+
     def get_document_chunks(self, base_doc_id: str) -> list[Document]:
         """Get all chunks for a document.
 
@@ -1541,22 +1577,17 @@ class Indexer:
         Returns:
             List of document chunks, ordered by chunk index
         """
-        # Get all documents from collection
-        all_docs = self.collection.get()
-        all_ids = all_docs["ids"] or []
-        all_doc_contents = all_docs["documents"] or []
-        all_metas = all_docs["metadatas"] or []
-
-        # Filter chunks belonging to this document. Match the "#chunk" separator
-        # too: a bare prefix test also claims any id that merely extends this one.
-        chunk_prefix = f"{base_doc_id}#chunk"
+        ids = self._document_ids(base_doc_id)
         chunks = []
-        for i, doc_id in enumerate(all_ids):
-            if doc_id == base_doc_id or doc_id.startswith(chunk_prefix):
-                metadata = dict(all_metas[i] or {})
+        for start in range(0, len(ids), _PAGE_SIZE):
+            page = self.collection.get(ids=ids[start : start + _PAGE_SIZE])
+            contents = page["documents"] or []
+            metas = page["metadatas"] or []
+            for i, doc_id in enumerate(page["ids"]):
+                metadata = dict(metas[i] or {})
                 raw_index = metadata.get("chunk_index")
                 chunk = Document(
-                    content=all_doc_contents[i],
+                    content=contents[i],
                     metadata=metadata,
                     doc_id=doc_id,
                     chunk_index=raw_index if isinstance(raw_index, int) else None,
@@ -1623,7 +1654,7 @@ class Indexer:
                 if content.endswith(candidate) and text.startswith(candidate):
                     overlap = candidate
                 else:
-                    overlap = _longest_suffix_prefix(content, text)
+                    overlap = _overlap_near(content, text, len(candidate))
             content += text[len(overlap) :]
             prev_end = chunk.metadata.get("chunk_end")
         return content
@@ -1779,19 +1810,17 @@ class Indexer:
             delete failed
         """
         try:
-            # Chunk ids are "<base_id>#chunk<i>-<start>"; chroma has no id-prefix
-            # filter, so list the ids and select the document's own.
-            chunk_prefix = f"{doc_id}#chunk"
-            all_ids = self.collection.get(include=[])["ids"] or []
-            ids = [i for i in all_ids if i == doc_id or i.startswith(chunk_prefix)]
-            # Callers may also pass a source path; keep deleting by source.
-            by_source = self.collection.get(where={"source": doc_id}, include=[])["ids"] or []
-            ids = sorted(set(ids) | set(by_source))
+            # Hold the lock across the paged reads: a concurrent write would
+            # shift the offsets and skip ids.
+            with self._index_writer_lock():
+                # Callers may also pass a source path; keep deleting by source.
+                by_source = self._iter_ids(where={"source": doc_id})
+                ids = sorted(set(self._document_ids(doc_id)) | set(by_source))
+                for start in range(0, len(ids), _PAGE_SIZE):
+                    self.collection.delete(ids=ids[start : start + _PAGE_SIZE])
             if not ids:
                 logger.debug(f"No document or chunks found for: {doc_id}")
                 return False
-            with self._index_writer_lock():
-                self.collection.delete(ids=ids)
             logger.debug(f"Deleted {len(ids)} entries for: {doc_id}")
             return True
         except Exception as e:

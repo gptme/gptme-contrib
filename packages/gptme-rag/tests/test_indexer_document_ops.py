@@ -3,7 +3,12 @@
 Regression tests for gptme/gptme-contrib#2356 R1-R3.
 """
 
-from gptme_rag.indexing.document import Document
+import pytest
+
+pytest.importorskip("chromadb")
+
+from gptme_rag.indexing import indexer as indexer_module  # noqa: E402
+from gptme_rag.indexing.document import Document  # noqa: E402
 
 
 def _words(n: int) -> str:
@@ -122,3 +127,71 @@ def test_get_document_chunks_does_not_match_id_prefix_of_other_doc(indexer, tmp_
     chunks = indexer.get_document_chunks(base_id)
 
     assert chunks and all(c.doc_id.startswith(base_id + "#chunk") for c in chunks)
+
+
+def test_document_ops_read_collection_in_pages(indexer, tmp_path, monkeypatch):
+    """R2: no unbounded get(), which can exceed SQLite's variable limit."""
+    keep = tmp_path / "keep.txt"
+    keep.write_text(_words(120))
+    indexer.index_file(keep)
+    keep_ids = set(indexer.collection.get()["ids"])
+
+    f = tmp_path / "big.txt"
+    f.write_text(_words(200))
+    n_chunks = indexer.index_file(f)
+    base_id = next(i for i in indexer.collection.get()["ids"] if i not in keep_ids).split("#chunk")[
+        0
+    ]
+    monkeypatch.setattr(indexer_module, "_PAGE_SIZE", 3)
+    real_get, real_delete = indexer.collection.get, indexer.collection.delete
+
+    def bounded_get(*args, **kwargs):
+        ids = kwargs.get("ids")
+        size = len(ids) if ids is not None else kwargs.get("limit")
+        assert size is not None and size <= 3, f"unbounded get: {kwargs}"
+        return real_get(*args, **kwargs)
+
+    def bounded_delete(*args, **kwargs):
+        assert len(kwargs["ids"]) <= 3
+        return real_delete(*args, **kwargs)
+
+    monkeypatch.setattr(indexer.collection, "get", bounded_get)
+    monkeypatch.setattr(indexer.collection, "delete", bounded_delete)
+
+    assert len(indexer.get_document_chunks(base_id)) == n_chunks
+    assert indexer.delete_document(base_id) is True
+    assert set(real_get()["ids"]) == keep_ids
+    assert indexer.delete_document(str(keep.resolve())) is True  # by source path
+    assert real_get()["ids"] == []
+
+
+def test_reconstruct_document_keeps_content_when_overlap_check_fails(indexer, tmp_path):
+    """R3: the fallback must not match a whole repetitive chunk and drop it.
+
+    Tiny chunks split the emoji across token boundaries, so re-encoding cannot
+    locate the overlap and the suffix/prefix fallback runs on every chunk.
+    """
+    indexer.processor.chunk_size = 7
+    indexer.processor.chunk_overlap = 3
+    f = tmp_path / "emoji.txt"
+    f.write_text("\U0001f600" * 100, encoding="utf-8")
+    indexer.index_file(f)
+
+    doc = indexer.reconstruct_document(_base_id(indexer))
+
+    assert doc.content.count("\U0001f600") >= 100
+
+
+@pytest.mark.parametrize(
+    ("left", "right", "expected", "overlap"),
+    [
+        # Identical lines match at every period: take the one near the recorded size.
+        ("----\n" * 10, "----\n" * 10, 9, "----\n" * 2),
+        # Never the whole next chunk, even when that is the only length in range.
+        ("ab" * 4, "ab" * 4, 8, "ab" * 3),
+        # Nothing within twice the recorded overlap: drop nothing.
+        ("x" + "abcdefgh", "abcdefgh" + "y", 3, ""),
+    ],
+)
+def test_overlap_near_is_bounded_by_recorded_overlap(left, right, expected, overlap):
+    assert indexer_module._overlap_near(left, right, expected) == overlap
