@@ -54,8 +54,8 @@ class DocumentProcessor:
             # Encode text to tokens
             tokens = self.encoding.encode(text)
 
-            # Calculate total chunks
-            total_chunks = max(1, self.estimate_chunks(len(tokens)))
+            # Validate chunk settings (raises on overlap >= size).
+            self.estimate_chunks(len(tokens))
 
             # If text is short enough, yield as single chunk
             if len(tokens) <= self.chunk_size:
@@ -72,9 +72,11 @@ class DocumentProcessor:
                 }
                 return
 
-            # Process text in chunks based on tokens
+            # Compute every chunk span first: the final chunk stops at the end
+            # of the text and boundary adjustments move the cut points, so
+            # total_chunks is only known once all spans are chosen.
+            spans: list[tuple[int, int]] = []
             chunk_start = 0
-            chunk_count = 0
 
             def at_char_boundary(i: int) -> bool:
                 # A byte-level BPE token can end partway through a multi-byte
@@ -99,29 +101,7 @@ class DocumentProcessor:
                     while chunk_end < len(tokens) and not at_char_boundary(chunk_end):
                         chunk_end += 1
 
-                # Get chunk tokens and decode
-                chunk_tokens = tokens[chunk_start:chunk_end]
-                chunk_text = self.encoding.decode(chunk_tokens)
-
-                # Log chunk info
-                logger.debug(
-                    f"Creating chunk {chunk_count} with {len(chunk_tokens)} tokens, "
-                    f"{len(chunk_text)} chars, {chunk_text[:50]}..."
-                )
-
-                # Create chunk metadata
-                yield {
-                    "text": chunk_text,
-                    "metadata": {
-                        **(metadata or {}),
-                        "chunk_index": chunk_count,
-                        "token_count": len(chunk_tokens),
-                        "total_chunks": total_chunks,
-                        "chunk_start": chunk_start,
-                        "chunk_end": chunk_end,
-                        "is_chunk": True,
-                    },
-                }
+                spans.append((chunk_start, chunk_end))
 
                 # Calculate next chunk start
                 if chunk_end == len(tokens):
@@ -141,11 +121,32 @@ class DocumentProcessor:
                     while start < chunk_end and not at_char_boundary(start):
                         start += 1
                 chunk_start = min(start, len(tokens) - 1)
-                chunk_count += 1
 
                 # Check max chunks limit
-                if self.max_chunks and chunk_count >= self.max_chunks:
+                if self.max_chunks and len(spans) >= self.max_chunks:
                     break
+
+            for chunk_index, (span_start, span_end) in enumerate(spans):
+                chunk_tokens = tokens[span_start:span_end]
+                chunk_text = self.encoding.decode(chunk_tokens)
+
+                logger.debug(
+                    f"Creating chunk {chunk_index} with {len(chunk_tokens)} tokens, "
+                    f"{len(chunk_text)} chars, {chunk_text[:50]}..."
+                )
+
+                yield {
+                    "text": chunk_text,
+                    "metadata": {
+                        **(metadata or {}),
+                        "chunk_index": chunk_index,
+                        "token_count": len(chunk_tokens),
+                        "total_chunks": len(spans),
+                        "chunk_start": span_start,
+                        "chunk_end": span_end,
+                        "is_chunk": True,
+                    },
+                }
 
         except Exception as e:
             logger.error(f"Error processing text: {e}")
