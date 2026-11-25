@@ -97,6 +97,30 @@ def test_search_sees_index_rewritten_by_legacy_writer(isolated, monkeypatch, res
     assert "alpha_original" not in _search(src, "alpha original")
 
 
+@pytest.mark.parametrize("restart", [False, True])
+def test_search_ignores_documents_when_index_changes_during_load(
+    isolated, monkeypatch, restart
+):
+    src = isolated
+    (src / "mod.py").write_text("def alpha_original():\n    return 1\n")
+    assert _search(src, "alpha original") == ["alpha_original"]
+    if restart:
+        monkeypatch.setattr(mcp_server, "_index_cache", {})
+    real_load = SqliteIndexCache.load
+    rewritten = False
+
+    def racing_load(self):
+        nonlocal rewritten
+        if not rewritten:
+            rewritten = True
+            _rewrite_from_other_process(src)
+        return real_load(self)
+
+    monkeypatch.setattr(SqliteIndexCache, "load", racing_load)
+    assert _search(src, "beta renamed") == ["beta_renamed"]
+    assert "alpha_original" not in _search(src, "alpha original")
+
+
 def test_unchanged_index_reuses_cached_documents(isolated, monkeypatch):
     src = isolated
     (src / "mod.py").write_text("def alpha_original():\n    return 1\n")

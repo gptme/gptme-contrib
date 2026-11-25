@@ -91,19 +91,18 @@ def _get_or_build_index(directory: str) -> SymbolIndex:
         if cached_sqlite is None:
             # No freshness oracle available — return the snapshot as-is.
             return cached_index
-        # Read the generation before loading: if another process saves in
-        # between, the newer index is tagged with the older token and the
-        # next call reloads it, rather than the reverse.
+        # Check both sides of the load: a save in between must not pair a
+        # newer index with an older token (and its stale search documents).
         generation = cached_sqlite.generation()
         # Re-check SQLite freshness; returns None when any indexed file changed.
         loaded = cached_sqlite.load()
-        if loaded is not None:
+        if loaded is not None and generation == cached_sqlite.generation():
             if generation == cached_generation:
                 return cached_index
             # Another process saved a newer index; adopt it.
             _index_cache[dir_path] = (loaded, cached_sqlite, generation)
             return loaded
-        # Stale — drop and fall through to rebuild.
+        # Stale or replaced during load — drop and try SQLite again below.
         del _index_cache[dir_path]
 
     # Try SQLite first
@@ -112,7 +111,7 @@ def _get_or_build_index(directory: str) -> SymbolIndex:
         sqlite_cache = SqliteIndexCache(dir_path)
         generation = sqlite_cache.generation()
         cached = sqlite_cache.load()
-        if cached is not None:
+        if cached is not None and generation == sqlite_cache.generation():
             _index_cache[dir_path] = (cached, sqlite_cache, generation)
             return cached
     except Exception:
