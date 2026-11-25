@@ -6,7 +6,13 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
-from watchdog.events import DirDeletedEvent, FileDeletedEvent, FileModifiedEvent, FileMovedEvent
+from watchdog.events import (
+    DirDeletedEvent,
+    FileCreatedEvent,
+    FileDeletedEvent,
+    FileModifiedEvent,
+    FileMovedEvent,
+)
 
 from gptme_rag.indexing.watcher import IndexEventHandler
 
@@ -150,33 +156,27 @@ def test_failed_atomic_save_clears_destination_cache(tmp_path, indexer, monkeypa
     assert docs == [], "failed replacement left deleted content in the search cache"
 
 
-class _CountingCollection:
-    """Collection double that records full metadata scans."""
+def test_directory_delete_removes_files_indexed_under_ignored_names(tmp_path, indexer):
+    """File events match ignore patterns against the path tail only, so
+    ``node_modules/pkg/index.js`` gets indexed; moving its directory out of the
+    watch must remove it again."""
+    watched = tmp_path / "w"
+    (watched / "node_modules" / "pkg").mkdir(parents=True)
+    source = (watched / "node_modules" / "pkg" / "index.js").resolve()
+    source.write_text("vendored module payload")
+    handler = IndexEventHandler(indexer, ignore_patterns=["node_modules"])
+    handler._update_delay = 60
+    handler.on_created(FileCreatedEvent(str(source)))
+    timer = handler._timers[source]
+    timer.cancel()
+    timer.function(*timer.args, **timer.kwargs)
+    assert str(source) in _all_sources(indexer)
 
-    def __init__(self) -> None:
-        self.gets = 0
+    moved = watched / "node_modules" / "pkg"
+    shutil.move(str(moved), str(tmp_path / "elsewhere"))
+    handler.on_deleted(DirDeletedEvent(str(moved)))
 
-    def get(self, **kwargs):
-        self.gets += 1
-        return {"ids": [], "metadatas": []}
-
-
-def test_ignored_directory_delete_does_not_scan_collection(tmp_path):
-    """Directory churn under ignored trees must not trigger a collection scan.
-
-    ``Path.match`` only looks at the tail, so nested dirs such as
-    ``.git/objects/ab`` need an ancestor-aware check.
-    """
-    indexer = _SourceTrackingIndexer(tmp_path / "index")
-    indexer.collection = _CountingCollection()
-    handler = IndexEventHandler(
-        indexer, ignore_patterns=[".git", "__pycache__", "node_modules", "*.pyc"]
-    )
-
-    for name in ["__pycache__", ".git/objects/ab", "node_modules/pkg", "pkg/__pycache__"]:
-        handler.on_deleted(DirDeletedEvent(str(tmp_path / name)))
-
-    assert indexer.collection.gets == 0
+    assert str(source) not in _all_sources(indexer)
 
 
 def test_already_fired_deletion_cannot_remove_moved_file(tmp_path):
@@ -262,20 +262,20 @@ def test_old_deletion_stays_superseded_after_fresh_update(tmp_path):
         handler.cancel_pending_updates()
 
 
-def test_directory_delete_through_symlink_stops_at_watch_root(tmp_path):
-    """Resolved roots must bound raw watchdog paths, even below ignored ancestors."""
-    real_root = tmp_path / "real" / "project"
-    real_root.mkdir(parents=True)
-    alias = tmp_path / "node_modules"
+def test_directory_delete_through_symlink_removes_resolved_sources(tmp_path, indexer):
+    """Events under a symlinked watch path must match the resolved sources."""
+    real_root = tmp_path / "real"
+    (real_root / "sub").mkdir(parents=True)
+    alias = tmp_path / "alias"
     alias.symlink_to(real_root, target_is_directory=True)
-    indexer = _SourceTrackingIndexer(tmp_path / "index")
-    indexer.collection = _CountingCollection()
-    handler = IndexEventHandler(indexer, watch_roots=[str(alias)], ignore_patterns=["node_modules"])
+    source = (real_root / "sub" / "a.md").resolve()
+    source.write_text("symlinked directory payload")
+    indexer.index_file(source)
 
-    handler.on_deleted(DirDeletedEvent(str(alias / "removed")))
-    assert indexer.collection.gets == 1, "ancestor above the watch root silenced deletion"
-    handler.on_deleted(DirDeletedEvent(str(alias / "node_modules" / "pkg")))
-    assert indexer.collection.gets == 1, "ignored directory inside the root was scanned"
+    shutil.move(str(real_root / "sub"), str(tmp_path / "elsewhere"))
+    IndexEventHandler(indexer).on_deleted(DirDeletedEvent(str(alias / "sub")))
+
+    assert str(source) not in _all_sources(indexer)
 
 
 def test_atomic_saves_do_not_retain_unique_temp_paths(tmp_path):

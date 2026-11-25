@@ -23,7 +23,6 @@ class IndexEventHandler(FileSystemEventHandler):
         indexer: Indexer,
         pattern: str = "**/*.*",
         ignore_patterns: list[str] | None = None,
-        watch_roots: list[str] | None = None,
     ):
         """Initialize the event handler.
 
@@ -31,12 +30,10 @@ class IndexEventHandler(FileSystemEventHandler):
             indexer: The indexer to update
             pattern: Glob pattern for files to index
             ignore_patterns: List of glob patterns to ignore
-            watch_roots: Directories being watched; ignore checks stop there
         """
         self.indexer = indexer
         self.pattern = pattern
         self.ignore_patterns = ignore_patterns or [".git", "__pycache__", "*.pyc"]
-        self.watch_roots = [Path(root).resolve() for root in watch_roots or []]
         self._pending_updates: set[Path] = set()
         self._last_update = time.time()
         self._update_delay = 1.0  # seconds
@@ -64,10 +61,10 @@ class IndexEventHandler(FileSystemEventHandler):
         """
         src = str(event.src_path)
         if event.is_directory:
-            # Directory churn under ignored trees (.git/objects/xx,
-            # __pycache__, node_modules) is routine and holds no indexed
-            # source; scanning the collection for it would stall dispatch.
-            if not self._is_persist_path(Path(src)) and not self._is_ignored(Path(src)):
+            # No ignore-pattern filter here: neither the initial index nor the
+            # file-event filters exclude by ancestor, so any directory (even
+            # node_modules or __pycache__) may hold indexed sources.
+            if not self._is_persist_path(Path(src)):
                 self._delete_directory(Path(src).resolve())
         elif self._should_process(src):
             self._queue_deletion(Path(src))
@@ -114,23 +111,6 @@ class IndexEventHandler(FileSystemEventHandler):
             return False
         return path_obj.match(self.pattern) and not any(
             path_obj.match(pattern) for pattern in self.ignore_patterns
-        )
-
-    def _is_ignored(self, path: Path) -> bool:
-        """True if ``path`` or an ancestor inside the watched tree is ignored.
-
-        ``Path.match`` only inspects the tail of a path, so ``.git/objects/ab``
-        would not match ``.git`` without walking the ancestors. The walk stops
-        at the watch root so a directory above it cannot silence events.
-        """
-        path = path.resolve()
-        candidates = [path]
-        for parent in () if path in self.watch_roots else path.parents:
-            candidates.append(parent)
-            if parent in self.watch_roots:
-                break
-        return any(
-            candidate.match(pattern) for candidate in candidates for pattern in self.ignore_patterns
         )
 
     def _queue_update(self, path: Path) -> None:
@@ -544,9 +524,7 @@ class FileWatcher:
         """
         self.indexer = indexer
         self.paths = [Path(p) for p in paths]
-        self.event_handler = IndexEventHandler(
-            indexer, pattern, ignore_patterns, watch_roots=[str(p) for p in self.paths]
-        )
+        self.event_handler = IndexEventHandler(indexer, pattern, ignore_patterns)
         # For tests, use minimal delays
         if update_delay == 0:
             self.event_handler._update_delay = 0.1
