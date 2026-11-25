@@ -3602,6 +3602,10 @@ _BODY_REPO_REF_RE = re.compile(
     r"(?:github\.com/|https://github\.com/)([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)"
     r"|(\b[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#\d+"
 )
+# github.com paths that look like `owner/repo` but never name a repository.
+_NON_REPO_OWNERS = frozenset(
+    {"apps", "features", "marketplace", "orgs", "sponsors", "user-attachments"}
+)
 
 
 def _gitlink_shas_from_diff(diff: str) -> set[str]:
@@ -3636,17 +3640,18 @@ def _repos_cited_in_body(pr_body: str, parent_repo: str) -> list[str]:
     for m in _BODY_REPO_REF_RE.finditer(pr_body or ""):
         repo = next(g for g in m.groups() if g)
         key = repo.lower()
-        if key in seen:
+        if key in seen or key.split("/")[0] in _NON_REPO_OWNERS:
             continue
         seen.add(key)
         found.append(repo)
     return found
 
 
-# gh reports a missing commit as 422 "No commit found for SHA" (or 404 for an
-# unknown repo). Anything else (rate limit, 5xx, network) says nothing about
-# whether the commit exists.
-_COMMIT_MISSING_RE = re.compile(r"HTTP 404|HTTP 422|No commit found", re.IGNORECASE)
+# gh reports a missing commit in a readable repo as 422 "No commit found for
+# SHA". A 404 means the repo is unknown or unreadable to this host, and anything
+# else (rate limit, 5xx, network) is a failed request: neither says whether the
+# commit exists.
+_COMMIT_MISSING_RE = re.compile(r"HTTP 422|No commit found", re.IGNORECASE)
 
 
 def _commit_exists(repo: str, sha: str) -> bool | None:
@@ -3715,8 +3720,8 @@ def _check_cited_shas(
         if any(lookups):
             continue
         if None in lookups:
-            # A lookup failed for a reason other than "not found" (rate limit,
-            # 5xx, network): we cannot tell, so do not raise a false P1.
+            # A lookup could not answer (unreadable repo, rate limit, 5xx,
+            # network): we cannot tell, so do not raise a false P1.
             continue
         anchor = next(iter(touched_files), "")
         results.append(
