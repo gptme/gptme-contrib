@@ -3342,8 +3342,7 @@ def test_contrib_agent_literal_word_boundary_no_false_positive() -> None:
 
 
 def test_contrib_agent_literal_skips_docs_and_comment_lines() -> None:
-    """A name in a README, a comment or a docstring opener configures nothing
-    (contrib#2375, contrib#2387); code on the same file still routes."""
+    """README examples and full-line comments are exempt; code still routes."""
     file_shapes = [
         {
             "path": "packages/gptme-coordination/README.md",
@@ -3355,10 +3354,7 @@ def test_contrib_agent_literal_skips_docs_and_comment_lines() -> None:
             "status": "modified",
             "patch": (
                 "@@ -1,1 +1,5 @@\n"
-                "+    \"\"\"Extract @mentions (e.g. '@Alice' -> ['alice']).\n"
                 "+    # a value like team/bob must not escape the forum\n"
-                "+    // erik\n"
-                "+    /* gordon */\n"
             ),
         },
     ]
@@ -3375,6 +3371,8 @@ def test_contrib_agent_literal_skips_docs_and_comment_lines() -> None:
         '    **{"default_agent": "bob"},',
         '    *["bob", "alice"],',
         '    * ["bob", "alice"],',
+        '    """bob""",',
+        '    /* default */ const agent = "bob";',
     ],
 )
 def test_contrib_agent_literal_unpacking_still_routes(line: str) -> None:

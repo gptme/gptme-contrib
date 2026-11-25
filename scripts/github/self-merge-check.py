@@ -2865,10 +2865,6 @@ _GPTME_CONTRIB_REPO = "gptme/gptme-contrib"
 _CONTRIB_AGENT_LITERAL_RE = re.compile(
     r"(?<![A-Za-z0-9])(bob|alice|gordon|sven|erik)(?![A-Za-z0-9])", re.IGNORECASE
 )
-# Lines that open as a comment or docstring. Only the line START counts: code
-# with a trailing comment (``X = 1  # bob``) is still code.
-# A leading '*' (even '* ') can be executable Python unpacking, not prose.
-_CONTRIB_PROSE_LINE_PREFIXES = ("#", "//", "/*", '"""', "'''")
 
 
 def _contrib_repo_root() -> Path:
@@ -3202,7 +3198,10 @@ def contrib_agent_literal_reasons(file_shapes: list[dict[str, Any]]) -> list[str
         if is_test_file(path) or (doc_file and "src" not in Path(path).parts):
             continue
         for line in _contrib_added_lines(cast("str | None", entry.get("patch"))):
-            if not doc_file and line.lstrip().startswith(_CONTRIB_PROSE_LINE_PREFIXES):
+            # Only Python full-line comments are unambiguous without parsing
+            # surrounding source. Triple-quoted strings, '*' unpacking and
+            # block-comment openers can all introduce executable expressions.
+            if Path(path).suffix == ".py" and line.lstrip().startswith("#"):
                 continue
             for match in _CONTRIB_AGENT_LITERAL_RE.finditer(line):
                 hits.setdefault(match.group(1).lower(), set()).add(path)
