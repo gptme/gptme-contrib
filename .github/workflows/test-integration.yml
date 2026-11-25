@@ -5,13 +5,18 @@ on:
     branches: [ main, master ]
   pull_request:
     branches: [ main, master, 'feat/**' ]
+  # Merge queue: test the queued merge commit before it lands on master.
+  merge_group:
+    types: [checks_requested]
 
 # Cancel a PR's older runs when it gets a new push (they're superseded).
 # Pushes to a branch share one group without cancel-in-progress: a running
 # master run finishes, but a queued one is replaced by the newer push, so a
 # burst of merges runs once on the latest commit instead of once per commit.
 # Push runs here test the whole tree, so the survivor covers the replaced
-# commits. Schedule/dispatch runs keep a per-commit group.
+# commits. Schedule/dispatch runs keep a per-commit group, and so do merge
+# queue runs: github.sha is the merge group's head_sha, so a queue run never
+# shares a group with (or is cancelled by) a PR push.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.event_name == 'push' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -19,8 +24,9 @@ concurrency:
 jobs:
   # Detect which paths changed to skip expensive jobs on unrelated PRs
   changes:
-    name: Detect changes
+    name: Integration / detect changes
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       pull-requests: read
     outputs:
@@ -30,6 +36,12 @@ jobs:
     - uses: dorny/paths-filter@v3
       id: filter
       with:
+        # merge_group has no pull_request payload: compare the queued merge
+        # commit with the base it was built on (both SHAs, so paths-filter
+        # does a plain `git diff base..head`). Empty on other events, which
+        # keeps the default PR (API) and push (event.before) behaviour.
+        base: ${{ github.event.merge_group.base_sha }}
+        ref: ${{ github.event.merge_group.head_sha }}
         filters: |
           code:
             - 'packages/**'
@@ -43,9 +55,11 @@ jobs:
 
   integration-tests:
     needs: changes
-    # Always run on push to master; on PRs, only when code changed
+    # Always run on push to master; on PRs and in the merge queue, only when
+    # code changed
     if: github.event_name == 'push' || needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
@@ -76,3 +90,26 @@ jobs:
       - name: Run unit tests
         run: |
           make test-unit
+
+  # Stable required check for the merge queue / branch ruleset. A skipped
+  # integration-tests job passes (a PR touching no code must be mergeable);
+  # failed or cancelled jobs fail. always(), not !cancelled(): a skipped
+  # required check counts as passing, so this job must run (and fail) even
+  # when the run is cancelled.
+  required:
+    name: Integration / required
+    needs: [changes, integration-tests]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check needed jobs
+        env:
+          RESULTS: ${{ toJSON(needs.*.result) }}
+          FAILED: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
+        run: |
+          echo "Needed job results: $RESULTS"
+          if [[ "$FAILED" == "true" ]]; then
+            echo "::error::A required Integration Tests job failed or was cancelled"
+            exit 1
+          fi
