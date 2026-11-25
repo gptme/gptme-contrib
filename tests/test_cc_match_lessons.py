@@ -3016,7 +3016,11 @@ def test_transcript_pointer_is_not_counted_as_injected(hook, tmp_path):
     assert skill["path"] not in injected
 
 
-def test_budget_timeout_still_records_a_receipt(hook, tmp_path, monkeypatch):
+@pytest.mark.parametrize("rag_available", [True, False])
+@pytest.mark.parametrize("event", ["UserPromptSubmit", "PreToolUse"])
+def test_budget_timeout_still_records_a_receipt(
+    hook, tmp_path, monkeypatch, rag_available, event
+):
     """A hook that runs out of budget must leave a measured-zero receipt;
     otherwise it is indistinguishable from a hook that never ran.
 
@@ -3030,10 +3034,10 @@ def test_budget_timeout_still_records_a_receipt(hook, tmp_path, monkeypatch):
     def slow_main():
         time.sleep(5)
 
-    payload = {"hook_event_name": "UserPromptSubmit", "session_id": "budget-timeout"}
+    payload = {"hook_event_name": event, "session_id": "budget-timeout"}
     monkeypatch.setattr(hook, "main", slow_main)
     monkeypatch.setattr(hook, "_STDIN_CACHE", json.dumps(payload))
-    monkeypatch.setattr(hook, "_GPTME_RAG_AVAILABLE", True)
+    monkeypatch.setattr(hook, "_GPTME_RAG_AVAILABLE", rag_available)
     previous = signal.getsignal(signal.SIGALRM)
     try:
         with pytest.raises(SystemExit) as exc_info:
@@ -3045,3 +3049,44 @@ def test_budget_timeout_still_records_a_receipt(hook, tmp_path, monkeypatch):
     rows = [json.loads(line) for line in receipts.read_text().splitlines()]
     assert rows[-1]["reason"] == "hook_budget_timeout"
     assert rows[-1]["outcome"] == "empty"
+    assert rows[-1]["hook"] == event
+    assert rows[-1]["bytes"] == 0
+
+
+def test_timeout_after_budget_reservation_omits_abandoned_fields(
+    hook, tmp_path, monkeypatch, capsys
+):
+    """A timed-out emission must not report its abandoned decision metadata."""
+    _patch_main_for_budget(hook, tmp_path, monkeypatch, [_budget_lesson(0, 100)])
+    monkeypatch.setattr(
+        hook,
+        "_STDIN_CACHE",
+        json.dumps(
+            {
+                "hook_event_name": "UserPromptSubmit",
+                "session_id": "reserved-timeout",
+                "prompt": "k0",
+            }
+        ),
+    )
+
+    def timeout_after_reservation(*args, **kwargs):
+        assert hook._RECEIPT_FIELDS["session_bytes"] > 0
+        raise TimeoutError("hook budget")
+
+    monkeypatch.setattr(hook, "_log_lesson_events", timeout_after_reservation)
+    with pytest.raises(SystemExit) as exc_info:
+        hook._run_with_budget(5)
+    assert exc_info.value.code == 0
+    output = json.loads(capsys.readouterr().out)
+    assert "additionalContext" not in output["hookSpecificOutput"]
+    receipt = _receipts(tmp_path, "reserved-timeout")[-1]
+    assert receipt["reason"] == "hook_budget_timeout"
+    assert receipt["bytes"] == 0
+    assert "session_bytes" not in receipt
+    assert "budget_dropped" not in receipt
+    assert "prompt_lines" not in receipt
+    assert "prompt_novel_lines" not in receipt
+    # Reservation is deliberately conservative; recovery must not overwrite
+    # concurrent hooks' counters or block on the state lock after the timeout.
+    assert hook.load_session_state("reserved-timeout")["budget_bytes"] > 0

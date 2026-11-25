@@ -1768,7 +1768,7 @@ def emit_empty(
         )
         sys.stdout.flush()
     if session_id:
-        if not _GPTME_RAG_AVAILABLE:
+        if not _GPTME_RAG_AVAILABLE and reason != "hook_budget_timeout":
             reason = "dependency_missing"
         _write_emission_receipt(session_id, event_name, 0, "empty", reason)
 
@@ -2710,6 +2710,10 @@ def _run_with_budget(budget_seconds: float) -> None:
             session_id = cached.get("session_id") or None
         except (json.JSONDecodeError, TypeError, ValueError, AttributeError):
             pass
+        # Discard metadata from the abandoned emission decision. In particular,
+        # session_bytes counts reservations, not successfully emitted bytes;
+        # the conservative debit remains, but is not this empty output's size.
+        _RECEIPT_FIELDS.clear()
         # Record the timeout as a measured-zero receipt: without one, a hook
         # that ran out of budget is indistinguishable from one that never ran.
         emit_empty(event, session_id, "hook_budget_timeout")
