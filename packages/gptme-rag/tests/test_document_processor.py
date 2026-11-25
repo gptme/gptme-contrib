@@ -184,3 +184,31 @@ def test_chunks_never_split_multibyte_characters(chunk_size):
         assert covered_end == len(tokens)
         # Strip overlap by position, preserving order and every repetition.
         assert reconstructed.decode("utf-8") == text
+
+
+@pytest.mark.parametrize(
+    ("text", "chunk_size", "chunk_overlap", "max_chunks"),
+    [
+        # 1000 tokens: chunks start at 0, 300, 600 and the third reaches the
+        # end, but ceil(1000 / 300) estimated 4.
+        ("word " * 999, 400, 100, None),
+        ("word " * 1000, 400, 100, None),
+        ("This is a test. " * 50, 10, 2, 3),
+        ("日本語のテキスト 🎉🚀 emoji ünïcödé " * 20, 7, 3, None),
+    ],
+    ids=["exact-end", "partial-last", "max-chunks", "multibyte"],
+)
+def test_total_chunks_matches_chunks_emitted(text, chunk_size, chunk_overlap, max_chunks):
+    """#2356 R5: ``total_chunks`` is the number of chunks actually yielded.
+
+    It was estimated as ceil(tokens / (size - overlap)), but the final chunk
+    stops at the end of the text and character-boundary adjustments move the
+    cut points, so the estimate overcounted.
+    """
+    processor = DocumentProcessor(
+        chunk_size=chunk_size, chunk_overlap=chunk_overlap, max_chunks=max_chunks
+    )
+    chunks = list(processor.process_text(text))
+    assert len(chunks) > 1
+    assert [c["metadata"]["chunk_index"] for c in chunks] == list(range(len(chunks)))
+    assert {c["metadata"]["total_chunks"] for c in chunks} == {len(chunks)}
