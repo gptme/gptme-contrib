@@ -3560,6 +3560,23 @@ def test_gptme_core_changed_config_default_routes() -> None:
     assert any("Changed or removed config field" in r for r in reasons)
 
 
+@pytest.mark.parametrize(
+    "removed",
+    [
+        # A multi-line dataclass field: only the inner default line is removed.
+        '        default="shadow",',
+        # A module-level constant at column 0.
+        'DEFAULT_MODEL = "a"',
+    ],
+)
+def test_gptme_core_changed_config_default_shapes_route(removed: str) -> None:
+    patch = f"@@ -1 +1 @@\n-{removed}\n+{removed}  # changed\n"
+    reasons = self_merge_check.gptme_core_route_to_erik_reasons(
+        "fix: change default", "", [_shape("gptme/config/models.py", patch)]
+    )
+    assert any("Changed or removed config field" in r for r in reasons)
+
+
 def _changes(*rows: tuple[str, int]) -> list[Any]:
     fc = self_merge_check.merge_policy.FileChange
     return [fc(path=path, additions=n, deletions=0, patch=None) for path, n in rows]

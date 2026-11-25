@@ -2700,8 +2700,11 @@ _GPTME_CORE_AUTH_BILLING_RE = re.compile(
 # constant (`TIMEOUT = 30`), a `def` signature with a keyword default
 # (`def f(x, t=0.7)`), and a parameter or keyword line in a multi-line
 # signature or call (`    temperature: float = 0.7,`). A plain `x = y`
-# statement inside a function body matches none of them, so ordinary fixes on
-# this surface still do not hold.
+# statement inside a function body matches none of them. Two shapes are
+# deliberately broad and do match routine edits: an annotated local
+# (`result: list[str] = []`) and any keyword line in a multi-line call
+# (`messages=msgs,`). Those hold, so the detector is conservative here — a
+# fix that removes such a line still routes to Erik rather than being missed.
 _GPTME_CORE_DEFAULT_SHAPE_RES = (
     re.compile(r"^\s*[A-Za-z_]\w*\s*:\s*[^=\n]+?=(?!=)\s*\S"),
     re.compile(r"^[A-Z][A-Z0-9_]*\s*(?::[^=\n]+)?=(?!=)\s*\S"),
@@ -2870,7 +2873,11 @@ def gptme_core_route_to_erik_reasons(
                 for line in added_lines
             ):
                 required_config.add(path)
-            if any(_GPTME_CORE_CONFIG_FIELD_RE.match(line) for line in removed_lines):
+            if any(
+                _GPTME_CORE_CONFIG_FIELD_RE.match(line)
+                or _gptme_core_carries_default(line)
+                for line in removed_lines
+            ):
                 changed_config.add(path)
         if path.startswith(_GPTME_CORE_AUTH_SURFACE_PREFIXES):
             sensitive_surface.add(path)
