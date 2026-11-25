@@ -2312,7 +2312,12 @@ def check_waiting(fix: bool, verbose: bool):
           type: pr_ci
           ref: "gptme/gptme#1217"
     """
-    from gptodo.waiting import WaitType, check_condition, parse_waiting_for
+    from gptodo.waiting import (
+        WaitType,
+        check_condition,
+        clear_resolved_conditions,
+        parse_waiting_for,
+    )
 
     console = Console()
 
@@ -2367,17 +2372,17 @@ def check_waiting(fix: bool, verbose: bool):
         # Report status
         status_str = ", ".join(status_parts)
         if all_resolved:
+            if fix:
+                if not clear_resolved_conditions(task.path, task.metadata.get("waiting_for")):
+                    pending_count += 1
+                    console.print(f"[yellow]⏳ {task.id}: Conditions changed; recheck required[/]")
+                    continue
+                changes_made.append(task.id)
+                console.print(
+                    "  [cyan]→ Removed resolved external conditions; task deps retained[/]"
+                )
             resolved_count += 1
             console.print(f"[green]✓ {task.id}[/]: {status_str}")
-            if fix:
-                # Clear waiting_for from task
-                post = frontmatter.load(task.path)
-                post.metadata.pop("waiting_for", None)
-                post.metadata.pop("waiting_since", None)
-                with open(task.path, "w") as f:
-                    f.write(frontmatter.dumps(post))
-                changes_made.append(task.id)
-                console.print("  [cyan]→ Cleared waiting_for[/]")
         else:
             pending_count += 1
             console.print(f"[yellow]⏳ {task.id}[/]: {status_str}")
@@ -2390,7 +2395,9 @@ def check_waiting(fix: bool, verbose: bool):
         console.print(f"  Skipped (task deps): [dim]{skipped_count}[/]")
 
     if changes_made:
-        console.print(f"\n[cyan]Cleared waiting_for on {len(changes_made)} task(s):[/]")
+        console.print(
+            f"\n[cyan]Removed resolved external conditions on {len(changes_made)} task(s):[/]"
+        )
         for task_id in changes_made:
             console.print(f"  • {task_id}")
 
@@ -2428,7 +2435,12 @@ def watch(interval: int, fix: bool, once: bool, verbose: bool):
     import signal
     import time
 
-    from gptodo.waiting import WaitType, check_condition, parse_waiting_for
+    from gptodo.waiting import (
+        WaitType,
+        check_condition,
+        clear_resolved_conditions,
+        parse_waiting_for,
+    )
 
     console = Console()
     repo_root = find_repo_root(Path.cwd())
@@ -2485,14 +2497,12 @@ def watch(interval: int, fix: bool, once: bool, verbose: bool):
                 previous_state[task.id][key] = checked.resolved
 
             if all_resolved:
-                resolved_count += 1
                 if fix:
-                    post = frontmatter.load(task.path)
-                    post.metadata.pop("waiting_for", None)
-                    post.metadata.pop("waiting_since", None)
-                    with open(task.path, "w") as f:
-                        f.write(frontmatter.dumps(post))
+                    if not clear_resolved_conditions(task.path, task.metadata.get("waiting_for")):
+                        pending_count += 1
+                        continue
                     changes.append((task.id, task_changes))
+                resolved_count += 1
             else:
                 pending_count += 1
 
