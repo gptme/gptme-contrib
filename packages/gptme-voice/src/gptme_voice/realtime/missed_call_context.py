@@ -88,7 +88,12 @@ def _timestamp(value: object) -> datetime:
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     if parsed.tzinfo is None:
         raise ValueError("timestamp must include timezone")
-    return parsed.astimezone(timezone.utc)
+    try:
+        return parsed.astimezone(timezone.utc)
+    except OverflowError as exc:
+        # An offset near datetime.min/max can fall outside the UTC range; callers
+        # treat that like any other unparseable timestamp.
+        raise ValueError("timestamp out of range") from exc
 
 
 def _as_utc(now: datetime | None) -> datetime:
