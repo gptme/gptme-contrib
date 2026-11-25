@@ -36,3 +36,19 @@ def test_symlink_in_another_category_keeps_its_own_features(tmp_path: Path):
     assert linked.keywords == original.keywords == {"git"}
     assert discovery.extract_features(source) is original
     assert discovery.extract_features(alias) is linked
+
+
+def test_duplicates_compares_every_file_pair_despite_shared_stems(tmp_path: Path):
+    for relative in ("git/commit.md", "workflow/commit.md", "other/rebase.md"):
+        path = tmp_path / relative
+        path.parent.mkdir()
+        path.write_text("---\nmatch:\n  keywords: [git]\n---\n# Identical lesson\n")
+    discovery = LessonDiscovery(lessons_dir=tmp_path)
+
+    duplicates = discovery.find_all_duplicates(threshold=0.95)
+
+    # Three distinct files give three pairs, including both commit/rebase pairs.
+    assert len(duplicates) == 3
+    pairs = [tuple(sorted((a, b))) for a, b, _ in duplicates]
+    assert pairs.count(("commit", "rebase")) == 2
+    assert pairs.count(("commit", "commit")) == 1

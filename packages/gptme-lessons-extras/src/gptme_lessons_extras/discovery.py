@@ -470,7 +470,6 @@ class LessonDiscovery:
             List of (lesson_a, lesson_b, similarity_score) tuples
         """
         duplicates = []
-        processed = set()
 
         lesson_files = [
             f for f in self.lessons_dir.rglob("*.md") if f.name not in NON_LESSON_FILES
@@ -481,12 +480,6 @@ class LessonDiscovery:
 
             for lesson_b in lesson_files[i + 1 :]:
                 features_b = self.extract_features(lesson_b)
-
-                # Skip if already processed
-                pair = tuple(sorted([features_a.lesson_id, features_b.lesson_id]))
-                if pair in processed:
-                    continue
-                processed.add(pair)
 
                 # Compute similarity
                 text_similarity = self.compute_text_similarity(
