@@ -70,17 +70,17 @@ def init_repo(network_dir: Path = DEFAULT_NETWORK_DIR, force: bool = False) -> P
         SyncError: If initialization fails
     """
     if network_dir.exists() and not force:
-        # Verify it's a valid git repo
-        try:
-            run_git(["rev-parse", "--git-dir"], network_dir)
+        # It must be the root of its own work tree: a directory inside an
+        # enclosing repo (e.g. a versioned home) would make us push that repo.
+        top = run_git(["rev-parse", "--show-toplevel"], network_dir, check=False)
+        if top.returncode == 0 and network_dir.samefile(top.stdout.rstrip("\n")):
             print(f"✓ Network repo exists: {network_dir}")
             return network_dir
-        except SyncError:
-            # Never delete a directory we did not create without --force.
-            raise SyncError(
-                f"{network_dir} exists but is not a git repository; "
-                "move it aside or re-run with --force to replace it"
-            ) from None
+        # Never delete a directory we did not create without --force.
+        raise SyncError(
+            f"{network_dir} exists but is not a git repository; "
+            "move it aside or re-run with --force to replace it"
+        )
 
     # Clone next to the target first, so a failed clone (offline, auth)
     # leaves any existing directory untouched.

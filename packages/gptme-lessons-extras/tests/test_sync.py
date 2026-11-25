@@ -67,6 +67,32 @@ def test_init_repo_refuses_non_repo_directory_without_force(
     assert (target / "my-notes.md").read_text() == "user content\n"
 
 
+def test_init_repo_refuses_directory_inside_enclosing_repo(tmp_path, monkeypatch, sync):
+    # e.g. ~/.gptme/network inside a version-controlled home: accepting it would
+    # let push_lessons push the enclosing repo's commits.
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    target = tmp_path / "network"
+    target.mkdir()
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent))
+
+    with pytest.raises(sync.SyncError, match="not a git repository"):
+        sync.init_repo(target)
+
+
+def test_init_repo_accepts_existing_clone_through_symlink(tmp_path, sync):
+    remote = _bare_remote_with_seed(tmp_path)
+    clone = tmp_path / "clone"
+    subprocess.run(
+        ["git", "clone", "-q", str(remote), str(clone)],
+        check=True,
+        capture_output=True,
+    )
+    link = tmp_path / "network"
+    link.symlink_to(clone, target_is_directory=True)
+
+    assert sync.init_repo(link) == link
+
+
 def test_init_repo_force_keeps_directory_when_clone_fails(tmp_path, monkeypatch, sync):
     target = tmp_path / "network"
     target.mkdir()
