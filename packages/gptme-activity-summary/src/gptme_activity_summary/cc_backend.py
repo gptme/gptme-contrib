@@ -53,7 +53,7 @@ _MARKER_RESERVE = len(_truncation_marker(10**12, 10**12))
 
 
 def _bound_text(text: str, budget: int, label: str) -> str:
-    """Truncate ``text`` to ``budget`` characters with an explicit marker."""
+    """Truncate ``text`` to at most ``budget`` characters with a marker."""
     if len(text) <= budget:
         return text
     logger.warning(
@@ -62,17 +62,28 @@ def _bound_text(text: str, budget: int, label: str) -> str:
         len(text),
         budget,
     )
-    return text[:budget] + _truncation_marker(len(text) - budget, len(text))
+    keep = max(0, budget - _MARKER_RESERVE)
+    marker = _truncation_marker(len(text) - keep, len(text))
+    # The reserve is an upper bound on marker length; for budgets smaller than
+    # the reserve, trim the marker so the result still fits ``budget``.
+    return text[:keep] + marker[: budget - keep]
 
 
 def _bound_entries(entries: list[tuple[Path, str]], budget: int) -> list[tuple[Path, str]]:
-    """Bound combined entry text to ``budget`` characters.
+    """Bound combined entry text to at most ``budget`` characters.
 
     Short entries are kept whole; leftover budget is redistributed across the
     remaining (oversized) entries so no capacity is wasted. Every oversized
     entry keeps its head — which carries the heading, outcome and category —
     followed by an explicit truncation marker, so the model knows the content
     is partial rather than silently missing.
+
+    The per-entry share can shrink below the marker length when the entry count
+    is very large (``budget / _MARKER_RESERVE`` entries, ~5k at 600k). Markers
+    are then dropped in favour of keeping whole entries greedily, so the
+    combined output never exceeds ``budget`` — the earlier fallback appended a
+    full marker per entry and could produce a prompt twice the budget with no
+    journal content at all.
     """
     total = sum(len(content) for _, content in entries)
     if total <= budget:
@@ -84,17 +95,41 @@ def _bound_entries(entries: list[tuple[Path, str]], budget: int) -> list[tuple[P
     while remaining:
         share = remaining_budget // len(remaining)
         small = [i for i in remaining if len(entries[i][1]) <= share]
-        if not small:
-            keep = max(0, share - _MARKER_RESERVE)
+        if small:
+            for i in small:
+                content = entries[i][1]
+                bounded[i] = content
+                remaining_budget -= len(content)
+                remaining.remove(i)
+            continue
+        if share > _MARKER_RESERVE:
+            keep = share - _MARKER_RESERVE
             for i in remaining:
                 content = entries[i][1]
                 bounded[i] = content[:keep] + _truncation_marker(len(content) - keep, len(content))
-            break
-        for i in small:
-            content = entries[i][1]
-            bounded[i] = content
-            remaining_budget -= len(content)
-            remaining.remove(i)
+        else:
+            # Degenerate: not even a truncation marker fits an equal share.
+            # Keep whole entries greedily while they fit, then account for the
+            # dropped tail with one compact marker (bounded by what is left).
+            dropped: list[int] = []
+            for i in list(remaining):
+                content = entries[i][1]
+                if len(content) + _MARKER_RESERVE <= remaining_budget:
+                    bounded[i] = content
+                    remaining_budget -= len(content)
+                    remaining.remove(i)
+                else:
+                    dropped.append(i)
+            omitted_chars = sum(len(entries[i][1]) for i in dropped)
+            for i in dropped:
+                bounded[i] = ""
+            if dropped and remaining_budget > 0:
+                marker = (
+                    f"\n\n[... {len(dropped):,} entries, {omitted_chars:,} characters "
+                    f"omitted from this summary prompt budget ...]"
+                )
+                bounded[dropped[0]] = marker[:remaining_budget]
+        break
 
     logger.warning(
         "Daily entries total %d chars; bounded to %d (budget %d)",

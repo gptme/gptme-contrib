@@ -1566,6 +1566,35 @@ def test_bound_entries_redistributes_leftover_budget():
     assert "truncated:" in by_name["long.md"]
 
 
+def test_bound_entries_many_entries_stays_within_budget():
+    """A pathological entry count must not inflate the output past the budget.
+
+    When the per-entry share drops below the marker length, appending a marker
+    per entry produced a prompt roughly twice the budget with no content.
+    """
+    from pathlib import Path
+
+    from gptme_activity_summary.cc_backend import _bound_entries
+
+    entries = [(Path(f"s{i}.md"), "z" * 1_000) for i in range(10_000)]
+    bounded = _bound_entries(entries, 600_000)
+
+    assert len(bounded) == len(entries)
+    assert sum(len(content) for _, content in bounded) <= 600_000
+    # The budget goes to real journal text rather than marker-only entries.
+    assert sum(content.count("z") for _, content in bounded) > 400_000
+    assert any("omitted from this summary prompt budget" in content for _, content in bounded)
+
+
+def test_bound_text_never_exceeds_budget():
+    """``_bound_text`` truncates to at most the budget, marker included."""
+    from gptme_activity_summary.cc_backend import _bound_text
+
+    for budget in (1_000, 200, 50, 5):
+        bounded = _bound_text("x" * 10_000, budget, "test")
+        assert len(bounded) <= budget, f"budget={budget} produced {len(bounded)} chars"
+
+
 def test_summarize_daily_prompt_stays_bounded():
     """The assembled daily prompt never exceeds the model context ceiling."""
     from pathlib import Path
