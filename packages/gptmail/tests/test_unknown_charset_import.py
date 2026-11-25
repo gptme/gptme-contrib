@@ -48,3 +48,24 @@ def test_unknown_charset_part_is_imported(tmp_path: Path, multipart: bool) -> No
     imported = agent.email_dir / "inbox" / agent._format_filename(mid)
     assert imported.exists()
     assert "Hello there" in imported.read_text()
+
+
+def test_non_text_part_body_is_decoded_not_repr() -> None:
+    """A non-text part's ``get_content()`` is bytes; it must decode, not become ``b'...'``."""
+    from email import policy
+
+    from gptmail.lib import _part_text
+
+    raw = (
+        HEADERS
+        + "Content-Type: application/octet-stream\n"
+        + "Content-Transfer-Encoding: 8bit\n\n"
+        + "Hello there\nsecond line\n"
+    )
+    msg = email.message_from_string(raw, policy=policy.default)
+    assert isinstance(msg.get_content(), bytes)  # the shape under test
+
+    text = _part_text(msg)
+
+    assert text.startswith("Hello there\nsecond line")
+    assert "b'" not in text

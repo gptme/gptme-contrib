@@ -338,10 +338,15 @@ def fix_list_spacing(markdown_text: str) -> str:
 def _part_text(part: EmailMessage) -> str:
     """Text of a MIME part; an unknown charset decodes as UTF-8 with replacement.
 
-    ``get_content()`` raises ``LookupError`` for e.g. ``charset=unknown-8bit``.
+    ``get_content()`` raises ``LookupError`` for e.g. ``charset=unknown-8bit``,
+    and returns ``bytes`` for a non-text part, which must decode rather than
+    become its ``b'...'`` repr.
     """
     try:
-        return str(part.get_content())
+        content = part.get_content()
+        if isinstance(content, bytes):
+            return content.decode("utf-8", errors="replace")
+        return str(content)
     except LookupError:
         payload = part.get_payload(decode=True)
         if isinstance(payload, bytes):
