@@ -3643,11 +3643,22 @@ def _repos_cited_in_body(pr_body: str, parent_repo: str) -> list[str]:
     return found
 
 
-def _commit_exists(repo: str, sha: str) -> bool:
+# gh reports a missing commit as 422 "No commit found for SHA" (or 404 for an
+# unknown repo). Anything else (rate limit, 5xx, network) says nothing about
+# whether the commit exists.
+_COMMIT_MISSING_RE = re.compile(r"HTTP 404|HTTP 422|No commit found", re.IGNORECASE)
+
+
+def _commit_exists(repo: str, sha: str) -> bool | None:
+    """True if the commit exists, False if GitHub says it does not, None if unknown."""
     check: subprocess.CompletedProcess = _io.run(
         ["gh", "api", f"repos/{repo}/commits/{sha}", "--jq", ".sha"]
     )
-    return check.returncode == 0
+    if check.returncode == 0:
+        return True
+    if _COMMIT_MISSING_RE.search(f"{check.stderr or ''}\n{check.stdout or ''}"):
+        return False
+    return None
 
 
 def _check_cited_shas(
@@ -3696,9 +3707,16 @@ def _check_cited_shas(
         seen.add(sha)
         if _sha_matches_any(sha, gitlinks):
             continue
-        if _commit_exists(repo, sha):
+        lookups = [_commit_exists(repo, sha)]
+        for other in extra_repos:
+            if lookups[-1]:
+                break
+            lookups.append(_commit_exists(other, sha))
+        if any(lookups):
             continue
-        if any(_commit_exists(other, sha) for other in extra_repos):
+        if None in lookups:
+            # A lookup failed for a reason other than "not found" (rate limit,
+            # 5xx, network): we cannot tell, so do not raise a false P1.
             continue
         anchor = next(iter(touched_files), "")
         results.append(

@@ -552,9 +552,11 @@ def _scripted_run(responses):
 
     def fake_run(cmd, **kw):
         calls.append(cmd)
-        for prefix, (code, out) in responses.items():
+        for prefix, (code, out, *err) in responses.items():
             if tuple(cmd[: len(prefix)]) == prefix:
-                return subprocess.CompletedProcess(cmd, code, out, "err")
+                return subprocess.CompletedProcess(
+                    cmd, code, out, err[0] if err else "err"
+                )
         raise AssertionError(f"unexpected command {cmd}")
 
     return fake_run, calls
@@ -668,7 +670,9 @@ def test_read_checkout_file_refuses_paths_outside_the_checkout(alice_io, tmp_pat
 
 
 def test_cited_sha_lookup_goes_through_the_bound_run(alice_io):
-    fake_run, calls = _scripted_run({("gh", "api"): (1, "")})
+    fake_run, calls = _scripted_run(
+        {("gh", "api"): (1, "", "gh: No commit found for SHA: abc1234 (HTTP 422)")}
+    )
     w = _bound_with(alice_io, run=fake_run)
     body = "Fixed in `abc1234`. Also bumps the pin, commit 2222222."
     findings = w._check_cited_shas(body, "o/r", ["src/a.py"], _SUBMODULE_DIFF)
@@ -676,6 +680,21 @@ def test_cited_sha_lookup_goes_through_the_bound_run(alice_io):
     assert findings[0]["severity"] == "P1" and findings[0]["static"] is True
     # The gitlink SHA the PR moves is accepted without a lookup.
     assert calls == [["gh", "api", "repos/o/r/commits/abc1234", "--jq", ".sha"]]
+
+
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "gh: API rate limit exceeded (HTTP 403)",
+        "gh: Server Error (HTTP 502)",
+        "error connecting to api.github.com",
+    ],
+)
+def test_cited_sha_lookup_error_is_not_a_missing_commit(alice_io, stderr):
+    """A failed lookup is unknown, not 'not found' (contrib#2384, #2273)."""
+    fake_run, _calls = _scripted_run({("gh", "api"): (1, "", stderr)})
+    w = _bound_with(alice_io, run=fake_run)
+    assert w._check_cited_shas("Fixed in `abc1234`.", "o/r", ["src/a.py"]) == []
 
 
 def test_cited_sha_does_not_truncate_a_full_ref(alice_io):
