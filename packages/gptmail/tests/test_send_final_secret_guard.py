@@ -304,16 +304,26 @@ def test_quoted_printable_escapes_are_not_secret_assignments(recording_send, mon
 def test_real_scanner_still_blocks_assignment_in_quoted_printable_body(
     recording_send, monkeypatch, capsys
 ):
-    """Narrowing the raw scan must not let a real assignment in the body through."""
+    """Narrowing the raw scan must not let a real secret in the body through.
+
+    The draft carries the Markdown escape form, so the pre-MIME draft scan
+    cannot match it; only the rendered, transfer-decoded payload can. Without
+    that, this test passed even when the final scan was deleted entirely.
+    """
     import os
 
     monkeypatch.setattr(os, "environ", {"EMAIL_SEND_ALLOWLIST": "recipient@example.com"})
     monkeypatch.delitem(sys.modules, "redact")  # drop the fixture's fake scanner
     real_redact = pytest.importorskip("redact")
-    secret = "api_key = sk-synthetic0123456789abcdefABCDEF — rotate"
-    assert real_redact.redact(secret, literals=[]).blocked
+    literal = "SYNTHETIC_TOKEN_QP_BODY"
+    monkeypatch.setattr(sys.modules["redact"], "collect_secret_literals", lambda: [literal])
+    # The em dash makes the text parts quoted-printable on the wire.
+    rendered = f"{literal} — rotate"
+    draft_body = "SYNTHETIC\\_TOKEN\\_QP\\_BODY — rotate"
+    assert real_redact.redact(rendered, literals=[literal]).blocked
+    assert not real_redact.redact(draft_body, literals=[literal]).blocked
     agent, draft, calls = recording_send
-    draft.write_text(f"To: recipient@example.com\nSubject: Clean\n\n{secret}")
+    draft.write_text(f"To: recipient@example.com\nSubject: Clean\n\n{draft_body}")
     with pytest.raises(ValueError, match="Outbound"):
         agent.send("fixture")
     assert not calls
