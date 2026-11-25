@@ -8,12 +8,13 @@ Policy summary:
 - CI must be green (or skipped)
 - A machine review must be present and clean: own self-hosted AI reviewer with
   consensus pass and zero open P1 findings (see "Accepting our own review" below).
-  A current-head Greptile review with no unresolved threads at the configured
-  score floor is accepted as an *alternative* input when the own reviewer has no
-  usable verdict (absent, stale, abstained, or degraded consensus). An
-  open P0/P1 from our reviewer is never erased by a positive Greptile score.
+  A Greptile review covering the head (see "Review evidence and rebases") with
+  no unresolved threads at the configured score floor is accepted as an
+  *alternative* input when the own reviewer has no usable verdict (absent, stale,
+  abstained, or degraded consensus). An open P0/P1 from our reviewer is never
+  erased by a positive Greptile score.
   Greptile review uses a 3-branch staleness policy (Erik decision 2026-09-07):
-    1. Fresh Greptile on current head → 5/5 floor applies (original gate).
+    1. Fresh Greptile covering the head → 5/5 floor applies (original gate).
     2. Stale or dark Greptile AND fresh own-AI-review → AI reviewer verdict is the gate.
     3. Neither fresh → PR is not eligible (fail-closed, not fail-open).
   (Rationale: Greptile is a fine gate on public OSS repos when it responds and
@@ -32,6 +33,14 @@ To allow cross-repo merges, either:
   category/CI/Greptile checks still apply.
 - Or clear WORKSPACE_REPO entirely (set it to empty string) to disable the
   cross-repo restriction (not recommended; widens the merge surface).
+
+Review evidence and rebases
+---------------------------
+A machine review "covers" the head when it was made at the head SHA, or at a SHA
+whose own diff against the base has the same ``git patch-id --verbatim`` as the
+head's (a rebase or merge-from-base). Anything unreadable, binary, or involving
+mode changes, renames, copies or header-only file sections needs a fresh review.
+This applies to review evidence only: CI must pass at the exact head.
 
 Accepting our own review
 ------------------------
@@ -52,8 +61,8 @@ falls back to requiring Greptile rather than approving:
 
 - score is 5/5 — the rubric's only "nothing outstanding on this head" value.
   Deliberately not env-overridable, unlike the Greptile floor.
-- the review is at the current head SHA (a review of an older push says nothing
-  about the code about to merge)
+- the review covers the current head (see "Review evidence and rebases"; a
+  review of a different change says nothing about the code about to merge)
 - consensus is present and undegraded — no lost passes, no lost fan-out jobs, no
   clamped agreement threshold. A complete single pass (1/1) qualifies. A degraded
   run reached its score on less evidence than it asked for, which is exactly the
@@ -427,6 +436,25 @@ def run_gh_checked(args: list[str], timeout: int = 30) -> str | None:
         return result.stdout.strip()
     except (subprocess.TimeoutExpired, OSError):
         return None
+
+
+def run_gh_bytes(args: list[str], timeout: int = 30) -> bytes | None:
+    """`run_gh_checked` returning stdout untouched, for byte-exact comparisons.
+
+    Text mode rewrites CR and CRLF to LF and raises on non-UTF-8 output, and
+    stripping drops trailing whitespace on the last line. A diff that is hashed
+    to decide whether two commits carry the same change must see none of that.
+    """
+    try:
+        result = subprocess.run(["gh", *args], capture_output=True, timeout=timeout)
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if result.returncode != 0:
+        if result.stderr:
+            err = result.stderr.decode(errors="replace").strip()
+            print(f"[gh error] {err}", file=sys.stderr)
+        return None
+    return result.stdout
 
 
 def get_gh_user() -> str:
@@ -1530,13 +1558,16 @@ def _pr_diff_patch_id(repo: str, base_ref: str, sha: str) -> str | None:
     unchanged when the PR's own changes are unchanged. ``--verbatim`` keeps
     whitespace significant (the default ignores it, which would equate an
     indentation change in Python). Line numbers are still ignored, which is what
-    lets the same change survive a base that moved.
+    lets the same change survive a base that moved. The diff is hashed as bytes,
+    so line-ending and trailing-whitespace changes stay visible. The mode of an
+    added or deleted file (``new file mode``/``deleted file mode``) is part of
+    what patch-id hashes, which the tests pin.
 
     None on any failure, an empty/binary diff, header-only file sections or
     mode/rename/copy changes. Those require a fresh review rather than relying
     on patch-id's handling of extended headers across Git versions.
     """
-    raw = run_gh_checked(
+    raw = run_gh_bytes(
         [
             "api",
             "-H",
@@ -1545,13 +1576,13 @@ def _pr_diff_patch_id(repo: str, base_ref: str, sha: str) -> str | None:
         ],
         timeout=60,
     )
-    if not raw or "Binary files " in raw or "GIT binary patch" in raw:
+    if not raw or b"Binary files " in raw or b"GIT binary patch" in raw:
         return None
-    sections = re.split(r"(?m)^diff --git ", raw)
+    sections = re.split(rb"(?m)^diff --git ", raw)
     if len(sections) < 2 or any(
-        not re.search(r"(?m)^@@ ", section)
+        not re.search(rb"(?m)^@@ ", section)
         or re.search(
-            r"(?m)^(?:old mode |new mode |rename from |rename to |copy from |copy to )",
+            rb"(?m)^(?:old mode |new mode |rename from |rename to |copy from |copy to )",
             section,
         )
         for section in sections[1:]
@@ -1560,9 +1591,8 @@ def _pr_diff_patch_id(repo: str, base_ref: str, sha: str) -> str | None:
     try:
         proc = subprocess.run(
             ["git", "patch-id", "--verbatim"],
-            input=raw + "\n",
+            input=raw,
             capture_output=True,
-            text=True,
             timeout=30,
         )
     except (subprocess.TimeoutExpired, OSError):
@@ -1570,7 +1600,7 @@ def _pr_diff_patch_id(repo: str, base_ref: str, sha: str) -> str | None:
     fields = proc.stdout.split()
     if proc.returncode != 0 or len(fields) != 2:
         return None
-    return fields[0]
+    return fields[0].decode("ascii")
 
 
 def _review_carries_to_head(
@@ -1972,11 +2002,14 @@ def fetch_ai_review_status(
             "refusal": "consensus_shortfall",
         }
 
-    advisory = len(_ai_review_advisory_fps(marker))
     reviewed_sha = str(marker.get("sha"))
+    exact_head = _sha_matches_head(reviewed_sha, head_sha)
+    # The late-pass demotion applies at the exact reviewed head only, so a
+    # carried review must not report findings as advisory.
+    advisory = len(_ai_review_advisory_fps(marker)) if exact_head else 0
     provenance = (
         f"at current head {head_sha[:12]}"
-        if _sha_matches_head(reviewed_sha, head_sha)
+        if exact_head
         else f"carried from {reviewed_sha[:12]} to head {head_sha[:12]} via identical patch-id"
     )
     detail = f"AI review {score}/5 {provenance}, findings disposed"

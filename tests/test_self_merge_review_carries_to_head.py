@@ -54,14 +54,15 @@ def _rebased(diff: str) -> str:
 def diffs(monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, str | None]]:
     by_sha: dict[str, str | None] = {}
 
-    def fake(args: list[str], timeout: int = 30) -> str | None:
+    def fake(args: list[str], timeout: int = 30) -> bytes | None:
         path = args[-1]
         assert path.startswith("repos/o/r/compare/master...")
         ref = path.rsplit("...", 1)[1]
         # GitHub resolves an abbreviated sha, as the marker may carry one.
-        return next((d for sha, d in by_sha.items() if sha.startswith(ref)), None)
+        diff = next((d for sha, d in by_sha.items() if sha.startswith(ref)), None)
+        return None if diff is None else diff.encode(errors="surrogateescape")
 
-    monkeypatch.setattr(smc, "run_gh_checked", fake)
+    monkeypatch.setattr(smc, "run_gh_bytes", fake)
     smc._pr_diff_patch_id.cache_clear()
     yield by_sha
     smc._pr_diff_patch_id.cache_clear()
@@ -88,6 +89,67 @@ def test_indentation_change_does_not_carry(diffs: Any) -> None:
     diffs[OLD] = _diff("    y = 2")
     diffs[NEW] = _rebased(_diff("        y = 2"))
     assert not smc._review_carries_to_head("o/r", "master", OLD, NEW)
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        ("    y = 2", "    y = 2\r"),
+        ("    y = 2", "    y = 2\r    z = 3"),
+    ],
+    ids=["crlf", "bare-cr"],
+)
+def test_line_ending_change_does_not_carry(diffs: Any, old: str, new: str) -> None:
+    diffs[OLD] = _diff(old)
+    diffs[NEW] = _rebased(_diff(new))
+    assert not smc._review_carries_to_head("o/r", "master", OLD, NEW)
+
+
+def test_trailing_whitespace_on_last_line_does_not_carry(diffs: Any) -> None:
+    diffs[OLD] = _diff("    y = 2").replace("     return x\n", "+end\n")
+    diffs[NEW] = _rebased(diffs[OLD]).replace("+end\n", "+end  \n")
+    assert not smc._review_carries_to_head("o/r", "master", OLD, NEW)
+
+
+@pytest.mark.parametrize("mode", ["100755", "120000"], ids=["executable", "symlink"])
+def test_added_file_mode_change_does_not_carry(diffs: Any, mode: str) -> None:
+    added = (
+        "diff --git a/s b/s\n"
+        "new file mode 100644\n"
+        "index 0000000..c4d8682\n"
+        "--- /dev/null\n"
+        "+++ b/s\n"
+        "@@ -0,0 +1 @@\n"
+        "+../k\n"
+        "\\ No newline at end of file\n"
+    )
+    diffs[OLD] = added
+    diffs[NEW] = added.replace("new file mode 100644", f"new file mode {mode}")
+    assert not smc._review_carries_to_head("o/r", "master", OLD, NEW)
+
+
+def test_non_utf8_diff_is_compared_byte_exact(diffs: Any) -> None:
+    # A Latin-1 byte is not a failure, and changing it is still a change.
+    diffs[OLD] = _diff("    y = '\udce9'")
+    diffs[NEW] = _rebased(diffs[OLD])
+    assert smc._review_carries_to_head("o/r", "master", OLD, NEW)
+    diffs[NEW] = _rebased(_diff("    y = '\udce8'"))
+    smc._pr_diff_patch_id.cache_clear()
+    assert not smc._review_carries_to_head("o/r", "master", OLD, NEW)
+
+
+def test_run_gh_bytes_returns_stdout_untouched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = b"+a\r\n+\xe9  \n"
+    real_run = smc.subprocess.run
+
+    def fake(cmd: list[str], **kwargs: Any) -> Any:
+        script = f"import sys; sys.stdout.buffer.write({payload!r})"
+        return real_run([sys.executable, "-c", script], **kwargs)
+
+    monkeypatch.setattr(smc.subprocess, "run", fake)
+    assert smc.run_gh_bytes(["api", "x"]) == payload
 
 
 def test_unreadable_diff_fails_closed(diffs: Any) -> None:
@@ -179,6 +241,7 @@ def test_accepted_review_reports_provenance(diffs: Any, reviewed: str) -> None:
         marker_result={
             "sha": reviewed[:12],
             "score": 5,
+            "finding_provenance": {"0123456789ab": [{"model": "m", "pass": 2}]},
             "consensus": {
                 "requested": 3,
                 "answered": 3,
@@ -192,6 +255,7 @@ def test_accepted_review_reports_provenance(diffs: Any, reviewed: str) -> None:
         base_ref="master",
     )
     assert status["accepted"], status
+    assert ("finding(s) advisory" in status["detail"]) == (reviewed == NEW)
     if reviewed == OLD:
         assert f"carried from {OLD[:12]} to head {NEW[:12]}" in status["detail"]
         assert "via identical patch-id" in status["detail"]
