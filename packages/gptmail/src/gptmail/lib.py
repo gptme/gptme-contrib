@@ -112,7 +112,7 @@ def _is_html(text: str) -> bool:
 
 
 def _format_address_header(value: str) -> str:
-    """Build an RFC 5322-valid address-header value from a ``Name <addr>`` string.
+    """Build an RFC 5322-valid address-header value from ``Name <addr>`` entries.
 
     A raw ``"Recipient Name <recipient@example.com>"`` assigned directly to an email
     header is mishandled by Python's serializer when the display name is
@@ -121,20 +121,20 @@ def _format_address_header(value: str) -> str:
     ``To: =?utf-8?b?...?=``) — which makes the message undeliverable while still
     being accepted by the SMTP envelope.
 
-    This splits into ``(display-name, addr-spec)`` and re-joins with
+    This splits each mailbox into ``(display-name, addr-spec)`` and re-joins with
     :func:`email.utils.formataddr`, which RFC2047-encodes only the name and keeps
-    ``<addr>`` intact. Returns the address unchanged when there is no display
-    name.
+    ``<addr>`` intact. A mailbox without a display name stays a bare address.
+
+    Parses with :func:`email.utils.getaddresses`, as the send path does for the
+    msmtp recipients, so the header names every mailbox that gets delivery.
     """
-    name, addr = parseaddr(value)
-    if not addr:
-        # parseaddr couldn't find an addr-spec; return input untouched so the
-        # caller's downstream handling/fallbacks still apply.
+    mailboxes = getaddresses([value])
+    if not mailboxes or not all(addr for _, addr in mailboxes):
+        # Unparseable: return input untouched so the caller's downstream
+        # handling still applies.
         return value
-    if not name:
-        return addr
     # formataddr handles RFC2047 encoding of a non-ASCII name itself.
-    return formataddr((name, addr))
+    return ", ".join(formataddr((name, addr)) if name else addr for name, addr in mailboxes)
 
 
 # Envelope headers that survive BCC stripping. Gmail's IMAP copy of a blind
