@@ -92,6 +92,14 @@ def edit_content() -> str:
         return Path(tf.name).read_text()
 
 
+def _value_errors_as_cli_errors(func, *args, **kwargs):
+    """Report a library operation's validation errors without a traceback."""
+    try:
+        return func(*args, **kwargs)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
 @click.group()
 @click.version_option(version=_version_string(), prog_name="gptmail")
 def cli() -> None:
@@ -219,7 +227,7 @@ def send(message_id: str, force: bool) -> None:
     """Send draft email."""
     workspace_dir = get_workspace_dir()
     email = AgentEmail(workspace_dir)
-    email.send(message_id, force=force)
+    _value_errors_as_cli_errors(email.send, message_id, force=force)
 
 
 @cli.command(name="list")
@@ -308,7 +316,7 @@ def reply(message_id: str, content: str | None = None, from_address: str | None 
     email = AgentEmail(workspace_dir)
 
     # Get original message details
-    original = email.read_message(message_id)
+    original = _value_errors_as_cli_errors(email.read_message, message_id)
 
     # Parse headers from original message
     headers = {}
@@ -396,7 +404,8 @@ def reply(message_id: str, content: str | None = None, from_address: str | None 
     full_content = content + quoted_original
 
     # Create reply draft with proper threading
-    reply_id = email.compose(
+    reply_id = _value_errors_as_cli_errors(
+        email.compose,
         to=to,
         subject=subject,
         content=full_content,

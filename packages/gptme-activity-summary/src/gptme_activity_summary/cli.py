@@ -368,6 +368,19 @@ def generate_daily_with_cc(
     )
 
 
+def _cli_errors(func, *args, **kwargs):
+    """Run a summary generator, reporting expected failures without a traceback."""
+    try:
+        return func(*args, **kwargs)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    except FileNotFoundError as exc:
+        message = f"{exc.filename} not found" if exc.filename else str(exc)
+        if exc.filename == "claude":
+            message += ": install the Claude Code CLI or put it on PATH"
+        raise click.ClickException(message) from exc
+
+
 def generate_weekly_summary_cc(
     week: str,
     verbose: bool = False,
@@ -800,7 +813,9 @@ def daily(
 
     click.echo(f"Generating daily summary for {target_date} ({len(entries)} entries)...")
 
-    summary = generate_daily_with_cc(target_date, verbose=verbose, repos=list(repos) or None)
+    summary = _cli_errors(
+        generate_daily_with_cc, target_date, verbose=verbose, repos=list(repos) or None
+    )
 
     if dry_run:
         click.echo("\n--- DRY RUN OUTPUT ---")
@@ -884,7 +899,9 @@ def weekly(
 
     click.echo(f"Generating weekly summary for {week}...")
 
-    summary = generate_weekly_summary_cc(week, verbose=verbose, repos=list(repos) or None)
+    summary = _cli_errors(
+        generate_weekly_summary_cc, week, verbose=verbose, repos=list(repos) or None
+    )
 
     if dry_run:
         click.echo("\n--- DRY RUN OUTPUT ---")
@@ -966,7 +983,9 @@ def monthly(
 
     click.echo(f"Generating monthly summary for {month}...")
 
-    summary = generate_monthly_summary_cc(month, verbose=verbose, repos=list(repos) or None)
+    summary = _cli_errors(
+        generate_monthly_summary_cc, month, verbose=verbose, repos=list(repos) or None
+    )
 
     if dry_run:
         click.echo("\n--- DRY RUN OUTPUT ---")
