@@ -114,6 +114,14 @@ def fast():
 
 def slow():
     pass
+
+class A:
+    def log(self):
+        fast()
+
+class B:
+    def log(self):
+        slow()
 """
 
 
@@ -129,6 +137,10 @@ def test_calls_from_every_branch_definition_are_kept(tmp_path: Path, cross_file:
         key = "::run"
 
     assert {c.rpartition("::")[2] for c in callees[key]} == {"fast", "slow"}
+    # Same-named methods of different classes are not redefinitions of each other.
+    log_calls = [calls for qid, calls in callees.items() if qid.endswith(".log")]
+    assert log_calls
+    assert all(len(calls) == 1 for calls in log_calls)
 
 
 def test_index_cached_by_previous_extractor_is_discarded(tmp_path: Path, monkeypatch):
