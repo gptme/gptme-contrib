@@ -12,9 +12,10 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 
-# Known bot patterns in GitHub usernames
+# Known bot patterns in GitHub usernames. Matched as substrings of the
+# lowercased login, so keep them specific enough not to catch human names: a
+# bare "bot" also matches "abbott", "talbot" and "botanist-jane".
 BOT_USERNAME_PATTERNS = [
-    "bot",
     "-bot",
     "_bot",
     "[bot]",
@@ -52,6 +53,12 @@ def is_bot_user(username: str, user_type: str | None = None) -> bool:
     for pattern in BOT_USERNAME_PATTERNS:
         if pattern in username_lower:
             return True
+
+    # CamelCase bot suffix ("MyBot") is an established automation convention.
+    # A bare lowercase "bot" is not sufficient evidence on its own: it appears
+    # in ordinary human names ("abbott", "talbot", "botanist-jane").
+    if username.endswith("Bot"):
+        return True
 
     return False
 
