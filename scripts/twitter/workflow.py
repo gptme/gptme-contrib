@@ -787,6 +787,67 @@ def move_draft(path: Path, new_status: str) -> Path:
     return new_path
 
 
+# Drafts that miss the 3/3 auto-approve bar wait in review/ for a human. Nothing
+# else revisits them, so without an expiry a 2/3 draft (including a reply to a
+# real question) sits there silently forever. Expire them with a reason so they
+# become a visible, countable rejection instead of an unlabelled graveyard.
+DEFAULT_REVIEW_EXPIRY_DAYS = 7
+
+
+def _naive_local(value: datetime) -> datetime:
+    """Drop timezone info after converting to local time, so datetimes compare."""
+    if value.tzinfo is None:
+        return value
+    return value.astimezone().replace(tzinfo=None)
+
+
+def expire_review_drafts(
+    max_age_days: int = DEFAULT_REVIEW_EXPIRY_DAYS,
+    dry_run: bool = False,
+    now: datetime | None = None,
+) -> tuple[int, int]:
+    """Move review/ drafts older than ``max_age_days`` to rejected/.
+
+    Returns ``(expired, remaining)``. A non-positive ``max_age_days`` disables
+    expiry. Age is measured from the draft's ``created_at``.
+    """
+    now = _naive_local(now or datetime.now())
+    expired = 0
+    remaining = 0
+    for path in list_drafts("review"):
+        # One broken or unwritable draft must not stop auto() from reviewing and
+        # posting everything else, so each draft fails on its own.
+        try:
+            draft = TweetDraft.load(path)
+            age_days = (now - _naive_local(draft.created_at)).total_seconds() / 86400
+            if max_age_days <= 0 or age_days < max_age_days:
+                remaining += 1
+                continue
+            score = (
+                "unscored"
+                if draft.quality_score is None
+                else f"quality_score {draft.quality_score}/3"
+            )
+            reason = (
+                f"Expired: {score}, still in review/ {age_days:.0f}d after creation "
+                f"(limit {max_age_days}d) with no human disposition"
+            )
+            if dry_run:
+                console.print(f"[yellow]Would expire {path.name}: {reason}")
+            else:
+                draft.reject_reason = reason
+                draft.save(path)
+                moved = move_draft(path, "rejected")
+                console.print(
+                    f"[yellow]Expired {path.name} -> {moved.parent.name}/: {reason}"
+                )
+            expired += 1
+        except Exception as e:
+            console.print(f"[red]Could not expire review draft {path.name}: {e}")
+            remaining += 1
+    return expired, remaining
+
+
 def _mark_posted(draft: TweetDraft, path: Path, tweet_id: str) -> Path:
     """Record the posted tweet id/time and move the draft to the posted dir.
 
@@ -2960,6 +3021,15 @@ def auto(
 
     # Step 2: Review drafts
     console.print("\n[bold]Step 2: Reviewing drafts[/bold]")
+    # Read at run time: cli() loads .env after this module is imported.
+    expiry_days = int(
+        os.environ.get("TWITTER_REVIEW_EXPIRY_DAYS", DEFAULT_REVIEW_EXPIRY_DAYS)
+    )
+    expired, parked = expire_review_drafts(expiry_days, dry_run=dry_run)
+    console.print(
+        f"Parked in review/: {parked} (expired this cycle: {expired}, "
+        f"limit {expiry_days}d)"
+    )
     drafts = list_drafts("new")
 
     approved_count = 0

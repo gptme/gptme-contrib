@@ -3030,3 +3030,136 @@ def test_saving_or_moving_an_old_review_does_not_launder_its_digest(
     if destination:
         path = workflow_module.move_draft(path, destination)
     assert workflow_module.TweetDraft.load(path).scored_digest == digest
+
+
+def _save_review_draft(module: Any, name: str, created: datetime, **kwargs) -> Path:
+    path: Path = module.REVIEW_DIR / name
+    draft = module.TweetDraft(text="Parked draft", **kwargs)
+    draft.created_at = created
+    draft.save(path)
+    return path
+
+
+def test_expire_review_drafts_rejects_stale_with_reason_and_keeps_fresh(
+    workflow_module: Any, tmp_path: Path
+) -> None:
+    _set_status_dirs(workflow_module, tmp_path)
+    now = datetime(2026, 11, 25, 12, 0)
+    stale = _save_review_draft(
+        workflow_module,
+        "reply_old.yml",
+        datetime(2026, 11, 15, 0, 21),
+        type="reply",
+        in_reply_to="1",
+        quality_score=2,
+    )
+    unscored = _save_review_draft(
+        workflow_module, "tweet_unscored.yml", datetime(2026, 10, 4, 9, 0)
+    )
+    fresh = _save_review_draft(
+        workflow_module, "tweet_fresh.yml", datetime(2026, 11, 23, 3, 0)
+    )
+
+    expired, remaining = workflow_module.expire_review_drafts(7, now=now)
+
+    assert (expired, remaining) == (2, 1)
+    assert fresh.exists()
+    assert not stale.exists() and not unscored.exists()
+    reason = workflow_module.TweetDraft.load(
+        workflow_module.REJECTED_DIR / stale.name
+    ).reject_reason
+    assert "quality_score 2/3" in reason and "limit 7d" in reason
+    assert "unscored" in (
+        workflow_module.TweetDraft.load(
+            workflow_module.REJECTED_DIR / unscored.name
+        ).reject_reason
+    )
+
+
+def test_expire_review_drafts_accepts_timezone_aware_times(
+    workflow_module: Any, tmp_path: Path
+) -> None:
+    _set_status_dirs(workflow_module, tmp_path)
+    _save_review_draft(
+        workflow_module,
+        "tweet_aware.yml",
+        datetime(2026, 10, 1, 0, 0, tzinfo=timezone.utc),
+    )
+    _save_review_draft(workflow_module, "tweet_naive.yml", datetime(2026, 10, 1))
+    now = datetime(2026, 11, 25, 12, 0, tzinfo=timezone.utc)
+
+    assert workflow_module.expire_review_drafts(0, now=now) == (0, 2)
+    assert workflow_module.expire_review_drafts(7, now=now) == (2, 0)
+
+
+def test_expire_review_drafts_continues_past_a_draft_that_fails(
+    workflow_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _set_status_dirs(workflow_module, tmp_path)
+    stuck = _save_review_draft(workflow_module, "tweet_a.yml", datetime(2026, 10, 1))
+    other = _save_review_draft(workflow_module, "tweet_b.yml", datetime(2026, 10, 1))
+    broken = workflow_module.REVIEW_DIR / "tweet_c.yml"
+    broken.write_text("- not a draft\n")
+    real_save = workflow_module.TweetDraft.save
+
+    def save(draft: Any, path: Path) -> None:
+        if path == stuck:
+            raise PermissionError("read-only draft")
+        real_save(draft, path)
+
+    monkeypatch.setattr(workflow_module.TweetDraft, "save", save)
+
+    result = workflow_module.expire_review_drafts(7, now=datetime(2026, 11, 25))
+
+    assert result == (1, 2)
+    assert stuck.exists() and broken.exists()
+    assert (workflow_module.REJECTED_DIR / other.name).exists()
+
+
+@pytest.mark.parametrize(("configured", "expired"), [(None, True), ("0", False)])
+def test_auto_reads_review_expiry_from_env_at_run_time(
+    workflow_module: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    configured: str | None,
+    expired: bool,
+) -> None:
+    _set_status_dirs(workflow_module, tmp_path)
+    stale = _save_review_draft(workflow_module, "tweet_old.yml", datetime(2020, 1, 1))
+    # Set after import, as load_dotenv() in cli() does.
+    if configured is None:
+        monkeypatch.delenv("TWITTER_REVIEW_EXPIRY_DAYS", raising=False)
+    else:
+        monkeypatch.setenv("TWITTER_REVIEW_EXPIRY_DAYS", configured)
+    client = SimpleNamespace(get_home_timeline=lambda **kw: SimpleNamespace(data=None))
+    monkeypatch.setattr(workflow_module, "load_twitter_client", lambda **kw: client)
+    monkeypatch.setattr(workflow_module, "cached_get_me", lambda *a, **kw: None)
+
+    workflow_module.auto(
+        list_id=None,
+        auto_approve=False,
+        post_approved=False,
+        dry_run=False,
+        max_tweets=1,
+        max_drafts=1,
+        skip_mentions=True,
+        skip_timeline=False,
+    )
+
+    assert stale.exists() is not expired
+
+
+def test_expire_review_drafts_dry_run_and_disabled_move_nothing(
+    workflow_module: Any, tmp_path: Path
+) -> None:
+    _set_status_dirs(workflow_module, tmp_path)
+    now = datetime(2026, 11, 25, 12, 0)
+    stale = _save_review_draft(
+        workflow_module, "tweet_old.yml", datetime(2026, 10, 1, 0, 0)
+    )
+
+    assert workflow_module.expire_review_drafts(7, dry_run=True, now=now) == (1, 0)
+    assert stale.exists()
+    assert workflow_module.expire_review_drafts(0, now=now) == (0, 1)
+    assert stale.exists()
+    assert list(workflow_module.REJECTED_DIR.iterdir()) == []
