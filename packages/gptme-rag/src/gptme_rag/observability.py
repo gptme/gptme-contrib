@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
@@ -119,13 +120,43 @@ def detect_session_id(env_vars: Sequence[str] = DEFAULT_SESSION_ENV_VARS) -> str
 
 
 def _as_score(value: Any) -> float:
-    """Coerce a hit score to float; unusable values become 0.0 rather than raise."""
+    """Coerce a hit score to float; unusable values become 0.0 rather than raise.
+
+    NaN and infinities count as unusable: ``json.dumps`` would write them as
+    ``NaN``/``Infinity``, which is not valid JSON, and one NaN poisons any
+    average computed from the log.
+
+    Collapsing to 0.0 is deliberate and matches the existing contract for
+    ``None`` and unparsable strings: an unusable score contributes nothing to
+    ``avg_top_score``. It does not claim the hit was irrelevant — ``num_hits``
+    and ``nonzero`` carry that, so an injection with a broken score still
+    counts as fired.
+    """
     if value is None:
         return 0.0
     try:
-        return float(value)
+        score = float(value)
     except (TypeError, ValueError, OverflowError):
         return 0.0
+    return score if math.isfinite(score) else 0.0
+
+
+def _json_safe(value: Any) -> Any:
+    """Replace non-finite floats with ``None`` so the record stays valid JSON.
+
+    ``json.dumps`` would emit ``NaN``/``Infinity`` for these, which strict
+    readers reject, and ``allow_nan=False`` would drop the whole record. The
+    caller-supplied ``extra`` and copied hit fields are not score fields, so
+    there is no meaningful zero to substitute: ``null`` records that the value
+    was unusable while keeping the injection itself observable.
+    """
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, Mapping):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, list | tuple):
+        return [_json_safe(v) for v in value]
+    return value
 
 
 def _copyable_hit_field(value: Any) -> bool:
@@ -193,7 +224,11 @@ def log_injection(
         record.update(extra)
 
     try:
-        payload = json.dumps(record) + "\n"
+        # Sanitise rather than let ``allow_nan=False`` drop the whole record:
+        # losing an injection from the log is a worse observability failure
+        # than recording the offending field as null.
+        record = _json_safe(record)
+        payload = json.dumps(record, allow_nan=False) + "\n"
         log_file.parent.mkdir(parents=True, exist_ok=True)
         with open(log_file, "a", encoding="utf-8") as f:
             f.write(payload)
@@ -252,6 +287,9 @@ def summarize_injections(log_file: Path) -> InjectionStats:
             try:
                 num_hits = int(rec.get("num_hits", 0) or 0)
                 top_score = float(rec.get("top_score", 0.0) or 0.0)
+                if not math.isfinite(top_score):
+                    # Keep legacy injections counted, matching the writer's score fallback.
+                    top_score = 0.0
             except (TypeError, ValueError, OverflowError):
                 # Same contract as a partial trailing line: skip, don't raise.
                 stats.malformed += 1
