@@ -1262,6 +1262,69 @@ def test_reopen_client_error_but_issue_is_open_does_not_duplicate(
     assert "is open again" in out.out
 
 
+def test_failed_reopen_with_a_different_open_issue_still_surfaces(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    # The re-query must confirm *this* issue reopened. A same-titled open issue
+    # with another number (a concurrent create, or one the recovery path failed
+    # to close) is not proof the reopen landed; treating it as success would
+    # swallow the alarm this PR protects.
+    calls: list[list[str]] = []
+    closed_at = (NOW - timedelta(hours=5)).isoformat()
+    open_queries = {"n": 0}
+
+    def fake_gh(args: list[str]):
+        calls.append(args)
+
+        class R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        if args[:2] == ["issue", "list"]:
+            if "closed" in args:
+                R.stdout = json.dumps(
+                    [
+                        {
+                            "number": 97,
+                            "title": cfg_for(tmp_path).issue_title,
+                            "closedAt": closed_at,
+                        }
+                    ]
+                )
+            else:
+                open_queries["n"] += 1
+                # First query (escalate's "is one already open?") finds none;
+                # the post-failure re-query sees a different open issue.
+                if open_queries["n"] > 1:
+                    R.stdout = json.dumps(
+                        [{"number": 98, "title": cfg_for(tmp_path).issue_title}]
+                    )
+                else:
+                    R.stdout = "[]"
+        elif args[:2] == ["issue", "reopen"]:
+            R.returncode = 1
+            R.stderr = "Command 'gh' timed out after 30 seconds"
+        return R()
+
+    monkeypatch.setattr(soc, "_gh", fake_gh)
+    monkeypatch.setattr(soc, "_supplementary_notify", lambda cfg, status: None)
+    cfg = cfg_for(tmp_path)
+    write_records(
+        tmp_path,
+        [rec(40, "productive")]
+        + [rec(h, "failed", "auth_failure") for h in (1, 2, 3, 4)],
+    )
+    status = assess(tmp_path)
+    soc.escalate(cfg, status, dry_run=False, now=NOW)
+
+    out = capsys.readouterr()
+    assert "is open again" not in out.out
+    assert any(
+        a[:2] == ["issue", "create"] for a in calls
+    ), "an unrelated open issue must not mask a failed reopen"
+
+
 def test_failed_close_is_not_reported_as_recovered(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:

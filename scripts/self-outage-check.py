@@ -563,6 +563,22 @@ def _gh(args: list[str]) -> subprocess.CompletedProcess:
         return subprocess.CompletedProcess(["gh", *args], 1, "", str(e))
 
 
+def _report_gh_failure(action: str, res: subprocess.CompletedProcess) -> bool:
+    """Print a failed gh call to stderr; return True when it failed.
+
+    Every `_gh` caller that does not act on the result uses this, so turning an
+    exception into a failed CompletedProcess never makes a failure silent.
+    """
+    if res.returncode == 0:
+        return False
+    print(
+        f"[self-outage-check] {action} failed (rc={res.returncode}): "
+        f"{(res.stderr or res.stdout).strip()}",
+        file=sys.stderr,
+    )
+    return True
+
+
 def find_open_issue(cfg: Config) -> dict | None:
     """Return the open self-detected outage issue, if any."""
     res = _gh(
@@ -844,7 +860,14 @@ def escalate(cfg: Config, status: dict, dry_run: bool, now: datetime) -> None:
                         # the issue can be reopened (and carry the details) while
                         # rc=1 comes back. Re-query before minting a duplicate —
                         # #97/#98 is exactly the outcome this path prevents.
-                        if find_open_issue(cfg) is not None:
+                        # Only the *same* issue counts: another same-titled open
+                        # issue is not proof this reopen landed, and treating it
+                        # as success would swallow the alarm this PR protects.
+                        open_issue = find_open_issue(cfg)
+                        if (
+                            open_issue is not None
+                            and open_issue.get("number") == reopen["number"]
+                        ):
                             reopened = True
                             print(
                                 f"Issue #{reopen['number']} is open again — its "
@@ -874,7 +897,8 @@ def escalate(cfg: Config, status: dict, dry_run: bool, now: datetime) -> None:
                             _issue_body(cfg, status),
                         ]
                     )
-                    print(res.stdout.strip() or res.stderr.strip())
+                    if not _report_gh_failure("create issue", res):
+                        print(res.stdout.strip())
                     _supplementary_notify_pending = True
             else:
                 updated = _parse_ts(existing.get("updatedAt", ""))
@@ -900,7 +924,8 @@ def escalate(cfg: Config, status: dict, dry_run: bool, now: datetime) -> None:
                         _issue_body(cfg, status),
                     ]
                 )
-                print(res.stdout.strip() or res.stderr.strip())
+                if not _report_gh_failure("comment on issue", res):
+                    print(res.stdout.strip())
         else:
             print(
                 "[self-outage-check] outage confirmed; no --repo set, skipping GitHub issue."
@@ -930,7 +955,7 @@ def escalate(cfg: Config, status: dict, dry_run: bool, now: datetime) -> None:
         if dry_run:
             print(f"[dry-run] would COMMENT+CLOSE issue #{existing['number']}")
             return
-        _gh(
+        res = _gh(
             [
                 "issue",
                 "comment",
@@ -941,6 +966,7 @@ def escalate(cfg: Config, status: dict, dry_run: bool, now: datetime) -> None:
                 recovery,
             ]
         )
+        _report_gh_failure("recovery comment", res)
         closed = _gh(["issue", "close", str(existing["number"]), "--repo", cfg.repo])
         if closed.returncode != 0:
             # `_gh` turns a timeout or a missing binary into a failed result, so
