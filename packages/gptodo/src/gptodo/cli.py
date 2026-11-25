@@ -8114,16 +8114,24 @@ def worktree_merge_cmd(worktree_path: str, target: str, keep: bool):
 
 @worktree_group.command("cleanup")
 @click.option("--json", "output_json", is_flag=True, help="Output as JSON")
-def worktree_cleanup_cmd(output_json: bool):
-    """Remove worktrees whose branches have been merged.
+@click.option(
+    "--idle-days",
+    type=float,
+    default=7.0,
+    show_default=True,
+    help="Only remove worktrees with no tracked-file change in this many days",
+)
+def worktree_cleanup_cmd(output_json: bool, idle_days: float):
+    """Remove worktrees that are merged and provably inactive.
 
-    Automatically cleans up worktrees that are no longer needed
-    because their branches have been merged into origin/master.
+    Ancestry alone is not evidence that a worktree is unused, so a worktree is
+    only removed when its branch is merged into origin/master, it is clean, it
+    is not locked, and no tracked file changed in the last --idle-days.
     """
     console = Console()
     repo_root = find_repo_root(Path.cwd())
 
-    count = cleanup_merged_worktrees(repo_root)
+    count = cleanup_merged_worktrees(repo_root, idle_days=idle_days)
 
     if output_json:
         print(json.dumps({"cleaned_up": count}, indent=2))
