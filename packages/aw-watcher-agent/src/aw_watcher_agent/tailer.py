@@ -21,7 +21,7 @@ import json
 import os
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, cast
 
@@ -30,6 +30,19 @@ from . import core
 
 # Codex marks shell exits as "Process exited with code N" / "exited with code N".
 _EXIT_CODE_RE = re.compile(r"exited with code (\d+)")
+
+# How long an unpaired call that precedes a paired one is held back before it
+# is emitted as a zero-duration crash orphan. Codex can write a slow call's
+# output after a later call's, and the positional cursor never revisits an
+# emitted call, so emitting at once would make the 0 ms stub permanent
+# (gptme/gptme-contrib#2366, AC1). Past the window it is treated as a genuine
+# orphan, so one lost output cannot block the rest of the file forever.
+#
+# Accepted limit: the window runs from the call's start, so a call that is
+# still running after it (with a later call already paired) also becomes a
+# stub. The transcript alone cannot tell "slow" from "lost" at that point:
+# neither writes anything until an output arrives.
+ORPHAN_GRACE = timedelta(minutes=10)
 
 
 # ---------------------------------------------------------------------------
@@ -214,6 +227,7 @@ def emit_file(
     path: Path,
     *,
     pulsetime: float = 5.0,
+    now: datetime | None = None,
 ) -> int:
     """Parse one rollout file and emit **new** tool activities since the last run.
 
@@ -238,13 +252,25 @@ def emit_file(
         return 0
 
     # Stop short of trailing unpaired (in-flight) calls so the cursor never
-    # advances past a call whose output hasn't arrived yet.  Unpaired calls in
-    # the middle of the list (orphaned by a crash) are still emitted.
+    # advances past a call whose output hasn't arrived yet.
     last_paired_pos = len(new) - 1
     while last_paired_pos >= 0 and not new[last_paired_pos].paired:
         last_paired_pos -= 1
 
-    to_emit = new[: last_paired_pos + 1]
+    # An unpaired call in the middle may still get its output (out-of-order
+    # writes): hold it, and everything after it, for ORPHAN_GRACE. Older ones
+    # are crash orphans and are emitted with zero duration.
+    now = now or datetime.now(timezone.utc)
+    cutoff = last_paired_pos + 1
+    for pos in range(cutoff):
+        if new[pos].paired:
+            continue
+        started = _parse_ts(new[pos].timestamp)
+        if started is not None and now - started < ORPHAN_GRACE:
+            cutoff = pos
+            break
+
+    to_emit = new[:cutoff]
     if not to_emit:
         return 0
 

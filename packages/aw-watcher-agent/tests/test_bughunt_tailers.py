@@ -199,3 +199,47 @@ def test_ac5_mixed_naive_aware_timestamps_crash_tail_codex(tmp_path, monkeypatch
     )
     rc = cli.main(["tail-codex", "--file", str(rollout), "--hostname", "host"])
     assert rc == 0
+
+
+# --- gptme/gptme-contrib#2366 AC1: out-of-order Codex output -----------------
+
+
+def _ooo_rollout(tmp_path):
+    rollout = tmp_path / "rollout-ooo.jsonl"
+    lines = [
+        _meta(),
+        _call("slow", "exec_command", "2026-11-24T10:00:00.000Z"),
+        _call("fast", "read_file", "2026-11-24T10:00:01.000Z"),
+        _out("fast", "2026-11-24T10:00:02.000Z", "ok"),
+    ]
+    rollout.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return rollout
+
+
+def test_codex_late_output_is_held_back_not_emitted_as_orphan(tmp_path, monkeypatch):
+    """An unpaired call ahead of a paired one is held back within the grace
+    window, so its late output still pairs instead of leaving a 0 ms stub."""
+    monkeypatch.setattr(core, "state_dir", lambda: tmp_path / "state")
+    rollout = _ooo_rollout(tmp_path)
+    client = _HBClient()
+    soon = datetime(2026, 11, 24, 10, 0, 5, tzinfo=timezone.utc)
+    assert tailer.emit_file(client, "host", rollout, now=soon) == 0
+
+    with rollout.open("a", encoding="utf-8") as fh:
+        fh.write(_out("slow", "2026-11-24T10:00:10.000Z", "Process exited with code 0") + "\n")
+    later = datetime(2026, 11, 24, 10, 0, 15, tzinfo=timezone.utc)
+    assert tailer.emit_file(client, "host", rollout, now=later) == 2
+    assert [e.data["tool"] for e in client.events] == ["exec_command", "read_file"]
+    assert client.events[0].duration == 10
+
+
+def test_codex_genuine_orphan_still_emits_after_grace(tmp_path, monkeypatch):
+    """A call whose output never arrives is emitted as a crash orphan once the
+    grace window has passed, so it cannot block later calls forever."""
+    monkeypatch.setattr(core, "state_dir", lambda: tmp_path / "state")
+    rollout = _ooo_rollout(tmp_path)
+    client = _HBClient()
+    after_grace = datetime(2026, 11, 24, 10, 0, 0, tzinfo=timezone.utc) + tailer.ORPHAN_GRACE
+    assert tailer.emit_file(client, "host", rollout, now=after_grace) == 2
+    assert [e.data["tool"] for e in client.events] == ["exec_command", "read_file"]
+    assert client.events[0].duration == 0
