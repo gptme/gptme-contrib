@@ -546,6 +546,7 @@ def test_fenced_code_comment_is_not_a_chapter():
             "# not a heading either",
             "~~~",
             body,
+            "    ```",
             "# Chapter 2 Core Concepts",
             body,
         ]
@@ -554,11 +555,13 @@ def test_fenced_code_comment_is_not_a_chapter():
         text, source="t", title="T", url="u", target_tokens=5000, min_chunk_tokens=10
     )
     chapters = {d.chapter for d in docs}
+    # The four-space-indented fence is an indented code block, not a fence, so
+    # the heading that follows it is still recognised.
     assert chapters == {"Chapter 1 Variables", "Chapter 2 Core Concepts"}
     contents = " ".join(d.content for d in docs)
     assert "compute the percentage of the hour" in contents
     assert "a tilde line does not close" in contents
     assert "not a heading either" in contents
-    # Fence markers are syntax, not prose.
-    assert "```" not in contents
+    # Fence markers are syntax, not prose (an indented one is code, so kept).
+    assert "```python" not in contents
     assert "~~~" not in contents

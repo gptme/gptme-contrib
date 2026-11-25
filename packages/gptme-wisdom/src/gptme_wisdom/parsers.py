@@ -53,9 +53,10 @@ _CHAPTER_NUMBER_WORDS = (
 _BOOK_CHAPTER_RE = re.compile(
     rf"^(chapter|part)\s+(\d+|[ivxlc]+|(?:{_CHAPTER_NUMBER_WORDS}))\b", re.IGNORECASE
 )
-# Fenced code blocks: ``` or ~~~ (three or more). Content inside is code, so a
-# leading "#" there is a comment, not a heading.
-_BOOK_FENCE_RE = re.compile(r"^(`{3,}|~{3,})")
+# Fenced code blocks: ``` or ~~~ (three or more), indented by at most three
+# spaces like any other CommonMark block construct. Content inside is code, so
+# a leading "#" there is a comment, not a heading.
+_BOOK_FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 
 
 def _chapter_marker(line: str) -> str | None:
@@ -142,7 +143,7 @@ def parse_book_text(
         if not line:
             continue
 
-        fm = _BOOK_FENCE_RE.match(line)
+        fm = _BOOK_FENCE_RE.match(raw_line)
         if fm:
             char = fm.group(1)[0]
             if fence_char is None:
