@@ -500,6 +500,10 @@ def test_wrapped_prose_chapter_references_are_not_chapters():
             body,
             "Chapter 4, the interpreter evaluates the expression.",
             body,
+            "Chapter 3 - the interpreter walks the AST",
+            body,
+            "Chapter 2.5 covers the design",
+            body,
             "Chapter 2: Core Concepts",
             body,
             "Part Two Advanced Topics",
@@ -519,6 +523,8 @@ def test_wrapped_prose_chapter_references_are_not_chapters():
     contents = " ".join(d.content for d in docs)
     assert "showed how lists are mutable" in contents
     assert "solution is to copy the list" in contents
+    assert "walks the AST" in contents
+    assert "covers the design" in contents
 
 
 def test_fenced_code_comment_is_not_a_chapter():
@@ -532,6 +538,8 @@ def test_fenced_code_comment_is_not_a_chapter():
             "```python",
             "# compute the percentage of the hour that has elapsed",
             "minutes = 100",
+            "~~~",
+            "# a tilde line does not close a backtick fence",
             "```",
             body,
             "~~~",
@@ -549,6 +557,7 @@ def test_fenced_code_comment_is_not_a_chapter():
     assert chapters == {"Chapter 1 Variables", "Chapter 2 Core Concepts"}
     contents = " ".join(d.content for d in docs)
     assert "compute the percentage of the hour" in contents
+    assert "a tilde line does not close" in contents
     assert "not a heading either" in contents
     # Fence markers are syntax, not prose.
     assert "```" not in contents
