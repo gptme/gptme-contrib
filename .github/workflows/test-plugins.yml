@@ -199,7 +199,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ['3.10', '3.13']
+        # PRs test the 3.10 floor only, where newer-syntax breaks show up.
+        # Merge queue, push, schedule and dispatch keep both ends of the range.
+        python-version: ${{ github.event_name == 'pull_request' && fromJSON('["3.10"]') || fromJSON('["3.10", "3.13"]') }}
         shard: ${{ fromJson(needs.discover.outputs.shards) }}
 
     steps:
