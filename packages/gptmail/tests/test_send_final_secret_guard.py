@@ -70,6 +70,19 @@ def test_clean_payload_delivered_once_and_archived(recording_send, body):
     assert (agent.email_dir / "sent/fixture.md").exists()
 
 
+@pytest.mark.parametrize(
+    "recipient", ["a@example.com, b@example.com", "A <a@example.com>, B <b@example.com>"]
+)
+def test_all_validated_recipients_reach_msmtp(recording_send, monkeypatch, recipient):
+    agent, draft, calls = recording_send
+    monkeypatch.setenv("EMAIL_SEND_ALLOWLIST", "example.com")
+    draft.write_text(f"To: {recipient}\nSubject: Clean\n\nHello")
+    agent.send("fixture")
+    assert len(calls) == 1
+    assert calls[0][0] == ["msmtp", "--", "a@example.com", "b@example.com"]
+    assert not draft.exists()
+
+
 def test_forbidden_recipient_remains_zero_delivery(recording_send):
     agent, draft, calls = recording_send
     draft.write_text("To: forbidden@example.com\nSubject: Clean\n\nHello")

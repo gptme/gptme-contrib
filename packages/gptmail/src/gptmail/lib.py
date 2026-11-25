@@ -1246,16 +1246,14 @@ class AgentEmail:
             _, sender_email = parseaddr(sender)
             account = self._get_msmtp_account_for_address(sender_email or sender)
 
-            # Build msmtp command
-            _, recipient_email = parseaddr(recipient)
-            if not recipient_email:
-                recipient_email = recipient  # Fallback if parsing fails
-
+            # Deliver every mailbox validated above, not parseaddr's first
+            # mailbox on older Python or an unparsed fallback on newer Python.
+            recipient_emails = [addr for _, addr in getaddresses([recipient])]
             msmtp_cmd = ["msmtp"]
             if account:
                 msmtp_cmd.extend(["-a", account])
             # "--" ends option parsing: the recipient is never an msmtp option.
-            msmtp_cmd.extend(["--", recipient_email])
+            msmtp_cmd.extend(["--", *recipient_emails])
 
             # Check rate limit before sending
             if not self.rate_limiter.can_proceed():
