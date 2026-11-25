@@ -148,3 +148,82 @@ def test_failed_atomic_save_clears_destination_cache(tmp_path, indexer, monkeypa
     assert _contents_for(indexer, target) == []
     docs, _, _ = indexer.search("old cached bananas", n_results=1)
     assert docs == [], "failed replacement left deleted content in the search cache"
+
+
+class _CountingCollection:
+    """Collection double that records full metadata scans."""
+
+    def __init__(self) -> None:
+        self.gets = 0
+
+    def get(self, **kwargs):
+        self.gets += 1
+        return {"ids": [], "metadatas": []}
+
+
+def test_ignored_directory_delete_does_not_scan_collection(tmp_path):
+    """Directory churn under ignored trees must not trigger a collection scan.
+
+    ``Path.match`` only looks at the tail, so nested dirs such as
+    ``.git/objects/ab`` need an ancestor-aware check.
+    """
+    indexer = _SourceTrackingIndexer(tmp_path / "index")
+    indexer.collection = _CountingCollection()
+    handler = IndexEventHandler(
+        indexer, ignore_patterns=[".git", "__pycache__", "node_modules", "*.pyc"]
+    )
+
+    for name in ["__pycache__", ".git/objects/ab", "node_modules/pkg", "pkg/__pycache__"]:
+        handler.on_deleted(DirDeletedEvent(str(tmp_path / name)))
+
+    assert indexer.collection.gets == 0
+
+
+def test_already_fired_deletion_cannot_remove_moved_file(tmp_path):
+    """A deletion timer that fired before the move but reaches its critical
+    section afterwards must not delete the file that replaced it."""
+    a = (tmp_path / "a.md").resolve()
+    b = (tmp_path / "b.md").resolve()
+    a.write_text("A")
+    b.write_text("B")
+    indexer = _SourceTrackingIndexer(tmp_path / "index")
+    indexer.sources = {str(a), str(b)}
+    handler = IndexEventHandler(indexer)
+    handler._update_delay = 0.05
+
+    b.unlink()
+    handler.on_deleted(FileDeletedEvent(str(b)))
+    os.replace(a, b)
+    # Simulate the timer having fired already: it has removed itself from
+    # _timers and is waiting to run _process_deletion.
+    with handler._lock:
+        fired = handler._timers.pop(b)
+    fired.cancel()
+    handler.on_moved(FileMovedEvent(str(a), str(b)))
+
+    handler._process_deletion(b)  # the late, already-fired timer body
+
+    assert str(b) in indexer.sources, "stale deletion removed the moved-in file"
+    assert str(a) not in indexer.sources
+
+
+def test_deletion_after_move_is_still_honoured(tmp_path):
+    """Invalidating a move destination must not block a later real deletion."""
+    a = (tmp_path / "a.md").resolve()
+    b = (tmp_path / "b.md").resolve()
+    a.write_text("A")
+    b.write_text("B")
+    indexer = _SourceTrackingIndexer(tmp_path / "index")
+    indexer.sources = {str(a), str(b)}
+    handler = IndexEventHandler(indexer)
+    handler._update_delay = 0.05
+
+    os.replace(a, b)
+    handler.on_moved(FileMovedEvent(str(a), str(b)))
+    assert str(b) in indexer.sources
+
+    b.unlink()
+    handler.on_deleted(FileDeletedEvent(str(b)))
+    time.sleep(0.3)
+
+    assert str(b) not in indexer.sources

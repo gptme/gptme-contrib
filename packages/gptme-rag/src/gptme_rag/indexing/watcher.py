@@ -23,6 +23,7 @@ class IndexEventHandler(FileSystemEventHandler):
         indexer: Indexer,
         pattern: str = "**/*.*",
         ignore_patterns: list[str] | None = None,
+        watch_roots: list[str] | None = None,
     ):
         """Initialize the event handler.
 
@@ -30,15 +31,20 @@ class IndexEventHandler(FileSystemEventHandler):
             indexer: The indexer to update
             pattern: Glob pattern for files to index
             ignore_patterns: List of glob patterns to ignore
+            watch_roots: Directories being watched; ignore checks stop there
         """
         self.indexer = indexer
         self.pattern = pattern
         self.ignore_patterns = ignore_patterns or [".git", "__pycache__", "*.pyc"]
+        self.watch_roots = [Path(root).resolve() for root in watch_roots or []]
         self._pending_updates: set[Path] = set()
         self._last_update = time.time()
         self._update_delay = 1.0  # seconds
         self._lock = Lock()
         self._timers: dict[Path, Timer] = {}
+        # Paths whose already-fired timer must not touch the index (a move
+        # superseded it). Entries are dropped when the path is queued again.
+        self._invalidated: set[Path] = set()
 
     def on_modified(self, event: FileSystemEvent) -> None:
         """Handle file modification events."""
@@ -61,7 +67,10 @@ class IndexEventHandler(FileSystemEventHandler):
         """
         src = str(event.src_path)
         if event.is_directory:
-            if not self._is_persist_path(Path(src)):
+            # Directory churn under ignored trees (.git/objects/xx,
+            # __pycache__, node_modules) is routine and holds no indexed
+            # source; scanning the collection for it would stall dispatch.
+            if not self._is_persist_path(Path(src)) and not self._is_ignored(Path(src)):
                 self._delete_directory(Path(src).resolve())
         elif self._should_process(src):
             self._queue_deletion(Path(src))
@@ -72,6 +81,7 @@ class IndexEventHandler(FileSystemEventHandler):
         with self._lock:
             for pending in [p for p in self._timers if str(p).startswith(prefix)]:
                 self._timers.pop(pending).cancel()
+                self._invalidated.add(pending)
 
         sources: set[str] = set()
         page_size = 1000
@@ -107,6 +117,22 @@ class IndexEventHandler(FileSystemEventHandler):
             path_obj.match(pattern) for pattern in self.ignore_patterns
         )
 
+    def _is_ignored(self, path: Path) -> bool:
+        """True if ``path`` or an ancestor inside the watched tree is ignored.
+
+        ``Path.match`` only inspects the tail of a path, so ``.git/objects/ab``
+        would not match ``.git`` without walking the ancestors. The walk stops
+        at the watch root so a directory above it cannot silence events.
+        """
+        candidates = [path]
+        for parent in path.parents:
+            candidates.append(parent)
+            if parent in self.watch_roots:
+                break
+        return any(
+            candidate.match(pattern) for candidate in candidates for pattern in self.ignore_patterns
+        )
+
     def _queue_update(self, path: Path) -> None:
         """Queue a file for update with debouncing.
 
@@ -118,7 +144,9 @@ class IndexEventHandler(FileSystemEventHandler):
             if self._should_skip_file(path, set()):
                 return
 
-            # Cancel any existing timer for this path
+            # Cancel any existing timer for this path; a fresh event also
+            # un-invalidates the path for later timers.
+            self._invalidated.discard(resolved_path)
             if resolved_path in self._timers:
                 self._timers[resolved_path].cancel()
 
@@ -133,6 +161,7 @@ class IndexEventHandler(FileSystemEventHandler):
         resolved_path = path.resolve()
 
         with self._lock:
+            self._invalidated.discard(resolved_path)
             # Cancel any pending update timer for this path
             if resolved_path in self._timers:
                 self._timers[resolved_path].cancel()
@@ -145,24 +174,31 @@ class IndexEventHandler(FileSystemEventHandler):
 
     def _process_deletion(self, path: Path) -> None:
         """Process a queued file deletion."""
+        canonical_path = str(path)
+        # The delete runs under the lock: a move that supersedes this timer
+        # invalidates the path and replaces the destination under the same
+        # lock, so the two critical sections cannot interleave.
         with self._lock:
             self._timers.pop(path, None)
-
-        canonical_path = str(path)
-        logger.info(f"Removing deleted file from index: {canonical_path}")
-
-        try:
-            self.indexer.delete_documents({"source": canonical_path})
-            self.indexer.cache.clear()
-            logger.debug(f"Successfully removed {canonical_path} from index")
-        except Exception as e:
-            logger.error(f"Error removing {canonical_path} from index: {e}", exc_info=True)
+            if path in self._invalidated:
+                logger.debug(f"Skipping superseded deletion for {path}")
+                return
+            logger.info(f"Removing deleted file from index: {canonical_path}")
+            try:
+                self.indexer.delete_documents({"source": canonical_path})
+                self.indexer.cache.clear()
+                logger.debug(f"Successfully removed {canonical_path} from index")
+            except Exception as e:
+                logger.error(f"Error removing {canonical_path} from index: {e}", exc_info=True)
 
     def _process_update(self, path: Path) -> None:
         """Process a queued file update."""
         with self._lock:
             # Remove timer reference
             self._timers.pop(path, None)
+            if path in self._invalidated:
+                logger.debug(f"Skipping superseded update for {path}")
+                return
 
         logger.debug(f"Processing update for {path}")
 
@@ -213,6 +249,13 @@ class IndexEventHandler(FileSystemEventHandler):
             src_path = Path(src_str).resolve()
             dest_path = Path(dest_str).resolve()
 
+            # A timer that already fired for src must not re-index it.
+            with self._lock:
+                self._invalidated.add(src_path)
+                pending_src = self._timers.pop(src_path, None)
+            if pending_src is not None:
+                pending_src.cancel()
+
             # Remove old file from index if it was being tracked
             if self._should_process(src_str):
                 logger.debug(f"Removing old path from index: {src_path}")
@@ -231,8 +274,11 @@ class IndexEventHandler(FileSystemEventHandler):
 
                 # A pending timer for dest (e.g. `rm b; mv a b` inside the
                 # debounce window) would act on the file it replaced; the move
-                # supersedes it.
+                # supersedes it. Invalidating also covers a timer that has
+                # already fired but has not reached its critical section yet:
+                # _process_* re-check the marker under this same lock.
                 with self._lock:
+                    self._invalidated.add(dest_path)
                     pending = self._timers.pop(dest_path, None)
                 if pending is not None:
                     pending.cancel()
@@ -502,7 +548,9 @@ class FileWatcher:
         """
         self.indexer = indexer
         self.paths = [Path(p) for p in paths]
-        self.event_handler = IndexEventHandler(indexer, pattern, ignore_patterns)
+        self.event_handler = IndexEventHandler(
+            indexer, pattern, ignore_patterns, watch_roots=[str(p) for p in self.paths]
+        )
         # For tests, use minimal delays
         if update_delay == 0:
             self.event_handler._update_delay = 0.1
