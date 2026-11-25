@@ -44,3 +44,24 @@ def test_same_reply_from_the_same_sender_is_still_a_duplicate(tmp_path: Path) ->
     _stored(tmp_path, "alice@example.com")
     agent = AgentEmail(str(tmp_path), "bob@gptme.org")
     assert agent._is_duplicate_message(_incoming("Alice <alice@example.com>"), "inbox")
+
+
+def test_resync_dedups_when_several_senders_replied(tmp_path: Path) -> None:
+    """Every reply in a thread shares the primary index key.
+
+    Dedup has to see all of them: a re-synced copy of one sender's reply must
+    still be caught when another sender's reply owns the same key.
+    """
+    _stored(tmp_path, "alice@example.com")
+    (tmp_path / "email" / "inbox" / "second.md").write_text(
+        "From: carol@example.com\nTo: bob@gptme.org\nSubject: Re: Lunch?\n"
+        "Date: Wed, 07 Oct 2026 11:00:30 +0000\n"
+        "Message-ID: <second@example.com>\nIn-Reply-To: <lunch@gptme.org>\n\n"
+        "Sounds good!\n"
+    )
+    agent = AgentEmail(str(tmp_path), "bob@gptme.org")
+
+    # Gmail re-syncs both replies with a reformatted display name and a new
+    # Message-ID. Whichever file won the shared index key, both must dedup.
+    assert agent._is_duplicate_message(_incoming("Alice <alice@example.com>"), "inbox")
+    assert agent._is_duplicate_message(_incoming("Carol <carol@example.com>"), "inbox")
