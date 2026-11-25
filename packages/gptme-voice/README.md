@@ -205,8 +205,10 @@ Prefixes match whole path segments; lists use OR, and exclusions win.
 Filters do not accept globs, absolute paths or traversal. A nonempty filter
 opts into the configured sources; filters can only narrow that corpus, never
 read an arbitrary requested path. Symlinks, including directory symlinks, are
-excluded. Existing caller authorization still controls tool exposure.
-Configure narrow, reviewed sources rather than a whole-workspace glob.
+excluded. Reads pin directory descriptors and refuse symlink replacements;
+platforms without no-follow directory-descriptor support skip file reads.
+Existing caller authorization still controls tool exposure. Configure narrow,
+reviewed sources rather than a whole-workspace glob.
 
 Filtered topic queries use `gptme-rag[lexical]` (scikit-learn) and return
 matching passages; without that optional backend they return an explicit

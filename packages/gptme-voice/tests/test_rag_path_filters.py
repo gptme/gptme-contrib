@@ -93,10 +93,13 @@ async def test_default_recaps_stay_recent_journals_only(corpus: Path) -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("injected", [False, True])
 @pytest.mark.parametrize(
+    "query", ["what have you been doing today", "what have you been doing today?"]
+)
+@pytest.mark.parametrize(
     "filters", [{"include_paths": ["scripts/"]}, {"exclude_paths": ["journal/"]}]
 )
 async def test_filtered_recaps_require_topic_terms(
-    corpus: Path, injected: bool, filters: dict[str, list[str]]
+    corpus: Path, injected: bool, query: str, filters: dict[str, list[str]]
 ) -> None:
     def search_impl(query: str, n_results: int) -> list[dict[str, str]]:
         pytest.fail("A filtered query without topic terms must not call the backend")
@@ -104,7 +107,7 @@ async def test_filtered_recaps_require_topic_terms(
     rag = VoiceRag(
         str(corpus), enabled=True, search_impl=search_impl if injected else None
     )
-    result = await rag.search("what have you been doing today", **filters)
+    result = await rag.search(query, **filters)
     assert result["status"] == "error"
     assert result["results"] == []
     assert "topic" in result["error"].lower()
@@ -198,6 +201,30 @@ async def test_symlinks_cannot_extend_declared_corpus(
         result = await rag.search("secret", **kwargs)
         assert all("secret" not in r["snippet"].lower() for r in result["results"])
         assert all("leak" not in r["source"] for r in result["results"])
+
+
+@pytest.mark.parametrize("swap_parent", [False, True])
+def test_symlink_swap_between_validation_and_read_is_rejected(
+    corpus: Path, monkeypatch: pytest.MonkeyPatch, swap_parent: bool
+) -> None:
+    rag = VoiceRag(str(corpus), enabled=True)
+    source = corpus / "scripts/voice/brief.py"
+    safe_source = rag._safe_source
+
+    def swap_after_check(path: Path) -> bool:
+        safe = safe_source(path)
+        if swap_parent:
+            parent = source.parent
+            parent.rename(parent.with_name("original"))
+            write(corpus, "private/brief.py", "Ungrantable secret")
+            parent.symlink_to(corpus / "private", target_is_directory=True)
+        else:
+            source.unlink()
+            source.symlink_to(corpus / "private/ungranted.md")
+        return safe
+
+    monkeypatch.setattr(rag, "_safe_source", swap_after_check)
+    assert rag._load_documents([source]) == []
 
 
 @pytest.mark.asyncio
@@ -312,3 +339,18 @@ async def test_filtered_snippet_shows_match_beyond_file_header(corpus: Path) -> 
         in result["results"][0]["snippet"]
     )
     assert len(result["results"][0]["snippet"]) <= 402
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("lexical")
+async def test_snippet_anchor_matches_whole_lexical_tokens(corpus: Path) -> None:
+    write(
+        corpus,
+        "scripts/voice/brief.py",
+        "# implementation_notes\n" + "# filler\n" * 100 + "brief delivery details\n",
+    )
+    result = await VoiceRag(str(corpus), enabled=True).search(
+        "implementation brief", include_paths=["scripts/"]
+    )
+    assert result["status"] == "ok"
+    assert "brief delivery details" in result["results"][0]["snippet"]

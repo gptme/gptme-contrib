@@ -18,8 +18,10 @@ import asyncio
 import logging
 import os
 import re
+import stat
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -388,6 +390,33 @@ class VoiceRag:
                     return paths[:_MAX_FILES]
         return (paths + [p for p in recent if p not in seen])[:_MAX_FILES]
 
+    def _read_source(self, path: Path) -> tuple[bytes, float, str]:
+        """Read through pinned directory descriptors, never following source symlinks."""
+        if self.workspace is None:
+            raise OSError("No workspace configured")
+        if not hasattr(os, "O_NOFOLLOW") or os.open not in os.supports_dir_fd:
+            raise OSError("Safe source reads require no-follow directory descriptors")
+        relative = path.absolute().relative_to(self.workspace.absolute())
+        if any(part in {".", ".."} for part in relative.parts):
+            raise OSError("Invalid source path")
+        with ExitStack() as stack:
+            flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+            directory = os.open(self.workspace.resolve(), flags)
+            stack.callback(os.close, directory)
+            for part in relative.parts[:-1]:
+                directory = os.open(part, flags, dir_fd=directory)
+                stack.callback(os.close, directory)
+            fd = os.open(
+                relative.name,
+                os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                dir_fd=directory,
+            )
+            stream = stack.enter_context(os.fdopen(fd, "rb"))
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode):
+                raise OSError("Source is not a regular file")
+            return stream.read(_MAX_FILE_BYTES + 1), info.st_mtime, relative.as_posix()
+
     def _load_documents(self, paths: list[Path]) -> list[Any]:
         try:
             from gptme_rag.indexing.document import Document
@@ -402,8 +431,7 @@ class VoiceRag:
             if not self._safe_source(path):
                 continue
             try:
-                with path.open("rb") as stream:
-                    raw = stream.read(_MAX_FILE_BYTES + 1)
+                raw, modified, rel = self._read_source(path)
                 if len(raw) > _MAX_FILE_BYTES:
                     continue
                 content = raw.decode("utf-8", errors="replace")
@@ -412,12 +440,7 @@ class VoiceRag:
                 continue
             if not content.strip():
                 continue
-            rel = self._relpath(path)
-            try:
-                mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
-            except OSError as exc:
-                logger.debug("skip unreadable (stat) %s: %s", path, exc)
-                continue
+            mtime = datetime.fromtimestamp(modified, tz=timezone.utc)
             docs.append(
                 Document(
                     content=content,
@@ -477,7 +500,7 @@ class VoiceRag:
             "max_file_bytes": _MAX_FILE_BYTES,
         }
         terms = topic_terms(query)
-        if filtered and not terms:
+        if filtered and not re.search(r"\w", terms):
             return {
                 "status": "error",
                 "query": query,
@@ -664,9 +687,9 @@ def _format_result(doc: Any, terms: str = "") -> dict[str, Any]:
     if terms:
         # Whole-file lexical ranking needs a matching passage, not just a header.
         for term in sorted(set(re.findall(r"\w+", terms)), key=len, reverse=True):
-            offset = content.lower().find(term.lower())
-            if offset >= 0:
-                start = max(0, offset - 80)
+            match = re.search(r"\b" + re.escape(term) + r"\b", content, re.IGNORECASE)
+            if match is not None:
+                start = max(0, match.start() - 80)
                 break
     snippet = content[start : start + _MAX_SNIPPET]
     if start:
