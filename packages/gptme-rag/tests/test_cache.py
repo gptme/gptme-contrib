@@ -276,7 +276,10 @@ class TestSmartRAGCache:
         """Test that least recently used entries are evicted first."""
         cache = SmartRAGCache(
             ttl_seconds=300,
-            max_memory_bytes=4096,  # Larger limit to fit 2-3 entries
+            # Fits entry1 + one 20-doc entry but not all three. Contents count
+            # toward size_bytes(), and str sizes differ across Python versions
+            # (3.11: ~4.5KB for two, ~7.3KB for three; 3.12: ~4.0KB / ~6.5KB).
+            max_memory_bytes=6144,
         )
 
         # Add first entry
@@ -333,8 +336,9 @@ class TestSmartRAGCache:
         )
         cache.put(key3, entry3)
 
-        # key1 should still be in cache (was accessed)
+        # key1 should still be in cache (was accessed); key2 was the LRU victim
         assert cache.get(key1) is not None
+        assert cache.get(key2) is None
 
     def test_stats_tracking(self):
         """Test cache statistics tracking."""
