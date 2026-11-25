@@ -46,6 +46,7 @@ Install notes:
 from __future__ import annotations
 
 import re
+import sys
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -279,6 +280,25 @@ def browser_observe(
     ]
 
 
+def _find_same_element(
+    chosen: ObserveResult, fresh: list[ObserveResult]
+) -> ObserveResult | None:
+    """Find the element the caller chose among fresh observations.
+
+    Returns None when it cannot be identified, so a retry never acts on a
+    lookalike or on whichever element merely ranks first.
+    """
+    same = [r for r in fresh if r.description == chosen.description]
+    for result in same:
+        if result.selector == chosen.selector:
+            return result
+    # A changed selector is only unambiguous for a single match. A lost
+    # ordinal does not say which of the duplicates survived.
+    if len(same) == 1 and " >> nth=" not in chosen.selector:
+        return same[0]
+    return None
+
+
 def _dispatch_action(
     sel: str,
     method: str,
@@ -379,10 +399,12 @@ def browser_act(
 
     Stale-selector recovery: when a cached (observed) selector no longer
     resolves — the page re-rendered, moved the element, or swapped refs — the
-    dispatch fails and, with `retry_on_stale=True` (default), the element is
-    re-observed once with the same query and retried with the fresh top
-    match. The re-observe makes no model call on the token-scoring path.
-    `retry_on_stale=False` returns the first failure immediately.
+    dispatch fails and, with `retry_on_stale=True` (default), the page is
+    re-observed once with the same query and the same element is retried: same
+    role and name, and either the same selector or the only such match. If it
+    cannot be identified, the first failure is returned. The re-observe makes no
+    model call on the token-scoring path. `retry_on_stale=False` returns the
+    first failure immediately.
 
     Returns ActResult with `success`, the selector used, and elapsed time.
     """
@@ -424,8 +446,8 @@ def browser_act(
     if result.success or not retry_on_stale:
         return result
 
-    # Stale selector: re-observe once with the same query. If the fresh top
-    # match is the same selector, retrying is pointless — return the failure.
+    # Stale selector: re-observe once with the same query and look for the
+    # element the caller chose.
     #
     # Block retry only when the error signals that the action already executed
     # (navigation or detach after click). Any other failure — including a plain
@@ -452,14 +474,15 @@ def browser_act(
     if any(phrase in msg_lower for phrase in _no_retry_phrases):
         return result  # post-action failure — don't retry (avoid double-acting)
 
-    fresh = browser_observe(reobserve_query, top_k=1)
-    if fresh:
-        # Retry with the fresh selector. When the selector is unchanged the element
-        # was temporarily absent (transient DOM change) and is visible again per the
-        # snapshot — retrying is correct. When fresh is empty, the element is truly
-        # absent and there is nothing to retry against.
+    target = _find_same_element(
+        best, browser_observe(reobserve_query, top_k=sys.maxsize)
+    )
+    if target:
+        # When the selector is unchanged the element was temporarily absent
+        # (transient DOM change) and is visible again per the snapshot, so
+        # retrying is correct.
         result = _dispatch_action(
-            fresh[0].selector, method, arguments, t0, element_method=fresh[0].method
+            target.selector, method, arguments, t0, element_method=target.method
         )
     return result
 

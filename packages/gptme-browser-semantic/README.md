@@ -104,8 +104,11 @@ state = browser_extract()                       # ExtractResult; .data is the AR
   returns a clear failure instead of guessing.
 
   **Stale-selector recovery**: when a cached selector no longer resolves (the
-  page re-rendered or swapped refs), the element is re-observed once with the
-  same query and the action retried on the fresh top match. Errors that suggest
+  page re-rendered or swapped refs), the page is re-observed once with the same
+  query and the action retried on the same element: same role and name, and
+  either the same selector or the only such match. If it cannot be identified
+  (for example, one of two duplicates disappeared), the first failure is
+  returned. `>> nth=i` selectors are positional. Errors that suggest
   the action already ran (navigation, detached target) are not retried, to
   avoid double-acting. `retry_on_stale=False` returns the first failure
   immediately.

@@ -265,3 +265,61 @@ def test_hunt_b7_advertised_email_fill_example_succeeds(
     )
     assert result.success, result.message
     assert rec.fills and rec.fills[0][1] == "hello@example.com"
+
+
+# ---------------------------------------------------------------------------
+# The stale-selector retry must act on the element the caller chose, not on
+# whatever ranks first for the original query.
+# ---------------------------------------------------------------------------
+
+TWO_REPLIES = HEADER + '- main:\n  - button "Reply"\n  - button "Reply"\n'
+
+
+def test_retry_keeps_chosen_duplicate_ordinal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rec = _wire(Recorder(TWO_REPLIES), monkeypatch)
+    second = browser_observe("reply")[1]
+    rec.click_error = TimeoutError("Timeout 30000ms exceeded.")
+    browser_act(second)
+    assert rec.clicks == [second.selector, second.selector]
+
+
+def test_retry_follows_chosen_element_that_is_not_the_top_match(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snap = HEADER + ('- button "Submit" [ref=e1]\n- button "Submit again" [ref=e2]\n')
+    rec = _wire(Recorder(snap), monkeypatch)
+    second = browser_observe("submit button")[1]
+    rec.snapshot = snap.replace("[ref=e2]", "[ref=e9]")
+    rec.click_error = TimeoutError("Timeout 30000ms exceeded.")
+    browser_act(second)
+    assert rec.clicks == ["[ref=e2]", "[ref=e9]"]
+
+
+@pytest.mark.parametrize(
+    ("before", "index", "after"),
+    [
+        # One of two duplicates disappeared: which one survived is unknown.
+        (TWO_REPLIES, 1, HEADER + '- main:\n  - button "Reply"\n'),
+        (TWO_REPLIES, 0, HEADER + '- main:\n  - button "Reply"\n'),
+        # A unique element became ambiguous.
+        (HEADER + '- main:\n  - button "Reply"\n', 0, TWO_REPLIES),
+        # The chosen element is gone; only a lookalike remains.
+        (
+            HEADER + '- main:\n  - button "Reply"\n',
+            0,
+            HEADER + '- main:\n  - button "Reply all"\n',
+        ),
+    ],
+)
+def test_retry_is_skipped_when_chosen_element_cannot_be_identified(
+    monkeypatch: pytest.MonkeyPatch, before: str, index: int, after: str
+) -> None:
+    rec = _wire(Recorder(before), monkeypatch)
+    chosen = browser_observe("reply")[index]
+    rec.snapshot = after
+    rec.click_error = TimeoutError("Timeout 30000ms exceeded.")
+    result = browser_act(chosen)
+    assert not result.success
+    assert rec.clicks == [chosen.selector]
