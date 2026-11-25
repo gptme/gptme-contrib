@@ -83,8 +83,14 @@ state = browser_extract()                       # ExtractResult; .data is the AR
 
   Selectors: when the snapshot line carries `[ref=eN]`, that ref is reused.
   Otherwise the locator is `role={role}[name='{name}']`, which gptme's
-  `click_element` / `fill_element` accept. Other bracket attributes such as
-  `[level=1]` are ignored.
+  `click_element` / `fill_element` accept. This selector matches the whole,
+  case-sensitive accessible name; duplicate role/name pairs get `>> nth=i`.
+  Other bracket attributes such as `[level=1]` are ignored.
+
+  Native `<select>` elements and editable ARIA comboboxes both appear as
+  `combobox`, potentially with option descendants. The snapshot cannot tell
+  them apart, so comboboxes keep the `fill` default. For a native select, use
+  `browser_act(observed, method="select", arguments=["value"])` explicitly.
 
 - **`browser_act(action_or_observed, *, method=None, arguments=None, retry_on_stale=True) -> ActResult`**
   Two forms:

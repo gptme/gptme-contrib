@@ -128,7 +128,7 @@ def _parse_aria_to_elements(snapshot: str) -> list[dict[str, str]]:
     # Split on "\n" only: str.splitlines() also splits on \x0b etc., which a
     # page title can contain, letting the page fabricate element lines.
     lines = snapshot.split("\n")
-    for i, line in enumerate(lines):
+    for line in lines:
         item = item_re.match(line)
         if not item:
             continue
@@ -167,14 +167,10 @@ def _parse_aria_to_elements(snapshot: str) -> list[dict[str, str]]:
         selector = (
             f"[{actual_ref}]" if actual_ref else f"role={role}[name='{escaped_name}']"
         )
-        element = {"role": role, "name": name, "selector": selector}
-        if role == "combobox" and _has_option_children(
-            lines, i, len(item.group("indent"))
-        ):
-            # A native <select> is exposed as a combobox with option children;
-            # it needs select_option, not fill.
-            element["method"] = "select"
-        elements.append(element)
+        # Option descendants do not identify a native <select>: editable ARIA
+        # comboboxes can have them too. Keep fill as the default; callers with
+        # a native select must pass method="select" to browser_act.
+        elements.append({"role": role, "name": name, "selector": selector})
 
     # Several elements with the same role+name share one role selector, which
     # resolves to multiple elements (a strict-mode violation on click). Make
@@ -189,19 +185,6 @@ def _parse_aria_to_elements(snapshot: str) -> list[dict[str, str]]:
             e["selector"] = f"{sel} >> nth={seen.get(sel, 0)}"
             seen[sel] = seen.get(sel, 0) + 1
     return elements
-
-
-def _has_option_children(lines: list[str], index: int, indent: int) -> bool:
-    """True if the snapshot item at ``index`` has ``option`` child items."""
-    for line in lines[index + 1 :]:
-        stripped = line.lstrip()
-        if not stripped:
-            continue
-        if len(line) - len(stripped) <= indent:
-            return False
-        if re.match(r"-\s+'?option\b", stripped):
-            return True
-    return False
 
 
 def _method_for_role(role: str) -> str:
@@ -289,7 +272,7 @@ def browser_observe(
         ObserveResult(
             description=f"{e['role']} {e['name']!r}",
             selector=e["selector"],
-            method=e.get("method") or _method_for_role(e["role"]),
+            method=_method_for_role(e["role"]),
             instruction=instruction,
         )
         for _, e in scored

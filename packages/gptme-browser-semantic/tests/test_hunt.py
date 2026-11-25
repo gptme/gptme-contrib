@@ -143,7 +143,8 @@ def test_hunt_b3_duplicate_role_name_elements_get_distinct_selectors(
 # ---------------------------------------------------------------------------
 # B4: role->method map misses real ARIA roles: <input type=number> is
 # `spinbutton` (inferred "click": value silently dropped, success=True) and a
-# native <select> is `combobox` (inferred "fill", which Playwright rejects).
+# native <select> is also `combobox`. Its tag cannot be inferred from ARIA;
+# callers must explicitly request select rather than misclassify editable widgets.
 # ---------------------------------------------------------------------------
 
 
@@ -157,7 +158,7 @@ def test_hunt_b4_number_input_is_filled_not_clicked(
     assert rec.fills == [(obs[0].selector, "3")], (result, rec.clicks)
 
 
-def test_hunt_b4_native_select_uses_select_option(
+def test_hunt_b4_native_select_uses_explicit_select_override(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     snap = HEADER + (
@@ -172,8 +173,26 @@ def test_hunt_b4_native_select_uses_select_option(
         r for r in browser_observe("country", top_k=5) if "combobox" in r.description
     ]
     assert obs
-    browser_act(obs[0], arguments=["se"])
+    result = browser_act(obs[0], method="select", arguments=["se"])
+    assert result.success, result.message
     assert rec.selects == [(obs[0].selector, "se")], rec.fills
+
+
+def test_editable_combobox_with_options_keeps_fill_method(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A contenteditable role=combobox can expose the same option descendants
+    # as a native select. The snapshot alone does not reveal its DOM tag.
+    snap = HEADER + (
+        '- combobox "Country":\n' "  - listbox:\n" '    - option "Sweden"\n'
+    )
+    rec = _wire(Recorder(snap), monkeypatch)
+    obs = browser_observe("country")[0]
+    assert obs.method == "fill"
+    result = browser_act(obs, arguments=["Sweden"])
+    assert result.success, result.message
+    assert rec.fills == [(obs.selector, "Sweden")]
+    assert rec.selects == []
 
 
 # ---------------------------------------------------------------------------
