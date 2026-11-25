@@ -18,6 +18,8 @@ function setup() {
 test('logs dir follows GPTME_LOGS_HOME, then XDG_DATA_HOME', () => {
     assert.equal(gptmeLogsDir({ GPTME_LOGS_HOME: '/x/logs' }), '/x/logs');
     assert.equal(gptmeLogsDir({ XDG_DATA_HOME: '/d' }), '/d/gptme/logs');
+    assert.equal(gptmeLogsDir({ GPTME_LOGS_HOME: 'logs' }, '/srv/agent'), '/srv/agent/logs');
+    assert.equal(gptmeLogsDir({ XDG_DATA_HOME: 'data' }, '/srv/agent'), '/srv/agent/data/gptme/logs');
 });
 
 test('reply is the last assistant text of this run, without tool calls', () => {
@@ -31,6 +33,34 @@ test('reply is the last assistant text of this run, without tool calls', () => {
         + row('system', 'Ran command: echo 4\n4')
         + row('assistant', 'It is 4.\n@complete'));
     assert.equal(replySince(conv, since, logs), 'It is 4.');
+});
+
+test('multiline tool arguments never become a reply', () => {
+    const { logs, conv, file } = setup();
+    const call = '@shell(call_1): ' + JSON.stringify({
+        command: 'echo "}"', nested: { values: [1, 2], escaped: '"\\' },
+    }, null, 2);
+    writeFileSync(file, row('assistant', 'The answer is 4.') + row('assistant', call));
+    assert.equal(replySince(conv, 0, logs), 'The answer is 4.');
+    assert.equal(replySince(conv, 1, logs), null);
+    appendFileSync(file, row('assistant', `Before.\n${call}\nAfter.\n@complete`));
+    assert.equal(replySince(conv, 2, logs), 'Before.\n\nAfter.');
+});
+
+test('multiple calls, MCP names and incomplete arguments do not leak', () => {
+    const { logs, conv, file } = setup();
+    writeFileSync(file, row('assistant', 'Answer.\n@shell(call_1): {"command":"true"}\n'
+        + '@server.tool/name(call-2): {\n "nested": {"key": "value"}\n}\n@complete: {}'));
+    assert.equal(replySince(conv, 0, logs), 'Answer.');
+    appendFileSync(file, row('assistant', '@shell(call_3): {\n "command": "unfinished'));
+    assert.equal(replySince(conv, 1, logs), null);
+});
+
+test('tool-call examples in fenced code are preserved', () => {
+    const { logs, conv, file } = setup();
+    const example = 'Example:\n```txt\n@shell(call_1): {\n  "command": "echo 4"\n}\n```';
+    writeFileSync(file, row('assistant', example));
+    assert.equal(replySince(conv, 0, logs), example);
 });
 
 test('a run with no assistant text does not resend the previous reply', () => {

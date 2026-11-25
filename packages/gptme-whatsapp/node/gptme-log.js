@@ -8,11 +8,54 @@
 
 import { existsSync, readFileSync } from 'fs';
 import { homedir } from 'os';
-import { join } from 'path';
+import { join, resolve } from 'path';
 
-// Structured calls carry a call id; bare @handles are user-facing text.
-// gptme also emits the parameterless completion sentinel as `@complete`.
-const TOOL_CALL_LINE = /^(?:@[a-z_]+\([^)]*\):.*|@complete(?::\s*\{\})?)$/;
+/** Find the end of a tool's JSON object, including nested/quoted braces. */
+function jsonEnd(content, start) {
+    let depth = 0;
+    let quoted = false;
+    let escaped = false;
+    for (let i = start; i < content.length; i++) {
+        const ch = content[i];
+        if (escaped) {
+            escaped = false;
+        } else if (quoted && ch === '\\') {
+            escaped = true;
+        } else if (ch === '"') {
+            quoted = !quoted;
+        } else if (!quoted) {
+            if (ch === '{') depth++;
+            if (ch === '}' && --depth === 0) return i + 1;
+        }
+    }
+    return null;
+}
+
+/** Strip complete structured calls, not their argument lines or code examples. */
+function withoutToolCalls(content) {
+    // Match the upstream call-id syntax, including MCP tool names. Bare @handles
+    // are text, apart from the explicit parameterless completion sentinel.
+    const markers = /^[ \t]*(?:([`~]{3,})[^\n]*|@[^\r\n]+?\([\w:.-]+\):\s*(?=\{)|@complete(?::\s*\{\})?[ \t]*(?=\r?$))/gm;
+    let fence = null;
+    let cursor = 0;
+    let result = '';
+    let match;
+    while ((match = markers.exec(content))) {
+        if (match[1]) {
+            if (!fence) fence = match[1];
+            else if (match[1][0] === fence[0] && match[1].length >= fence.length) fence = null;
+            continue;
+        }
+        if (fence) continue;
+        const start = markers.lastIndex;
+        const end = content[start] === '{' ? jsonEnd(content, start) : start;
+        // Incomplete structured arguments must not leak either.
+        result += content.slice(cursor, match.index);
+        cursor = end ?? content.length;
+        markers.lastIndex = cursor;
+    }
+    return (result + content.slice(cursor)).trim();
+}
 
 const pendingRuns = new Map();
 
@@ -37,10 +80,10 @@ export async function runWithReply(convName, generate, logsDir = gptmeLogsDir())
 }
 
 /** gptme's conversation logs dir (mirrors gptme.dirs.get_logs_dir). */
-export function gptmeLogsDir(env = process.env) {
-    if (env.GPTME_LOGS_HOME) return env.GPTME_LOGS_HOME;
+export function gptmeLogsDir(env = process.env, cwd = process.cwd()) {
+    if (env.GPTME_LOGS_HOME) return resolve(cwd, env.GPTME_LOGS_HOME);
     const data = env.XDG_DATA_HOME || join(homedir(), '.local', 'share');
-    return join(data, 'gptme', 'logs');
+    return resolve(cwd, data, 'gptme', 'logs');
 }
 
 function logPath(convName, logsDir) {
@@ -73,11 +116,7 @@ export function replySince(convName, since, logsDir = gptmeLogsDir()) {
             continue;
         }
         if (!msg || msg.role !== 'assistant' || typeof msg.content !== 'string') continue;
-        const text = msg.content
-            .split('\n')
-            .filter((line) => !TOOL_CALL_LINE.test(line.trim()))
-            .join('\n')
-            .trim();
+        const text = withoutToolCalls(msg.content);
         if (text) return text;
     }
     return null;

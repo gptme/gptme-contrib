@@ -25,7 +25,7 @@
 import pkg from 'whatsapp-web.js';
 const { Client, LocalAuth } = pkg;
 import qrcode from 'qrcode-terminal';
-import { runWithReply } from './gptme-log.js';
+import { gptmeLogsDir, runWithReply } from './gptme-log.js';
 import { spawn } from 'child_process';
 import { existsSync } from 'fs';
 
@@ -133,7 +133,8 @@ async function callGptme(sender, message) {
     // Read the reply from the conversation log, not stdout (which also carries
     // the echoed prompt, tool calls and exit chrome). Only rows this run wrote.
     return truncate(await runWithReply(convName,
-        () => spawnAndCapture(GPTME_CMD, args, () => true)));
+        () => spawnAndCapture(GPTME_CMD, args, () => true),
+        gptmeLogsDir(process.env, WORKSPACE)));
 }
 
 /**
