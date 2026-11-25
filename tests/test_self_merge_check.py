@@ -26,6 +26,7 @@ spec.loader.exec_module(self_merge_check)
 
 # Real (unpatched) helper, captured before the autouse fixture swaps it for a Mock.
 _REAL_MERGE_PERMISSION = self_merge_check.merge_permission.__wrapped__
+_REAL_FETCH_PR_FILE_SHAPES = self_merge_check._fetch_pr_file_shapes
 
 
 @pytest.fixture(autouse=True)
@@ -2895,6 +2896,64 @@ def test_evaluate_pr_gptme_core_truncated_shapes_refuse_eligibility() -> None:
     assert not result.eligible
     assert result.category is None
     assert any("diff shape" in reason for reason in result.reasons), result.reasons
+
+
+@pytest.mark.parametrize(
+    ("path", "status", "additions"),
+    [
+        ("gptme/config/models.py", "modified", 900),
+        ("gptme/util/reduce.py", "modified", 900),
+        ("scripts/big.py", "added", 900),
+        ("gptme/util/reduce.py", "renamed", 3),
+        ("gptme/util/reduce.py", "modified", None),
+    ],
+)
+def test_evaluate_pr_gptme_core_omitted_patch_refuses_eligibility(
+    path: str, status: str, additions: int | None
+) -> None:
+    """GitHub omits `patch` for oversized diffs; the detectors then see nothing.
+
+    A complete file list is not a complete read: without the patch, new CLI
+    flags and config keys are invisible. An unknown addition count counts as
+    unread.
+    """
+    shape = {"path": path, "status": status, "patch": None, "additions": additions}
+    result = _evaluate_gptme_core([{"path": path}], [shape])
+    assert not result.eligible
+    assert result.category is None
+    assert any(
+        "omitted the patch" in reason and path in reason for reason in result.reasons
+    ), result.reasons
+
+
+@pytest.mark.parametrize(
+    ("path", "status", "additions"),
+    [
+        # Oversized lockfile diff: no patch-reading detector applies to it.
+        ("webui/package-lock.json", "modified", 900),
+        # Nothing was added, so there is nothing to read.
+        ("gptme/util/reduce.py", "removed", 0),
+        ("gptme/util/reduce.py", "renamed", 0),
+        ("tests/fixtures/__init__.py", "added", 0),
+    ],
+)
+def test_evaluate_pr_gptme_core_harmless_missing_patch_stays_eligible(
+    path: str, status: str, additions: int
+) -> None:
+    """A missing patch only refuses eligibility when it hides added source lines."""
+    shape = {"path": path, "status": status, "patch": None, "additions": additions}
+    result = _evaluate_gptme_core([{"path": path}], [shape])
+    assert result.category == "gptme-core-diff-shape-eligible", result.reasons
+
+
+def test_fetch_pr_file_shapes_requests_addition_counts() -> None:
+    """The omitted-patch check needs `additions` in the projected shape."""
+    completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="")
+    with patch.object(
+        self_merge_check.subprocess, "run", return_value=completed
+    ) as mock_run:
+        _REAL_FETCH_PR_FILE_SHAPES("gptme/gptme", 999)
+    assert "additions: .additions" in mock_run.call_args.args[0][-1]
 
 
 def test_evaluate_pr_gptme_core_new_hook_module_routes_to_erik() -> None:

@@ -2817,7 +2817,7 @@ def _fetch_pr_file_shapes(repo: str, number: int) -> list[dict[str, Any]]:
                 "--paginate",
                 "--jq",
                 ".[] | {path: .filename, previous_path: .previous_filename, "
-                "status: .status, patch: .patch}",
+                "status: .status, patch: .patch, additions: .additions}",
             ],
             capture_output=True,
             text=True,
@@ -2847,6 +2847,27 @@ def _gptme_core_shapes_cover_files(
     }
     changed = {path.replace("\\", "/").removeprefix("./") for path in files}
     return len(file_shapes) == len(files) and shape_paths == changed
+
+
+def _gptme_core_unread_patches(file_shapes: list[dict[str, Any]]) -> list[str]:
+    """Paths whose added lines the patch-reading detectors need but cannot see.
+
+    GitHub omits `patch` for oversized diffs while still listing the file. Only
+    the CLI-flag (Python) and config-key (gptme/config/) detectors read patch
+    text, so an omitted lockfile or asset diff does not matter. `additions == 0`
+    (deletion, pure rename, empty file, binary) leaves nothing to read; an
+    unknown count does not.
+    """
+    unread = []
+    for shape in file_shapes:
+        path = str(shape.get("path", "")).replace("\\", "/").removeprefix("./")
+        if (
+            (path.endswith(".py") or path.startswith("gptme/config/"))
+            and not isinstance(shape.get("patch"), str)
+            and shape.get("additions") != 0
+        ):
+            unread.append(path)
+    return sorted(unread)
 
 
 def _pr_diff_proves_no_gitlinks(repo: str, number: int, file_count: int) -> bool:
@@ -4793,6 +4814,13 @@ def evaluate_pr(
                     "Could not read the complete PR diff shape "
                     f"({len(file_shapes)} shape(s) for {len(files)} changed "
                     "file(s)); gptme/gptme eligibility requires a complete read"
+                )
+            elif unread := _gptme_core_unread_patches(file_shapes):
+                result.category = None
+                category_reasons.append(
+                    "GitHub omitted the patch for "
+                    + ", ".join(unread)
+                    + "; the CLI-flag and config-key detectors cannot inspect it"
                 )
             else:
                 shape_reasons = gptme_core_route_to_erik_reasons(
