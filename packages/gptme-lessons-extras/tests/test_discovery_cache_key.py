@@ -17,3 +17,22 @@ def test_same_stem_in_different_categories_gets_its_own_features(tmp_path: Path)
     assert (fa.category, fa.keywords) == ("git", {"git"})
     assert (fb.category, fb.keywords) == ("workflow", {"standup"})
     assert d.extract_features(a) is fa  # still cached per file
+
+
+def test_symlink_in_another_category_keeps_its_own_features(tmp_path: Path):
+    source = tmp_path / "git" / "commit.md"
+    alias = tmp_path / "workflow" / "commit.md"
+    source.parent.mkdir()
+    alias.parent.mkdir()
+    source.write_text("---\nmatch:\n  keywords: [git]\n---\n# T\n")
+    alias.symlink_to(source)
+    discovery = LessonDiscovery(lessons_dir=tmp_path)
+
+    original = discovery.extract_features(source)
+    linked = discovery.extract_features(alias)
+
+    assert original.category == "git"
+    assert linked.category == "workflow"
+    assert linked.keywords == original.keywords == {"git"}
+    assert discovery.extract_features(source) is original
+    assert discovery.extract_features(alias) is linked

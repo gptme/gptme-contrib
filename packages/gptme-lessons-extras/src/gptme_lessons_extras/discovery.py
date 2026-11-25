@@ -92,8 +92,9 @@ class LessonDiscovery:
         """Extract features from a lesson file."""
         lesson_id = lesson_path.stem
         # Cache by file, not stem: git/commit.md and workflow/commit.md share
-        # a stem but are different lessons.
-        cache_key = str(lesson_path.resolve())
+        # a stem but are different lessons. Preserve symlink aliases because
+        # category is derived from the caller's path, not the resolved target.
+        cache_key = str(lesson_path.absolute())
 
         # Check cache first
         if cache_key in self.features_cache:
