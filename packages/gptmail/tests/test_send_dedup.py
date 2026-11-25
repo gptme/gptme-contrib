@@ -4,6 +4,7 @@ Concurrent sessions can each decide an inbox email is unreplied; the guard has
 to live at the send site, not in the dispatch-time check.
 """
 
+import os
 import subprocess
 import threading
 import time
@@ -95,6 +96,7 @@ def test_failed_delivery_keeps_draft_and_allows_retry(
     with pytest.raises(subprocess.CalledProcessError):
         agent.send(msg)
     assert not agent._is_completed("<orig@example.com>")
+    assert list((agent.email_dir / "sent").iterdir()) == []  # no staged copy left
 
     monkeypatch.setattr(
         subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, b"", b"")
@@ -223,3 +225,51 @@ def test_send_uses_one_draft_snapshot(
     assert "Edited body" not in archived
     if original:
         assert agent._is_completed(original)
+
+
+def test_draft_replaced_while_sent_copy_is_published(
+    agent: AgentEmail, deliveries: list, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An editor swapping the draft file cannot change what sent/ records."""
+    msg = _draft(agent, "swapped", None)
+    draft = agent.email_dir / "drafts" / "swapped.md"
+    sent = agent.email_dir / "sent" / "swapped.md"
+    snapshot = draft.read_text()
+
+    def swap_draft_before(real_move: Any) -> Any:
+        def move(path: Path, target: Any) -> Any:
+            if Path(target) == sent:
+                edited = draft.with_name("editor.swp")
+                edited.write_text("To: erik@example.com\nSubject: edited\n\nEdited body\n")
+                os.replace(edited, draft)
+            return real_move(path, target)
+
+        return move
+
+    # Whichever way the code publishes into sent/, the editor lands just before it.
+    for name in ("rename", "replace"):
+        monkeypatch.setattr(Path, name, swap_draft_before(getattr(Path, name)))
+    agent.send(msg)
+
+    assert len(deliveries) == 1
+    assert sent.read_text().startswith(snapshot)
+    assert "Edited body" not in sent.read_text()
+
+
+def test_draft_archived_during_delivery_still_completes_the_send(
+    agent: AgentEmail, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """archive() takes no send lock; a delivered reply must still be recorded."""
+    msg = _draft(agent, "moved", "<orig@example.com>")
+    sent = agent.email_dir / "sent" / "moved.md"
+    snapshot = (agent.email_dir / "drafts" / "moved.md").read_text()
+
+    def archive_during_delivery(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess:
+        agent.archive(msg)
+        return subprocess.CompletedProcess(args[0], 0)
+
+    monkeypatch.setattr(subprocess, "run", archive_during_delivery)
+    agent.send(msg)
+
+    assert sent.read_text().startswith(snapshot)
+    assert agent._is_completed("<orig@example.com>")

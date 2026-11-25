@@ -1267,15 +1267,25 @@ class AgentEmail:
                 if not self.rate_limiter.wait_if_needed(max_wait=60):
                     raise RuntimeError("Rate limit timeout - could not send within 60s")
 
-            # Send via msmtp
-            subprocess.run(
-                msmtp_cmd,
-                input=mime_bytes,
-                capture_output=True,
-                check=True,
-                timeout=30,
-            )
-            print(f"Email delivered via SMTP to {recipient} (from {sender}) as HTML")
+            # Stage the sent/ copy before delivery: publishing it afterwards is a
+            # bare rename that needs neither the draft file nor new disk space.
+            staged_path = sent_path.with_name(f".{uuid.uuid4().hex}.tmp")
+            try:
+                staged_path.write_text(content)
+                # Send via msmtp
+                subprocess.run(
+                    msmtp_cmd,
+                    input=mime_bytes,
+                    capture_output=True,
+                    check=True,
+                    timeout=30,
+                )
+                print(f"Email delivered via SMTP to {recipient} (from {sender}) as HTML")
+                # sent/ gets exactly what was delivered, even if the draft was
+                # edited, replaced or archived while msmtp ran.
+                staged_path.replace(sent_path)
+            finally:
+                staged_path.unlink(missing_ok=True)
         except subprocess.CalledProcessError as e:
             error_msg = e.stderr.decode() if e.stderr else str(e)
             print(f"Failed to send {message_id}: {error_msg}")
@@ -1287,14 +1297,9 @@ class AgentEmail:
             print(f"Error sending {message_id}: {e}")
             raise
 
-        # Move markdown file to sent folder (only after successful sending).
-        # Keep the file open so a concurrent archive() move cannot cause us to
-        # recreate sent/. Store what was delivered, not a later draft edit.
-        with draft_path.open("r+") as sent_file:
-            draft_path.rename(sent_path)
-            sent_file.seek(0)
-            sent_file.write(content)
-            sent_file.truncate()
+        # The sent/ copy is published, so drop the draft. archive() takes no send
+        # lock and may already have moved it.
+        draft_path.unlink(missing_ok=True)
         self._record_local_send(sent_path)
 
         # Append send audit metadata so allowlist bypasses leave a forensic trace.
