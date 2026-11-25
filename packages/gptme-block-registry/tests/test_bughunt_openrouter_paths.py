@@ -47,6 +47,19 @@ def test_r5_1_per_key_cap_402_deadline_is_not_4h_credit_reprobe() -> None:
     assert block_deadline(window, now) == datetime(2026, 11, 25, tzinfo=UTC)
 
 
+@pytest.mark.parametrize(
+    "settings_link", ["https://openrouter.ai/settings/credits", ""]
+)
+def test_account_402_affordability_keeps_four_hour_reprobe(settings_link: str) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    text = PER_KEY_402.replace("https://openrouter.ai/settings/keys", settings_link)
+    window = limit_window_from_text(text)
+    assert window == "credits"
+    now = datetime(2026, 11, 24, 6, tzinfo=UTC)
+    assert block_deadline(window, now) == now + timedelta(hours=4)
+
+
 # ---------------------------------------------------------------------------
 # R5-2: block paths built from backend / pool / context escape state_dir
 # ---------------------------------------------------------------------------

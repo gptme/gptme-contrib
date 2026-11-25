@@ -28,11 +28,9 @@ _WINDOW_RE = re.compile(
     r"key limit exceeded[^)]*\((daily|weekly|monthly) limit\)", re.IGNORECASE
 )
 _CREDITS_RE = re.compile(r"insufficient credits|requires more credits", re.IGNORECASE)
-# A 402 naming a per-key cap is the key's own limit, not the account running dry
-# (same rule as the shell breaker): it resets daily like any key cap.
-_KEY_CAP_402_RE = re.compile(
-    r"can only afford|openrouter\.ai/settings/keys|/keys/", re.IGNORECASE
-)
+# A key-management link identifies a per-key cap. "Can only afford" alone
+# also appears in account-credit errors, so it cannot identify a daily reset.
+_KEY_CAP_402_RE = re.compile(r"openrouter\.ai/settings/keys|/keys/", re.IGNORECASE)
 
 
 def limit_window_from_text(text: str) -> str | None:
