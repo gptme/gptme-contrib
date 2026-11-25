@@ -561,6 +561,7 @@ def summarize_journal_with_cc(
     Returns:
         Dictionary with extracted summary data
     """
+    extra_context = _bounded_context(extra_context) if extra_context else ""
     context_section = ""
     if extra_context:
         context_section = f"""
@@ -651,6 +652,18 @@ def _truncate_block(text: str, limit: int) -> str:
     return text[:head] + marker + (text[-tail:] if tail else "")
 
 
+def _bounded_context(extra_context: str) -> str:
+    """Cap optional real-data context so it cannot dominate the prompt."""
+    if len(extra_context) <= _MAX_EXTRA_CONTEXT_CHARS:
+        return extra_context
+    logger.warning(
+        "Prompt context bounded: truncated extra context from %d to %d chars",
+        len(extra_context),
+        _MAX_EXTRA_CONTEXT_CHARS,
+    )
+    return _truncate_block(extra_context, _MAX_EXTRA_CONTEXT_CHARS)
+
+
 def _bound_journal_entries(entries: list[tuple[Path, str]], max_chars: int) -> tuple[str, int]:
     """Join journal entries into one prompt block, capped at ``max_chars``.
 
@@ -731,14 +744,7 @@ def summarize_daily_with_cc(
         else ""
     )
 
-    if extra_context and len(extra_context) > _MAX_EXTRA_CONTEXT_CHARS:
-        logger.warning(
-            "Daily prompt context bounded: truncated extra context from %d to %d chars",
-            len(extra_context),
-            _MAX_EXTRA_CONTEXT_CHARS,
-        )
-        extra_context = _truncate_block(extra_context, _MAX_EXTRA_CONTEXT_CHARS)
-
+    extra_context = _bounded_context(extra_context) if extra_context else ""
     context_section = ""
     if extra_context:
         context_section = f"""
@@ -858,6 +864,7 @@ def summarize_weekly_with_cc(
         ]
     )
 
+    extra_context = _bounded_context(extra_context) if extra_context else ""
     context_section = ""
     if extra_context:
         context_section = f"""
@@ -1097,6 +1104,7 @@ def summarize_monthly_with_cc(
         ]
     )
 
+    extra_context = _bounded_context(extra_context) if extra_context else ""
     context_section = ""
     if extra_context:
         context_section = f"""

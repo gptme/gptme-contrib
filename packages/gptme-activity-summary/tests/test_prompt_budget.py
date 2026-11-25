@@ -81,3 +81,13 @@ def test_daily_summary_prompt_stays_under_budget(monkeypatch):
         cc_backend._MAX_JOURNAL_PROMPT_CHARS + cc_backend._MAX_EXTRA_CONTEXT_CHARS + 5_000
     )
     assert "oversized entries are truncated" in prompt
+
+
+def test_bounded_context_truncates_and_passes_through():
+    small = "g" * 100
+    assert cc_backend._bounded_context(small) == small
+
+    big = "g" * (cc_backend._MAX_EXTRA_CONTEXT_CHARS + 50_000)
+    out = cc_backend._bounded_context(big)
+    assert len(out) <= cc_backend._MAX_EXTRA_CONTEXT_CHARS
+    assert "[... truncated" in out
