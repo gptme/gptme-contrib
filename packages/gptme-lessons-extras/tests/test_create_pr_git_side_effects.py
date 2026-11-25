@@ -263,7 +263,7 @@ def test_lesson_directly_under_lessons_uses_default_category(repo, create_pr):
 
 def test_failed_checkout_hook_does_not_block_retry(repo, create_pr):
     hook = repo / ".git" / "hooks" / "post-checkout"
-    hook.write_text('#!/bin/sh\nrm -- "$0"\nexit 1\n')
+    hook.write_text("#!/bin/sh\nexit 1\n")
     hook.chmod(0o755)
     lesson = repo / "lessons" / "tools" / "git-careful.md"
     git(repo, "add", str(lesson))
@@ -274,6 +274,7 @@ def test_failed_checkout_hook_does_not_block_retry(repo, create_pr):
     assert git(repo, "branch", "--list", "lesson/*") == ""
     assert git(repo, "write-tree") == index_before
     assert lesson.read_text() == LESSON
+    hook.unlink()
     assert create_pr.create_lesson_pr(lesson) is True
 
 

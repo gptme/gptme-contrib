@@ -113,6 +113,21 @@ def _undo_lesson_branch(
         else ["branch", "-D", branch_name],
     ):
         if subprocess.run(["git", *args], cwd=repo_root).returncode != 0:
+            # post-checkout can fail after the switch completed. Verify the
+            # actual ref before deciding whether index restoration is safe.
+            if args[0] == "checkout":
+                actual_ref = subprocess.check_output(
+                    ["git", "rev-parse", "--symbolic-full-name", "HEAD"],
+                    text=True,
+                    cwd=repo_root,
+                ).strip()
+                expected_ref = (
+                    "HEAD"
+                    if original_ref == start_sha
+                    else f"refs/heads/{original_ref}"
+                )
+                if actual_ref == expected_ref:
+                    continue
             print(
                 f"⚠️  Cleanup stopped at `git {' '.join(args)}`; "
                 f"check branch {branch_name}"
