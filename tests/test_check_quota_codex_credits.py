@@ -46,16 +46,30 @@ def quota_mod():
     return mod
 
 
-def _pacing(weekly: float = 1.0):
-    """Five-hour window is gone upstream (None since 2026-07); weekly binds."""
-    return (0.1, 1000, weekly, 50_000)
+def _patch_pool(
+    quota_mod,
+    monkeypatch,
+    tmp_path: Path,
+    extra: dict,
+    five_hour: float | None = None,
+) -> Path:
+    """Write a weekly-exhausted cache in the scraper's shape.
 
-
-def _patch_pool(quota_mod, monkeypatch, tmp_path: Path, cache: dict) -> None:
+    ``five_hour`` defaults to None because current /status output has no 5h line.
+    """
+    cache = {
+        "main": {
+            "five_hour": None
+            if five_hour is None
+            else {"utilization": five_hour, "resets_in_seconds": 1000},
+            "weekly": {"utilization": 1.0, "resets_in_seconds": 50_000},
+        },
+        **extra,
+    }
     cache_file = tmp_path / "codex-usage-cache.json"
     cache_file.write_text(json.dumps(cache))
     monkeypatch.setattr(quota_mod, "CODEX_USAGE_CACHE_FILE", cache_file)
-    monkeypatch.setattr(quota_mod, "_load_codex_main_pacing", lambda: _pacing())
+    return cache_file
 
 
 def test_weekly_exhausted_pool_with_credits_stays_available(
@@ -116,7 +130,39 @@ def test_stale_cache_credits_are_unknown_not_zero(quota_mod, monkeypatch, tmp_pa
     stale = time.time() - (quota_mod.CODEX_USAGE_MAX_AGE_SECONDS + 60)
     os.utime(quota_mod.CODEX_USAGE_CACHE_FILE, (stale, stale))
 
-    assert quota_mod._load_codex_credits() is None
+    assert quota_mod._shared_codex_pool_quota("codex", "gpt-5.6-sol") is None
+
+
+def test_exhausted_five_hour_window_blocks_despite_credits(
+    quota_mod, monkeypatch, tmp_path
+):
+    """Credits lift the weekly cap only."""
+    _patch_pool(quota_mod, monkeypatch, tmp_path, {"credits": 25_706}, five_hour=1.0)
+
+    row = quota_mod._shared_codex_pool_quota("codex", "gpt-5.6-sol")
+
+    assert row is not None
+    assert row.available is False
+    assert row.metadata["on_credits"] is False
+
+
+def test_cache_rewrite_mid_row_cannot_drop_credits(quota_mod, monkeypatch, tmp_path):
+    """The scraper truncates and rewrites the cache; one row must use one read."""
+    cache_file = _patch_pool(quota_mod, monkeypatch, tmp_path, {"credits": 25_706})
+    read_text = Path.read_text
+
+    def read_then_truncate(self: Path, *args: Any, **kwargs: Any) -> str:
+        text = read_text(self, *args, **kwargs)
+        if self == cache_file:
+            cache_file.write_text("")
+        return text
+
+    monkeypatch.setattr(Path, "read_text", read_then_truncate)
+
+    row = quota_mod._shared_codex_pool_quota("codex", "gpt-5.6-sol")
+
+    assert row is not None
+    assert row.available is True
 
 
 # --- Scraper seam -----------------------------------------------------------
@@ -154,6 +200,23 @@ def _parse(screen: str) -> dict[str, Any]:
     assert proc.returncode == 0, proc.stderr
     data: dict[str, Any] = json.loads(proc.stdout)
     return data
+
+
+def test_scraper_output_without_five_hour_line_reaches_the_credit_gate(
+    quota_mod, monkeypatch, tmp_path
+):
+    """Weekly-only /status output must produce an on-credits row end to end."""
+    data = _parse(STATUS_SCREEN.replace("5h limit:    100% left (resets 12:00)\n", ""))
+    assert data["main"]["five_hour"] is None
+    cache_file = tmp_path / "codex-usage-cache.json"
+    cache_file.write_text(json.dumps(data))
+    monkeypatch.setattr(quota_mod, "CODEX_USAGE_CACHE_FILE", cache_file)
+
+    row = quota_mod._shared_codex_pool_quota("codex", "gpt-5.6-sol")
+
+    assert row is not None
+    assert row.available is True
+    assert row.metadata["on_credits"] is True
 
 
 def test_scraper_parses_credit_balance_into_cache():

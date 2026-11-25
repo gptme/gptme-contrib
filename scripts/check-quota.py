@@ -231,15 +231,12 @@ def _load_cached_claude_usage() -> tuple[dict[str, object], int] | None:
     return data, age_seconds
 
 
-def _load_codex_main_pacing() -> tuple[float, int, float, int] | None:
-    """Read the codex usage cache main tier.
+def _load_codex_usage_cache() -> dict[str, object] | None:
+    """Read the scraped codex /status snapshot once.
 
-    Returns (5h_util, 5h_reset_s, weekly_util, weekly_reset_s) from the scraped
-    /status snapshot, or None when the cache is missing, malformed, or stale
-    (>CODEX_USAGE_MAX_AGE_SECONDS). The scraper (check-codex-usage.sh) already
-    normalizes codex's "% left" to utilization (1 - left/100). gpt-5.4 and
-    gpt-5.5 share this main (non-Spark) Codex pool, so the same numbers apply to
-    both models.
+    Returns None when the cache is missing, malformed, or stale
+    (>CODEX_USAGE_MAX_AGE_SECONDS). Pacing and credits are both derived from the
+    returned dict so one quota row never mixes two snapshots of the file.
     """
     age = _file_age_seconds(CODEX_USAGE_CACHE_FILE)
     if age is None or age > CODEX_USAGE_MAX_AGE_SECONDS:
@@ -248,43 +245,51 @@ def _load_codex_main_pacing() -> tuple[float, int, float, int] | None:
         data = json.loads(CODEX_USAGE_CACHE_FILE.read_text())
     except (OSError, json.JSONDecodeError):
         return None
-    main = data.get("main") if isinstance(data, dict) else None
+    return data if isinstance(data, dict) else None
+
+
+def _codex_main_pacing(
+    data: dict[str, object],
+) -> tuple[tuple[float, int] | None, tuple[float, int]] | None:
+    """Return ((5h_util, 5h_reset_s) | None, (weekly_util, weekly_reset_s)).
+
+    None when the snapshot has no usable weekly section. The 5h section is
+    optional: current /status output only shows the weekly limit, so the scraper
+    writes "five_hour": null. The scraper (check-codex-usage.sh) already
+    normalizes codex's "% left" to utilization (1 - left/100). All non-Spark
+    Codex models share this main pool.
+    """
+    main = data.get("main")
     if not isinstance(main, dict):
         return None
-    five_hour = main.get("five_hour")
-    weekly = main.get("weekly")
-    if not isinstance(five_hour, dict) or not isinstance(weekly, dict):
+
+    def window(key: str) -> tuple[float, int] | None:
+        section = main.get(key)
+        if not isinstance(section, dict):
+            return None
+        try:
+            return float(section["utilization"]), int(section["resets_in_seconds"])
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    weekly = window("weekly")
+    if weekly is None:
         return None
-    try:
-        return (
-            float(five_hour["utilization"]),
-            int(five_hour["resets_in_seconds"]),
-            float(weekly["utilization"]),
-            int(weekly["resets_in_seconds"]),
-        )
-    except (KeyError, TypeError, ValueError):
-        return None
+    return window("five_hour"), weekly
 
 
-def _load_codex_credits() -> int | None:
-    """Purchased credit balance from the codex usage cache (None = unknown).
+def _codex_credits(data: dict[str, object]) -> int | None:
+    """Purchased credit balance from the codex usage snapshot (None = unknown).
 
     When the weekly plan allowance is spent, Codex keeps serving against this
     balance (codex /status: "Weekly limit: 0% left ... Credits: N credits"), so
-    a weekly-exhausted pool with credits left is NOT a hard stop. Absent/None
-    means the cache predates credit parsing, NOT zero.
+    a weekly-exhausted pool with credits left is NOT a hard stop. An absent
+    value is unknown, NOT zero.
     """
-    age = _file_age_seconds(CODEX_USAGE_CACHE_FILE)
-    if age is None or age > CODEX_USAGE_MAX_AGE_SECONDS:
+    credits = data.get("credits")
+    if isinstance(credits, bool) or not isinstance(credits, int):
         return None
-    try:
-        data = json.loads(CODEX_USAGE_CACHE_FILE.read_text())
-    except (OSError, json.JSONDecodeError):
-        return None
-    credits = data.get("credits") if isinstance(data, dict) else None
-    if isinstance(credits, bool) or not isinstance(credits, int | float):
-        return None
-    return int(credits)
+    return credits
 
 
 def _shared_codex_pool_quota(backend: str, model: str) -> BackendQuota | None:
@@ -302,30 +307,37 @@ def _shared_codex_pool_quota(backend: str, model: str) -> BackendQuota | None:
     deprioritizes a near-exhausted pool instead of only discovering exhaustion
     reactively via crash-loop / 429 clusters.
     """
-    pacing = _load_codex_main_pacing()
+    data = _load_codex_usage_cache()
+    if data is None:
+        return None
+    pacing = _codex_main_pacing(data)
     if pacing is None:
         return None
-    fh_util, fh_reset, wk_util, wk_reset = pacing
-    target, gap, pacing_status = _combine_pacing(
-        [
-            (fh_util, fh_reset, 18000),
-            (wk_util, wk_reset, 604800),
-        ]
-    )
-    util = max(fh_util, wk_util)
-    credits = _load_codex_credits()
+    fh, (wk_util, wk_reset) = pacing
+    axes = [(wk_util, wk_reset, 604800)]
+    if fh is not None:
+        axes.insert(0, (fh[0], fh[1], 18000))
+    target, gap, pacing_status = _combine_pacing(axes)
+    if fh is not None and fh[0] >= wk_util:
+        util, reset = fh
+        reason = f"5h: {fh[0]:.0%}, 7d: {wk_util:.0%}"
+    else:
+        util, reset = wk_util, wk_reset
+        fh_label = f"5h: {fh[0]:.0%}" if fh is not None else "no 5h data"
+        reason = f"7d: {wk_util:.0%}, {fh_label}"
+    credits = _codex_credits(data)
     # Weekly exhaustion is a hard stop ONLY with no credit balance left. Codex
     # keeps serving past the plan allowance against purchased credits, and the
     # gptme openai-subscription route shares this pool — so blocking both on the
-    # weekly gauge alone starves the fleet of a working model for days.
-    on_credits = util >= 0.98 and credits is not None and credits > 0
+    # weekly gauge alone starves the fleet of a working model for days. An
+    # exhausted 5h window still blocks: credits only lift the weekly cap here.
+    on_credits = (
+        wk_util >= 0.98
+        and (fh is None or fh[0] < 0.98)
+        and credits is not None
+        and credits > 0
+    )
     available = util < 0.98 or on_credits
-    if fh_util >= wk_util:
-        reset = fh_reset
-        reason = f"5h: {fh_util:.0%}, 7d: {wk_util:.0%}"
-    else:
-        reset = wk_reset
-        reason = f"7d: {wk_util:.0%}, 5h: {fh_util:.0%}"
     if not available:
         reason = f"BLOCKED — {reason}"
         if credits is not None and credits <= 0:
