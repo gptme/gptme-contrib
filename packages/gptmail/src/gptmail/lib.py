@@ -1043,7 +1043,9 @@ class AgentEmail:
         # before locking can go stale if the draft is edited meanwhile, letting
         # two senders of one draft take different reply locks. Order is always
         # draft -> reply, so the nesting cannot deadlock.
-        with FileLock(lock_path(f"draft:{filename}"), timeout=SEND_LOCK_TIMEOUT):
+        # The draft-lock holder may wait out the reply lock before it sends, so a
+        # second sender of this draft has to be able to wait for both.
+        with FileLock(lock_path(f"draft:{filename}"), timeout=2 * SEND_LOCK_TIMEOUT):
             if sent_path.exists():
                 raise ValueError(f"Already sent: {message_id}")
             if not draft_path.exists():
@@ -1297,9 +1299,19 @@ class AgentEmail:
             print(f"Error sending {message_id}: {e}")
             raise
 
-        # The sent/ copy is published, so drop the draft. archive() takes no send
-        # lock and may already have moved it.
-        draft_path.unlink(missing_ok=True)
+        # The sent/ copy is published, so drop the draft, unless it was edited
+        # while sending: that edit was never delivered. archive() takes no send
+        # lock and may already have moved the draft.
+        try:
+            if draft_path.read_text(errors="replace") == content:
+                draft_path.unlink()
+            else:
+                logger.warning("Draft %s changed during delivery; kept the unsent edit", draft_path)
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            # Delivery already succeeded; preserve reply bookkeeping.
+            logger.warning("Failed to remove sent draft %s: %s", draft_path, e)
         self._record_local_send(sent_path)
 
         # Append send audit metadata so allowlist bypasses leave a forensic trace.

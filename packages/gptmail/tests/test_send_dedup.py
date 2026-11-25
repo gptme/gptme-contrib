@@ -150,6 +150,51 @@ def test_concurrent_sends_of_same_draft_deliver_once(agent: AgentEmail, deliveri
     assert sorted(results) == ["refused"] * 2 + ["sent"]
 
 
+def test_second_sender_outwaits_a_holder_queued_on_the_reply_lock(
+    agent: AgentEmail, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The draft-lock holder spends a reply-lock wait plus a send under it.
+
+    Both fit the timeout on their own but not together, so a second sender of
+    the same draft needs the longer wait to be refused instead of timing out.
+    """
+    import hashlib
+
+    import gptmail.lib as lib
+
+    monkeypatch.setattr(lib, "SEND_LOCK_TIMEOUT", 2.0)
+    msg = _draft(agent, "queued", "<orig@example.com>")
+    digest = hashlib.sha256(b"reply:orig@example.com").hexdigest()[:16]
+    reply_lock = lib.FileLock(agent.email_dir / ".send-locks" / f"{digest}.lock")
+
+    def slow_run(cmd: Any, **kwargs: Any) -> subprocess.CompletedProcess:
+        time.sleep(1.2)
+        return subprocess.CompletedProcess(cmd, 0, b"", b"")
+
+    monkeypatch.setattr(subprocess, "run", slow_run)
+    results: list[str] = []
+
+    def worker() -> None:
+        try:
+            agent.send(msg)
+            results.append("sent")
+        except ValueError:
+            results.append("refused")
+        except lib.LockError:
+            results.append("timed out")
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    with reply_lock:
+        # Another reply to the same original is mid-send.
+        for t in threads:
+            t.start()
+        time.sleep(1.2)
+    for t in threads:
+        t.join(timeout=10)
+
+    assert sorted(results) == ["refused", "sent"]
+
+
 def test_reply_lock_follows_the_draft_read_under_lock(
     agent: AgentEmail, deliveries: list, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -219,7 +264,7 @@ def test_send_uses_one_draft_snapshot(
     delivered = message_from_bytes(deliveries[0])
     assert delivered.get("In-Reply-To") == original
     assert delivered["Subject"] == "Re: hi"
-    assert reads == 1
+    assert "Edited body" in real_read(draft)  # never delivered, so still a draft
     archived = (agent.email_dir / "sent" / "snapshot.md").read_text()
     assert archived.startswith(snapshot)
     assert "Edited body" not in archived
@@ -230,7 +275,10 @@ def test_send_uses_one_draft_snapshot(
 def test_draft_replaced_while_sent_copy_is_published(
     agent: AgentEmail, deliveries: list, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An editor swapping the draft file cannot change what sent/ records."""
+    """An editor swapping the draft file cannot change what sent/ records.
+
+    The edit was never delivered, so it must also survive in drafts/.
+    """
     msg = _draft(agent, "swapped", None)
     draft = agent.email_dir / "drafts" / "swapped.md"
     sent = agent.email_dir / "sent" / "swapped.md"
@@ -254,6 +302,7 @@ def test_draft_replaced_while_sent_copy_is_published(
     assert len(deliveries) == 1
     assert sent.read_text().startswith(snapshot)
     assert "Edited body" not in sent.read_text()
+    assert "Edited body" in draft.read_text()
 
 
 def test_draft_archived_during_delivery_still_completes_the_send(
