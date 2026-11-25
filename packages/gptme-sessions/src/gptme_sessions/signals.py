@@ -136,12 +136,12 @@ def _command_flag_value(cmd: str, flag: str) -> str | None:
 def _commit_subject(cmd: str) -> str | None:
     match = _COMMIT_HEREDOC_SUBJECT_RE.search(cmd)
     if match:
-        return match.group(2).strip().splitlines()[0].strip() or None
+        return (match.group(2).strip().splitlines() or [""])[0].strip() or None
     match = _COMMIT_SUBJECT_RE.search(cmd)
     if not match:
         return None
     value = match.group(1) if match.group(1) is not None else match.group(2)
-    return value.replace('\\"', '"').splitlines()[0].strip() or None
+    return (value.replace('\\"', '"').splitlines() or [""])[0].strip() or None
 
 
 # Same as _COMMIT_SUBJECT_RE but also accepts the long forms
@@ -170,7 +170,7 @@ def _stated_commit_subjects(cmd: str) -> list[str]:
         value = next((g for g in match.groups() if g is not None), "")
         if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
             value = value[1:-1]
-        subject = value.replace('\\"', '"').splitlines()[0].strip()
+        subject = (value.replace('\\"', '"').splitlines() or [""])[0].strip()
         if subject:
             found.append((match.start(), subject))
     for heredoc in heredocs:

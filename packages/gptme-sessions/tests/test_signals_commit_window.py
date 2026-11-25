@@ -239,3 +239,17 @@ def test_empty_heredoc_body_states_no_subject() -> None:
         for body in ("", "   \n\t"):
             cmd = f"git commit {flag} \"$(cat <<'EOF'\n{body}\nEOF\n)\""
             assert _stated_commit_subjects(cmd) == [], (flag, body)
+
+
+def test_empty_commit_message_has_no_subject() -> None:
+    """Empty -m values and empty heredocs yield no subject in either extractor."""
+    from gptme_sessions.signals import _commit_subject, _stated_commit_subjects
+
+    cmds = [
+        "git commit -m ''",
+        'git commit -am ""',
+        "git commit -m \"$(cat <<'EOF'\n\nEOF\n)\"",
+    ]
+    for cmd in cmds:
+        assert _commit_subject(cmd) is None, cmd
+        assert _stated_commit_subjects(cmd) == [], cmd
