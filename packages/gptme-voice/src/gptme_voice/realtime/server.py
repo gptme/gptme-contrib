@@ -56,6 +56,12 @@ from .openai_client import (
     _get_openai_api_key,
     _load_project_instructions,
 )
+from .planned_calls import (
+    fulfill_planned_call,
+    fulfillment_tool_schema,
+    load_pending_planned_calls,
+    planned_call_guidance,
+)
 from .sounds import DISPATCH_CUE_MULAW, PCM_CUES, SAMPLE_RATE, TIMEOUT_CUE_MULAW
 from .tool_bridge import GptmeToolBridge
 from .twilio_integration import (
@@ -2630,10 +2636,11 @@ class VoiceServer:
         # Fire-and-forget: pre-warm the provider connection so it is ready before
         # Twilio's media-stream WebSocket sends its "start" event.  This eliminates
         # most of the ~1-3s dead air between call answer and first greeting audio.
-        # A possible standup callback must retain recent-call evidence until
-        # the authenticated stream chooses callback vs resume. A generic
-        # prewarm would consume that evidence before the decision below.
+        # A callback or pending plan must retain recent-call evidence until
+        # the authenticated stream chooses its cold bootstrap. A generic
+        # prewarm would consume that evidence but cannot be claimed by it.
         callback_candidate = False
+        planned_candidate = False
         if signature_validated and self._twilio_body_caller_allowed(from_number):
             identity = _lookup_caller_identity(from_number, self.workspace)
             callback_candidate = bool(
@@ -2641,7 +2648,12 @@ class VoiceServer:
                 and identity.is_operator
                 and load_callback_candidate(self.workspace) is not None
             )
-        if from_number and not callback_candidate:
+            planned_candidate = bool(
+                identity
+                and identity.is_operator
+                and load_pending_planned_calls(self.workspace, from_number)
+            )
+        if from_number and not callback_candidate and not planned_candidate:
             self._register_prewarm_task(from_number)
 
         # Forward caller number to WebSocket handler via TwiML custom parameters.
@@ -2847,9 +2859,18 @@ class VoiceServer:
                     # Only the signed, CallSid-bound grant may unlock the local
                     # standup plan. Number-only prewarms never contain this data.
                     callback_brief = None
+                    pending_plans: list[dict] = []
                     if granted_from and not handoff_id and not standup_brief:
                         identity = _lookup_caller_identity(granted_from, self.workspace)
                         if identity and identity.is_operator:
+                            if call_direction == "inbound":
+                                pending_plans = load_pending_planned_calls(
+                                    self.workspace, granted_from
+                                )
+                                if pending_plans:
+                                    metadata["offered_plan_ids"] = json.dumps(
+                                        [p["plan_id"] for p in pending_plans]
+                                    )
                             recent = self._load_recent_call(granted_from)
                             callback_brief = await load_callback_brief(
                                 self.workspace,
@@ -2865,6 +2886,7 @@ class VoiceServer:
                         and not handoff_id
                         and not standup_brief
                         and not callback_brief
+                        and not pending_plans
                     )
                     # A spoofed start event must not steal a body- or rag-capable
                     # prewarm: the prewarmed session's tool schema was built from
@@ -2934,6 +2956,12 @@ class VoiceServer:
                                 anonymous_is_operator=False,
                             )
                         instructions = bootstrap.instructions
+                        if pending_plans:
+                            instructions = (
+                                planned_call_guidance(pending_plans)
+                                + "\n\n"
+                                + instructions
+                            )
                         initial_response_instructions = (
                             bootstrap.initial_response_instructions
                             if bootstrap.should_greet_first
@@ -2945,6 +2973,8 @@ class VoiceServer:
                             include_body_tools=body_adapter is not None,
                             include_rag_tools=rag_for_ws is not None,
                         )
+                        if pending_plans:
+                            session_cfg.extra_tools.append(fulfillment_tool_schema())
                         realtime_client = self._make_client(
                             session_cfg,
                             on_audio=on_audio,
@@ -2973,6 +3003,22 @@ class VoiceServer:
                         on_hangup=_twilio_hangup,
                         on_handoff=self._make_handoff_callback([caller_id], transcript),
                         transcript_provider=lambda: transcript,
+                        on_fulfill_planned_call=(
+                            lambda arguments: fulfill_planned_call(
+                                self.workspace or "",
+                                offered_plans=pending_plans,
+                                caller=granted_from or "",
+                                call_sid=call_sid,
+                                transcript=transcript,
+                                plan_id=arguments.get("plan_id", ""),
+                                caller_confirmation=arguments.get(
+                                    "caller_confirmation", ""
+                                ),
+                                summary=arguments.get("summary", ""),
+                            )
+                        )
+                        if pending_plans
+                        else None,
                         body_adapter=body_adapter,
                         rag=rag_for_ws,
                     )

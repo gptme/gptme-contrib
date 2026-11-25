@@ -272,6 +272,7 @@ class GptmeToolBridge:
         on_timeout: Callable[[], Awaitable[None]] | None = None,
         on_hangup: Callable[[str | None], Awaitable[None]] | None = None,
         on_handoff: Callable[[str, str, str | None], Awaitable[dict]] | None = None,
+        on_fulfill_planned_call: Callable[[dict], dict] | None = None,
         transcript_provider: Callable[[], Sequence[object]] | None = None,
         body_adapter: "BodyAdapter | None" = None,
         vision_bridge: "VisionSessionBridge | None" = None,
@@ -285,6 +286,7 @@ class GptmeToolBridge:
         self.on_timeout = on_timeout
         self.on_hangup = on_hangup
         self.on_handoff = on_handoff
+        self.on_fulfill_planned_call = on_fulfill_planned_call
         self.transcript_provider = transcript_provider
         self.body_adapter = body_adapter
         self.vision_bridge = vision_bridge
@@ -1194,6 +1196,13 @@ class GptmeToolBridge:
             if not isinstance(prompt, str):
                 return {"error": "Invalid arguments for look: prompt must be text."}
             return await self.vision_bridge.look(prompt)
+
+        if name == "fulfill_planned_call":
+            if self.on_fulfill_planned_call is None:
+                return {
+                    "error": "No authenticated planned call is offered on this session."
+                }
+            return self.on_fulfill_planned_call(arguments)
 
         if name == "workspace_search":
             if self.rag is None or not self.rag.enabled:

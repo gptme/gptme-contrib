@@ -22,9 +22,10 @@ def pinned_utc_now(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPat
     share a UTC calendar date. Tests that build fixtures from the wall clock
     with minute offsets therefore failed whenever CI ran just after 00:00 UTC.
     """
-    from gptme_voice.realtime import missed_call_context
+    from gptme_voice.realtime import missed_call_context, planned_calls
 
     monkeypatch.setattr(missed_call_context, "datetime", _PinnedDatetime)
+    monkeypatch.setattr(planned_calls, "datetime", _PinnedDatetime)
     monkeypatch.setattr(request.module, "datetime", _PinnedDatetime)
     return PINNED_UTC_NOW
 
