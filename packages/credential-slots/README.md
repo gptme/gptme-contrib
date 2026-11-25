@@ -67,18 +67,22 @@ mgr.get_available_subscriptions()   # slots whose files exist
 
 ok, reason = mgr.slot_is_fresh("personal")
 
-# Switch (deferred while lock_guard returns holds, unless force=True)
-result = mgr.switch_to("personal", reason="work quota exhausted")
-if not result.ok:
-    print(result.reason, result.deferred_locks)
-
 # switch_to() does not check for drift: it replaces whatever is at the live
 # path. Check (and heal) first, or a login written since the last switch is lost.
 # Live file matches no slot (e.g. after /login)?
 drift = mgr.detect_live_slot_drift()
 if drift and drift["drift"]:
     # The caller decides which slot was active before the refresh.
-    print(mgr.heal_drift_to("work").reason)
+    healed = mgr.heal_drift_to("work")
+    if not healed.ok:
+        raise RuntimeError(f"Drift recovery failed; not switching: {healed.reason}")
+    print(healed.reason)
+
+# Switch only after drift recovery succeeds (or no drift was detected).
+# Deferred while lock_guard returns holds, unless force=True.
+result = mgr.switch_to("personal", reason="work quota exhausted")
+if not result.ok:
+    print(result.reason, result.deferred_locks)
 
 # Slot identity replaced through the symlink?
 ident = mgr.detect_slot_identity_drift("work")
