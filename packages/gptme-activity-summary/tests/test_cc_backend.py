@@ -1522,3 +1522,163 @@ def test_auth_expiry_raised_when_first_fallback_auth_expires_and_second_fallback
     ):
         with pytest.raises(ClaudeAuthExpiredError):
             call_claude_code("test prompt", max_retries=1)
+
+
+def test_bound_entries_leaves_small_input_untouched():
+    """Entries under budget pass through byte-for-byte."""
+    from pathlib import Path
+
+    from gptme_activity_summary.cc_backend import _bound_entries
+
+    entries = [(Path("a.md"), "x" * 100), (Path("b.md"), "y" * 200)]
+    assert _bound_entries(entries, 1_000) == entries
+
+
+def test_bound_entries_truncates_oversized_with_marker():
+    """A high-volume day is bounded and every entry is marked as partial."""
+    from pathlib import Path
+
+    from gptme_activity_summary.cc_backend import _bound_entries
+
+    entries = [(Path(f"s{i}.md"), "z" * 5_000) for i in range(600)]
+    bounded = _bound_entries(entries, 600_000)
+
+    assert len(bounded) == len(entries)
+    assert sum(len(content) for _, content in bounded) <= 600_000
+    for path, content in bounded:
+        assert content.startswith("z" * 10), "entry head must be preserved"
+        assert "truncated:" in content, f"{path} lost its truncation marker"
+
+
+def test_bound_entries_redistributes_leftover_budget():
+    """Short entries stay whole; their unused budget goes to the long ones."""
+    from pathlib import Path
+
+    from gptme_activity_summary.cc_backend import _bound_entries
+
+    entries = [(Path("short.md"), "s" * 100), (Path("long.md"), "l" * 1_000)]
+    bounded = _bound_entries(entries, 500)
+
+    by_name = {path.name: content for path, content in bounded}
+    assert by_name["short.md"] == "s" * 100
+    assert len(by_name["long.md"]) <= 400 + 200  # slice + marker text
+    assert by_name["long.md"].startswith("l" * 10)
+    assert "truncated:" in by_name["long.md"]
+
+
+def test_bound_entries_many_entries_stays_within_budget():
+    """A pathological entry count must not inflate the rendered output.
+
+    When the per-entry share drops below the marker length, appending a marker
+    per entry produced a prompt roughly twice the budget with no content. The
+    oversized tail is now omitted from the output instead of emptied.
+    """
+    from pathlib import Path
+
+    from gptme_activity_summary.cc_backend import _bound_entries
+
+    entries = [(Path(f"s{i}.md"), "z" * 1_000) for i in range(10_000)]
+    bounded = _bound_entries(entries, 600_000)
+
+    rendered = "\n\n---\n\n".join(
+        f"### Entry: {path.name}\n\n{content}" for path, content in bounded
+    )
+    # The header/separator overhead counts against the budget, not just content.
+    assert len(rendered) <= 600_000
+    assert len(bounded) < len(entries), "the tail is omitted, not returned empty"
+    assert all(content for _, content in bounded), "no silently empty entries"
+    assert any("omitted from this summary prompt budget" in c for _, c in bounded)
+    # The budget goes to real journal text rather than marker-only entries.
+    assert sum(content.count("z") for _, content in bounded) > 300_000
+
+
+@pytest.mark.parametrize("budget", [1_000, 200, 50, 5])
+def test_bound_text_never_exceeds_budget(budget: int):
+    """``_bound_text`` truncates to at most the budget, marker included."""
+    from gptme_activity_summary.cc_backend import _bound_text
+
+    bounded = _bound_text("x" * 10_000, budget, "test")
+    assert len(bounded) <= budget, f"budget={budget} produced {len(bounded)} chars"
+    if budget >= 200:
+        assert "truncated:" in bounded
+    else:
+        # Too small for a marker: plain truncation, no misleading fragment.
+        assert bounded == "x" * budget
+
+
+@pytest.mark.parametrize(
+    "n_entries,size", [(5_000, 1), (10_000, 10), (20_000, 50), (10_000, 1_000)]
+)
+def test_bound_entries_rendered_size_never_exceeds_budget(n_entries: int, size: int):
+    """Rendered size stays within budget across pathological entry counts.
+
+    The aggregate marker carrier still pays for its header and separator, so a
+    marker sized to the whole remaining budget would overshoot by that overhead.
+    """
+    from pathlib import Path
+
+    from gptme_activity_summary.cc_backend import _bound_entries
+
+    budget = 600_000
+    entries = [(Path(f"s{i}.md"), "z" * size) for i in range(n_entries)]
+    bounded = _bound_entries(entries, budget)
+    rendered = "\n\n---\n\n".join(
+        f"### Entry: {path.name}\n\n{content}" for path, content in bounded
+    )
+    assert len(rendered) <= budget
+
+
+@pytest.mark.parametrize("n_entries", [600, 10_000])
+def test_summarize_daily_prompt_stays_bounded(n_entries: int):
+    """The assembled daily prompt never exceeds the model context ceiling."""
+    from pathlib import Path
+
+    from gptme_activity_summary import cc_backend
+
+    entries = [(Path(f"session-{i}.md"), "z" * 5_000) for i in range(n_entries)]
+    captured: dict[str, str] = {}
+
+    def fake_call(prompt: str, **kwargs: object) -> str:
+        captured["prompt"] = prompt
+        return '{"accomplishments": []}'
+
+    with patch.object(cc_backend, "call_claude_code", fake_call):
+        cc_backend.summarize_daily_with_cc(entries, "2026-11-24", extra_context="c" * 50_000)
+
+    prompt = captured["prompt"]
+    # ~4 chars/token: keep a wide margin under the 1M-token window.
+    assert len(prompt) < 900_000
+    assert "truncated:" in prompt or "omitted from this summary prompt budget" in prompt
+
+
+@pytest.mark.parametrize(
+    "sizes",
+    [
+        [500] * 60,  # all oversized: truncation, then omission
+        [1] * 30 + [10_000],  # short entries use most of the budget first
+    ],
+)
+def test_bound_entries_never_loses_or_clips_markers(sizes: list[int]):
+    """Across a budget sweep, partial output is always announced in full.
+
+    Filenames differ in length because header overhead is charged per entry.
+    """
+    from pathlib import Path
+
+    from gptme_activity_summary.cc_backend import _bound_entries
+
+    entries = [(Path("s" * (1 + i % 40) + f"{i}.md"), "z" * size) for i, size in enumerate(sizes)]
+    originals = dict(entries)
+    for budget in range(200, 20_000):
+        bounded = _bound_entries(entries, budget)
+        rendered = "\n\n---\n\n".join(
+            f"### Entry: {path.name}\n\n{content}" for path, content in bounded
+        )
+        assert len(rendered) <= budget, f"budget={budget}"
+        for path, content in bounded:
+            if content != originals[path]:
+                assert content.endswith("budget ...]"), f"budget={budget}: {content!r}"
+        if len(bounded) < len(entries):
+            assert any(
+                " entries, " in content for _, content in bounded
+            ), f"budget={budget}: entries omitted without a marker"
