@@ -1592,13 +1592,40 @@ def test_bound_entries_many_entries_stays_within_budget():
     assert sum(content.count("z") for _, content in bounded) > 300_000
 
 
-def test_bound_text_never_exceeds_budget():
+@pytest.mark.parametrize("budget", [1_000, 200, 50, 5])
+def test_bound_text_never_exceeds_budget(budget: int):
     """``_bound_text`` truncates to at most the budget, marker included."""
     from gptme_activity_summary.cc_backend import _bound_text
 
-    for budget in (1_000, 200, 50, 5):
-        bounded = _bound_text("x" * 10_000, budget, "test")
-        assert len(bounded) <= budget, f"budget={budget} produced {len(bounded)} chars"
+    bounded = _bound_text("x" * 10_000, budget, "test")
+    assert len(bounded) <= budget, f"budget={budget} produced {len(bounded)} chars"
+    if budget >= 200:
+        assert "truncated:" in bounded
+    else:
+        # Too small for a marker: plain truncation, no misleading fragment.
+        assert bounded == "x" * budget
+
+
+@pytest.mark.parametrize(
+    "n_entries,size", [(5_000, 1), (10_000, 10), (20_000, 50), (10_000, 1_000)]
+)
+def test_bound_entries_rendered_size_never_exceeds_budget(n_entries: int, size: int):
+    """Rendered size stays within budget across pathological entry counts.
+
+    The aggregate marker carrier still pays for its header and separator, so a
+    marker sized to the whole remaining budget would overshoot by that overhead.
+    """
+    from pathlib import Path
+
+    from gptme_activity_summary.cc_backend import _bound_entries
+
+    budget = 600_000
+    entries = [(Path(f"s{i}.md"), "z" * size) for i in range(n_entries)]
+    bounded = _bound_entries(entries, budget)
+    rendered = "\n\n---\n\n".join(
+        f"### Entry: {path.name}\n\n{content}" for path, content in bounded
+    )
+    assert len(rendered) <= budget
 
 
 @pytest.mark.parametrize("n_entries", [600, 10_000])

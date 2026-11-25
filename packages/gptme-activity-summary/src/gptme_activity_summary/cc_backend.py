@@ -82,9 +82,11 @@ def _bound_text(text: str, budget: int, label: str) -> str:
     )
     keep = max(0, budget - _MARKER_RESERVE)
     marker = _truncation_marker(len(text) - keep, len(text))
-    # The reserve is an upper bound on marker length; for budgets smaller than
-    # the reserve, trim the marker so the result still fits ``budget``.
-    return text[:keep] + marker[: budget - keep]
+    if len(marker) > budget - keep:
+        # Budget is smaller than a meaningful marker. Truncate plainly rather
+        # than emit a clipped marker fragment that misstates what was omitted.
+        return text[:budget]
+    return text[:keep] + marker
 
 
 def _bound_entries(entries: list[tuple[Path, str]], budget: int) -> list[tuple[Path, str]]:
@@ -148,7 +150,11 @@ def _bound_entries(entries: list[tuple[Path, str]], budget: int) -> list[tuple[P
                     f"\n\n[... {len(dropped):,} entries, {omitted_chars:,} characters "
                     f"omitted from this summary prompt budget ...]"
                 )
-                bounded[dropped[0]] = marker[:remaining_budget]
+                # The carrier entry is still rendered with its header and
+                # separator, so those count against what the marker may use.
+                room = max(0, remaining_budget - overhead[dropped[0]])
+                if room:
+                    bounded[dropped[0]] = marker[:room]
         break
 
     bounded_entries = [(entries[i][0], bounded[i]) for i in range(len(entries)) if i in bounded]
