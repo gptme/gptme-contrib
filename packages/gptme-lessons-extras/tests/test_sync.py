@@ -198,6 +198,32 @@ def test_init_repo_force_keeps_original_when_restore_fails(tmp_path, monkeypatch
     assert kept[0].read_text() == "user content\n"
 
 
+def test_init_repo_force_keeps_original_on_interrupt_between_renames(
+    tmp_path, monkeypatch, sync
+):
+    # A BaseException that is not an OSError (the CLI exits 130 on
+    # KeyboardInterrupt) between parking the old dir and moving the clone in
+    # must not let the staging cleanup delete the user's only copy.
+    monkeypatch.setattr(sync, "NETWORK_REPO_URL", str(_bare_remote_with_seed(tmp_path)))
+    target = tmp_path / "network"
+    target.mkdir()
+    (target / "my-notes.md").write_text("user content\n")
+    real_rename = Path.rename
+
+    def interrupt_moving_clone_in(self, dest):
+        if self.name == "network" and self != target:
+            raise KeyboardInterrupt
+        return real_rename(self, dest)
+
+    monkeypatch.setattr(Path, "rename", interrupt_moving_clone_in)
+
+    with pytest.raises(KeyboardInterrupt):
+        sync.init_repo(target, force=True)
+    kept = list(tmp_path.rglob("my-notes.md"))
+    assert len(kept) == 1
+    assert kept[0].read_text() == "user content\n"
+
+
 def test_push_lessons_pushes_commit_left_by_failed_push(tmp_path, monkeypatch, sync):
     remote = _bare_remote_with_seed(tmp_path)
     net = tmp_path / "net"

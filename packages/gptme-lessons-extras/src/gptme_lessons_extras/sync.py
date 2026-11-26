@@ -117,6 +117,11 @@ def init_repo(network_dir: Path = DEFAULT_NETWORK_DIR, force: bool = False) -> P
         replace = force and (network_dir.exists() or network_dir.is_symlink())
         if replace:
             network_dir.rename(old_dir)
+            # From here until the clone is in place (or the original is
+            # restored) staging holds the user's only copy. Keep it even if
+            # something that is not an OSError (e.g. KeyboardInterrupt)
+            # unwinds through the finally block.
+            keep_staging = True
         try:
             clone_dir.rename(network_dir)
         except OSError as swap_error:
@@ -126,13 +131,14 @@ def init_repo(network_dir: Path = DEFAULT_NETWORK_DIR, force: bool = False) -> P
                 except OSError as restore_error:
                     # Keep the original directory: report where it is instead
                     # of letting the staging cleanup delete it.
-                    keep_staging = True
                     raise SyncError(
                         f"Failed to move the clone into {network_dir} "
                         f"({swap_error}) and could not restore the original "
                         f"directory; it is kept at {old_dir} ({restore_error})."
                     ) from restore_error
+                keep_staging = False
             raise
+        keep_staging = False
         print(f"✓ Cloned to {network_dir}")
         return network_dir
     except subprocess.CalledProcessError as e:
