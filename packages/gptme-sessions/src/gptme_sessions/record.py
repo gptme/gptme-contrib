@@ -621,6 +621,15 @@ class SessionRecord:
         default_factory=dict, init=False, repr=False, compare=False
     )
 
+    def __setattr__(self, name: str, value: Any) -> None:
+        # An explicit assignment, including None -> None, supersedes an opaque
+        # enum value loaded from disk. Annotation edits instead merge with the
+        # unknown names at serialization, since those names aren't in our view.
+        roundtrip = self.__dict__.get("_roundtrip_fields")
+        if roundtrip is not None and name != "annotated_fields":
+            roundtrip.pop(name, None)
+        object.__setattr__(self, name, value)
+
     def __post_init__(self) -> None:
         if not self.session_id:
             self.session_id = str(uuid.uuid4())[:8]
@@ -1034,7 +1043,13 @@ class SessionRecord:
         for k, v in legacy.items():
             d.setdefault(k, v)
         for name, (raw, normalized) in roundtrip.items():
-            if d[name] == normalized:
+            if name == "annotated_fields":
+                # Apply edits to representable names without erasing a newer
+                # writer's annotation locks, including on list replacement.
+                current = d[name]
+                d[name] = [value for value in raw if value not in normalized or value in current]
+                d[name].extend(value for value in current if value not in raw)
+            elif d[name] == normalized:
                 if name != "dropout_depth" or d["dropout_selected"] is not False:
                     d[name] = raw
         return d
