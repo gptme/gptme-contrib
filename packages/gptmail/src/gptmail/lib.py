@@ -1313,7 +1313,10 @@ class AgentEmail:
         try:
             draft_path.replace(pending_path)
         except FileNotFoundError:
-            pass  # archive() or another sender already moved it
+            # archive() or another sender already moved it. A delivered message
+            # that the user archived is left in both sent/ and archive/: the
+            # archive copy is their own move, and deleting it would discard it.
+            pass
         except OSError as e:
             # Delivery already succeeded; preserve reply bookkeeping.
             logger.warning("Failed to remove sent draft %s: %s", draft_path, e)
@@ -1331,15 +1334,20 @@ class AgentEmail:
                     logger.warning("Failed to remove sent draft %s: %s", draft_path, e)
             else:
                 logger.warning("Draft %s changed during delivery; kept the unsent edit", draft_path)
-                try:
-                    pending_path.replace(draft_path)
-                except OSError as e:
-                    logger.warning(
-                        "Failed to restore edited draft %s; it is at %s: %s",
-                        draft_path,
-                        pending_path,
-                        e,
-                    )
+                if draft_path.exists():
+                    # The editor already created a new drafts/ file; restoring
+                    # would overwrite that newer save. Keep both.
+                    logger.warning("Edited draft also at %s; kept both", pending_path)
+                else:
+                    try:
+                        pending_path.replace(draft_path)
+                    except OSError as e:
+                        logger.warning(
+                            "Failed to restore edited draft %s; it is at %s: %s",
+                            draft_path,
+                            pending_path,
+                            e,
+                        )
         self._record_local_send(sent_path)
 
         # Append send audit metadata so allowlist bypasses leave a forensic trace.

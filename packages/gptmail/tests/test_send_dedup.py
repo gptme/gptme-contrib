@@ -235,7 +235,12 @@ def test_reply_lock_follows_the_draft_read_under_lock(
 def test_send_uses_one_draft_snapshot(
     agent: AgentEmail, deliveries: list, monkeypatch: pytest.MonkeyPatch, original: str | None
 ) -> None:
-    """An unlocked edit after the lock-key read cannot change what is delivered."""
+    """An unlocked edit after the lock-key read cannot change what is delivered.
+
+    Both surfaces are pinned to the first read: the bytes handed to msmtp and
+    the copy published in sent/. The edit is written by the monkeypatched read
+    itself, so any later re-read of the draft would return it.
+    """
     from email import message_from_bytes
 
     msg = _draft(agent, "snapshot", original)
@@ -261,6 +266,7 @@ def test_send_uses_one_draft_snapshot(
     agent.send(msg)
 
     assert len(deliveries) == 1
+    assert b"Edited body" not in deliveries[0]
     delivered = message_from_bytes(deliveries[0])
     assert delivered.get("In-Reply-To") == original
     assert delivered["Subject"] == "Re: hi"
