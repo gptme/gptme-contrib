@@ -220,6 +220,29 @@ def test_rename_of_persisted_synthetic_id_replaces_in_place(tmp_path: Path) -> N
     assert rows[0]["model"] == "opus"
 
 
+def test_user_id_that_merely_starts_with_noid_is_not_synthetic(tmp_path: Path) -> None:
+    """Only ``noid-`` + 12 lowercase hex is the reserved derived-id shape.
+
+    A user-assigned id such as ``noid-abc`` must not be reclassified as
+    store-invented: it keeps its id verbatim and is not aliased on rename.
+    """
+    store = SessionStore(sessions_dir=tmp_path)
+    store.path.write_text(
+        json.dumps({"session_id": "noid-abc", "model": "opus"}) + "\n", encoding="utf-8"
+    )
+
+    record = store.load_all()[0]
+    assert record.session_id == "noid-abc"
+    # No rename alias is registered: the id is the caller's, not ours.
+    assert "session_id" not in record._store_invented
+
+    store.rewrite([record])
+    rows = [json.loads(line) for line in store.path.read_text(encoding="utf-8").splitlines()]
+    assert [row["session_id"] for row in rows] == ["noid-abc"]
+    # A row that had no timestamp on disk still does not gain a fabricated one.
+    assert "timestamp" not in rows[0]
+
+
 def test_store_invented_marker_is_never_serialized() -> None:
     record = SessionRecord.from_dict({"session_id": "x", "_store_invented": {"a": 1}})
     assert record._store_invented == {}
@@ -348,6 +371,14 @@ def test_stale_copy_after_same_row_change_replaces_in_place(tmp_path: Path) -> N
 
     Regression for the P1 on #2338: the persisted ``noid-`` id is stable, so a
     stale outstanding copy still matches the changed on-disk row by id.
+
+    The stale copy wins: ``rewrite()`` is last-writer-wins per id, and this is
+    the *same* documented lost update a row with a real id gets when two
+    writers hold it without ``lock()``. Giving an id-less row a stable id makes
+    it participate in that documented contract instead of escaping it by
+    duplicating; it does not introduce a new class of data loss. Holding
+    ``lock()`` across load -> mutate -> rewrite is the caller's defence, for
+    real-id and derived-id rows alike.
     """
     store = SessionStore(sessions_dir=tmp_path)
     store.path.write_text(json.dumps({"model": "opus"}) + "\n", encoding="utf-8")

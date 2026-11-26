@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import sys
 import uuid
 from collections import deque
@@ -59,9 +60,17 @@ def _ensure_trailing_newline(path: Path) -> None:
         os.fsync(f.fileno())
 
 
+#: Exact shape of an id this store derives from a row that had none. The
+#: namespace is reserved: ``noid-`` followed by exactly 12 lowercase hex
+#: characters. Matching the *whole* shape (not just the prefix) keeps a
+#: user-assigned id such as ``noid-abc`` out of the synthetic path, where it
+#: would otherwise lose its timestamp and be aliased on rename (#2338).
+_SYNTHETIC_ID_RE = re.compile(r"noid-[0-9a-f]{12}\Z")
+
+
 def _is_synthetic_id(session_id: object) -> bool:
     """True for an id this store derived from a row that had none."""
-    return isinstance(session_id, str) and session_id.startswith("noid-")
+    return isinstance(session_id, str) and _SYNTHETIC_ID_RE.match(session_id) is not None
 
 
 def _parse_row(line: str) -> SessionRecord:
@@ -90,14 +99,15 @@ def _parse_row(line: str) -> SessionRecord:
     session_id = data.get("session_id") if isinstance(data, dict) else None
     has_timestamp = isinstance(data, dict) and bool(data.get("timestamp"))
     record = SessionRecord.from_dict(data)
+    if isinstance(data, dict) and not has_timestamp:
+        # The "now" timestamp was invented at parse time. Never write it back as
+        # if it were recorded data — whatever the row's id shape, and whether or
+        # not the derived id has since been persisted (#2338).
+        record._store_invented["timestamp"] = record.timestamp
     if _is_synthetic_id(session_id):
         # Remember the derived id so a later caller-assigned id is treated as a
         # rename of this row rather than a second, duplicate row (#2338).
         record._store_invented["session_id"] = record.session_id
-        if not has_timestamp:
-            # A row we previously derived an id for keeps its invented timestamp
-            # out of the file, even after the id was persisted.
-            record._store_invented["timestamp"] = record.timestamp
     if isinstance(data, dict) and not session_id:
         content = record.to_dict()
         content.pop("session_id", None)
