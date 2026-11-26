@@ -1588,6 +1588,40 @@ def test_non_git_gitignore_from_a_parent_applies_relative_to_that_parent(
     assert not indexer._is_ignored(root / "public.md", specs)
 
 
+def test_non_git_gitignore_closer_negation_overrides_ancestor_rule(
+    tmp_path, isolated_gitignore_files
+):
+    """Git's most-specific-wins: a nearer `!x` beats an outer ignore, not vice versa."""
+    indexer = object.__new__(Indexer)
+    (tmp_path / ".gitignore").write_text("*.md\n")
+    root = tmp_path / "docs"
+    root.mkdir()
+    (root / ".gitignore").write_text("!keep.md\n")
+    (root / "keep.md").write_text("keep")
+    (root / "drop.md").write_text("drop")
+
+    specs = indexer._load_gitignore(root)
+    assert not indexer._is_ignored(root / "keep.md", specs)
+    assert indexer._is_ignored(root / "drop.md", specs)
+
+
+def test_non_git_gitignore_global_negation_does_not_override_local_ignore(
+    tmp_path, isolated_gitignore_files
+):
+    """The global ignore file has the lowest precedence, as in git."""
+    indexer = object.__new__(Indexer)
+    home = Path.home()
+    (home / ".config" / "git").mkdir(parents=True, exist_ok=True)
+    (home / ".config" / "git" / "ignore").write_text("!*.md\n")
+    root = tmp_path / "docs"
+    root.mkdir()
+    (root / ".gitignore").write_text("*.md\n")
+    (root / "notes.md").write_text("notes")
+
+    specs = indexer._load_gitignore(root)
+    assert indexer._is_ignored(root / "notes.md", specs)
+
+
 @pytest.mark.parametrize(
     ("rules", "ignored"),
     [

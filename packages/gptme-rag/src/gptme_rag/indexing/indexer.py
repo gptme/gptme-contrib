@@ -234,6 +234,10 @@ for logger_name in [
 
 logger = logging.getLogger(__name__)
 
+# Patterns always ignored when falling back to .gitignore in a non-git directory.
+# Kept separate from the global/ancestor rules so no negation can re-include them.
+_ALWAYS_IGNORED = GitIgnoreSpec.from_lines([".git", "*.sqlite3", "*.db"])
+
 QueryEmbeddings = list[Sequence[float]]
 
 
@@ -1035,7 +1039,12 @@ class Indexer:
 
         Each ``.gitignore`` applies relative to the directory that holds it, as in
         git, so anchored (``/x``) and directory (``dir/``) patterns match the right
-        paths. Global and built-in patterns apply relative to ``directory``.
+        paths. Global patterns apply relative to ``directory``.
+
+        Returns the rule sets in **ascending precedence** order: global patterns
+        first, then ``.gitignore`` files from the outermost ancestor down to
+        ``directory``. ``_is_ignored`` walks the list in reverse so the nearest
+        ``.gitignore`` decides first, matching git's most-specific-wins rule.
         """
         root = directory.resolve()
         base_lines: list[str] = []
@@ -1048,11 +1057,11 @@ class Indexer:
             except Exception as e:
                 logger.warning(f"Error reading global gitignore: {e}")
 
-        # Essential patterns for non-git directories
-        base_lines.extend([".git", "*.sqlite3", "*.db"])
         specs = [(root, GitIgnoreSpec.from_lines(base_lines))]
 
-        # Collect all .gitignore files up to root or max depth
+        # Collect .gitignore files from the ancestors, outermost first so the
+        # nearest one ends up last (highest precedence).
+        ancestors: list[tuple[Path, GitIgnoreSpec]] = []
         current_dir = root
         max_depth = 10  # Limit traversal to avoid infinite loops
         depth = 0
@@ -1061,40 +1070,72 @@ class Indexer:
             if gitignore_path.exists():
                 try:
                     lines = gitignore_path.read_text().splitlines()
-                    specs.append((current_dir, GitIgnoreSpec.from_lines(lines)))
+                    ancestors.append((current_dir, GitIgnoreSpec.from_lines(lines)))
                 except Exception as e:
                     logger.warning(f"Error reading {gitignore_path}: {e}")
             current_dir = current_dir.parent
             depth += 1
 
+        specs.extend(reversed(ancestors))
         return specs
+
+    @staticmethod
+    def _spec_decision(spec: GitIgnoreSpec, rel_path: str) -> bool | None:
+        """Return True (ignored), False (re-included) or None (no rule matches)."""
+        for pattern in reversed(spec.patterns):
+            if pattern.match_file(rel_path):
+                # pathspec marks a plain pattern as include=True (it ignores) and a
+                # ``!`` pattern as include=False (it re-includes).
+                return pattern.include
+        return None
+
+    def _decide_rel_path(
+        self,
+        rel_path: str,
+        root: Path,
+        gitignore_specs: list[tuple[Path, GitIgnoreSpec]],
+    ) -> bool | None:
+        """Decide one path against every rule set, nearest ``.gitignore`` first."""
+        for base, spec in reversed(gitignore_specs):
+            try:
+                root_rel = root.relative_to(base).as_posix()
+            except ValueError:
+                continue
+            # ``root_rel`` is the scan root relative to this rule set's directory
+            # (``.`` for the root itself), so ancestor rules see the full path.
+            spec_rel = rel_path if root_rel == "." else f"{root_rel}/{rel_path}"
+            decision = self._spec_decision(spec, spec_rel)
+            if decision is not None:
+                return decision
+        return None
 
     def _is_ignored(
         self, file_path: Path, gitignore_specs: list[tuple[Path, GitIgnoreSpec]]
     ) -> bool:
-        """Check whether any loaded gitignore rule set ignores a file."""
+        """Check whether the loaded gitignore rule sets ignore a file."""
         # Judge symlinks by their lexical path inside the already-resolved scan root.
         # Resolving a parent link could move the candidate outside every rule's base.
         path = file_path.absolute()
-        for base, spec in gitignore_specs:
-            try:
-                rel_path = path.relative_to(base).as_posix()
-            except ValueError:
-                continue
-            # Git cannot re-include a file while its parent directory is excluded.
-            # We enumerate files without pruning directories, so check their prefixes.
-            parts = rel_path.split("/")
-            for depth in range(1, len(parts)):
-                parent = "/".join(parts[:depth]) + "/"
-                # A directory's last matching rule wins, including `!dir/`.
-                for pattern in reversed(spec.patterns):
-                    if pattern.match_file(parent):
-                        if pattern.include:
-                            return True
-                        break
-            if spec.match_file(rel_path):
+        root = gitignore_specs[0][0]
+        try:
+            rel_root = path.relative_to(root).as_posix()
+        except ValueError:
+            return False
+
+        # Built-in patterns are unconditional: a negation cannot re-include them.
+        if _ALWAYS_IGNORED.match_file(rel_root):
+            return True
+
+        # Git cannot re-include a file while its parent directory stays excluded.
+        # We enumerate files without pruning directories, so decide each prefix
+        # through the same precedence walk (a nearer `!dir/` can re-include it).
+        parts = rel_root.split("/")
+        for depth in range(1, len(parts)):
+            parent_rel = "/".join(parts[:depth]) + "/"
+            if self._decide_rel_path(parent_rel, root, gitignore_specs) is True:
                 return True
-        return False
+
+        return self._decide_rel_path(rel_root, root, gitignore_specs) is True
 
     def index_directory(
         self,
