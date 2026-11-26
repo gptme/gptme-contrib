@@ -42,8 +42,11 @@ function withoutToolCalls(content) {
     let match;
     while ((match = markers.exec(content))) {
         if (match[1]) {
+            // Only a bare delimiter line closes a fence; ```txt does not.
+            const line = content.slice(match.index).split('\n')[0];
+            const bare = line.trim().replace(/^[`~]+/, '') === '';
             if (!fence) fence = match[1];
-            else if (match[1][0] === fence[0] && match[1].length >= fence.length) fence = null;
+            else if (bare && match[1][0] === fence[0] && match[1].length >= fence.length) fence = null;
             continue;
         }
         if (fence) continue;

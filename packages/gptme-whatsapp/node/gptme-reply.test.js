@@ -60,3 +60,13 @@ test('non-message JSON and malformed lines are ignored', () => {
         '{"type": "usage", "input_tokens": 3}\nnot json\n' + msg('assistant', 'Fine.'),
     ), 'Fine.');
 });
+
+test('a longer fence containing shorter ones stays intact', () => {
+    const example = 'Nested:\n````md\n```txt\n@shell(call_1): {\n  "command": "echo 4"\n}\n```\n````';
+    assert.equal(extractReply(msg('assistant', example)), example);
+});
+
+test('a fence line with trailing text does not close the block', () => {
+    const example = 'Example:\n```txt\n@shell(call_1): {\n  "command": "echo 4"\n}\n```text';
+    assert.equal(extractReply(msg('assistant', example)), example);
+});

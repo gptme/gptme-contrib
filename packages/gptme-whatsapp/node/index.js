@@ -26,7 +26,7 @@ import pkg from 'whatsapp-web.js';
 const { Client, LocalAuth } = pkg;
 import qrcode from 'qrcode-terminal';
 import { extractReply } from './gptme-reply.js';
-import { spawn } from 'child_process';
+import { spawn, spawnSync } from 'child_process';
 import { existsSync } from 'fs';
 import { sessionArgs, sessionName } from './claude-session.js';
 import { createKeyedQueue } from './serial-queue.js';
@@ -46,6 +46,14 @@ if (ALLOWED_CONTACTS.length > 0) {
 } else {
     console.log('Warning: ALLOWED_CONTACTS not set — accepting all contacts');
 }
+// The gptme backend reads replies from `--output-format json`. Refuse to start
+// on a gptme that cannot emit it rather than silently dropping every reply.
+if (BACKEND === 'gptme' && !gptmeSupportsJsonOutput()) {
+    console.error(`${GPTME_CMD} does not support --output-format json.`);
+    console.error('Upgrade gptme (the flag was added in May 2026) or set BACKEND=claude-code.');
+    process.exit(1);
+}
+
 if (BACKEND === 'claude-code' && !existsSync(SYSTEM_PROMPT_FILE)) {
     console.log(`Warning: SYSTEM_PROMPT_FILE not found at ${SYSTEM_PROMPT_FILE}`);
     console.log('Run: cd ${WORKSPACE} && ./scripts/build-system-prompt.sh > ${SYSTEM_PROMPT_FILE}');
@@ -117,6 +125,17 @@ client.on('message', async (msg) => {
         }
     });
 });
+
+/** Whether the configured gptme understands `--output-format json`. */
+function gptmeSupportsJsonOutput() {
+    try {
+        const probe = spawnSync(GPTME_CMD, ['--help'], { encoding: 'utf8' });
+        if (probe.error) return false;
+        return `${probe.stdout ?? ''}${probe.stderr ?? ''}`.includes('--output-format');
+    } catch {
+        return false;
+    }
+}
 
 /**
  * Call the agent backend with the message and return the response.
@@ -194,7 +213,11 @@ function signalTree(proc, signal) {
         process.kill(-proc.pid, signal);
     } catch {
         // No such group: already gone, or a platform without process groups.
-        proc.kill(signal);
+        try {
+            proc.kill(signal);
+        } catch {
+            // Already reaped: nothing left to signal.
+        }
     }
 }
 
@@ -290,7 +313,12 @@ for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
     process.on(signal, () => {
         console.log('Shutting down WhatsApp bridge...');
         for (const proc of running) signalTree(proc, signal);
-        client.destroy().then(() => process.exit(0));
+        // Exit even when WhatsApp teardown fails; a hung bridge is worse than a
+        // rejected destroy().
+        client.destroy().then(
+            () => process.exit(0),
+            () => process.exit(0),
+        );
     });
 }
 

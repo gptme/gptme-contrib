@@ -22,6 +22,7 @@ function bridge(env = {}, overrides = {}) {
     const handlers = {};
     const signals = {};
     const sent = [];
+    const exits = [];
     const source = readFileSync(new URL('./index.js', import.meta.url), 'utf8')
         .replace(/^import .*;\n/gm, '');
     class Client {
@@ -37,12 +38,17 @@ function bridge(env = {}, overrides = {}) {
             env: environment,
             platform: 'linux',
             on(signal, handler) { signals[signal] = handler; },
-            exit() {},
-            kill(pid, signal) { children.find((c) => c.pid === -pid).signal = signal; },
+            exit(code) { exits.push(code); },
+            kill(pid, signal) {
+                const child = children.find((c) => c.pid === -pid);
+                if (child) child.signal = signal;
+            },
         },
         existsSync: () => true,
         createKeyedQueue,
         extractReply,
+        // The bridge probes `gptme --help` for the JSON output flag at startup.
+        spawnSync: () => ({ stdout: '--output-format [text|json]' }),
         setTimeout: (callback) => { timers.add(callback); return callback; },
         clearTimeout: (timer) => timers.delete(timer),
         spawn: (cmd, args, options) => {
@@ -67,7 +73,7 @@ function bridge(env = {}, overrides = {}) {
     const receive = (body) => handlers.message({
         from: '123@c.us', body, reply: async (text) => { sent.push(text); },
     });
-    return { context, children, timers, signals, sent, receive };
+    return { context, children, timers, signals, sent, exits, receive };
 }
 
 const tick = () => new Promise((resolve) => setImmediate(resolve));
@@ -155,6 +161,7 @@ test('a timeout also kills what a wrapper command started', {
             env: { HOME: dir, AGENT_WORKSPACE: dir, GPTME_CMD: wrapper, PATH: process.env.PATH },
             platform: process.platform,
             on() {},
+            exit() {},
             kill: (pid, signal) => process.kill(pid, signal),
         } },
     );
@@ -234,4 +241,14 @@ test('an abandoned run cannot leak text into the next run\'s reply', async () =>
     await second;
     assert.deepEqual(sent, ['next answer']);
     assert.equal(timers.size, 0);
+});
+
+test('the bridge refuses to start on a gptme without JSON output', () => {
+    const { exits } = bridge({}, { spawnSync: () => ({ stdout: 'Usage: gptme [OPTIONS]' }) });
+    assert.deepEqual(exits, [1]);
+});
+
+test('a gptme that supports JSON output starts normally', () => {
+    const { exits } = bridge();
+    assert.deepEqual(exits, []);
 });
