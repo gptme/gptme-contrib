@@ -1426,6 +1426,8 @@ def test_non_object_jsonl_line_is_skipped(tmp_path: Path, bad_line: str) -> None
         "https://hunter2pw@proxy.internal/path/@scope",
         "https://hunter2pw@proxy.internal/path:part/@scope",
         "bob://hunter2pw:tail@proxy.internal",
+        "https://bob:hunter2pw;token=beta@proxy.internal",
+        "https://bob:hunter2pw;password=beta@proxy.internal",
         "http://hunter2pw@proxy.internal:8080",
         "https://glpat-hunter2pw@gitlab.example/o/r.git",
         "user:pa@ss@proxy.internal:8080",

@@ -270,6 +270,18 @@ def _redact(text: str) -> str:
     net for short synthetic/truncated secrets the package's length floors miss.
     """
     text = _redact_ambiguous_quoted(text)
+    # Quoted assignments must be scrubbed whole before token scanning, which
+    # can remove their closing quote. Leave unquoted matches for AFTER the URL
+    # scan: an assignment inside a password can otherwise consume its @host.
+    for pat in _SECRET_PATTERNS:
+        if pat.groups:
+            text = pat.sub(
+                lambda m: m.group(1) + "[REDACTED]"
+                if m.group(0)[len(m.group(1)) :].startswith(('"', "'", '\\"', "\\'"))
+                else m.group(0),
+                text,
+            )
+    text = _redact_url_credentials(text)
     if _package_redact is not None:
         text = _PACKAGE_REDACT_MARKER.sub("[REDACTED]", _package_redact(text).redacted)
     for pat in _SECRET_PATTERNS:
@@ -277,8 +289,7 @@ def _redact(text: str) -> str:
             text = pat.sub(lambda m: m.group(1) + "[REDACTED]", text)
         else:
             text = pat.sub("[REDACTED]", text)
-    # Preserve quoted assignment boundaries until their whole value is scrubbed.
-    return _redact_url_credentials(text)
+    return text
 
 
 _STATUS_KEYS = frozenset({"code", "status", "status_code", "statuscode", "http_status"})
