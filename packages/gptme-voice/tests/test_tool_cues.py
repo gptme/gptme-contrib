@@ -135,8 +135,34 @@ async def test_completed_work_awaiting_delivery_is_not_cancelled(cancel_all):
     assert not task.done()
     await _flush_cues(bridge)
     cue.assert_not_awaited()
+    # A completed entry is not cancellable, so the cancel request reclaims it
+    # instead of leaving an unlisted zombie behind.
+    assert "one" not in bridge._pending_tasks
     task.cancel()
     await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_cancel_reclaims_a_task_that_ended_with_an_exception():
+    """A task that raised before its own pop is still reclaimed by a cancel."""
+    cue = AsyncMock()
+    bridge = GptmeToolBridge(on_cancel=cue)
+
+    async def raises():
+        raise RuntimeError("delivery failed")
+
+    task = asyncio.create_task(raises())
+    bridge._pending_tasks["one"] = PendingTask(
+        task=task, description="Broken", mode="fast", started_at=time.monotonic()
+    )
+    await asyncio.gather(task, return_exceptions=True)
+    assert task.done()
+
+    result = await bridge.handle_function_call("subagent_cancel", {"task_id": "one"})
+    assert result["status"] == "not_found"
+    assert "one" not in bridge._pending_tasks
+    await _flush_cues(bridge)
+    cue.assert_not_awaited()
 
 
 async def _dispatch_blocked_subagent(bridge, monkeypatch):

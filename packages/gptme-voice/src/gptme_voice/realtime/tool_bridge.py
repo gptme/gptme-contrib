@@ -1085,6 +1085,11 @@ class GptmeToolBridge:
         if entry.cancel_requested and not entry.task.done():
             return {"task_id": task_id, "cancelled": False, "cancelling": True}
         if entry.task.done() or entry.completed_at is not None:
+            # Nothing left to cancel. Reclaim the entry: a task that ended with
+            # an exception (e.g. delivery raising on the success path) never
+            # reaches _run_subagent's own pop, and would otherwise linger in
+            # _pending_tasks as an uncancellable, unlisted zombie.
+            self._pending_tasks.pop(task_id, None)
             return {"task_id": task_id, "cancelled": False}
         entry.cancel_requested = True
         entry.task.cancel()
@@ -1163,6 +1168,11 @@ class GptmeToolBridge:
             if task_id_arg:
                 entry = self._pending_tasks.get(task_id_arg)
                 if entry is None or entry.task.done():
+                    if entry is not None:
+                        # A task that ended with an exception never reaches
+                        # _run_subagent's own pop. Reclaim it here so it cannot
+                        # linger as an unlisted zombie.
+                        self._pending_tasks.pop(task_id_arg, None)
                     return {
                         "status": "not_found",
                         "task_id": task_id_arg,
