@@ -590,13 +590,17 @@ class Bandit:
         import fcntl
 
         self.state_dir.mkdir(parents=True, exist_ok=True)
-        lock_path = self.state_file.with_name(self.state_file.name + ".lock")
-        with open(lock_path, "a", encoding="utf-8") as lock_file:
+        with open(self.lock_file, "a", encoding="utf-8") as lock_file:
             fcntl.flock(lock_file, fcntl.LOCK_EX)
             try:
                 yield
             finally:
                 fcntl.flock(lock_file, fcntl.LOCK_UN)
+
+    @property
+    def lock_file(self) -> Path:
+        """Sidecar lock path; adapters may retain a legacy filename."""
+        return self.state_file.with_name(self.state_file.name + ".lock")
 
     @property
     def backup_file(self) -> Path:
@@ -664,6 +668,14 @@ class Bandit:
             ValueError: if mature arms would be removed without the override.
         """
         self.state_dir.mkdir(parents=True, exist_ok=True)
+        data = self._serialize_state()
+        if not allow_arm_deletion:
+            self._refuse_mature_arm_removal(data)
+        self._backup_current()
+        _atomic_write_text(self.state_file, json.dumps(data, indent=2) + "\n")
+
+    def _serialize_state(self) -> dict:
+        """Build the persisted document; adapters may retain a legacy wire format."""
         data: dict = {
             "arms": {arm_id: asdict(arm) for arm_id, arm in self.state.arms.items()},
             "total_sessions": self.state.total_sessions,
@@ -675,10 +687,7 @@ class Bandit:
                 arm_id: {ctx_key: asdict(arm) for ctx_key, arm in contexts.items()}
                 for arm_id, contexts in self.state.contextual_arms.items()
             }
-        if not allow_arm_deletion:
-            self._refuse_mature_arm_removal(data)
-        self._backup_current()
-        _atomic_write_text(self.state_file, json.dumps(data, indent=2) + "\n")
+        return data
 
     def _persisted_document(self) -> dict:
         """Return the first loadable persisted state document, or ``{}``.

@@ -24,7 +24,10 @@ systems:
 - [gptodo](../gptodo/README.md) — task management; the `team` loop's coordinator delegates
   through it
 - [gptmail](../gptmail/README.md) — the `email` loop syncs and answers mail through it
-- [gptme-sessions](../gptme-sessions/README.md) — analyse the sessions these loops produce
+- [gptme-sessions](../gptme-sessions/README.md) — analyse the sessions these loops produce;
+  its shared Thompson-sampling engine also owns PM model-routing posterior updates,
+  locking and persistence. The PM adapter retains existing state and reward policy
+  (no decay enabled), including the legacy wire format for rolling upgrades.
 - [gptme-coordination](../gptme-coordination/README.md) — work claims between concurrent agents
 
 ## Install
@@ -32,9 +35,9 @@ systems:
 Not published on PyPI. Install from the repository:
 
 ```bash
-uv tool install "git+https://github.com/gptme/gptme-contrib#subdirectory=packages/gptme-runloops"
+uv tool install --with "git+https://github.com/gptme/gptme-contrib#subdirectory=packages/gptme-sessions" "git+https://github.com/gptme/gptme-contrib#subdirectory=packages/gptme-runloops"
 # or, from a clone of gptme-contrib:
-uv pip install -e packages/gptme-runloops
+uv pip install -e packages/gptme-sessions -e packages/gptme-runloops
 ```
 
 The backend CLIs (`gptme`, `claude`, `codex`, `grok`) and `gh` are external and must be on

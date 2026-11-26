@@ -204,3 +204,175 @@ def test_work_type_classification():
         "notification-triage",
     ]:
         assert wt in PM_WORK_TYPES, f"{wt} should be in PM_WORK_TYPES"
+
+
+def test_shared_engine_and_legacy_state(tmp_path):
+    """Legacy PM documents load without resetting evidence or adding decay."""
+    from gptme_sessions.thompson_sampling import Bandit
+
+    aid = _arm_id("ci-fix", "codex:gpt-6.1-sol")
+    path = tmp_path / "bandit-state.json"
+    path.write_text(
+        json.dumps(
+            {
+                "arms": {
+                    aid: {
+                        "alpha": 21.5,
+                        "beta": 4.5,
+                        "total_selections": 24,
+                    }
+                }
+            }
+        )
+    )
+    bandit = PmModelBandit(state_dir=tmp_path)
+    assert isinstance(bandit, Bandit)
+    assert bandit.arms[aid].alpha == 21.5
+    bandit.record_outcome("ci-fix", "codex:gpt-6.1-sol", 0.25)
+    loaded = PmModelBandit(state_dir=tmp_path)
+    assert loaded.arms[aid].alpha == 21.75
+    assert loaded.arms[aid].beta == 5.25
+    assert loaded.arms[aid].total_selections == 25
+    assert loaded.arms[aid].arm_id == aid
+
+
+def test_recovery_does_not_overwrite_good_backup(tmp_path):
+    """Repeated recovery must not replace the good backup with corrupt bytes."""
+    aid = _arm_id("ci-fix", "haiku")
+    path = tmp_path / "bandit-state.json"
+    backup = tmp_path / "bandit-state.json.bak"
+    backup.write_text(
+        json.dumps(
+            {
+                "arms": {
+                    aid: {
+                        "alpha": 30.0,
+                        "beta": 2.0,
+                        "total_selections": 30,
+                    }
+                }
+            }
+        )
+    )
+    path.write_text("{broken")
+    PmModelBandit(state_dir=tmp_path).record_outcome("ci-fix", "haiku", "productive")
+    assert json.loads(backup.read_text())["arms"][aid]["alpha"] == 30.0
+    path.write_text("{broken again")
+    recovered = PmModelBandit(state_dir=tmp_path)
+    assert recovered.arms[aid].alpha == 30.0
+
+
+def test_shared_mature_arm_guard(tmp_path):
+    import pytest
+
+    bandit = PmModelBandit(state_dir=tmp_path)
+    for _ in range(12):
+        bandit.record_outcome("ci-fix", "haiku", "productive")
+    bandit.arms.clear()
+    with pytest.raises(ValueError, match="mature bandit arm"):
+        bandit._save()
+    assert (
+        PmModelBandit(state_dir=tmp_path)
+        .arms[_arm_id("ci-fix", "haiku")]
+        .total_selections
+        == 12
+    )
+
+
+def test_concurrent_updates_preserve_all_evidence(tmp_path):
+    import subprocess
+    import sys
+
+    # Independent interpreters avoid relying on pytest's importlib-only test
+    # module name being importable by multiprocessing's spawn unpickler.
+    script = """
+import sys
+from gptme_runloops.pm_bandit import PmModelBandit
+bandit = PmModelBandit(state_dir=sys.argv[1])
+for _ in range(10):
+    bandit.record_outcome("ci-fix", "haiku", "productive")
+"""
+    workers = [
+        subprocess.Popen([sys.executable, "-c", script, str(tmp_path)])
+        for _ in range(2)
+    ]
+    try:
+        for worker in workers:
+            assert worker.wait(timeout=30) == 0
+    finally:
+        for worker in workers:
+            if worker.poll() is None:
+                worker.kill()
+                worker.wait()
+    arm = PmModelBandit(state_dir=tmp_path).arms[_arm_id("ci-fix", "haiku")]
+    assert arm.total_selections == 20
+    assert arm.alpha == 21.0
+
+
+def test_new_writes_remain_readable_by_old_pm_workers(tmp_path):
+    """Rolling upgrades retain the three-field PM wire format and lock name."""
+    bandit = PmModelBandit(state_dir=tmp_path)
+    bandit.record_outcome("ci-fix", "haiku", "productive")
+    data = json.loads((tmp_path / "bandit-state.json").read_text())
+    assert set(data) == {"arms"}
+    for row in data["arms"].values():
+        assert set(row) == {"alpha", "beta", "total_selections"}
+    assert (tmp_path / "bandit-state.json.lock").exists()
+    # This is the constructor signature used by the old PM loader.
+    from dataclasses import make_dataclass
+
+    legacy_arm = make_dataclass("LegacyArm", ["alpha", "beta", "total_selections"])
+    old = legacy_arm(**data["arms"][_arm_id("ci-fix", "haiku")])
+    assert old.alpha == 2.0
+
+
+def test_reward_mapping_is_unchanged(tmp_path):
+    bandit = PmModelBandit(state_dir=tmp_path)
+    for outcome in ("productive", "failed", "unknown", -2.0, 5.0, 0.25):
+        bandit.record_outcome("ci-fix", "haiku", outcome)
+    arm = bandit.arms[_arm_id("ci-fix", "haiku")]
+    assert arm.alpha == 3.25
+    assert arm.beta == 4.75
+    assert arm.total_selections == 6
+
+
+def test_sampling_retains_rng_sequence_without_creating_unselected_arms(tmp_path):
+    aid = _arm_id("ci-fix", "haiku")
+    (tmp_path / "custom.json").write_text(
+        json.dumps(
+            {
+                "arms": {
+                    aid: {
+                        "alpha": 8.0,
+                        "beta": 3.0,
+                        "total_selections": 9,
+                    }
+                }
+            }
+        )
+    )
+    bandit = PmModelBandit(state_dir=tmp_path, state_file="custom.json")
+    actual_rng = random.Random(83)
+    expected_rng = random.Random(83)
+    for _ in range(20):
+        samples = {
+            "haiku": expected_rng.betavariate(8.0, 3.0),
+            "sonnet": expected_rng.betavariate(1.0, 1.0),
+        }
+        assert bandit.resolve_model(
+            "ci-fix", ["haiku", "sonnet"], rng=actual_rng
+        ) == max(samples, key=samples.__getitem__)
+    assert list(bandit.arms) == [aid]
+
+
+def test_non_json_filename_keeps_legacy_sidecars(tmp_path):
+    bandit = PmModelBandit(state_dir=tmp_path, state_file="custom.state")
+    bandit.record_outcome("ci-fix", "haiku", "productive")
+    bandit.record_outcome("ci-fix", "haiku", "productive")
+    assert bandit.lock_file == tmp_path / "custom.json.lock"
+    assert bandit.backup_file == tmp_path / "custom.json.bak"
+    assert bandit.lock_file.exists()
+    assert bandit.backup_file.exists()
+    (tmp_path / "custom.state").write_text("broken")
+    recovered = PmModelBandit(state_dir=tmp_path, state_file="custom.state")
+    assert recovered.arms[_arm_id("ci-fix", "haiku")].total_selections == 1

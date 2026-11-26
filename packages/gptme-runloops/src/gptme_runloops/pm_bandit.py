@@ -1,26 +1,13 @@
-"""PM dispatch model-routing bandit.
+"""PM dispatch model-routing adapter over the shared Thompson-sampling engine.
 
-Replaces the static fast/slow model split (resolve_lane_model()) with a
-Thompson-sampling bandit that learns per-work-type model assignments from
-actual dispatch outcomes.
+Each work type (strategy-reply, ci-fix, greptile-fix, etc.) has a separate
+Beta-Bernoulli arm per available model. Consumers use resolve_model() to sample
+and record_outcome() to learn from dispatch outcomes.
 
-Each work type (strategy-reply, ci-fix, greptile-fix, etc.) has a
-separate Beta-Bernoulli arm per available model. The bandit samples posterior
-distributions at dispatch time and picks the highest-scoring model, naturally
-balancing exploration and exploitation.
-
-Usage:
-
-    from gptme_runloops.pm_bandit import PmModelBandit
-
-    bandit = PmModelBandit()
-    model = bandit.resolve_model("ci-fix", ["haiku", "sonnet"])
-    bandit.record_outcome("ci-fix", model, "productive")
-
-State persists to state/pm-dispatch/bandit-state.json with atomic writes
-and .bak recovery (mirrors LessonBandit persistence). record_outcome() holds
-an exclusive fcntl lock during load+update+save to prevent lost updates when
-multiple dispatch workers run concurrently.
+State remains at state/pm-dispatch/bandit-state.json in the legacy PM format.
+The shared engine owns locking, reload-under-lock, atomic writes, valid-backup
+recovery and mature-arm protection. No decay is enabled by this adapter: this
+refactor preserves the existing PM reward and routing policy.
 
 Reference: https://github.com/gptme/gptme-contrib/pull/1075
 """
@@ -30,22 +17,10 @@ from __future__ import annotations
 import json
 import os
 import random
-import shutil
-import sys
-import tempfile
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
-# POSIX-only locking for concurrent dispatch workers.
-if sys.platform == "linux":
-    import fcntl
-elif sys.platform == "win32":
-    raise ImportError(
-        "pm_bandit requires POSIX file locking (fcntl). Windows is not supported."
-    )
-else:
-    import fcntl  # assume POSIX
+from gptme_sessions.thompson_sampling import Bandit, BanditState
+from gptme_sessions.thompson_sampling import BanditArm as SharedBanditArm
 
 PM_WORK_TYPES: set[str] = {
     "strategy-reply",
@@ -64,27 +39,31 @@ DEFAULT_STATE_DIR = "state/pm-dispatch"
 DEFAULT_STATE_FILE = "bandit-state.json"
 
 
-@dataclass
-class BanditArm:
-    """A single Beta-Bernoulli arm: one (work_type, model) pair."""
+class BanditArm(SharedBanditArm):
+    """Keep the PM constructor API while sharing posterior operations."""
 
-    alpha: float = 1.0
-    beta: float = 1.0
-    total_selections: int = 0
+    def __init__(
+        self,
+        alpha: float = 1.0,
+        beta: float = 1.0,
+        total_selections: int = 0,
+        *,
+        arm_id: str = "",
+        total_rewards: int = 0,
+        last_updated: str = "",
+    ):
+        super().__init__(
+            arm_id=arm_id,
+            alpha=alpha,
+            beta=beta,
+            total_selections=total_selections,
+            total_rewards=total_rewards,
+            last_updated=last_updated,
+        )
 
-    @property
-    def mean(self) -> float:
-        return self.alpha / (self.alpha + self.beta)
 
-    def sample(self, rng: random.Random | None = None) -> float:
-        if rng is not None:
-            return rng.betavariate(self.alpha, self.beta)
-        return random.betavariate(self.alpha, self.beta)
-
-    def update(self, reward: float) -> None:
-        self.alpha += reward
-        self.beta += 1.0 - reward
-        self.total_selections += 1
+class _PmState(BanditState):
+    arm_class = BanditArm
 
 
 def _arm_id(work_type: str, model: str) -> str:
@@ -98,20 +77,70 @@ def _parse_arm_id(arm_id: str) -> tuple[str, str] | None:
     return None
 
 
-class PmModelBandit:
-    """Thompson-sampling bandit for PM dispatch model routing."""
+class PmModelBandit(Bandit):
+    """PM naming, rewards and wire-format compatibility for the shared engine.
+
+    Use resolve_model(), record_outcome() and summary() for PM routing. The
+    legacy PM document persists only posterior parameters and selection counts;
+    inherited contextual/session-reporting APIs are not a PM persistence API.
+    """
+
+    state_class = _PmState
 
     def __init__(
         self,
         state_dir: str | Path | None = None,
         state_file: str = DEFAULT_STATE_FILE,
     ):
-        self.state_dir = Path(
-            state_dir or os.environ.get("PM_BANDIT_STATE_DIR") or DEFAULT_STATE_DIR
+        super().__init__(
+            state_dir=state_dir
+            or os.environ.get("PM_BANDIT_STATE_DIR")
+            or DEFAULT_STATE_DIR,
+            state_file=state_file,
         )
-        self.state_file = self.state_dir / state_file
-        self.arms: dict[str, BanditArm] = {}
-        self._load()
+
+    @property
+    def lock_file(self) -> Path:
+        return self.state_file.with_suffix(".json.lock")
+
+    @property
+    def backup_file(self) -> Path:
+        return self.state_file.with_suffix(".json.bak")
+
+    @property
+    def arms(self) -> dict[str, SharedBanditArm]:
+        """Expose the current state even after the shared engine reloads it."""
+        return self.state.arms
+
+    @classmethod
+    def _decode_state(cls, text: str) -> BanditState:
+        data = json.loads(text)
+        for aid, arm in data.get("arms", {}).items():
+            # Old PM files identify arms only by the enclosing key.
+            arm.setdefault("arm_id", aid)
+        return super()._decode_state(json.dumps(data))
+
+    def _serialize_state(self) -> dict:
+        # Retain the old wire format so an already-running old worker can still
+        # load a new worker's update. Both versions use bandit-state.json.lock.
+        return {
+            "arms": {
+                aid: {
+                    "alpha": arm.alpha,
+                    "beta": arm.beta,
+                    "total_selections": arm.total_selections,
+                }
+                for aid, arm in self.arms.items()
+            },
+        }
+
+    def _load(self) -> None:
+        """Compatibility alias for existing PM callers."""
+        self.state = self._load_state()
+
+    def _save(self) -> None:
+        """Compatibility alias; persisted mutations should use record_outcome()."""
+        self.save()
 
     def resolve_model(
         self,
@@ -141,26 +170,12 @@ class PmModelBandit:
         model: str,
         outcome: str | float,
     ) -> None:
-        """Record a dispatch outcome and update the posterior.
-
-        Holds an exclusive fcntl lock during load+update+save so concurrent
-        dispatch workers don't overwrite each other's posterior updates.
-        """
+        """Update under the shared engine's exclusive reload/update/save lock."""
         if isinstance(outcome, str):
             reward = 1.0 if outcome == "productive" else 0.0
         else:
             reward = max(0.0, min(1.0, float(outcome)))
-        self.state_dir.mkdir(parents=True, exist_ok=True)
-        lock_path = self.state_file.with_suffix(".json.lock")
-        with open(lock_path, "w") as lf:
-            fcntl.flock(lf, fcntl.LOCK_EX)
-            self.arms = {}
-            self._load()  # re-read under lock to pick up concurrent updates
-            aid = _arm_id(work_type, model)
-            if aid not in self.arms:
-                self.arms[aid] = BanditArm()
-            self.arms[aid].update(reward)
-            self._save()
+        self.update([_arm_id(work_type, model)], reward)
 
     def known_work_types(self) -> set[str]:
         types: set[str] = set()
@@ -188,51 +203,8 @@ class PmModelBandit:
 
     def _known_models(self, work_type: str) -> set[str]:
         models: set[str] = set()
-        for aid, arm in self.arms.items():
+        for aid in self.arms:
             parsed = _parse_arm_id(aid)
             if parsed and parsed[0] == work_type:
                 models.add(parsed[1])
         return models
-
-    def _load(self) -> None:
-        candidates = [self.state_file, self.state_file.with_suffix(".json.bak")]
-        for path in candidates:
-            if not path.exists():
-                continue
-            try:
-                data = json.loads(path.read_text())
-                for aid, arm_data in data.get("arms", {}).items():
-                    self.arms[aid] = BanditArm(**arm_data)
-                return
-            except (json.JSONDecodeError, TypeError, KeyError):
-                continue
-
-    def _save(self) -> None:
-        self.state_dir.mkdir(parents=True, exist_ok=True)
-        data: dict[str, Any] = {
-            "arms": {
-                aid: {
-                    "alpha": arm.alpha,
-                    "beta": arm.beta,
-                    "total_selections": arm.total_selections,
-                }
-                for aid, arm in self.arms.items()
-            },
-        }
-        if self.state_file.exists():
-            bak = self.state_file.with_suffix(".json.bak")
-            try:
-                shutil.copy2(self.state_file, bak)
-            except OSError:
-                pass
-        fd, tmp_path = tempfile.mkstemp(
-            dir=str(self.state_dir), suffix=".tmp", prefix="bandit-"
-        )
-        try:
-            with open(fd, "w") as f:
-                json.dump(data, f, indent=2)
-                f.write("\n")
-            Path(tmp_path).replace(self.state_file)
-        except BaseException:
-            Path(tmp_path).unlink(missing_ok=True)
-            raise
