@@ -67,14 +67,21 @@ def collect_codesize_section(
 ) -> dict:
     """Use declared Python dependencies as evidence for package review."""
     workspace = workspace.resolve()
-    report = build_report(workspace, code_only=True)
-    data = report.to_dict()
-    del data["root"]
-
     paths = _manifests(workspace)
     projects = {
         path.parent.relative_to(workspace).as_posix(): _read_project(path) for path in paths
     }
+    # Package evidence must stay per-package even when the detected profile is
+    # brain/metarepo or a repo-level group map merges package directories.
+    package_groups = {
+        path: path if (workspace / Path(path).name).is_dir() else Path(path).name
+        for path in projects
+        if path.startswith("packages/")
+    }
+    report = build_report(workspace, code_only=True, group_map=package_groups)
+    data = report.to_dict()
+    del data["root"]
+
     internal: Counter[str] = Counter()
     for project in projects.values():
         dependencies = _dependencies(project)

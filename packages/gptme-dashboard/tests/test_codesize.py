@@ -640,9 +640,15 @@ def test_code_only_filters_current_and_history(tmp_path: Path) -> None:
     assert build_report(tmp_path).largest_files[0].path == "docs/big.md"
 
 
-def test_dashboard_codesize_uses_matrix_and_distinct_agent_checkouts(tmp_path: Path) -> None:
+@pytest.mark.parametrize("brain", [False, True])
+def test_dashboard_codesize_uses_matrix_and_distinct_agent_checkouts(
+    tmp_path: Path, brain: bool
+) -> None:
     repo = tmp_path / "workspace"
     _init_repo(repo)
+    if brain:
+        for surface in ("tasks", "lessons", "journal"):
+            _write(repo, f"{surface}/entry.md", 3)
     for name, stage in [("core", "5 - Production/Stable"), ("old", "3 - Alpha")]:
         _write(repo, f"packages/{name}/src/logic.py", 1500 if name == "core" else 10)
         manifest = repo / f"packages/{name}/pyproject.toml"
@@ -699,8 +705,15 @@ def test_dashboard_codesize_uses_matrix_and_distinct_agent_checkouts(tmp_path: P
     report = json.loads((output / "data.json").read_text())["codesize"]
     assert report["agent_repos_scanned"] == 2
     assert "root" not in report
+    assert report["profile"] == ("brain" if brain else "monorepo")
+    if brain:
+        standalone = build_report(repo, code_only=True, history_weeks=0)
+        assert {group.name for group in standalone.groups} == {"packages"}
     rows = {row["name"]: row for row in report["packages"]}
     assert rows["core"]["flags"] == ["Upstream", "Split"]
+    assert rows["core"]["path"] == "packages/core"
+    assert rows["core"]["source_lines"] == 1505
+    assert rows["old"]["source_lines"] == 10
     assert rows["core"]["internal_dependents"] == 1
     assert rows["core"]["source_delta"] == 1
     assert report["history"][-1]["threshold_counts"] == {"1500": 1, "3000": 0}
