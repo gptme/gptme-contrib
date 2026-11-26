@@ -2867,9 +2867,9 @@ def _fetch_pr_file_totals(repo: str, number: int) -> dict[str, int] | None:
         return None
     if not isinstance(totals, dict):
         return None
-    if not all(
-        isinstance(totals.get(key), int) for key in ("changed_files", "additions")
-    ):
+    # `type(...) is int`, not isinstance: JSON true/false decode to bool, which
+    # is an int subclass and would slip through as 0/1.
+    if not all(type(totals.get(key)) is int for key in ("changed_files", "additions")):
         return None
     return cast("dict[str, int]", totals)
 
@@ -2894,6 +2894,11 @@ def _gptme_core_shapes_cover_files(
     file count catches a capped listing; the added-line sum catches the case
     where GitHub caps that count too, because the truncated shapes cannot
     account for every added line. Unknown or mismatched totals refuse.
+
+    Residual gap, accepted: a capped tail made only of zero-addition entries
+    (pure deletions, content-free renames, empty files) contributes 0 to both
+    sides, so it stays undetectable from these totals. No API field proves that
+    class of completeness; the gate errs closed everywhere it can.
     """
     if not totals:
         return False

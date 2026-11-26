@@ -2991,6 +2991,39 @@ def test_evaluate_pr_gptme_core_unknown_totals_refuses_eligibility() -> None:
     assert any("diff shape" in reason for reason in result.reasons), result.reasons
 
 
+def test_gptme_core_shapes_cover_files_compares_independent_totals() -> None:
+    """Pin the helper directly, so the totals comparison cannot silently drop.
+
+    The `evaluate_pr` tests derive their totals from the same fixture, which
+    makes an eligible-path pass self-consistent by construction. Here the two
+    sides are supplied independently.
+    """
+    files = ["gptme/a.py", "gptme/b.py"]
+    shapes = [
+        {"path": "gptme/a.py", "additions": 3},
+        {"path": "./gptme/b.py", "additions": 2},
+    ]
+    cover = self_merge_check._gptme_core_shapes_cover_files
+    assert cover(shapes, files, {"changed_files": 2, "additions": 5})
+    # A truncated shape read that loses added lines must refuse even when the
+    # file count still matches.
+    assert not cover(shapes, files, {"changed_files": 2, "additions": 900})
+    assert not cover(shapes, files, {"changed_files": 3001, "additions": 5})
+    assert not cover(shapes, files, None)
+
+
+@pytest.mark.parametrize("bad", [True, False])
+def test_fetch_pr_file_totals_rejects_bool_totals(bad: bool) -> None:
+    """JSON booleans are ints in Python; the type guard must still refuse."""
+    completed = subprocess.CompletedProcess(
+        args=[],
+        returncode=0,
+        stdout=f'{{"changed_files": {str(bad).lower()}, "additions": 1}}',
+    )
+    with patch.object(self_merge_check.subprocess, "run", return_value=completed):
+        assert self_merge_check._fetch_pr_file_totals("gptme/gptme", 999) is None
+
+
 @pytest.mark.parametrize(
     ("path", "status", "additions"),
     [
