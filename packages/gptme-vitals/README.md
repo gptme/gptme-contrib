@@ -214,10 +214,11 @@ views use mode-0600 files outside its served root and the same 0/1/2 exit codes.
 ## Private thread map and log
 
 The viewer consumes the existing session-lineage export; it does not mine a new
-forest, join agents, fetch sources or read journal files. Run it explicitly:
+forest, join agents, fetch sources or read journal files. Run it explicitly,
+replacing `example-agent` with the agent identity in your session store:
 
 ```sh
-gptme-sessions threads --since 1d --agent bob --no-journals --json > /private/threads.json
+gptme-sessions threads --since 1d --agent example-agent --no-journals --json > /private/threads.json
 gptme-vitals threads --input /private/threads.json \
   --private-root /private/vitals --public-root /served/vitals
 ```
