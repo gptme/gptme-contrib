@@ -483,6 +483,11 @@ def browser_act(
         return result
     if any(phrase in msg_lower for phrase in _no_retry_phrases):
         return result  # post-action failure — don't retry (avoid double-acting)
+    # A duplicate (positional ``>> nth=i``) is never retried, so skip the
+    # re-observe entirely rather than paying a browser round-trip whose result
+    # _find_same_element would discard.
+    if " >> nth=" in best.selector:
+        return result
 
     target = _find_same_element(
         best, browser_observe(reobserve_query, top_k=sys.maxsize)

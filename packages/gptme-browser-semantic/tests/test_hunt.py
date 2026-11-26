@@ -22,8 +22,10 @@ class Recorder:
         self.selects: list[tuple[str, str]] = []
         self.click_error: Exception | None = None
         self.fill_error: Exception | None = None
+        self.snapshots = 0
 
     def snapshot_page(self) -> str:
+        self.snapshots += 1
         return self.snapshot
 
     def click_element(self, selector: str) -> str:
@@ -290,6 +292,19 @@ def test_retry_is_skipped_for_duplicate_ordinal(
     result = browser_act(second)
     assert not result.success
     assert rec.clicks == [second.selector]
+
+
+def test_retry_skips_the_reobserve_for_a_duplicate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A duplicate is never retried, so no browser round-trip is paid for it."""
+    rec = _wire(Recorder(TWO_REPLIES), monkeypatch)
+    second = browser_observe("reply")[1]
+    snapshots = rec.snapshots
+    rec.click_error = TimeoutError("Timeout 30000ms exceeded.")
+    result = browser_act(second)
+    assert not result.success
+    assert rec.snapshots == snapshots
 
 
 def test_retry_does_not_follow_a_reordered_duplicate(
