@@ -1339,6 +1339,44 @@ def test_send_text_message_delivers_verbatim_user_turn() -> None:
     asyncio.run(_exercise())
 
 
+def test_send_typed_message_interrupts_an_active_reply() -> None:
+    """Typing while the model talks cancels that reply before the new turn."""
+
+    async def _exercise() -> None:
+        fake_ws = _FakeWebSocket()
+
+        async def _fake_connect(*_args, **_kwargs):
+            return fake_ws
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "gptme_voice.realtime.openai_client.websockets.connect", _fake_connect
+            )
+            client = OpenAIRealtimeClient(api_key="test-key")
+            await client.connect()
+            await client._handle_event({"type": "session.updated"})
+
+            baseline = len(fake_ws.sent)
+            assert await client.send_typed_message("idle turn") is False
+            assert [e["type"] for e in fake_ws.sent[baseline:]] == [
+                "conversation.item.create",
+                "response.create",
+            ]
+
+            await client._handle_event({"type": "response.created"})
+            assert client.responding
+            baseline = len(fake_ws.sent)
+            assert await client.send_typed_message("wait, not that") is True
+            assert [e["type"] for e in fake_ws.sent[baseline:]] == [
+                "response.cancel",
+                "conversation.item.create",
+                "response.create",
+            ]
+            await client.disconnect()
+
+    asyncio.run(_exercise())
+
+
 def test_send_text_message_times_out_if_session_never_becomes_ready() -> None:
     """A missing provider ready event must not pin the local handler forever."""
 

@@ -158,6 +158,8 @@ class _FakeRealtimeClient:
         self.disconnect_kwargs: dict[str, object] | None = None
         self.activate_session_count = 0
         self.on_function_call = None
+        self.sent_typed: list[str] = []
+        self.typed_interrupts = False
 
     async def connect(self) -> None:
         return None
@@ -179,6 +181,10 @@ class _FakeRealtimeClient:
 
     async def send_text_message(self, text: str) -> None:
         self.sent_text.append(text)
+
+    async def send_typed_message(self, text: str) -> bool:
+        self.sent_typed.append(text)
+        return self.typed_interrupts
 
 
 class _DummyToolBridge:
@@ -3228,6 +3234,217 @@ def test_browser_websocket_ignores_malformed_json_text_frame(
     asyncio.run(server.handle_browser_websocket(websocket))
 
     assert fake_client.commit_count == 1
+
+
+def _run_browser_call(
+    monkeypatch: pytest.MonkeyPatch,
+    server: VoiceServer,
+    websocket,
+    fake_client: _FakeRealtimeClient,
+) -> dict:
+    """Drive handle_browser_websocket with fakes; return what _on_call_end saw."""
+    seen: dict = {}
+
+    async def _fake_build_session_instructions(
+        *, caller_id: str, handoff_id: str | None
+    ) -> str:
+        return "You are Bob."
+
+    async def _fake_on_call_end(caller_id, source, transcript, *args, **kwargs):
+        seen.update(caller_id=caller_id, transcript=list(transcript))
+
+    monkeypatch.setattr(
+        server, "_build_session_instructions", _fake_build_session_instructions
+    )
+    monkeypatch.setattr(server, "_make_client", lambda _cfg, **_kw: fake_client)
+    monkeypatch.setattr(server, "_on_call_end", _fake_on_call_end)
+    monkeypatch.setattr("gptme_voice.realtime.server.GptmeToolBridge", _DummyToolBridge)
+    asyncio.run(server.handle_browser_websocket(websocket))
+    return seen
+
+
+def test_browser_typed_message_goes_to_the_call_and_the_transcript(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Text typed into the chat during a call is a user turn of the call."""
+    server = VoiceServer(enable_browser_transport=True)
+    websocket = _DummyBrowserWebSocket(
+        [
+            {
+                "type": "websocket.receive",
+                "text": json.dumps({"type": "text", "text": "  use the other file  "}),
+            },
+            {
+                "type": "websocket.receive",
+                "text": json.dumps({"type": "text", "text": " "}),
+            },
+            {"type": "websocket.disconnect"},
+        ]
+    )
+    fake_client = _FakeRealtimeClient()
+
+    seen = _run_browser_call(monkeypatch, server, websocket, fake_client)
+
+    assert fake_client.sent_typed == ["use the other file"]
+    assert [(t.role, t.text) for t in seen["transcript"]] == [
+        ("user", "use the other file")
+    ]
+    # Playback is always cleared: the provider may have finished streaming a
+    # reply the browser is still playing.
+    assert {"type": "clear"} in [json.loads(m) for m in websocket.text_messages]
+
+
+def test_browser_typed_message_during_a_reply_clears_playback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    server = VoiceServer(enable_browser_transport=True)
+    websocket = _DummyBrowserWebSocket(
+        [
+            {
+                "type": "websocket.receive",
+                "text": json.dumps({"type": "text", "text": "stop, wrong file"}),
+            },
+            {"type": "websocket.disconnect"},
+        ]
+    )
+    fake_client = _FakeRealtimeClient()
+    fake_client.typed_interrupts = True
+
+    _run_browser_call(monkeypatch, server, websocket, fake_client)
+
+    assert {"type": "clear"} in [json.loads(m) for m in websocket.text_messages]
+
+
+def test_probe_call_leaves_no_call_record(monkeypatch: pytest.MonkeyPatch) -> None:
+    """?probe=1 calls skip all post-call bookkeeping."""
+    server = VoiceServer(enable_browser_transport=True)
+    websocket = _DummyBrowserWebSocket(
+        [
+            {
+                "type": "websocket.receive",
+                "text": json.dumps({"type": "text", "text": "hi"}),
+            },
+            {"type": "websocket.disconnect"},
+        ]
+    )
+    websocket.query_params = {"probe": "1"}
+    seen = _run_browser_call(monkeypatch, server, websocket, _FakeRealtimeClient())
+    assert seen == {}  # _on_call_end never ran
+
+    normal = _DummyBrowserWebSocket([{"type": "websocket.disconnect"}])
+    seen = _run_browser_call(monkeypatch, server, normal, _FakeRealtimeClient())
+    assert seen["caller_id"] == "local"
+
+
+def test_probe_call_never_touches_the_conversation_or_a_real_caller(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A probe gets no conversation link (no context fetch, no transcript posts)
+    and a caller id of its own (no resume record of a real caller consumed)."""
+    server = VoiceServer(enable_browser_transport=True)
+    server.browser_secret = "s3cret"
+    server.gptme_server_url = "http://127.0.0.1:5700"
+    server.gptme_server_key = "k"
+    fetched: list[str] = []
+
+    async def _fetch(*args, **kwargs):
+        fetched.append(args[2])
+        raise AssertionError("probe fetched conversation context")
+
+    monkeypatch.setattr(
+        "gptme_voice.realtime.server.fetch_conversation_context", _fetch
+    )
+    seen_callers: list[str] = []
+
+    async def _build(*, caller_id: str, handoff_id: str | None) -> str:
+        seen_callers.append(caller_id)
+        return "You are Bob."
+
+    websocket = _DummyBrowserWebSocket(
+        [
+            {
+                "type": "websocket.receive",
+                "text": json.dumps({"type": "text", "text": "hi"}),
+            },
+            {"type": "websocket.disconnect"},
+        ]
+    )
+    websocket.query_params = {"probe": "1", "conversation_id": "conv-1"}
+    websocket.headers = {"x-gptme-voice-secret": "s3cret"}
+    websocket.client = None
+    monkeypatch.setattr(server, "_build_session_instructions", _build)
+    monkeypatch.setattr(
+        server, "_make_client", lambda _cfg, **_kw: _FakeRealtimeClient()
+    )
+    monkeypatch.setattr("gptme_voice.realtime.server.GptmeToolBridge", _DummyToolBridge)
+    asyncio.run(server.handle_browser_websocket(websocket))
+
+    assert fetched == []
+    assert len(seen_callers) == 1 and seen_callers[0].startswith("probe-")
+
+
+def test_probe_reporting_sends_transcript_and_tool_events() -> None:
+    from gptme_voice.realtime.server import _probe_reporting
+
+    sent: list[dict] = []
+    ai_turns: list[str] = []
+    user_turns: list[str] = []
+    injected: list[str] = []
+
+    class _Socket:
+        async def send_text(self, message: str) -> None:
+            sent.append(json.loads(message))
+
+    async def _on_ai(text: str) -> None:
+        ai_turns.append(text)
+
+    def _on_user(text: str, item_id: str | None = None) -> None:
+        user_turns.append(text)
+
+    async def _inject(text: str) -> None:
+        injected.append(text)
+
+    async def _exercise() -> None:
+        ai, user, wrap_result = _probe_reporting(_Socket(), _on_ai, _on_user)
+        user("what time is it")
+        await ai("Checking.")
+        await wrap_result(_inject)("It is noon.")
+        await asyncio.sleep(0)
+
+    asyncio.run(_exercise())
+    assert ai_turns == ["Checking."] and user_turns == ["what time is it"]
+    assert injected == ["It is noon."]
+    assert {"type": "transcript", "role": "assistant", "text": "Checking."} in sent
+    assert {"type": "transcript", "role": "user", "text": "what time is it"} in sent
+    assert {"type": "tool_result", "text": "It is noon."} in sent
+
+
+def test_browser_websocket_requires_sidecar_secret_when_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """As gptme-server's sidecar, /voice only accepts the server's tunnel."""
+    server = VoiceServer(enable_browser_transport=True)
+    server.browser_secret = "s3cret"
+
+    class _SecretSocket(_DummyBrowserWebSocket):
+        def __init__(self, secret: str | None) -> None:
+            super().__init__([{"type": "websocket.disconnect"}])
+            self.headers = {"x-gptme-voice-secret": secret} if secret else {}
+            self.close_code: int | None = None
+            self.client = None
+
+        async def close(self, code: int = 1000) -> None:
+            self.close_code = code
+
+    for bad in (None, "wrong"):
+        sock = _SecretSocket(bad)
+        asyncio.run(server.handle_browser_websocket(sock))
+        assert sock.close_code == 1008
+        assert not sock.accepted
+
+    good = _SecretSocket("s3cret")
+    _run_browser_call(monkeypatch, server, good, _FakeRealtimeClient())
+    assert good.accepted
 
 
 def test_audio_converter_independent_resample_states() -> None:

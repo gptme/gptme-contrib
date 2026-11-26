@@ -828,6 +828,26 @@ class OpenAIRealtimeClient:
         )
         await self._send_event("response.create", {})
 
+    @property
+    def responding(self) -> bool:
+        """True while the model is producing a response."""
+        return self._responding
+
+    async def send_typed_message(self, text: str) -> bool:
+        """Deliver a message the user typed during the call.
+
+        Like :meth:`send_text_message`, but a message typed while the model is
+        talking interrupts that reply first (the typed equivalent of speaking
+        over it), since a second ``response.create`` would be rejected while
+        one is active. Returns True if a reply was interrupted.
+        """
+        interrupted = self._responding
+        if interrupted:
+            await self._send_event("response.cancel", {})
+            self._responding = False
+        await self.send_text_message(text)
+        return interrupted
+
     async def wait_until_ready(self, timeout: float | None = None) -> None:
         """Wait until the provider has applied our session configuration.
 

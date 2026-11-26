@@ -9,6 +9,7 @@ import asyncio
 import base64
 import contextlib
 import hashlib
+import hmac
 import ipaddress
 import json
 import logging
@@ -21,6 +22,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -39,6 +41,7 @@ from ..handoff import HandoffWriter, get_valid_agents
 from ..rag import VoiceRag, rag_instruction_preamble, rag_tool_schema
 from ..vision import VisionSessionBridge, vision_tool_schema
 from .audio import AudioConverter
+from .conversation_link import LiveTranscriptSink, fetch_conversation_context
 from .latency import latency_trace_from_env
 from .missed_call_context import (
     CALLBACK_GREETING,
@@ -80,6 +83,71 @@ from .twilio_integration import (
     verify_stream_params,
 )
 from .xai_client import XAIRealtimeClient, _get_xai_api_key
+
+# Longest typed message accepted from the browser during a call.
+_MAX_TYPED_MESSAGE_CHARS = 8000
+
+# Header gptme-server's tunnel sets when this process is its voice sidecar.
+_BROWSER_SECRET_HEADER = "x-gptme-voice-secret"
+
+
+def _is_probe_call(websocket) -> bool:
+    """``?probe=1``: a test call that leaves no trace.
+
+    Probe calls get transcript and tool-result events on the websocket (so a
+    probe client can check what happened) and skip all post-call bookkeeping:
+    no call record, call history, post-call unit or transcript promotion.
+    """
+    query_params = getattr(websocket, "query_params", {}) or {}
+    return str(query_params.get("probe", "")).lower() in ("1", "true", "yes")
+
+
+def _probe_caller_id() -> str:
+    """A fresh caller id for a probe call, never shared with a real caller."""
+    return f"probe-{uuid.uuid4().hex[:12]}"
+
+
+def _probe_reporting(websocket, on_ai_transcript, on_user_transcript):
+    """Wrap transcript callbacks to also report each turn to a probe client."""
+
+    async def _send(event: dict) -> None:
+        try:
+            await websocket.send_text(json.dumps(event))
+        except Exception:  # client gone: reporting must never break the call
+            pass
+
+    async def _ai(text: str) -> None:
+        await on_ai_transcript(text)
+        await _send({"type": "transcript", "role": "assistant", "text": text})
+
+    def _user(text: str, item_id: str | None = None) -> None:
+        on_user_transcript(text, item_id)
+        asyncio.ensure_future(
+            _send({"type": "transcript", "role": "user", "text": text})
+        )
+
+    def _wrap_result(inject):
+        async def _on_result(text: str) -> None:
+            await _send({"type": "tool_result", "text": text[:2000]})
+            await inject(text)
+
+        return _on_result
+
+    return _ai, _user, _wrap_result
+
+
+def _notify_after(sink, on_ai_transcript, on_user_transcript):
+    """Wrap transcript callbacks so *sink* hears about every change."""
+
+    async def _ai(text: str) -> None:
+        await on_ai_transcript(text)
+        sink.notify()
+
+    def _user(text: str, item_id: str | None = None) -> None:
+        on_user_transcript(text, item_id)
+        sink.notify()
+
+    return _ai, _user
 
 
 def _websocket_peer_host(websocket) -> str | None:
@@ -899,6 +967,9 @@ class VoiceServer:
         self.post_call_command = _get_config_env("GPTME_VOICE_POST_CALL_COMMAND")
         self.gptme_server_url = _get_config_env("GPTME_VOICE_GPTME_SERVER_URL") or ""
         self.gptme_server_key = _get_config_env("GPTME_VOICE_GPTME_SERVER_KEY") or ""
+        # Set by gptme-server when it runs this process as its voice sidecar:
+        # /voice then requires the secret and accepts ?conversation_id=.
+        self.browser_secret = _get_config_env("GPTME_VOICE_BROWSER_SECRET") or ""
         self.state_dir = Path(
             _get_config_env("GPTME_VOICE_STATE_DIR") or _DEFAULT_STATE_DIR
         )
@@ -3326,7 +3397,12 @@ class VoiceServer:
 
         await websocket.accept()
 
-        caller_id = self._get_local_caller_id(websocket)
+        probe = _is_probe_call(websocket)
+        # A probe gets a caller id of its own, so it never resumes (and thereby
+        # consumes) a real caller's recent-call record or pending follow-up.
+        caller_id = (
+            _probe_caller_id() if probe else self._get_local_caller_id(websocket)
+        )
         handoff_id = self._get_local_handoff_id(websocket)
         realtime_client: OpenAIRealtimeClient | None = None
         tool_bridge: GptmeToolBridge | None = None
@@ -3358,6 +3434,11 @@ class VoiceServer:
                     call_sid=None,
                 )
             )
+            wrap_result = None
+            if probe:
+                on_ai_transcript, on_user_transcript, wrap_result = _probe_reporting(
+                    websocket, on_ai_transcript, on_user_transcript
+                )
             realtime_client = self._make_client(
                 session_cfg,
                 on_audio=lambda audio: self._send_local_audio(websocket, audio),
@@ -3368,7 +3449,11 @@ class VoiceServer:
 
             tool_bridge = GptmeToolBridge(
                 workspace=self.workspace,
-                on_result=realtime_client.inject_message,
+                on_result=(
+                    wrap_result(realtime_client.inject_message)
+                    if wrap_result
+                    else realtime_client.inject_message
+                ),
                 on_dispatch=self._make_sound_cue_callback(websocket, "dispatch"),
                 on_timeout=self._make_sound_cue_callback(websocket, "timeout"),
                 on_cancel=self._make_sound_cue_callback(websocket, "cancel"),
@@ -3439,6 +3524,11 @@ class VoiceServer:
                 vision_bridge.close()
             if realtime_client:
                 await self._disconnect_realtime_client(realtime_client)
+            if probe:
+                logger.info(
+                    "Probe call ended (%d turns); no call record", len(transcript)
+                )
+                return
             await self._on_call_end(
                 caller_id,
                 "local",
@@ -3457,21 +3547,72 @@ class VoiceServer:
 
         Accepts raw binary PCM16 audio frames at 16kHz from the browser side.
         Control messages remain JSON text frames.
+
+        When run as gptme-server's sidecar (``GPTME_VOICE_BROWSER_SECRET``
+        set), the server's tunnel must present the secret, and the call is
+        bound to the ``conversation_id`` it passes: the realtime model gets
+        the conversation's recent history, tools run in its workspace, and
+        transcript turns are appended to it live.
         """
+        if self.browser_secret and not hmac.compare_digest(
+            websocket.headers.get(_BROWSER_SECRET_HEADER, ""), self.browser_secret
+        ):
+            logger.warning(
+                "Rejecting /voice client %s: missing or wrong sidecar secret",
+                _websocket_peer_host(websocket) or "unknown",
+            )
+            await websocket.close(code=1008)
+            return
+
         await websocket.accept()
 
-        caller_id = self._get_local_caller_id(websocket)
+        conversation_id = (
+            str(websocket.query_params.get("conversation_id") or "") or None
+            if self.browser_secret
+            else None
+        )
+        probe = _is_probe_call(websocket)
+        caller_id = (
+            _probe_caller_id()
+            if probe
+            else f"webui:{conversation_id}"
+            if conversation_id
+            else self._get_local_caller_id(websocket)
+        )
         handoff_id = self._get_local_handoff_id(websocket)
         realtime_client: OpenAIRealtimeClient | None = None
         tool_bridge: GptmeToolBridge | None = None
         transcript: list[TranscriptTurn] = []
         audio_converter = AudioConverter()
+        live_sink: LiveTranscriptSink | None = None
+        tool_workspace = self.workspace
 
         try:
             instructions = await self._build_session_instructions(
                 caller_id=caller_id,
                 handoff_id=handoff_id,
             )
+            if (
+                conversation_id
+                and self.gptme_server_url
+                and self.gptme_server_key
+                and not probe  # a probe must not write into a real conversation
+            ):
+                context = await fetch_conversation_context(
+                    self.gptme_server_url, self.gptme_server_key, conversation_id
+                )
+                if context.instructions:
+                    instructions = f"{instructions}\n\n{context.instructions}"
+                if context.workspace:
+                    tool_workspace = context.workspace
+                live_sink = LiveTranscriptSink(
+                    server_url=self.gptme_server_url,
+                    api_key=self.gptme_server_key,
+                    conversation_id=conversation_id,
+                    call_sid=f"webui-{uuid.uuid4().hex[:12]}",
+                    transcript=transcript,
+                    call_metadata={"source": "webui", "provider": self.provider},
+                )
             body_adapter = self._body_adapter_for_websocket(
                 websocket, transport="browser"
             )
@@ -3489,17 +3630,34 @@ class VoiceServer:
                     call_sid=None,
                 )
             )
+            if live_sink is not None:
+                on_ai_transcript, on_user_transcript = _notify_after(
+                    live_sink, on_ai_transcript, on_user_transcript
+                )
+            wrap_result = None
+            if probe:
+                on_ai_transcript, on_user_transcript, wrap_result = _probe_reporting(
+                    websocket, on_ai_transcript, on_user_transcript
+                )
             realtime_client = self._make_client(
                 session_cfg,
                 on_audio=lambda audio: self._send_browser_audio(websocket, audio),
                 on_audio_end=lambda: self._send_browser_audio_end(websocket),
                 on_ai_transcript=on_ai_transcript,
                 on_user_transcript=on_user_transcript,
+                # Barge-in: the caller started talking, so drop queued playback.
+                # (audio_end only means the provider finished *streaming* the
+                # reply, which is long before the browser finished playing it.)
+                on_speech_started=lambda: self._send_browser_clear(websocket),
             )
 
             tool_bridge = GptmeToolBridge(
-                workspace=self.workspace,
-                on_result=realtime_client.inject_message,
+                workspace=tool_workspace,
+                on_result=(
+                    wrap_result(realtime_client.inject_message)
+                    if wrap_result
+                    else realtime_client.inject_message
+                ),
                 on_dispatch=self._make_sound_cue_callback(websocket, "dispatch"),
                 on_timeout=self._make_sound_cue_callback(websocket, "timeout"),
                 on_cancel=self._make_sound_cue_callback(websocket, "cancel"),
@@ -3554,6 +3712,10 @@ class VoiceServer:
                     continue
                 if data.get("type") == "commit":
                     await realtime_client.commit_audio()
+                elif data.get("type") == "text":
+                    await self._handle_browser_typed_message(
+                        websocket, realtime_client, transcript, live_sink, data
+                    )
 
         except WebSocketDisconnect:
             pass
@@ -3566,6 +3728,13 @@ class VoiceServer:
         finally:
             if realtime_client:
                 await self._disconnect_realtime_client(realtime_client)
+            if live_sink is not None:
+                await live_sink.close()
+            if probe:
+                logger.info(
+                    "Probe call ended (%d turns); no call record", len(transcript)
+                )
+                return
             await self._on_call_end(
                 caller_id,
                 "browser",
@@ -3727,9 +3896,49 @@ class VoiceServer:
         await websocket.send_bytes(audio_data)
 
     async def _send_browser_audio_end(self, websocket):
-        """Signal to the browser transport that playback is complete."""
+        """Signal that the provider finished streaming this reply's audio.
+
+        The browser keeps playing what it has buffered; this is not a stop.
+        """
         message = {"type": "audio_end"}
         await websocket.send_text(json.dumps(message))
+
+    async def _handle_browser_typed_message(
+        self,
+        websocket,
+        realtime_client: OpenAIRealtimeClient,
+        transcript: list[TranscriptTurn],
+        live_sink: LiveTranscriptSink | None,
+        data: dict,
+    ) -> None:
+        """A message the user typed into the chat during the call.
+
+        It goes to the realtime model as the user's turn (answered by voice),
+        and into the transcript, so it is added to the conversation like a
+        spoken turn rather than starting a text-agent step.
+        """
+        text = str(data.get("text") or "").strip()[:_MAX_TYPED_MESSAGE_CHARS]
+        if not text:
+            return
+        # A distinct item id keeps it from being merged with a speech partial.
+        _append_transcript_turn(
+            transcript,
+            "user",
+            text,
+            item_id=f"typed-{uuid.uuid4().hex[:8]}",
+            allow_continuation=False,
+        )
+        if live_sink is not None:
+            live_sink.notify(immediate=True)
+        await realtime_client.send_typed_message(text)
+        # Always drop queued playback: the provider may have finished streaming
+        # a long reply that the browser is still playing (responding == False),
+        # and the typed message supersedes it either way.
+        await self._send_browser_clear(websocket)
+
+    async def _send_browser_clear(self, websocket) -> None:
+        """Tell the browser to drop queued assistant audio (caller barge-in)."""
+        await websocket.send_text(json.dumps({"type": "clear"}))
 
     def run(self):
         """Run the server."""
