@@ -2,6 +2,7 @@
 
 import importlib
 import os
+import shutil
 import subprocess
 import sys
 import types
@@ -23,6 +24,8 @@ def sync(monkeypatch):
     monkeypatch.delitem(sys.modules, "gptme_lessons_extras.sync", raising=False)
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
     monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+    # Git localises its error messages via gettext; tests match on English text.
+    monkeypatch.setenv("LC_ALL", "C")
     return importlib.import_module("gptme_lessons_extras.sync")
 
 
@@ -247,6 +250,21 @@ def test_init_repo_force_keeps_original_on_interrupt_between_renames(
     kept = list(tmp_path.rglob("my-notes.md"))
     assert len(kept) == 1
     assert kept[0].read_text() == "user content\n"
+
+
+def test_init_repo_force_warns_when_staging_cleanup_fails(
+    tmp_path, monkeypatch, sync, capsys
+):
+    # A partially failed cleanup must not hide the copy left behind.
+    monkeypatch.setattr(sync, "NETWORK_REPO_URL", str(_bare_remote_with_seed(tmp_path)))
+    target = tmp_path / "network"
+    target.mkdir()
+    (target / "stale.md").write_text("old\n")
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
+    monkeypatch.setattr(shutil, "rmtree", lambda *a, **k: None)
+
+    assert sync.init_repo(target, force=True) == target
+    assert "Could not fully remove the staging directory" in capsys.readouterr().out
 
 
 def test_push_lessons_pushes_commit_left_by_failed_push(tmp_path, monkeypatch, sync):

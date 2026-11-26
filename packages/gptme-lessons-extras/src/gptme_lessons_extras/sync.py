@@ -160,6 +160,11 @@ def init_repo(network_dir: Path = DEFAULT_NETWORK_DIR, force: bool = False) -> P
     finally:
         if not keep_staging:
             shutil.rmtree(staging, ignore_errors=True)
+            if staging.exists():
+                print(
+                    f"⚠ Could not fully remove the staging directory {staging}; "
+                    "it may still hold a copy of the replaced repository."
+                )
 
 
 def export_to_network(
