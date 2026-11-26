@@ -362,16 +362,21 @@ def _is_test_path(rel_path: str) -> bool:
     return path.suffix in JS_SUFFIXES and path.stem.endswith((".test", ".spec"))
 
 
-def iter_source_files(root: Path, *, recurse_submodules: bool = False):
+def iter_source_files(root: Path, submodules: list[str] | None = None):
     """Yield (relative path, absolute path) for source files.
 
-    In a git repository these are the tracked files; elsewhere every file.
+    In a git repository these are the tracked files of ``root`` and of each listed
+    submodule; elsewhere every file.
     """
     if _is_git_repo(root):
-        args = ["ls-files", "-z"]
-        if recurse_submodules:
-            args.append("--recurse-submodules")
-        candidates = [root / p for p in _git(root, *args).split("\0") if p]
+        # Ask each repo in turn: `ls-files --recurse-submodules` silently skips
+        # a submodule that is checked out but not active.
+        candidates = [
+            root / base / p
+            for base in ("", *(submodules or []))
+            for p in _git(root / base, "ls-files", "-z").split("\0")
+            if p
+        ]
     else:
         candidates = list(root.rglob("*"))
     for path in candidates:
@@ -427,7 +432,7 @@ def build_report(
             for path, count in _change_counts(root / sub, hotspot_window).items():
                 change_counts[f"{sub}/{path}"] = count
 
-    for rel, path in iter_source_files(root, recurse_submodules=recurse):
+    for rel, path in iter_source_files(root, submodules):
         lines = _count_lines(path)
         if lines == 0:
             continue
@@ -527,7 +532,9 @@ def _lines_at_commit(
     cannot be read are added to ``unreadable``.
     """
     patterns = [f":(icase)*{suffix}" for suffix in sorted(SOURCE_SUFFIXES)]
-    out = _git(root, "grep", "-c", "-I", "", commit, "--", *patterns)
+    # pin the output shape against user config: no colour, cwd-relative paths
+    grep = ("-c", "grep.fullName=false", "grep", "--no-color")
+    out = _git(root, *grep, "-c", "-I", "", commit, "--", *patterns)
     rows: list[tuple[str, int]] = []
     marker = f"{commit}:"
     for line in out.splitlines():

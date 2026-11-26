@@ -480,3 +480,26 @@ def test_pnpm_lockfile_is_not_source(tmp_path: Path) -> None:
 
     assert [f.path for f in report.largest_files] == ["src/a.ts"]
     assert report.history[-1].source_lines == 5
+
+
+def test_user_grep_config_does_not_empty_or_reprefix_the_trend(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    _write(repo, "sub/src/a.py", 10)
+    _commit_all(repo)
+    _git(repo, "config", "color.grep", "always")
+    _git(repo, "config", "grep.fullName", "true")
+
+    report = build_report(repo / "sub", history_weeks=4)
+
+    assert report.history[-1].largest_file == "src/a.py"
+
+
+def test_metarepo_counts_a_checked_out_but_inactive_submodule(tmp_path: Path) -> None:
+    meta = _metarepo(tmp_path)
+    _git(meta, "config", "--remove-section", "submodule.modules/beta")
+
+    report = build_report(meta, history_weeks=4)
+
+    assert {g.name for g in report.groups} >= {"modules/alpha", "modules/beta"}
+    assert report.history[-1].source_lines == report.total_source_lines
