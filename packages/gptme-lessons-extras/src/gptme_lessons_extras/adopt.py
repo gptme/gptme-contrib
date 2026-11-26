@@ -18,6 +18,7 @@ from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TextIO
+from uuid import uuid4
 
 # Import from existing modules
 try:
@@ -165,8 +166,11 @@ def adopt_lesson(
         backup: Path | None = None
         previous: str | None = None
         if write_path.exists():
-            backup = write_path.with_name(f".{write_path.name}.previous")
-            backup.unlink(missing_ok=True)  # stale backup from a crashed run
+            # Unique per run, and never delete another run's backup: after a
+            # crash it can be the only copy of the overwritten lesson.
+            backup = write_path.with_name(
+                f".{write_path.name}.{uuid4().hex[:12]}.previous"
+            )
             try:
                 os.link(write_path, backup)
             except OSError:
@@ -209,8 +213,7 @@ def adopt_lesson(
             if backup is not None:
                 # The lesson and the ledger agree from here on; removing the
                 # backup is cleanup, so a failure must not be reported as a
-                # failed adoption. A leftover .previous is removed by the next
-                # adoption's stale-backup sweep.
+                # failed adoption. A leftover .previous is kept.
                 with contextlib.suppress(OSError):
                     backup.unlink(missing_ok=True)
 

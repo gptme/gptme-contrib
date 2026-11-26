@@ -238,6 +238,29 @@ def test_backup_cleanup_failure_is_not_a_failed_adoption(tmp_path, monkeypatch):
     assert len(json.loads(_ledger(lessons).read_text())["adoptions"]) == 1
 
 
+def test_backup_from_crashed_run_survives_next_adoption(tmp_path, monkeypatch):
+    """After a crash the backup is the only copy of the old lesson; keep it."""
+    meta, net = _network_lesson(tmp_path)
+    lessons = tmp_path / "ws" / "lessons"
+    local = lessons / "tools" / "git.md"
+    local.parent.mkdir(parents=True)
+    local.write_text("ORIGINAL LESSON\n")
+
+    def crash(**_kwargs):
+        raise KeyboardInterrupt  # not an Exception: no rollback, as in a crash
+
+    monkeypatch.setattr(adopt, "record_adoption", crash)
+    with pytest.raises(KeyboardInterrupt):
+        adopt.adopt_lesson(meta, net, lessons, force=True)
+    monkeypatch.undo()
+
+    ok, msg = adopt.adopt_lesson(meta, net, lessons, force=True)
+
+    assert ok, msg
+    (backup,) = local.parent.glob(".*.previous")
+    assert backup.read_text() == "ORIGINAL LESSON\n"
+
+
 def test_wrong_shaped_ledger_is_set_aside_not_blocking(tmp_path, capsys):
     """Valid JSON of the wrong shape must not block adoptions either."""
     lessons = tmp_path / "ws" / "lessons"
