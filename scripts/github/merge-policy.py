@@ -107,7 +107,10 @@ def main(argv: list[str] | None = None) -> int:
     rollout = merge_policy.rollout_repos(policy)
     classifier = gate.path_classifier()
 
-    jobs: list[tuple[str, int, list[merge_policy.FileChange] | None, str | None]] = []
+    rollout_lower = {r.lower() for r in rollout}
+    jobs: list[
+        tuple[str, int, list[merge_policy.FileChange] | None, str | None, bool]
+    ] = []
     if args.stdin:
         for item in json.load(sys.stdin):
             supplied = _changes(item.get("files") or [])
@@ -117,21 +120,26 @@ def main(argv: list[str] | None = None) -> int:
                 and total == len(supplied)
                 and len({c.path for c in supplied if c.path}) == total
             )
+            repo = item["repo"]
             title = item.get("title")
+            title_failed = False
             if (
                 complete
                 and not isinstance(title, str)
-                and item["repo"].lower() in {r.lower() for r in rollout}
+                and repo.lower() in rollout_lower
             ):
                 # A tier with title_types cannot be evaluated without the title,
-                # and reporting tier 2 here would disagree with the gate.
-                title = _pr_title(item["repo"], int(item["number"]))
+                # and reporting tier 2 here would disagree with the gate. A failed
+                # fetch is an error, never a silent tier-2 verdict.
+                title = _pr_title(repo, int(item["number"]))
+                title_failed = not isinstance(title, str)
             jobs.append(
                 (
-                    item["repo"],
+                    repo,
                     int(item["number"]),
                     supplied if complete else None,
                     title if isinstance(title, str) else None,
+                    title_failed,
                 )
             )
     for ref in args.refs:
@@ -140,12 +148,14 @@ def main(argv: list[str] | None = None) -> int:
             print(f"bad ref {ref!r}; expected OWNER/REPO#N", file=sys.stderr)
             return 2
         repo, number = m.group(1), int(m.group(2))
+        title = _pr_title(repo, number)
         jobs.append(
             (
                 repo,
                 number,
                 gate.fetch_pr_file_changes(repo, number),
-                _pr_title(repo, number),
+                title,
+                repo.lower() in rollout_lower and not isinstance(title, str),
             )
         )
     if not jobs:
@@ -153,10 +163,13 @@ def main(argv: list[str] | None = None) -> int:
 
     out: list[dict[str, Any]] = []
     failed = False
-    for repo, number, changes, title in jobs:
+    for repo, number, changes, title, title_failed in jobs:
         row: dict[str, Any] = {"repo": repo, "number": number}
         if changes is None:
             row["error"] = "could not establish complete PR file inventory"
+            failed = True
+        elif title_failed:
+            row["error"] = "could not fetch PR title for a title-scoped tier"
             failed = True
         else:
             row.update(

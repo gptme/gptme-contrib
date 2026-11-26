@@ -179,6 +179,23 @@ def test_scanner_stdin_fetches_missing_title_for_rollout_repo(capsys) -> None:
     assert [(r["number"], r["tier"], r["rollout"]) for r in rows] == [(8, 1, True)]
 
 
+def test_scanner_stdin_errors_when_title_fetch_fails(capsys) -> None:
+    """A failed title fetch is an error, not a silent tier-2 verdict."""
+    payload = [
+        {
+            "repo": REPO,
+            "number": 8,
+            "changedFiles": 1,
+            "files": [{"path": "src/a.ts", "additions": 3}],
+        }
+    ]
+    with patch.object(cli, "_pr_title", return_value=None):
+        with patch.object(sys, "stdin", io.StringIO(json.dumps(payload))):
+            assert cli.main(["tier", "--stdin", "--json"]) == 2
+    row = json.loads(capsys.readouterr().out)[0]
+    assert "error" in row and "tier" not in row
+
+
 def test_scanner_cli_rejects_bad_ref(capsys) -> None:
     assert cli.main(["tier", "not-a-ref"]) == 2
 

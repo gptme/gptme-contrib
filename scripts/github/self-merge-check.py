@@ -4139,7 +4139,9 @@ def merge_policy_tier_waiver(
             "(update this gptme-contrib checkout to origin/master)",
             None,
         )
-    if repo not in merge_policy.rollout_repos(policy):
+    # Case-insensitive: the AW conversion and assign_tier's repo scoping both
+    # lowercase, so an exact-case lookup would refuse a lowercase --repo.
+    if repo.lower() not in {r.lower() for r in merge_policy.rollout_repos(policy)}:
         return reasons, None, None
     changes = fetch_pr_file_changes(repo, number)
     if changes is None or {c.path for c in changes} != set(files):

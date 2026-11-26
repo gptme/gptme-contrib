@@ -126,6 +126,22 @@ def test_aw_tier1_waives_path_reason_but_keeps_hard_stop() -> None:
     assert warning and "merge-policy tier 1" in warning
 
 
+def test_aw_tier1_waiver_is_case_insensitive_on_repo() -> None:
+    """A lowercase --repo must still reach the tier waiver."""
+    changes = [mp.FileChange("src/app.py", 120)]
+    with patch.object(smc, "fetch_pr_file_changes", return_value=changes):
+        remaining, warning, verdict = smc.merge_policy_tier_waiver(
+            ["Files not in any allowed self-merge category: src/app.py"],
+            repo="activitywatch/aw-webui",
+            number=1,
+            files=["src/app.py"],
+            title="fix: stop double-save on blur",
+        )
+    assert remaining == []
+    assert warning and "merge-policy tier 1" in warning
+    assert verdict and verdict["tier"] == 1
+
+
 def test_aw_src_fix_is_waived_as_tier1() -> None:
     changes = [mp.FileChange("src/app.py", 120)]
     with patch.object(smc, "fetch_pr_file_changes", return_value=changes):
