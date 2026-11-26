@@ -139,8 +139,9 @@ def test_rewrite_does_not_duplicate_id_less_rows(tmp_path: Path) -> None:
 
     rows = [json.loads(line) for line in snapshots[-1].splitlines()]
     assert len(rows) == 2
-    # Neither an invented id nor an invented "now" timestamp reaches the file.
-    assert "session_id" not in rows[0]
+    # The derived id is persisted (stable identity across rewrites); the
+    # invented "now" timestamp never reaches the file.
+    assert rows[0]["session_id"].startswith("noid-")
     assert "timestamp" not in rows[0]
     assert {k: rows[0][k] for k in legacy} == legacy
     assert rows[1]["session_id"] == "keep01"
@@ -175,9 +176,10 @@ def test_update_to_id_less_row_replaces_it_in_place(tmp_path: Path) -> None:
     rows = [json.loads(line) for line in store.path.read_text(encoding="utf-8").splitlines()]
     assert len(rows) == 2
     assert rows[0]["outcome"] == "productive"
-    # A timestamp that was on disk is real data and is kept; the id stays absent.
+    # A timestamp that was on disk is real data and is kept; the derived id is
+    # persisted so later rewrites match this row by id.
     assert rows[0]["timestamp"] == "2026-01-02T03:04:05+00:00"
-    assert "session_id" not in rows[0]
+    assert rows[0]["session_id"].startswith("noid-")
     assert rows[1]["session_id"] == "b"
 
 
@@ -220,7 +222,7 @@ def test_two_rewrites_of_the_same_records_keep_one_id_less_row(tmp_path: Path) -
     rows = [json.loads(line) for line in store.path.read_text(encoding="utf-8").splitlines()]
     assert len(rows) == 1
     assert rows[0]["model"] == "opus"
-    assert "session_id" not in rows[0]
+    assert rows[0]["session_id"].startswith("noid-")
 
 
 def test_mutate_rewrite_twice_without_reload_keeps_one_id_less_row(tmp_path: Path) -> None:
@@ -238,7 +240,7 @@ def test_mutate_rewrite_twice_without_reload_keeps_one_id_less_row(tmp_path: Pat
     assert len(rows) == 1
     assert rows[0]["attempt_kind"] == "repetition"
     assert rows[0]["category"] == "code"
-    assert "session_id" not in rows[0]
+    assert rows[0]["session_id"].startswith("noid-")
 
 
 @pytest.mark.parametrize("interleaving", ["subset", "stamp"])
@@ -266,7 +268,7 @@ def test_unrelated_rewrite_keeps_outstanding_id_less_copy_matched(
     assert len(rows) == 2
     assert rows[0]["category"] == "code"
     assert rows[0]["extra"] == {"z": 1, "a": 2}
-    assert "session_id" not in rows[0]
+    assert rows[0]["session_id"].startswith("noid-")
     assert "timestamp" not in rows[0]
     assert rows[1]["session_id"] == "keep01"
     if interleaving == "stamp":
@@ -311,7 +313,68 @@ def test_appended_id_less_row_stays_matched_on_later_rewrites(tmp_path: Path, so
         rows = [json.loads(line) for line in store.path.read_text(encoding="utf-8").splitlines()]
         assert [row["model"] for row in rows] == expected_models
         assert rows[-1]["category"] == category
-        assert all("session_id" not in row and "timestamp" not in row for row in rows)
+        assert all(
+            str(row.get("session_id", "")).startswith("noid-") and "timestamp" not in row
+            for row in rows
+        )
 
     if source == "archive":
         assert archive.read_text(encoding="utf-8") == legacy
+
+
+def test_stale_copy_after_same_row_change_replaces_in_place(tmp_path: Path) -> None:
+    """Another writer changing the same id-less row must not spawn a duplicate.
+
+    Regression for the P1 on #2338: the persisted ``noid-`` id is stable, so a
+    stale outstanding copy still matches the changed on-disk row by id.
+    """
+    store = SessionStore(sessions_dir=tmp_path)
+    store.path.write_text(json.dumps({"model": "opus"}) + "\n", encoding="utf-8")
+
+    x = store.load_all()[0]
+    # A different writer stamps the same row (its own load -> mutate -> rewrite).
+    assert store.stamp_attempt_kind(x.session_id, "repetition")
+
+    x.category = "code"
+    store.rewrite([x])
+
+    rows = [json.loads(line) for line in store.path.read_text(encoding="utf-8").splitlines()]
+    # One row, not two. The stale copy replaces in place (losing the other
+    # writer's stamp), the same documented lost-update a real-id row gets.
+    assert len(rows) == 1
+    assert rows[0]["category"] == "code"
+    assert rows[0]["session_id"].startswith("noid-")
+
+
+def test_derived_id_is_stable_across_format_only_rewrite(tmp_path: Path) -> None:
+    """A no-op rewrite re-serialises the row canonically but keeps its id."""
+    store = SessionStore(sessions_dir=tmp_path)
+    store.path.write_text(json.dumps({"model": "opus"}) + "\n", encoding="utf-8")
+
+    old_id = store.load_all()[0].session_id
+    store.rewrite(store.load_all())  # unrelated, formatting-only rewrite
+    new_id = store.load_all()[0].session_id
+
+    assert old_id == new_id
+    # An id obtained before the rewrite still resolves afterwards.
+    assert store.stamp_attempt_kind(old_id, "repetition")
+
+
+def test_repeated_rewrite_of_noncanonical_field_value_keeps_one_row(tmp_path: Path) -> None:
+    """A value normalised on read must not change the persisted id.
+
+    Regression for the P1 on #2338: ``run_type`` is normalised by
+    ``SessionRecord.from_dict`` but not by ``to_dict``, so the id has to come
+    from the canonical content rather than the raw in-memory field.
+    """
+    store = SessionStore(sessions_dir=tmp_path)
+    store.path.write_text(json.dumps({"model": "opus"}) + "\n", encoding="utf-8")
+
+    record = store.load_all()[0]
+    record.run_type = "123"  # normalised to "autonomous" on the next read
+    for _ in range(3):
+        store.rewrite([record])
+
+    rows = [json.loads(line) for line in store.path.read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == 1
+    assert rows[0]["session_id"].startswith("noid-")
