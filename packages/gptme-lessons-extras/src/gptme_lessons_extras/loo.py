@@ -203,7 +203,7 @@ def analyze(
         )
     if category_controlled:
         warnings.append(
-            "Category deltas use eligible category-size weights; pooled z/p are descriptive and are not a category-adjusted significance test."
+            "Category deltas use eligible category-size weights; means and z/p are null because pooled statistics are not a category-adjusted comparison."
         )
     lesson_ids = sorted({lid for s in sessions for lid in s["lessons"]})
     results = []
@@ -269,6 +269,13 @@ def analyze(
         )
         if comparison and category_controlled:
             result["delta"] = round(weighted_delta / total_weight, 4)
+            for field in (
+                "avg_reward_with",
+                "avg_reward_without",
+                "z_score",
+                "p_value_approx",
+            ):
+                result[field] = None
         if not comparison:
             row_warnings.append(
                 "insufficient_samples: no eligible with/without comparison"

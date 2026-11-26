@@ -147,6 +147,11 @@ def test_category_control_reverses_simpson_confound():
     result = controlled["results"][0]
     assert raw["delta"] == -0.46
     assert result["delta"] == 0.1
+    for field in ("avg_reward_with", "avg_reward_without", "z_score", "p_value_approx"):
+        assert result[field] is None
+    assert raw["avg_reward_with"] == 0.27
+    assert raw["avg_reward_without"] == 0.73
+    assert raw["z_score"] < 0
     assert result["categories_used"] == 2
     assert result["sessions_with"] == 10
     assert result["sessions_without"] == 10

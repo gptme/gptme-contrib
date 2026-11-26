@@ -192,8 +192,10 @@ small samples and does not correct for testing many lessons.
 both arms, then averages deltas weighted by category size. Categories lacking an
 arm are excluded. Comparison counts and trigger averages use only eligible
 categories; `exposed_sessions` and `unexposed_sessions` count the full corpus.
-Its pooled p-value is descriptive, not a category-adjusted
-significance test. Category control cannot remove all selection effects.
+Means, `z_score` and `p_value_approx` are null in this mode: pooled statistics
+can point in the opposite direction from the controlled delta and are not a
+category-adjusted significance test. Category control cannot remove all selection
+effects.
 
 Warnings keep three recurring failure modes visible:
 
