@@ -83,59 +83,131 @@ def _looks_like_openrouter_model(model_name: str) -> bool:
 
 
 @lru_cache(maxsize=256)
-def _segment_glob_regex(pattern: str) -> re.Pattern[str]:
-    """Compile a path glob where ``*``/``?`` stay within one path segment.
+def _class_matcher(body: str) -> re.Pattern[str] | None:
+    """Compile the body of a ``[...]`` glob class, or ``None`` if invalid.
 
-    ``**/`` matches zero or more directories, a trailing ``/**`` matches
-    anything below, and ``[...]`` is a character class (``[!...]`` negated).
-    Unlike ``fnmatch``, ``src/*.py`` does not match ``src/sub/x.py``.
+    Mirrors ``fnmatch``: a leading ``!`` negates, a leading ``^`` or ``[`` is a
+    literal, and a body the regex engine rejects makes ``fnmatch`` treat the
+    ``[`` literally instead of raising.
     """
-    out: list[str] = []
-    i, n = 0, len(pattern)
-    while i < n:
-        if pattern.startswith("**/", i) and (i == 0 or pattern[i - 1] == "/"):
-            out.append("(?:.*/)?")
-            i += 3
-        elif pattern.startswith("/**", i) and i + 3 == n:
-            out.append("(?:/.*)?")
-            i += 3
-        elif pattern[i:] == "**" and (i == 0 or pattern[i - 1] == "/"):
-            out.append(".*")
-            i += 2
-        elif pattern[i] == "*":
-            out.append("[^/]*")
-            i += 1
-        elif pattern[i] == "?":
-            out.append("[^/]")
-            i += 1
-        elif pattern[i] == "[" and "]" in pattern[i + 2 :]:
-            end = pattern.index("]", i + 2)
-            body = pattern[i + 1 : end].replace("\\", "\\\\")
-            if body.startswith("!"):
-                body = "^" + body[1:]
-            elif body[:1] in ("^", "["):
-                # fnmatch treats a leading '^' or '[' as a literal
-                body = "\\" + body
-            candidate = "[" + body + "]"
-            try:
-                re.compile(candidate)
-            except re.error:
-                # e.g. '[!]' or a reversed range: fnmatch treats these as
-                # literals rather than raising, so match the '[' literally.
-                out.append(re.escape("["))
-                i += 1
-                continue
-            # Even negated classes and ranges containing '/' stay in a segment.
-            out.append("(?!/)" + candidate)
-            i = end + 1
+    if body.startswith("!"):
+        body = "^" + body[1:]
+    elif body[:1] in ("^", "["):
+        body = "\\" + body
+    try:
+        return re.compile("[" + body + "]")
+    except re.error:
+        return None
+
+
+def _class_end(pattern: str, start: int) -> int:
+    """Index of the ``]`` closing the class opened at ``start``, or ``-1``."""
+    n = len(pattern)
+    j = start + 1
+    if j < n and pattern[j] == "!":
+        j += 1
+    if j < n and pattern[j] == "]":
+        # A ']' right after '[' or '[!' is a literal member (fnmatch rule).
+        j += 1
+    while j < n and pattern[j] != "]":
+        j += 1
+    return j if j < n else -1
+
+
+def _segment_token_match(pattern: str, pos: int, char: str) -> int | None:
+    """Match the pattern token at ``pos`` against ``char``; return the next pos."""
+    token = pattern[pos]
+    if token == "?":
+        return pos + 1
+    if token == "[":
+        end = _class_end(pattern, pos)
+        if end < 0:
+            return pos + 1 if char == "[" else None
+        matcher = _class_matcher(pattern[pos + 1 : end].replace("\\", "\\\\"))
+        if matcher is None:
+            return pos + 1 if char == "[" else None
+        return end + 1 if matcher.match(char) else None
+    return pos + 1 if token == char else None
+
+
+def _segment_match(pattern: str, text: str) -> bool:
+    """Match one path segment against ``*``, ``?`` and ``[...]``.
+
+    Greedy two-pointer matching, so a pathological pattern cannot trigger the
+    exponential backtracking a translated regex would.
+    """
+    p = t = 0
+    star = -1
+    mark = 0
+    while t < len(text):
+        if p < len(pattern) and pattern[p] == "*":
+            star = p
+            mark = t
+            p += 1
+            continue
+        advanced = _segment_token_match(pattern, p, text[t]) if p < len(pattern) else None
+        if advanced is not None:
+            p = advanced
+            t += 1
+        elif star >= 0:
+            mark += 1
+            t = mark
+            p = star + 1
         else:
-            out.append(re.escape(pattern[i]))
-            i += 1
-    return re.compile("".join(out))
+            return False
+    while p < len(pattern) and pattern[p] == "*":
+        p += 1
+    return p == len(pattern)
+
+
+def _split_segments(pattern: str) -> list[str]:
+    """Split a glob on ``/``, leaving separators inside ``[...]`` alone."""
+    parts: list[str] = []
+    start = i = 0
+    while i < len(pattern):
+        if pattern[i] == "[":
+            end = _class_end(pattern, i)
+            i = end + 1 if end >= 0 else i + 1
+            continue
+        if pattern[i] == "/":
+            parts.append(pattern[start:i])
+            start = i + 1
+        i += 1
+    parts.append(pattern[start:])
+    return parts
 
 
 def _segment_glob_match(path: str, pattern: str) -> bool:
-    return _segment_glob_regex(pattern).fullmatch(path) is not None
+    """Match ``path`` against a glob whose ``*``/``?`` stay in one segment.
+
+    ``**`` as a whole segment matches zero or more directories, ``[...]`` is a
+    character class (``[!...]`` negated), and unlike ``fnmatch``,
+    ``src/*.py`` does not match ``src/sub/x.py``.
+    """
+    if pattern.endswith("/") and not path.endswith("/"):
+        return False
+    pattern_parts = _split_segments(pattern)
+    path_parts = path.split("/")
+    i = j = 0
+    star_j = -1
+    star_i = 0
+    while i < len(path_parts):
+        if j < len(pattern_parts) and pattern_parts[j] == "**":
+            star_j = j
+            star_i = i
+            j += 1
+        elif j < len(pattern_parts) and _segment_match(pattern_parts[j], path_parts[i]):
+            i += 1
+            j += 1
+        elif star_j >= 0:
+            star_i += 1
+            i = star_i
+            j = star_j + 1
+        else:
+            return False
+    while j < len(pattern_parts) and pattern_parts[j] == "**":
+        j += 1
+    return j == len(pattern_parts)
 
 
 class ChromaDBFilter(Filter):

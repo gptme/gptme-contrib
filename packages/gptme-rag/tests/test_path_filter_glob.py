@@ -1,5 +1,7 @@
 """``path_filters`` globs match within one path segment (gptme/gptme-contrib#2356, Q4)."""
 
+import time
+
 import pytest
 from gptme_rag.indexing.document import Document
 from gptme_rag.indexing.indexer import Indexer
@@ -67,3 +69,18 @@ def test_leading_caret_is_a_literal_in_a_class():
 )
 def test_segment_globs_still_match(source, pattern):
     assert _matches(source, pattern)
+
+
+def test_literal_closing_bracket_member_after_negation():
+    """``[!]]`` is a negated class containing a literal ']' (fnmatch rule)."""
+    assert _matches("/repo/src/a.py", "src/[!]].py")
+    assert not _matches("/repo/src/].py", "src/[!]].py")
+
+
+def test_pathological_star_pattern_matches_in_linear_time():
+    """Overlapping stars must not trigger exponential regex backtracking."""
+    pattern = "src/" + "*a" * 10 + "*.py"
+    source = "/repo/src/" + "a" * 24 + ".txt"
+    start = time.perf_counter()
+    assert not _matches(source, pattern)
+    assert time.perf_counter() - start < 0.5
