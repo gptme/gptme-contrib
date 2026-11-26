@@ -42,6 +42,8 @@ def _run(tmp_path: Path, body: bytes) -> tuple[subprocess.CompletedProcess[str],
         b"fix: x\n\n# ------------------------ >8 ------------------------\n"
         b"diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-old\n+new\n"
         b"\n  </think>\n",
+        b"fix: x\n\n# ------------------------ >8 ------------------------\n"
+        b"diff --git a/f b/f\n </think>\n",
     ],
 )
 def test_bare_tag_line_rejects_and_leaves_message_untouched(
