@@ -1720,6 +1720,7 @@ def test_non_git_gitignore_negated_dir_does_not_reinclude_files(
         ("*\n!*/\n!*.md\n", {"notes.txt", "sub/notes.txt"}),
         ("*\n!docs/\n", {"notes.txt", "keep.md", "sub/notes.txt", "sub/keep.md"}),
         ("docs/\n", {"notes.txt", "keep.md", "sub/notes.txt", "sub/keep.md"}),
+        ("docs/\n!docs/\n", set()),
     ],
 )
 def test_non_git_gitignore_ancestor_directory_negation_does_not_reinclude_files(

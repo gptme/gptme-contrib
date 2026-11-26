@@ -1094,14 +1094,13 @@ class Indexer:
         return specs
 
     @staticmethod
-    def _spec_decision(spec: GitIgnoreSpec, rel_path: str, root_len: int) -> bool | None:
+    def _spec_decision(spec: GitIgnoreSpec, rel_path: str) -> bool | None:
         """Return True (ignored), False (re-included) or None (no rule matches).
 
-        ``root_len`` is the length of the scan-root prefix in ``rel_path``.
         pathspec also matches a directory rule against everything below that
-        directory. Below the scan root ``_is_ignored`` decides each directory
-        itself, so such a match must not decide a descendant: ``!*/`` un-ignores
-        directories, not the files inside them.
+        directory. ``_is_ignored`` decides each directory itself, including the
+        scan root and its ancestors, so such a match must not decide a descendant:
+        ``!*/`` un-ignores directories, not the files inside them.
         """
         for pattern in reversed(spec.patterns):
             if pattern.regex and pattern.match_file(rel_path):
@@ -1112,13 +1111,7 @@ class Indexer:
                     for m in pattern.regex.finditer(rel_path)
                     if m.groupdict().get("ps_d")
                 ]
-                # An ignored scan root excludes its contents, but re-including
-                # that root never re-includes its descendants.
-                if (
-                    dir_ends
-                    and len(rel_path) not in dir_ends
-                    and (max(dir_ends) > root_len or not pattern.include)
-                ):
+                if dir_ends and len(rel_path) not in dir_ends:
                     continue
                 # pathspec marks a plain pattern as include=True (it ignores) and a
                 # ``!`` pattern as include=False (it re-includes).
@@ -1140,8 +1133,7 @@ class Indexer:
             # ``root_rel`` is the scan root relative to this rule set's directory
             # (``.`` for the root itself), so ancestor rules see the full path.
             spec_rel = rel_path if root_rel == "." else f"{root_rel}/{rel_path}"
-            root_len = len(spec_rel) - len(rel_path)
-            decision = self._spec_decision(spec, spec_rel, root_len)
+            decision = self._spec_decision(spec, spec_rel)
             if decision is not None:
                 return decision
         return None
@@ -1162,6 +1154,16 @@ class Indexer:
         # Built-in patterns are unconditional: a negation cannot re-include them.
         if _ALWAYS_IGNORED.match_file(rel_root):
             return True
+
+        # Decide the scan root and its loaded ancestors as directories too.
+        # This preserves exclusions above the root without letting a directory
+        # negation decide descendants (or ignoring the positive rule it cancels).
+        outermost = gitignore_specs[1][0] if len(gitignore_specs) > 1 else root
+        for directory in [root, *root.parents]:
+            if not directory.is_relative_to(outermost):
+                break
+            if self._decide_rel_path("", directory, gitignore_specs) is True:
+                return True
 
         # Git cannot re-include a file while its parent directory stays excluded.
         # We enumerate files without pruning directories, so decide each prefix
