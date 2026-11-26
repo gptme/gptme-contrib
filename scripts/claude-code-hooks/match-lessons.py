@@ -58,6 +58,7 @@ import sys
 import tempfile
 import time
 import uuid
+from collections import deque
 from collections.abc import Collection
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
@@ -1714,10 +1715,10 @@ def extract_recent_transcript_text(
     Skips: system prompt, assistant text blocks, tool_use inputs.
     Includes: tool_result content strings only (most recent).
     """
-    if not transcript_path:
+    if not transcript_path or max_messages <= 0:
         return ""
     try:
-        texts: list[str] = []
+        recent: deque[str] = deque(maxlen=max_messages)
         with open(transcript_path, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
@@ -1742,18 +1743,20 @@ def extract_recent_transcript_text(
                                 and block.get("type") == "tool_result"
                             ):
                                 tool_content = block.get("content", "")
-                                if tool_content and isinstance(tool_content, str):
-                                    texts.append(tool_content[:max_chars_per_message])
+                                if (
+                                    isinstance(tool_content, str)
+                                    and tool_content[:max_chars_per_message].strip()
+                                ):
+                                    recent.append(tool_content)
 
-        recent = [t for t in texts if t.strip()][-max_messages:]
-        combined = "\n".join(recent)
-        # Strip system-reminder blocks (contain previously injected lessons)
-        # to prevent self-referential keyword matches (gptme-contrib#341)
-        combined = re.sub(
-            r"<system-reminder>.*?</system-reminder>",
-            "",
-            combined,
-            flags=re.DOTALL,
+        # Strip complete reminders from each selected result before slicing:
+        # otherwise the slice can remove the closing tag and leave injected
+        # lesson text in the next match query (gptme-contrib#341, #2515).
+        combined = "\n".join(
+            re.sub(
+                r"<system-reminder>.*?</system-reminder>", "", text, flags=re.DOTALL
+            )[:max_chars_per_message]
+            for text in recent
         )
         return combined[:max_total_chars]
     except TimeoutError:

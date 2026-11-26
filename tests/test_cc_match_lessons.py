@@ -2945,6 +2945,39 @@ def test_session_state_writers_all_go_through_lock():
     ]
 
 
+@pytest.mark.parametrize("max_total_chars", [1_500, 1_100])
+def test_recent_transcript_strips_reminders_before_limiting(
+    hook, tmp_path, max_total_chars
+):
+    transcript = tmp_path / "t.jsonl"
+    reminder = (
+        "<system-reminder>\n"
+        + "Previously injected lesson\n" * 40
+        + "</system-reminder>"
+    )
+    first = "Earlier tool output\n" + "a" * 800
+    latest = "Latest tool output\n" + reminder + "Still tool output\n" + "b" * 800
+    entries = [
+        {
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [{"type": "tool_result", "content": output}],
+            },
+        }
+        for output in ("Outside the window", first, latest)
+    ]
+    transcript.write_text("\n".join(map(json.dumps, entries)) + "\n")
+
+    expected = first[:800] + "\n" + latest.replace(reminder, "")[:800]
+    assert (
+        hook.extract_recent_transcript_text(
+            str(transcript), max_messages=2, max_total_chars=max_total_chars
+        )
+        == expected[:max_total_chars]
+    )
+
+
 # --- Hook budget: the SIGALRM TimeoutError must not be swallowed ---
 
 
