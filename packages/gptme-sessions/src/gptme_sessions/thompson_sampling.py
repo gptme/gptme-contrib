@@ -34,6 +34,7 @@ CLI:
 
 import contextlib
 import json
+import math
 import os
 import random
 import sys
@@ -93,6 +94,61 @@ def removed_mature_arms(
         if isinstance(selections, (int, float)) and selections > min_selections:
             removed[arm_id] = int(selections)
     return removed
+
+
+def _has_mature_arm(document: object) -> bool:
+    """Whether a raw (possibly undecodable) state document holds a mature arm."""
+    if not isinstance(document, dict):
+        return False
+    arm_maps = [document.get("arms")]
+    contextual = document.get("contextual_arms")
+    if isinstance(contextual, dict):
+        arm_maps.extend(contextual.values())
+    for arms in arm_maps:
+        if not isinstance(arms, dict):
+            continue
+        for arm in arms.values():
+            if not isinstance(arm, dict):
+                continue
+            if _arm_evidence(arm) > MATURE_ARM_MIN_SELECTIONS:
+                return True
+    return False
+
+
+def _document_holds_mature_history(text: str) -> bool:
+    """Whether serialized state that strict decoding rejects still holds mature arms."""
+    try:
+        document = json.loads(text)
+    except ValueError:
+        return False
+    return _has_mature_arm(document)
+
+
+def _arm_evidence(arm: dict) -> float:
+    """Observations a raw arm document claims, whatever its writer called the counter.
+
+    A newer ``arm_class`` may rename or drop ``total_selections``.  Unknown
+    maturity must read as mature, so a missing or non-numeric counter counts as
+    unbounded evidence.  The posterior is no proxy for it: decay keeps
+    ``alpha + beta - 2`` below ``1 / (1 - gamma)`` however many observations
+    the arm has.  It only adds evidence when the counter is known.  An arm
+    that records nothing but its id holds no history to lose.
+    """
+    if not arm.keys() - {"arm_id"}:
+        return 0.0
+    selections = arm.get("total_selections")
+    if not isinstance(selections, (int, float)) or isinstance(selections, bool):
+        return math.inf
+    evidence = float(selections)
+    alpha, beta = arm.get("alpha"), arm.get("beta")
+    if (
+        isinstance(alpha, (int, float))
+        and isinstance(beta, (int, float))
+        and not isinstance(alpha, bool)
+        and not isinstance(beta, bool)
+    ):
+        evidence = max(evidence, float(alpha) + float(beta) - 2.0)
+    return evidence
 
 
 @dataclass
@@ -664,14 +720,21 @@ class Bandit:
         ``allow_arm_deletion=True`` only for deliberate removals such as
         :meth:`prune`.
 
+        Also refuses to overwrite mature history that cannot be decoded; that
+        check has no override.
+
         Raises:
-            ValueError: if mature arms would be removed without the override.
+            ValueError: if mature arms would be removed without the override, or
+                neither copy of the persisted state can be decoded and one of
+                them holds a mature arm.
         """
+        self._refuse_overwriting_undecodable_history()
         self.state_dir.mkdir(parents=True, exist_ok=True)
         data = self._serialize_state()
         if not allow_arm_deletion:
             self._refuse_mature_arm_removal(data)
         self._backup_current()
+        self._set_aside_undecodable_state()
         _atomic_write_text(self.state_file, json.dumps(data, indent=2) + "\n")
 
     def _serialize_state(self) -> dict:
@@ -688,6 +751,76 @@ class Bandit:
                 for arm_id, contexts in self.state.contextual_arms.items()
             }
         return data
+
+    def _set_aside_undecodable_state(self) -> None:
+        """Keep a state file this writer cannot load instead of overwriting it.
+
+        ``_refuse_overwriting_undecodable_history()`` only stops a save when no
+        copy loads at all. When the backup does load, ``_load_state()`` recovers
+        from it — and writing that recovered state back would drop everything a
+        richer writer recorded in its newer state file. Moving the unreadable
+        file aside keeps that evidence without blocking the save.
+
+        If that move fails while the file still holds a mature arm, the save
+        aborts: overwriting it would erase the history this path exists to keep.
+
+        Bytes that are not valid UTF-8 are kept aside too. They never *block* a
+        save on their content (nothing here can read them), but they do block
+        it if they cannot be kept aside: a file we cannot preserve must not be
+        overwritten.
+        """
+        try:
+            raw = self.state_file.read_bytes()
+        except OSError:
+            return
+        try:
+            text: str | None = raw.decode()
+        except UnicodeDecodeError:
+            text = None
+        if text is not None:
+            try:
+                self._decode_state(text)
+                return
+            except (ValueError, TypeError, KeyError, AttributeError):
+                pass
+        target = self._undecodable_state_archive()
+        try:
+            self.state_file.replace(target)
+        except OSError as e:
+            # A rename can fail where a plain copy succeeds (e.g. the target is
+            # on another filesystem). Preserving the bytes is what matters, not
+            # the rename itself, so try a copy before giving up.
+            try:
+                target.write_bytes(raw)
+            except OSError:
+                # Never overwrite bytes we could not preserve. If both the
+                # rename and the copy fail, the atomic write to this same
+                # directory would almost certainly fail too, so refusing does
+                # not turn a transient repair into a permanent wedge.
+                raise ValueError(
+                    f"refusing to overwrite bandit state that cannot be decoded: "
+                    f"{self.state_file} could not be kept aside at {target} ({e})"
+                ) from e
+        print(
+            f"Warning: kept unreadable bandit state as {target.name} "
+            "(it may hold observations this reader cannot load)",
+            file=sys.stderr,
+        )
+
+    def _undecodable_state_archive(self) -> Path:
+        """Destination for a state file this writer cannot load.
+
+        The stamp carries microseconds: a second-resolution name let a second
+        archival within the same second silently overwrite the first archive,
+        destroying the very observations this path exists to keep.
+        """
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        return self.state_file.with_name(f"{self.state_file.name}.undecodable-{stamp}")
+
+    def _undecodable_backup_archive(self) -> Path:
+        """Destination for a ``.bak`` this writer cannot parse."""
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        return self.backup_file.with_name(f"{self.backup_file.name}.undecodable-{stamp}")
 
     def _persisted_document(self) -> dict:
         """Return the first loadable persisted state document, or ``{}``.
@@ -715,6 +848,44 @@ class Bandit:
                 "pass allow_arm_deletion=True only for a deliberate removal"
             )
 
+    def _refuse_overwriting_undecodable_history(self) -> None:
+        """Refuse to save when real evidence exists but no copy of it loads.
+
+        A writer with a richer ``arm_class`` (or a newer engine) makes both files
+        fail strict decoding. ``_load_state()`` then returns an empty state, and
+        saving that would erase the history, first from the state file and on
+        the next save from the backup. Files that are not valid JSON hold
+        nothing recoverable here and are still repaired by saving.
+
+        A decodable backup is not enough on its own when the state file is the
+        newer of the two: ``_set_aside_undecodable_state()`` keeps that file
+        before it is replaced, so the observations it holds survive.  That
+        archival step aborts the save if it cannot move mature evidence aside.
+        """
+        unreadable: list[str] = []
+        for path in (self.state_file, self.backup_file):
+            try:
+                text = path.read_text()
+            except (OSError, UnicodeDecodeError):
+                continue
+            try:
+                self._decode_state(text)
+                return
+            except (ValueError, TypeError, KeyError, AttributeError):
+                pass
+            try:
+                document = json.loads(text)
+            except ValueError:
+                continue
+            if _has_mature_arm(document):
+                unreadable.append(str(path))
+        if unreadable:
+            raise ValueError(
+                f"refusing to overwrite bandit state that cannot be decoded: "
+                f"{', '.join(unreadable)} holds mature arms. Load it with the arm "
+                "class that wrote it, or move the files aside to start over."
+            )
+
     def _backup_current(self) -> None:
         """Copy the current state file to ``.bak`` if it can be loaded.
 
@@ -726,7 +897,72 @@ class Bandit:
             self._decode_state(current)
         except (OSError, ValueError, TypeError, KeyError, AttributeError):
             return
+        if self._backup_holds_undecodable_history():
+            print(
+                f"Warning: backup not rotated: {self.backup_file} holds mature arms "
+                "that cannot be decoded; recover or move it aside",
+                file=sys.stderr,
+            )
+            return
+        self._set_aside_unparseable_backup()
         _atomic_write_text(self.backup_file, current)
+
+    def _set_aside_unparseable_backup(self) -> None:
+        """Keep a torn ``.bak`` before a good state is rotated over it.
+
+        ``_backup_holds_undecodable_history()`` handles a backup that is valid
+        JSON but not decodable by this arm class. Bytes that are not even JSON
+        (a torn write) can still hold observations a richer writer could load,
+        so they are moved aside rather than silently replaced.
+        """
+        try:
+            raw = self.backup_file.read_bytes()
+        except OSError:
+            return
+        try:
+            text = raw.decode()
+        except UnicodeDecodeError:
+            text = None
+        if text is not None:
+            try:
+                json.loads(text)
+                return
+            except ValueError:
+                pass
+        target = self._undecodable_backup_archive()
+        try:
+            self.backup_file.replace(target)
+        except OSError as e:
+            # Do not rotate over a backup we could not preserve; the save must
+            # abort instead of destroying bytes a richer writer could load.
+            raise ValueError(
+                f"refusing to rotate over bandit backup that cannot be decoded: "
+                f"{self.backup_file} could not be kept aside at {target} ({e})"
+            ) from e
+        print(
+            f"Warning: kept unparseable bandit backup as {target.name} before rotating it",
+            file=sys.stderr,
+        )
+
+    def _backup_holds_undecodable_history(self) -> bool:
+        """Whether ``.bak`` is the only copy of mature history we cannot load.
+
+        This is the half-erased case: the state file was already reset by a
+        reader that could not decode it, and rotating would finish the job.
+        """
+        try:
+            text = self.backup_file.read_text()
+        except (OSError, UnicodeDecodeError):
+            return False
+        try:
+            self._decode_state(text)
+            return False
+        except (ValueError, TypeError, KeyError, AttributeError):
+            pass
+        try:
+            return _has_mature_arm(json.loads(text))
+        except ValueError:
+            return False
 
     def sample(
         self,

@@ -11,7 +11,7 @@ import pytest
 
 from gptme_sessions import Bandit, BanditArm, BanditState, SessionRecord
 import gptme_sessions.thompson_sampling as ts_module
-from gptme_sessions.thompson_sampling import load_bandit_means
+from gptme_sessions.thompson_sampling import MATURE_ARM_MIN_SELECTIONS, load_bandit_means
 
 
 # ── BanditArm unit tests ─────────────────────────────────────────────────────
@@ -1301,3 +1301,246 @@ def test_unknown_arm_fields_recover_backup_without_overwriting_it(tmp_path, cont
     del recovered.state.arms["a"]
     with pytest.raises(ValueError, match="refusing to delete mature bandit arm"):
         recovered.save()
+
+
+@pytest.mark.parametrize("contextual", [False, True])
+def test_undecodable_mature_history_is_never_overwritten(tmp_path, contextual):
+    """A richer writer's state must survive a plain reader that cannot load it (#2321)."""
+    context = ("ctx",) if contextual else None
+    bandit = Bandit(state_dir=tmp_path)
+    for _ in range(13):
+        bandit.update(["a"], outcome=1.0, context=context)
+    for path in (bandit.state_file, bandit.backup_file):
+        data = json.loads(path.read_text())
+        arms = [*data["arms"].values()]
+        for contexts in data.get("contextual_arms", {}).values():
+            arms.extend(contexts.values())
+        for arm in arms:
+            arm["extra"] = "from a richer arm_class"
+        if contextual:
+            data["arms"] = {}  # the only mature evidence is contextual
+        path.write_text(json.dumps(data))
+    before = (bandit.state_file.read_text(), bandit.backup_file.read_text())
+
+    reader = Bandit(state_dir=tmp_path)
+    with pytest.raises(ValueError, match="cannot be decoded"):
+        reader.update(["a"], outcome=1.0, context=context)
+    with pytest.raises(ValueError, match="cannot be decoded"):
+        reader.prune()
+
+    assert (bandit.state_file.read_text(), bandit.backup_file.read_text()) == before
+
+
+@pytest.mark.parametrize("contextual", [False, True])
+@pytest.mark.parametrize("counter", [None, "selections"])
+def test_undecodable_arm_without_known_counter_counts_as_mature(tmp_path, contextual, counter):
+    """A renamed or absent selection counter must not make unreadable history look fresh."""
+    arm = {"arm_id": "a", "alpha": 20.0, "beta": 1.0, "extra": "from a richer arm_class"}
+    if counter:
+        arm[counter] = 19
+    document = (
+        {"arms": {}, "contextual_arms": {"a": {"ctx": arm}}} if contextual else {"arms": {"a": arm}}
+    )
+    bandit = Bandit(state_dir=tmp_path)
+    for path in (bandit.state_file, bandit.backup_file):
+        path.write_text(json.dumps(document))
+    before = (bandit.state_file.read_text(), bandit.backup_file.read_text())
+
+    reader = Bandit(state_dir=tmp_path)
+    with pytest.raises(ValueError, match="cannot be decoded"):
+        reader.update(["a"], outcome=1.0)
+
+    assert (bandit.state_file.read_text(), bandit.backup_file.read_text()) == before
+
+
+@pytest.mark.parametrize("counter", [None, "selections"])
+def test_undecodable_decayed_arm_without_known_counter_counts_as_mature(tmp_path, counter):
+    """Decay caps alpha + beta - 2 near 1/(1-gamma), so the posterior is no proxy for the count."""
+    decayed = BanditArm(arm_id="a")
+    for _ in range(500):
+        decayed.apply_decay(0.9)  # what Bandit.update(decay_rate=0.9) does first
+        decayed.update(1.0)
+    assert decayed.alpha + decayed.beta - 2 <= MATURE_ARM_MIN_SELECTIONS
+    arm = {"arm_id": "a", "alpha": decayed.alpha, "beta": decayed.beta, "extra": "x"}
+    if counter:
+        arm[counter] = decayed.total_selections
+    bandit = Bandit(state_dir=tmp_path)
+    for path in (bandit.state_file, bandit.backup_file):
+        path.write_text(json.dumps({"arms": {"a": arm}}))
+    before = (bandit.state_file.read_text(), bandit.backup_file.read_text())
+
+    reader = Bandit(state_dir=tmp_path)
+    with pytest.raises(ValueError, match="cannot be decoded"):
+        reader.update(["a"], outcome=1.0)
+
+    assert (bandit.state_file.read_text(), bandit.backup_file.read_text()) == before
+
+
+def test_undecodable_mature_backup_is_not_rotated_over(tmp_path, capsys):
+    """A reader that already reset the state file must not erase .bak too (#2321)."""
+    bandit = Bandit(state_dir=tmp_path)
+    for _ in range(13):
+        bandit.update(["a"], outcome=1.0)
+    data = json.loads(bandit.state_file.read_text())
+    data["arms"]["a"]["extra"] = "from a richer arm_class"
+    bandit.backup_file.write_text(json.dumps(data))
+    history = bandit.backup_file.read_text()
+    bandit.state_file.write_text(json.dumps({"arms": {}, "total_sessions": 1}))
+
+    reader = Bandit(state_dir=tmp_path)
+    reader.update(["b"], outcome=1.0)
+    reader.update(["b"], outcome=1.0)
+
+    assert bandit.backup_file.read_text() == history
+    assert "backup not rotated" in capsys.readouterr().err
+    assert Bandit(state_dir=tmp_path).state.total_sessions == 3
+
+
+def test_undecodable_state_with_decodable_backup_is_kept_aside(tmp_path, capsys):
+    """A decodable .bak does not make an undecodable state file redundant (#2321).
+
+    A richer writer saves on top of a plain history: the newer state file holds
+    more observations than the plain .bak, so ``_load_state()`` recovers the
+    older backup. Returning on the backup's decode let the save overwrite the
+    newer file with that older content. The unreadable file is now kept aside
+    instead, so its observations survive.
+    """
+    bandit = Bandit(state_dir=tmp_path)
+    for _ in range(13):
+        bandit.update(["a"], outcome=1.0)
+    data = json.loads(bandit.state_file.read_text())
+    arm = data["arms"]["a"]
+    arm["extra"] = "from a richer arm_class"
+    arm["total_selections"] = 40
+    data["total_sessions"] = 40
+    state_before = json.dumps(data)
+    bandit.state_file.write_text(state_before)
+    backup_before = bandit.backup_file.read_text()
+    assert json.loads(backup_before)["total_sessions"] == 12
+
+    reader = Bandit(state_dir=tmp_path)
+    # The plain reader recovered the older backup, so the save starts from it.
+    assert reader.state.total_sessions == 12
+    reader.update(["a"], outcome=1.0)
+
+    kept = sorted(tmp_path.glob("bandit-state.json.undecodable-*"))
+    assert len(kept) == 1
+    assert kept[0].read_text() == state_before
+    assert bandit.backup_file.read_text() == backup_before
+    assert json.loads(bandit.state_file.read_text())["total_sessions"] == 13
+    assert "kept unreadable bandit state" in capsys.readouterr().err
+
+
+def test_undecodable_state_that_cannot_be_kept_aside_aborts_the_save(tmp_path, monkeypatch):
+    """A failed archival rename must not let the save overwrite mature history (#2449).
+
+    The backup decodes, so the guard lets the save through and the primary is
+    moved aside first. If that move fails, writing the recovered backup would
+    erase the newer observations the move was meant to preserve.
+    """
+    bandit = Bandit(state_dir=tmp_path)
+    for _ in range(13):
+        bandit.update(["a"], outcome=1.0)
+    data = json.loads(bandit.state_file.read_text())
+    data["arms"]["a"]["extra"] = "from a richer arm_class"
+    data["arms"]["a"]["total_selections"] = 40
+    data["total_sessions"] = 40
+    state_before = json.dumps(data)
+    bandit.state_file.write_text(state_before)
+    backup_before = bandit.backup_file.read_text()
+
+    blocked = tmp_path / "bandit-state.json.undecodable-blocked"
+    blocked.mkdir()  # a directory where the archive copy would go
+    monkeypatch.setattr(Bandit, "_undecodable_state_archive", lambda self: blocked)
+
+    reader = Bandit(state_dir=tmp_path)
+    with pytest.raises(ValueError, match="cannot be decoded"):
+        reader.update(["a"], outcome=1.0)
+
+    assert bandit.state_file.read_text() == state_before
+    assert bandit.backup_file.read_text() == backup_before
+
+
+def test_state_file_with_invalid_utf8_is_kept_aside_not_fatal(tmp_path, capsys):
+    """A torn or binary state file must not wedge every future save (#2449).
+
+    ``_set_aside_undecodable_state()`` used to catch only ``OSError`` on the
+    read, so invalid UTF-8 raised ``UnicodeDecodeError`` out of ``save()`` and
+    every later ``update()`` failed. The bytes hold nothing this reader can
+    parse, so they are kept aside and the save proceeds from the backup.
+    """
+    bandit = Bandit(state_dir=tmp_path)
+    for _ in range(13):
+        bandit.update(["a"], outcome=1.0)
+    garbage = b"\xff\xfe not utf-8 \x80\x00"
+    bandit.state_file.write_bytes(garbage)
+    backup_before = bandit.backup_file.read_text()
+
+    reader = Bandit(state_dir=tmp_path)
+    reader.update(["a"], outcome=1.0)
+
+    kept = sorted(tmp_path.glob("bandit-state.json.undecodable-*"))
+    assert len(kept) == 1
+    assert kept[0].read_bytes() == garbage
+    assert bandit.backup_file.read_text() == backup_before
+    assert json.loads(bandit.state_file.read_text())["arms"]["a"]["total_selections"] == 13
+    assert "kept unreadable bandit state" in capsys.readouterr().err
+
+
+def test_torn_backup_is_kept_aside_before_rotation(tmp_path, capsys):
+    """Rotating over a torn ``.bak`` must preserve its bytes (#2449).
+
+    A truncated backup is not valid JSON, so the mature-arm check cannot read
+    it. It still may hold observations a richer writer could load, so it is
+    moved aside before the good state is rotated over it.
+    """
+    bandit = Bandit(state_dir=tmp_path)
+    for _ in range(13):
+        bandit.update(["a"], outcome=1.0)
+    torn = '{"arms": {"a": {"arm_id": "a", "alpha": 14'
+    bandit.backup_file.write_text(torn)
+
+    bandit.update(["a"], outcome=1.0)
+
+    kept = sorted(tmp_path.glob("bandit-state.json.bak.undecodable-*"))
+    assert len(kept) == 1
+    assert kept[0].read_text() == torn
+    assert json.loads(bandit.backup_file.read_text())["total_sessions"] == 13
+    assert "kept unparseable bandit backup" in capsys.readouterr().err
+
+
+def test_both_torn_copies_are_preserved(tmp_path, capsys):
+    """Neither torn copy may be erased when both are unparseable (#2449)."""
+    bandit = Bandit(state_dir=tmp_path)
+    for _ in range(13):
+        bandit.update(["a"], outcome=1.0)
+    garbage_state = b"\xff\xfe not utf-8 \x80\x00"
+    torn_backup = '{"arms": {"a": {"arm_id": "a"'
+    bandit.state_file.write_bytes(garbage_state)
+    bandit.backup_file.write_text(torn_backup)
+
+    reader = Bandit(state_dir=tmp_path)
+    reader.update(["a"], outcome=1.0)
+
+    kept_state = sorted(tmp_path.glob("bandit-state.json.undecodable-*"))
+    assert len(kept_state) == 1 and kept_state[0].read_bytes() == garbage_state
+    # The primary is unloadable, so ``_backup_current`` skips rotation and the
+    # torn backup is left untouched at its own path.
+    assert bandit.backup_file.read_text() == torn_backup
+
+
+def test_torn_backup_that_cannot_be_kept_aside_aborts_the_save(tmp_path, monkeypatch):
+    """A backup we cannot preserve must not be rotated over (#2449)."""
+    bandit = Bandit(state_dir=tmp_path)
+    for _ in range(13):
+        bandit.update(["a"], outcome=1.0)
+    torn = '{"arms": {"a": {"arm_id": "a"'
+    bandit.backup_file.write_text(torn)
+    blocked = tmp_path / "bandit-state.json.bak.undecodable-blocked"
+    blocked.mkdir()
+    monkeypatch.setattr(Bandit, "_undecodable_backup_archive", lambda self: blocked)
+
+    with pytest.raises(ValueError, match="cannot be decoded"):
+        bandit.update(["a"], outcome=1.0)
+
+    assert bandit.backup_file.read_text() == torn
