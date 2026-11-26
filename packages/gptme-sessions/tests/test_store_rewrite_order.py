@@ -150,6 +150,113 @@ def test_rewrite_does_not_duplicate_id_less_rows(tmp_path: Path) -> None:
     assert snapshots[0] == snapshots[1] == snapshots[2]
 
 
+@pytest.mark.parametrize(
+    ("key", "value", "normalized"),
+    [
+        ("dispatch_kind", "future_kind", None),
+        ("attempt_kind", "future_attempt", None),
+        ("harm_category", "future_harm", None),
+        ("dropout_depth", "future_depth", None),
+        ("reasoning_profile", "future_profile", None),
+        ("annotated_fields", ["future_annotation", "outcome"], ["outcome"]),
+        ("_writer_meta", {"v": 2}, None),
+    ],
+)
+def test_rewrite_keeps_newer_writer_fields(
+    tmp_path: Path, key: str, value: object, normalized: object
+) -> None:
+    store = SessionStore(sessions_dir=tmp_path)
+    row = {"session_id": "future", "timestamp": "2026-11-24T01:02:03+00:00", key: value}
+    store.path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    for _ in range(2):
+        (record,) = store.load_all()
+        assert getattr(record, key, None) == normalized
+        record.model = "updated"
+        store.rewrite([record])
+
+        (line,) = store.path.read_text(encoding="utf-8").splitlines()
+        saved = json.loads(line)
+        assert saved[key] == value
+        assert saved["model"] == "updated"
+
+
+def test_newer_fields_do_not_override_edits_or_internal_state(tmp_path: Path) -> None:
+    store = SessionStore(sessions_dir=tmp_path)
+    store.path.write_text(
+        json.dumps(
+            {
+                "session_id": "future",
+                "timestamp": "2026-11-24T01:02:03+00:00",
+                "dispatch_kind": "future_kind",
+                "annotated_fields": ["future_annotation"],
+                "dropout_depth": "future_depth",
+                "_legacy_fields": "not record metadata",
+                "_roundtrip_fields": "not record metadata",
+                "_store_invented": {"timestamp": "2026-11-24T01:02:03+00:00"},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (record,) = store.load_all()
+    record.dispatch_kind = "worker"
+    record.annotated_fields.append("outcome")
+    record.dropout_selected = False
+    store.rewrite([record])
+
+    saved = json.loads(store.path.read_text(encoding="utf-8"))
+    assert saved["dispatch_kind"] == "worker"
+    assert saved["annotated_fields"] == ["future_annotation", "outcome"]
+    assert saved["dropout_depth"] is None
+    assert saved["timestamp"] == "2026-11-24T01:02:03+00:00"
+    assert {"_legacy_fields", "_roundtrip_fields", "_store_invented"}.isdisjoint(saved)
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["dispatch_kind", "attempt_kind", "harm_category", "dropout_depth", "reasoning_profile"],
+)
+def test_explicit_clear_replaces_newer_enum_value(tmp_path: Path, field: str) -> None:
+    store = SessionStore(sessions_dir=tmp_path)
+    store.path.write_text(
+        json.dumps({"session_id": "future", field: "future_value"}) + "\n", encoding="utf-8"
+    )
+    (record,) = store.load_all()
+    assert getattr(record, field) is None
+    setattr(record, field, None)
+    store.rewrite([record])
+    assert json.loads(store.path.read_text(encoding="utf-8"))[field] is None
+
+
+@pytest.mark.parametrize("edit", ["append", "remove", "replace", "clear"])
+def test_annotation_edits_preserve_unknown_names(tmp_path: Path, edit: str) -> None:
+    store = SessionStore(sessions_dir=tmp_path)
+    store.path.write_text(
+        json.dumps({"session_id": "future", "annotated_fields": ["future_annotation", "outcome"]})
+        + "\n",
+        encoding="utf-8",
+    )
+    (record,) = store.load_all()
+    assert record.annotated_fields == ["outcome"]
+    if edit == "append":
+        record.annotated_fields.append("category")
+        expected = ["future_annotation", "outcome", "category"]
+    elif edit == "remove":
+        record.annotated_fields.remove("outcome")
+        expected = ["future_annotation"]
+    elif edit == "replace":
+        record.annotated_fields = ["category"]
+        expected = ["future_annotation", "category"]
+    else:
+        record.annotated_fields.clear()
+        expected = ["future_annotation"]
+    for _ in range(2):
+        store.rewrite([record])
+        assert json.loads(store.path.read_text(encoding="utf-8"))["annotated_fields"] == expected
+        (record,) = store.load_all()
+
+
 def test_id_less_row_gets_stable_id_across_loads(tmp_path: Path) -> None:
     store = SessionStore(sessions_dir=tmp_path)
     store.path.write_text(json.dumps({"model": "opus"}) + "\n", encoding="utf-8")

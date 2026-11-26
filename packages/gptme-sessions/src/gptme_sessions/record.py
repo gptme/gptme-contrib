@@ -615,6 +615,20 @@ class SessionRecord:
     # written back with a made-up id and a "now" timestamp. In-memory only:
     # never serialized, never read from input.
     _store_invented: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
+    # Raw wire values that this reader cannot represent in the typed view,
+    # paired with an independent snapshot of that view to detect edits.
+    _roundtrip_fields: dict[str, tuple[Any, Any]] = field(
+        default_factory=dict, init=False, repr=False, compare=False
+    )
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        # An explicit assignment, including None -> None, supersedes an opaque
+        # enum value loaded from disk. Annotation edits instead merge with the
+        # unknown names at serialization, since those names aren't in our view.
+        roundtrip = self.__dict__.get("_roundtrip_fields")
+        if roundtrip is not None and name != "annotated_fields":
+            roundtrip.pop(name, None)
+        object.__setattr__(self, name, value)
 
     def __post_init__(self) -> None:
         if not self.session_id:
@@ -1019,17 +1033,25 @@ class SessionRecord:
     def to_dict(self) -> dict:
         """Serialize to JSON-compatible dict.
 
-        Legacy/unknown fields captured in ``_legacy_fields`` during
-        ``from_dict`` are re-emitted alongside dataclass fields so that
-        load→rewrite cycles preserve them.
+        Re-emit unknown fields and newer values of known fields on a
+        load→rewrite cycle. Changes to the normalized view take precedence.
         """
         d = asdict(self)
         d.pop("_store_invented", None)
+        roundtrip = d.pop("_roundtrip_fields")
         legacy = d.pop("_legacy_fields", {}) or {}
         for k, v in legacy.items():
-            # Known fields always win — we only add legacy keys that aren't
-            # already present as first-class fields.
             d.setdefault(k, v)
+        for name, (raw, normalized) in roundtrip.items():
+            if name == "annotated_fields":
+                # Apply edits to representable names without erasing a newer
+                # writer's annotation locks, including on list replacement.
+                current = d[name]
+                d[name] = [value for value in raw if value not in normalized or value in current]
+                d[name].extend(value for value in current if value not in raw)
+            elif d[name] == normalized:
+                if name != "dropout_depth" or d["dropout_selected"] is not False:
+                    d[name] = raw
         return d
 
     @classmethod
@@ -1052,8 +1074,10 @@ class SessionRecord:
         ``to_dict`` / ``rewrite`` calls preserve it.
         """
         known_fields = {f.name for f in cls.__dataclass_fields__.values()}
-        filtered = {k: v for k, v in data.items() if k in known_fields and k != "_store_invented"}
-        legacy = {k: v for k, v in data.items() if k not in known_fields and not k.startswith("_")}
+        # Internal dataclass fields are never loaded from disk. Other
+        # underscore-prefixed keys may be metadata from a newer writer.
+        filtered = {k: v for k, v in data.items() if k in known_fields and not k.startswith("_")}
+        legacy = {k: v for k, v in data.items() if k not in known_fields}
         # Migrate legacy records: journal_path that is not a .md file is
         # actually a trajectory path (JSONL or session directory) set by the
         # old sync command before trajectory_path was introduced.
@@ -1073,7 +1097,29 @@ class SessionRecord:
             del legacy["dropout_selection"]
         if legacy:
             filtered["_legacy_fields"] = legacy
-        return cls(**filtered)
+        record = cls(**filtered)
+        # Keep newer enum strings on disk without exposing them to old readers.
+        # Do not revert deliberate migrations or structural validation here.
+        for name, choices in (
+            ("dispatch_kind", DISPATCH_KINDS),
+            ("attempt_kind", ATTEMPT_KINDS),
+            ("harm_category", HARM_CATEGORY_LABELS),
+            ("dropout_depth", DROPOUT_DEPTH_VALUES),
+            ("reasoning_profile", REASONING_PROFILES),
+        ):
+            raw = filtered.get(name)
+            if isinstance(raw, str) and raw not in choices and getattr(record, name) is None:
+                if name != "dropout_depth" or record.dropout_selected is not False:
+                    record._roundtrip_fields[name] = (raw, None)
+        annotations = filtered.get("annotated_fields")
+        if isinstance(annotations, list):
+            names = list(dict.fromkeys(value for value in annotations if isinstance(value, str)))
+            if names != record.annotated_fields:
+                record._roundtrip_fields["annotated_fields"] = (
+                    names,
+                    record.annotated_fields.copy(),
+                )
+        return record
 
     def to_json(self) -> str:
         """Serialize to single-line JSON."""
