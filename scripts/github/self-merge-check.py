@@ -2618,10 +2618,22 @@ _AW_BUNDLE_REPO = "activitywatch/activitywatch"
 def activitywatch_self_merge_repo(repo: str) -> bool:
     """True for ActivityWatch component repos that may use the small-fix tier.
 
-    The bundle/release repo stays out: most of its diffs are release work.
+    Only the repos in ``[rollout].repos`` are in scope. The caller converts a
+    successful generic category into a hold, which only a ``self_merge`` tier
+    can waive; a repo outside the rollout list would therefore be blocked
+    outright instead of merely re-gated. The bundle/release repo stays out:
+    most of its diffs are release work.
     """
     lowered = repo.lower()
-    return lowered.startswith("activitywatch/") and lowered != _AW_BUNDLE_REPO
+    if not lowered.startswith("activitywatch/") or lowered == _AW_BUNDLE_REPO:
+        return False
+    try:
+        policy = merge_policy.load_policy()
+    except (OSError, ValueError):
+        # Fail closed: keep the conversion so a generic category cannot
+        # over-grant while the policy is unreadable.
+        return True
+    return lowered in {r.lower() for r in merge_policy.rollout_repos(policy)}
 
 
 def classify_category(

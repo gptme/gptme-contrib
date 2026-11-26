@@ -47,6 +47,12 @@ def test_activitywatch_bundle_is_not_a_self_merge_repo() -> None:
     assert smc.activitywatch_self_merge_repo("ActivityWatch/aw-webui")
     assert not smc.activitywatch_self_merge_repo("ActivityWatch/activitywatch")
     assert not smc.activitywatch_self_merge_repo("gptme/gptme")
+    # An ActivityWatch repo outside [rollout].repos must keep the generic
+    # category: the tier waiver cannot apply there, so converting would block
+    # it permanently rather than re-gate it.
+    assert not smc.activitywatch_self_merge_repo(
+        "ActivityWatch/activitywatch.github.io"
+    )
 
 
 def test_internal_tooling_on_aw_is_converted_then_held() -> None:

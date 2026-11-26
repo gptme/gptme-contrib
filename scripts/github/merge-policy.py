@@ -10,11 +10,14 @@ Usage:
     merge-policy.py tier --stdin [--json]
 
 ``--stdin`` takes a JSON list of
-``{"repo": "...", "number": N, "changedFiles": TOTAL, "files": [{"path", "additions", "deletions", "patch"}]}``
+``{"repo": "...", "number": N, "title": "...", "changedFiles": TOTAL, "files": [{"path", "additions", "deletions", "patch"}]}``
 so a scanner that already fetched files in its own batched query needs no
-extra API call. ``changedFiles`` must be the PR's total changed-file count,
-not the current page length. Missing/mismatched counts and duplicate paths
-produce an error, never a tier. Workflows remain human-review-only.
+extra API call. ``title`` is optional in general, but a rollout repo without
+one gets its title fetched here, because a tier with ``title_types`` cannot be
+evaluated without it and the gate would otherwise disagree. ``changedFiles``
+must be the PR's total changed-file count, not the current page length.
+Missing/mismatched counts and duplicate paths produce an error, never a tier.
+Workflows remain human-review-only.
 
 Exit codes: 0 ok, 2 usage/fetch error.
 """
@@ -115,6 +118,14 @@ def main(argv: list[str] | None = None) -> int:
                 and len({c.path for c in supplied if c.path}) == total
             )
             title = item.get("title")
+            if (
+                complete
+                and not isinstance(title, str)
+                and item["repo"].lower() in {r.lower() for r in rollout}
+            ):
+                # A tier with title_types cannot be evaluated without the title,
+                # and reporting tier 2 here would disagree with the gate.
+                title = _pr_title(item["repo"], int(item["number"]))
             jobs.append(
                 (
                     item["repo"],

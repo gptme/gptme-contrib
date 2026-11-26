@@ -43,11 +43,14 @@ def trusted_deployment():
     # Simulate deployment after the human merges the new policy to master.
     import subprocess
 
-    def git_show(argv, **kwargs):
+    def run(argv, **kwargs):
+        if argv[0] != "git":
+            # ``gh pr view --json title`` for a rollout repo without a title.
+            return subprocess.CompletedProcess(argv, 0, "fix: fetched title\n")
         rel = argv[2].split(":", 1)[1]
         return subprocess.CompletedProcess(argv, 0, (ROOT / rel).read_bytes())
 
-    with patch.object(mp.subprocess, "run", side_effect=git_show):
+    with patch.object(mp.subprocess, "run", side_effect=run):
         yield
 
 
@@ -136,12 +139,14 @@ def test_scanner_cli_stdin_json(capsys) -> None:
         {
             "repo": REPO,
             "number": 7,
+            "title": "docs: clarify install",
             "changedFiles": 1,
             "files": [{"path": "docs/a.md", "additions": 3}],
         },
         {
             "repo": REPO,
             "number": 8,
+            "title": "feat: new inspector",
             "changedFiles": 1,
             "files": [{"path": "src/a.ts", "additions": 3}],
         },
@@ -153,6 +158,25 @@ def test_scanner_cli_stdin_json(capsys) -> None:
         (7, 0, True),
         (8, 2, True),
     ]
+
+
+def test_scanner_stdin_fetches_missing_title_for_rollout_repo(capsys) -> None:
+    """A rollout tier has title_types, so a missing title must be fetched.
+
+    Otherwise the scanner reports tier 2 for a PR the gate tiers at 1.
+    """
+    payload = [
+        {
+            "repo": REPO,
+            "number": 8,
+            "changedFiles": 1,
+            "files": [{"path": "src/a.ts", "additions": 3}],
+        }
+    ]
+    with patch.object(sys, "stdin", io.StringIO(json.dumps(payload))):
+        assert cli.main(["tier", "--stdin", "--json"]) == 0
+    rows = json.loads(capsys.readouterr().out)
+    assert [(r["number"], r["tier"], r["rollout"]) for r in rows] == [(8, 1, True)]
 
 
 def test_scanner_cli_rejects_bad_ref(capsys) -> None:
