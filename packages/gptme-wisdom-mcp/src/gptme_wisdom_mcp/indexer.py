@@ -118,6 +118,15 @@ class SessionIndex:
             # through a SAVEPOINT: a failure rolls back only our own writes and
             # leaves the caller's transaction and its pending writes intact.
             # add() never commits a transaction it did not start.
+            #
+            # No BEGIN IMMEDIATE here, and none is needed: the caller's
+            # transaction already holds its own lock (a writer holds RESERVED,
+            # so no other connection can commit), and a deferred read-only one
+            # gets a WAL snapshot. If another connection commits a write after
+            # that snapshot is taken, our first write fails with
+            # SQLITE_BUSY_SNAPSHOT ("database is locked") instead of applying
+            # the stale values we read -- the savepoint rolls back and the
+            # error surfaces. Silent FTS/sessions divergence is not reachable.
             self.conn.execute("SAVEPOINT add_session")
             try:
                 changed = self._write(doc, values)

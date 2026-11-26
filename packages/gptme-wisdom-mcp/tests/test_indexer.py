@@ -6,6 +6,8 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 
 def test_session_index_roundtrip():
     """Create an index, add a document, search, find it."""
@@ -213,6 +215,46 @@ def test_overlapping_updates_do_not_delete_stale_fts_values(tmp_path: Path):
         assert first.add(doc("dolphin")) is True
         assert first.search("narwhal") == []
         assert len(first.search("dolphin")) == 1
+        _assert_fts_matches_rows(first)
+
+
+def test_a_joined_transaction_cannot_write_from_a_stale_snapshot(tmp_path: Path):
+    """The savepoint path fails loudly when another connection committed first.
+
+    It takes no BEGIN IMMEDIATE, so the only thing protecting the stored-value
+    read is WAL snapshot isolation: a write attempt against a superseded
+    snapshot raises SQLITE_BUSY_SNAPSHOT instead of applying stale FTS values.
+    """
+    from gptme_wisdom_mcp.indexer import SessionIndex
+    from gptme_wisdom_mcp.parsers import SessionDocument
+
+    def doc(content: str) -> SessionDocument:
+        return SessionDocument(
+            source="journal",
+            path="/journal/session.md",
+            date=datetime(2026, 1, 1),
+            title="Session",
+            content=content,
+            summary="summary",
+        )
+
+    with SessionIndex(tmp_path / "s.db") as first, SessionIndex(tmp_path / "s.db") as second:
+        assert first.add(doc("walrus")) is True
+        first.conn.execute("PRAGMA busy_timeout=0")
+        # A deferred transaction that has only read: its snapshot is walrus.
+        first.conn.execute("BEGIN")
+        assert first.conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 1
+        assert second.add(doc("narwhal")) is True
+
+        with pytest.raises(sqlite3.OperationalError, match="locked"):
+            first.add(doc("dolphin"))
+        # Only add()'s own writes rolled back; the caller still owns its txn.
+        assert first.conn.in_transaction
+        first.conn.rollback()
+
+        assert first.search("dolphin") == []
+        assert len(first.search("narwhal")) == 1
+        assert first.count() == 1
         _assert_fts_matches_rows(first)
 
 
