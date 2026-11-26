@@ -3227,7 +3227,9 @@ def test_expire_review_drafts_dry_run_and_disabled_move_nothing(
         workflow_module, "tweet_old.yml", datetime(2026, 10, 1, 0, 0)
     )
 
-    assert workflow_module.expire_review_drafts(7, dry_run=True, now=now) == (1, 0)
+    # A dry run moves nothing, so the draft still counts as parked: the summary
+    # must not under-report the queue it left untouched.
+    assert workflow_module.expire_review_drafts(7, dry_run=True, now=now) == (1, 1)
     assert stale.exists()
     assert workflow_module.expire_review_drafts(0, now=now) == (0, 1)
     assert stale.exists()

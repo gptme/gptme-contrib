@@ -849,7 +849,10 @@ def expire_review_drafts(
             )
             if dry_run:
                 console.print(f"[yellow]Would expire {path.name}: {reason}")
+                # Count it as remaining too: nothing moved, so review/ still
+                # holds it and the summary must not under-report the backlog.
                 expired += 1
+                remaining += 1
                 continue
             # Move first, then stamp the reason on the moved copy: a failed move
             # must leave the review/ file (and its mtime) untouched so the next
@@ -3065,8 +3068,11 @@ def auto(
         )
         expiry_days = DEFAULT_REVIEW_EXPIRY_DAYS
     expired, parked = expire_review_drafts(expiry_days, dry_run=dry_run)
+    # A dry run moves nothing, so say what would have happened rather than
+    # reporting drafts it did not expire.
+    verb = "would expire" if dry_run else "expired"
     console.print(
-        f"Parked in review/: {parked} (expired this cycle: {expired}, "
+        f"Parked in review/: {parked} ({verb} this cycle: {expired}, "
         f"limit {expiry_days}d)"
     )
     drafts = list_drafts("new")
