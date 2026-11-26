@@ -269,3 +269,9 @@ def test_outcome_contract_requires_normalized_scores(outcome, tmp_path):
 @pytest.mark.parametrize(("a_n", "b_n"), [(30, 60), (3, 7)])
 def test_identical_constant_outcomes_have_no_significance(a_n, b_n):
     assert welch_z([0.1] * a_n, [0.1] * b_n) == (0.0, 1.0)
+
+
+def test_welch_preserves_nonconstant_subnormal_variance():
+    assert welch_z([1e-200, 2e-200], [0.0, 1e-200]) == pytest.approx(
+        welch_z([1.0, 2.0], [0.0, 1.0])
+    )
