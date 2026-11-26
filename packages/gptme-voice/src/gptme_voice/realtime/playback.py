@@ -25,6 +25,9 @@ class TwilioPlayback:
         self.interrupted = False
         self.terminating = False
         self.stopped = False
+        # The media stream dropped without Twilio's ``stop``: playback can no
+        # longer be confirmed, but the platform call still has to be completed.
+        self.disconnected = False
         self.send_lock = asyncio.Lock()
         self._response_done = asyncio.Event()
         self._response_done.set()

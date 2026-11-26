@@ -3116,6 +3116,11 @@ class VoiceServer:
         finally:
             if playback is not None:
                 playback.stopped = True
+                if not stop_received:
+                    # Websocket drop, not a real call end: the hangup task may
+                    # be mid-drain, and its cancellation must still complete
+                    # the call at the platform level.
+                    playback.disconnected = True
                 playback.cancel_hangup()
                 if playback.hangup_task is not None:
                     # Stop/disconnect also cancels an in-flight REST wait.
@@ -3599,11 +3604,46 @@ class VoiceServer:
             reason or "<none>",
         )
         if playback is not None:
-            await playback.wait_until_played()
+            try:
+                await playback.wait_until_played()
+            except asyncio.CancelledError:
+                # Caller speech cancels the hangup before the drain completes.
+                # A dropped transport cannot confirm playback, but it must not
+                # skip the authoritative kill: closing the WebSocket does not
+                # end the call at the platform level.
+                if not playback.disconnected:
+                    raise
+                logger.info(
+                    "Farewell playback unconfirmed on disconnect; "
+                    "completing call anyway: stream=%s",
+                    playback.stream_sid,
+                )
             playback.terminating = True
         else:
             await asyncio.sleep(_HANGUP_FAREWELL_DELAY_SECONDS)
 
+        # The terminal kill runs in its own task: the websocket handler cancels
+        # this task from its ``finally`` block on disconnect, and that second
+        # cancellation must not abort the REST completion.
+        termination = asyncio.ensure_future(
+            self._terminate_call(websocket, source=source, call_sid=call_sid)
+        )
+        while not termination.done():
+            try:
+                await asyncio.shield(termination)
+            except asyncio.CancelledError:
+                continue
+        if termination.exception() is not None:
+            logger.warning(
+                "Hangup termination failed for call %s: %s",
+                call_sid,
+                termination.exception(),
+            )
+
+    async def _terminate_call(
+        self, websocket, *, source: str, call_sid: str | None
+    ) -> None:
+        """Revoke grants, complete the Twilio call, and close the media stream."""
         # Hangup is a real call end even if Twilio never sends ``stop``.
         if "twilio" in source:
             self._revoke_twilio_body_grants_for_call(call_sid)

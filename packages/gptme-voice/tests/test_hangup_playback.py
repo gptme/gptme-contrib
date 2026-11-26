@@ -240,6 +240,43 @@ def test_rest_failure_still_closes_websocket_after_playback(monkeypatch):
     asyncio.run(run())
 
 
+def test_disconnect_during_drain_still_completes_call(monkeypatch):
+    """A dropped transport must not skip the authoritative REST kill."""
+
+    from gptme_voice.realtime.playback import TwilioPlayback
+
+    async def run():
+        server = VoiceServer(openai_api_key="test")
+        rest = Mock()
+        monkeypatch.setattr("twilio.rest.Client", rest)
+        monkeypatch.setattr(server_module, "_get_config_env", lambda key: "test")
+        ws = PlaybackSocket()
+        playback = TwilioPlayback(ws, "MZ-test")
+        task = asyncio.create_task(
+            server._schedule_hangup(
+                ws,
+                source="twilio:tool",
+                reason="bye",
+                call_sid="CA-test",
+                playback=playback,
+            )
+        )
+        await next_mark(ws)
+        # The websocket handler's finally block, on a mid-drain disconnect.
+        playback.stopped = True
+        playback.disconnected = True
+        playback.cancel_hangup()
+        playback.hangup_task = task
+        task.cancel()
+        task.cancel()
+        await asyncio.wait_for(task, timeout=1)
+        rest.return_value.calls.return_value.update.assert_called_once_with(
+            status="completed"
+        )
+
+    asyncio.run(run())
+
+
 def test_response_callbacks_preserve_legacy_positional_transcript_arguments():
     from gptme_voice.realtime.openai_client import OpenAIRealtimeClient
 
