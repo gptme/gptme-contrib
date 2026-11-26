@@ -168,12 +168,47 @@ def test_ledger_keeps_its_mode(tmp_path):
     lessons.mkdir(parents=True)
     adopt.record_adoption("a-tools-l0", "a", "2026-01-01T00:00:00", lessons)
     ledger = _ledger(lessons)
-    ledger.chmod(0o644)
+    # Not 0644: under the common umask 022 that is the default a fresh file
+    # gets anyway, so the assertion would not discriminate "keep the mode"
+    # from "always use the umask default".
+    ledger.chmod(0o640)
 
     adopt.record_adoption("a-tools-l1", "a", "2026-01-02T00:00:00", lessons)
 
-    assert ledger.stat().st_mode & 0o777 == 0o644
+    assert ledger.stat().st_mode & 0o777 == 0o640
     assert len(json.loads(ledger.read_text())["adoptions"]) == 2
+
+
+def test_force_rollback_restores_without_rewriting(tmp_path, monkeypatch):
+    """The undo must be a rename: rewriting the old lesson needs free space."""
+    meta, net = _network_lesson(tmp_path)
+    lessons = tmp_path / "ws" / "lessons"
+    local = lessons / "tools" / "git.md"
+    local.parent.mkdir(parents=True)
+    local.write_text("ORIGINAL LESSON\n")
+
+    real_atomic = adopt._atomic_write
+    lesson_writes = 0
+
+    def counting_atomic(path):
+        nonlocal lesson_writes
+        if Path(path).name == "git.md":
+            lesson_writes += 1
+            if lesson_writes > 1:
+                # A restore that rewrites the content would hit this too.
+                raise OSError(28, "No space left on device")
+        return real_atomic(path)
+
+    monkeypatch.setattr(adopt, "_atomic_write", counting_atomic)
+    monkeypatch.setattr(adopt.json, "dump", _dump_then_enospc)
+    ok, msg = adopt.adopt_lesson(meta, net, lessons, force=True)
+    monkeypatch.undo()
+
+    assert not ok, msg
+    assert local.read_text() == "ORIGINAL LESSON\n"
+    assert lesson_writes == 1
+    assert not list(local.parent.glob("*.tmp"))
+    assert not list(local.parent.glob(".*.previous"))
 
 
 def test_wrong_shaped_ledger_is_set_aside_not_blocking(tmp_path, capsys):

@@ -156,14 +156,29 @@ def adopt_lesson(
         # so a failed write leaves the previous lesson intact rather than
         # truncated (a truncated file would be refused on retry, or would
         # discard the user's lesson under --force).
-        previous = local_path.read_text() if local_path.exists() else None
-        with _atomic_write(local_path) as f:
-            f.write(content)
+        #
+        # The undo below must not need free space: the failure it handles is
+        # usually ENOSPC, so rewriting the old content could fail too and
+        # leave the network version in place, losing the user's lesson. Keep
+        # the old inode as a hard link, so restoring is a rename.
+        write_path = local_path.resolve() if local_path.is_symlink() else local_path
+        backup: Path | None = None
+        previous: str | None = None
+        if write_path.exists():
+            backup = write_path.with_name(f".{write_path.name}.previous")
+            backup.unlink(missing_ok=True)  # stale backup from a crashed run
+            try:
+                os.link(write_path, backup)
+            except OSError:
+                # Filesystem without hard links: fall back to the content.
+                backup = None
+                previous = write_path.read_text()
 
-        # Record adoption in metrics (for future tracking). If that fails,
-        # undo the lesson write: an adoption reported as failed must leave
-        # nothing behind, or the retry is refused with "Local lesson exists".
         try:
+            with _atomic_write(local_path) as f:
+                f.write(content)
+
+            # Record adoption in metrics (for future tracking).
             record_adoption(
                 lesson_id=lesson_id,
                 agent_origin=network_meta.get("agent_origin", "unknown"),
@@ -171,12 +186,19 @@ def adopt_lesson(
                 lessons_dir=lessons_dir,
             )
         except Exception:
-            if previous is None:
-                local_path.unlink(missing_ok=True)
-            else:
+            # An adoption reported as failed must leave nothing behind, or the
+            # retry is refused with "Local lesson exists".
+            if backup is not None:
+                os.replace(backup, write_path)
+            elif previous is not None:
                 with _atomic_write(local_path) as f:
                     f.write(previous)
+            else:
+                write_path.unlink(missing_ok=True)
             raise
+        else:
+            if backup is not None:
+                backup.unlink(missing_ok=True)
 
         return True, f"Adopted to {local_path}"
 
