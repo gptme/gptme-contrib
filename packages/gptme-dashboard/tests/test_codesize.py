@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -503,3 +504,44 @@ def test_metarepo_counts_a_checked_out_but_inactive_submodule(tmp_path: Path) ->
 
     assert {g.name for g in report.groups} >= {"modules/alpha", "modules/beta"}
     assert report.history[-1].source_lines == report.total_source_lines
+
+
+@pytest.mark.parametrize("brain", [False, True])
+def test_user_submodule_recurse_does_not_inflate_the_trend(tmp_path: Path, brain: bool) -> None:
+    meta = _metarepo(tmp_path)
+    if brain:
+        for surface in ("tasks", "lessons", "journal"):
+            _write(meta, f"{surface}/a.md", 3)
+        _commit_all(meta, "brain layout")
+    # a common global setting; git grep honours it
+    _git(meta, "config", "submodule.recurse", "true")
+
+    report = build_report(meta, history_weeks=4)
+
+    assert report.history[-1].source_lines == report.total_source_lines
+
+
+def test_user_show_signature_does_not_corrupt_commit_dates(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    key = tmp_path / "key"
+    subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(key)], check=True)
+    _write(repo, "src/a.py", 10)
+    _git(repo, "add", "-A")
+    _git(
+        repo,
+        "-c",
+        "gpg.format=ssh",
+        "-c",
+        f"user.signingkey={key}",
+        "commit",
+        "-q",
+        "-S",
+        "-m",
+        "init",
+    )
+    _git(repo, "config", "log.showSignature", "true")
+
+    report = build_report(repo, history_weeks=0)
+
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", report.groups[0].last_commit)

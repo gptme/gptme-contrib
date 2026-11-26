@@ -172,10 +172,19 @@ class CodeSizeReport:
 # --------------------------------------------------------------------------- #
 
 
+# User config that would change what the output means or looks like.
+PINNED_CONFIG = (
+    "core.quotePath=false",  # non-ASCII paths must come out verbatim to match up
+    "grep.fullName=false",  # cwd-relative paths
+    "submodule.recurse=false",  # grep must not descend; submodules are handled here
+    "log.showSignature=false",  # no signature text mixed into formatted log output
+)
+
+
 def _git(root: Path, *args: str) -> str:
+    pinned = [arg for setting in PINNED_CONFIG for arg in ("-c", setting)]
     proc = subprocess.run(
-        # quotePath=false: non-ASCII paths must come out verbatim to match up.
-        ["git", "-c", "core.quotePath=false", "-C", str(root), *args],
+        ["git", *pinned, "-C", str(root), *args],
         capture_output=True,
         encoding="utf-8",
         errors="replace",
@@ -532,9 +541,7 @@ def _lines_at_commit(
     cannot be read are added to ``unreadable``.
     """
     patterns = [f":(icase)*{suffix}" for suffix in sorted(SOURCE_SUFFIXES)]
-    # pin the output shape against user config: no colour, cwd-relative paths
-    grep = ("-c", "grep.fullName=false", "grep", "--no-color")
-    out = _git(root, *grep, "-c", "-I", "", commit, "--", *patterns)
+    out = _git(root, "grep", "--no-color", "-c", "-I", "", commit, "--", *patterns)
     rows: list[tuple[str, int]] = []
     marker = f"{commit}:"
     for line in out.splitlines():
