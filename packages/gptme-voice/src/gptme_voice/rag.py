@@ -802,14 +802,25 @@ def _format_result(doc: Any, terms: str = "") -> dict[str, Any]:
 
         # Match the ranker's analyzer (ngrams up to 2) so a phrase-only match is
         # anchored on the phrase rather than on an earlier single word.
-        analyze = CountVectorizer(
-            stop_words=_LEXICAL_STOP_WORDS, ngram_range=(1, 2)
-        ).build_analyzer()
+        vectorizer = CountVectorizer(stop_words=_LEXICAL_STOP_WORDS, ngram_range=(1, 2))
+        stop_words = vectorizer.get_stop_words() or frozenset()
+        # Tokenise the document like the ranker does: a bigram it scored may span
+        # punctuation, newlines or stop words, so a literal search would miss it.
+        words = [
+            (word, match.start())
+            for match in re.finditer(vectorizer.token_pattern, content)
+            if (word := match.group().lower()) not in stop_words
+        ]
+        offsets: dict[str, int] = {}
+        for i, (word, offset) in enumerate(words):
+            offsets.setdefault(word, offset)
+            if i + 1 < len(words):
+                offsets.setdefault(f"{word} {words[i + 1][0]}", offset)
         # Whole-file lexical ranking needs a matching passage, not just a header.
+        analyze = vectorizer.build_analyzer()
         for term in sorted(set(analyze(terms)), key=len, reverse=True):
-            match = re.search(r"\b" + re.escape(term) + r"\b", content, re.IGNORECASE)
-            if match is not None:
-                start = max(0, match.start() - 80)
+            if term in offsets:
+                start = max(0, offsets[term] - 80)
                 break
     snippet = content[start : start + _MAX_SNIPPET]
     if start:

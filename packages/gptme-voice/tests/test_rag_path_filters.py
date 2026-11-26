@@ -198,10 +198,14 @@ async def test_symlinks_cannot_extend_declared_corpus(
     today = datetime.now(timezone.utc).date().isoformat()
     (corpus / f"journal/{today}/leak.md").symlink_to(private)
     rag = VoiceRag(str(corpus), enabled=True)
-    result = await rag.search("secret", include_paths=["scripts/", "knowledge/"])
+    # Reads reject symlinks too, so check journal selection directly.
+    selected = rag.collect_recent_files(include_paths=("journal",))
+    assert [path.name for path in selected] == ["recent.md"]
+    result = await rag.search(
+        "secret", include_paths=["scripts/", "knowledge/", "journal/"]
+    )
     assert result["status"] == "empty"
-    assert all("secret" not in r["snippet"].lower() for r in result["results"])
-    assert all("leak" not in r["source"] for r in result["results"])
+    assert result["results"] == []
 
 
 @pytest.mark.asyncio
@@ -239,18 +243,22 @@ def test_unfiltered_documents_load_without_a_pinned_root(corpus: Path) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("lexical")
+@pytest.mark.parametrize(
+    "phrase",
+    ["standup brief", "standup-brief", "standup\nbrief", "Standup of the Brief"],
+)
 async def test_snippet_anchors_on_a_phrase_not_an_earlier_single_word(
-    corpus: Path,
+    corpus: Path, phrase: str
 ) -> None:
     write(
         corpus,
         "scripts/voice/brief.py",
-        "# standup\n" + "# filler\n" * 100 + "standup brief delivery plan\n",
+        "# standup\n" + "# filler\n" * 100 + f"{phrase} delivery plan\n",
     )
     result = await VoiceRag(str(corpus), enabled=True).search(
         "standup brief", include_paths=["scripts/"]
     )
-    assert "standup brief delivery plan" in result["results"][0]["snippet"]
+    assert f"{phrase} delivery plan" in result["results"][0]["snippet"]
 
 
 @pytest.mark.asyncio
