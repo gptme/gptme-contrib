@@ -1422,6 +1422,9 @@ def test_non_object_jsonl_line_is_skipped(tmp_path: Path, bad_line: str) -> None
     [
         "bob:s3cr3t@proxy.internal:8080",
         "https://alice:hunter2pw@example.com/v1",
+        "https://hunter2pw@proxy.internal",
+        "http://hunter2pw@proxy.internal:8080",
+        "https://glpat-hunter2pw@gitlab.example/o/r.git",
         "user:pa@ss@proxy.internal:8080",
         "http://bob:pa/ss@example.com/x",
         "https://bob:/hunter2pw@proxy.internal",
@@ -1456,6 +1459,8 @@ def test_url_embedded_credentials_redacted(tmp_path: Path, credential: str) -> N
         "mail bob@example.com",
         "git@github.com:o/r",
         "https://registry.npmjs.org/@types/node",
+        "ssh://git@github.com/o/r.git",
+        "git://git@github.com/o/r.git",
     ],
 )
 def test_passwordless_userinfo_lookalikes_are_preserved(text: str) -> None:
@@ -1494,3 +1499,18 @@ def test_url_redaction_preserves_quoted_secret_boundaries(quote: str) -> None:
     redacted = soc._redact(text)
     assert "alpha" not in redacted
     assert "beta" not in redacted
+
+
+@pytest.mark.parametrize("reason", [["auth"], {"code": "auth"}])
+def test_unhashable_failure_reason_does_not_silence_outage(
+    tmp_path: Path, reason: object
+) -> None:
+    records = [rec(40, "productive")] + [
+        rec(h, "failed", "api_error_403") for h in (1, 2, 3, 4)
+    ]
+    malformed = rec(1, "failed", "auth")
+    malformed["failure_reason"] = reason
+    write_records(tmp_path, records + [malformed])
+    status = assess(tmp_path)
+    assert status["outage"] is True
+    assert status["auth_failures_in_window"] == 4

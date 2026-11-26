@@ -239,9 +239,11 @@ def _redact_url_credential_token(token: str) -> str:
         if user_colon != -1:
             colon = user_colon
         elif token[:colon].lower() in {"http", "https", "ssh", "git", "ftp", "ftps"}:
-            # Recognized URLs without a user/password separator are not
-            # credentials (including scoped package paths containing @).
-            return token
+            # A path @ (e.g. npm scopes) is not userinfo. SSH/git usernames
+            # are public identifiers; HTTP/FTP userinfo may instead be a token.
+            if "/" in token[colon + 3 : at] or token[:colon].lower() in {"ssh", "git"}:
+                return token
+            return token[: colon + 3] + "[REDACTED]" + token[at:]
     if colon == -1 or colon + 1 == at:
         return token
     return token[: colon + 1] + "[REDACTED]" + token[at:]
@@ -494,7 +496,9 @@ def assess(
     auth_failure_records = [
         r
         for r in records
-        if r.get("outcome") == "failed" and r.get("failure_reason") in reasons
+        if r.get("outcome") == "failed"
+        and isinstance(r.get("failure_reason"), str)
+        and r.get("failure_reason") in reasons
     ]
     auth_failures = len(auth_failure_records)
     productive = sum(1 for r in records if r.get("outcome") == "productive")
