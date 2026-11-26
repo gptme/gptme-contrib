@@ -48,10 +48,14 @@ if (ALLOWED_CONTACTS.length > 0) {
 }
 // The gptme backend reads replies from `--output-format json`. Refuse to start
 // on a gptme that cannot emit it rather than silently dropping every reply.
-if (BACKEND === 'gptme' && !gptmeSupportsJsonOutput()) {
+const jsonOutput = BACKEND === 'gptme' ? gptmeSupportsJsonOutput() : 'unknown';
+if (jsonOutput === 'no') {
     console.error(`${GPTME_CMD} does not support --output-format json.`);
     console.error('Upgrade gptme (the flag was added in May 2026) or set BACKEND=claude-code.');
     process.exit(1);
+}
+if (jsonOutput === 'unknown') {
+    console.log(`Warning: could not read ${GPTME_CMD} --help; assuming --output-format json works`);
 }
 
 if (BACKEND === 'claude-code' && !existsSync(SYSTEM_PROMPT_FILE)) {
@@ -126,14 +130,23 @@ client.on('message', async (msg) => {
     });
 });
 
-/** Whether the configured gptme understands `--output-format json`. */
+/**
+ * Whether the configured gptme understands `--output-format json`.
+ *
+ * Returns 'yes' or 'no' when its help text can be read, and 'unknown' when the
+ * probe itself fails (a wrapper command, a hang, a missing binary). A wrapper
+ * must not wedge startup, so the probe is bounded and an inconclusive answer
+ * does not stop the bridge.
+ */
 function gptmeSupportsJsonOutput() {
     try {
-        const probe = spawnSync(GPTME_CMD, ['--help'], { encoding: 'utf8' });
-        if (probe.error) return false;
-        return `${probe.stdout ?? ''}${probe.stderr ?? ''}`.includes('--output-format');
+        const probe = spawnSync(GPTME_CMD, ['--help'], { encoding: 'utf8', timeout: 10_000 });
+        if (probe.error) return 'unknown';
+        const help = `${probe.stdout ?? ''}${probe.stderr ?? ''}`;
+        if (help.includes('--output-format')) return 'yes';
+        return help.trim() ? 'no' : 'unknown';
     } catch {
-        return false;
+        return 'unknown';
     }
 }
 

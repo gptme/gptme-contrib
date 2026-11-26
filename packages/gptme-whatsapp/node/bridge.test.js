@@ -219,7 +219,7 @@ test('spawn failure clears the timer and releases the conversation', async () =>
     assert.deepEqual(sent, ['recovered']);
 });
 
-test('an abandoned run cannot leak text into the next run\'s reply', async () => {
+test('an abandoned run sends no reply and does not hold the sender', async () => {
     const { children, timers, sent, receive } = bridge();
     const first = receive('first');
     const second = receive('second');
@@ -233,8 +233,9 @@ test('an abandoned run cannot leak text into the next run\'s reply', async () =>
     await first;
     await tick();
     assert.equal(children.length, 2);
-    // The abandoned run's stdout is its own: a survivor writing there cannot
-    // reach the next run, whose reply comes from its own pipe.
+    // Each run's stdout is its own pipe, so the abandoned run's text cannot
+    // reach the next run. The mock cannot prove that property; it pins the
+    // queue behaviour (release after grace) instead.
     children[0].answer('stale orphan answer');
     children[1].answer('next answer');
     children[1].emit('close', 0);
@@ -250,5 +251,10 @@ test('the bridge refuses to start on a gptme without JSON output', () => {
 
 test('a gptme that supports JSON output starts normally', () => {
     const { exits } = bridge();
+    assert.deepEqual(exits, []);
+});
+
+test('an unreadable gptme --help does not stop the bridge', () => {
+    const { exits } = bridge({}, { spawnSync: () => ({ error: new Error('ETIMEDOUT') }) });
     assert.deepEqual(exits, []);
 });
