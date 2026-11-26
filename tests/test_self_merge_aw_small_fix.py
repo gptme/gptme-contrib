@@ -78,6 +78,48 @@ def test_aw_docs_only_is_waived_as_tier0() -> None:
     assert verdict and verdict["tier"] == 0
 
 
+def test_aw_tier1_does_not_waive_bot_ci_hard_stop() -> None:
+    # Tier 1 admits class ``code``, and ``.pre-commit-config.yaml`` classifies as
+    # code. A tier admits paths; it must not admit a CI/bot-policy change.
+    changes = [
+        mp.FileChange("src/app.py", 5),
+        mp.FileChange(".pre-commit-config.yaml", 5),
+    ]
+    files = ["src/app.py", ".pre-commit-config.yaml"]
+    hard_stop = "Bot/CI config changes require human review under current policy"
+    with patch.object(smc, "fetch_pr_file_changes", return_value=changes):
+        remaining, warning, verdict = smc.merge_policy_tier_waiver(
+            [hard_stop],
+            repo=REPO,
+            number=1,
+            files=files,
+            title="fix: x",
+        )
+    assert remaining == [hard_stop]
+    assert warning is None
+    assert verdict and verdict["tier"] == 1
+
+
+def test_aw_tier1_waives_path_reason_but_keeps_hard_stop() -> None:
+    changes = [
+        mp.FileChange("src/app.py", 5),
+        mp.FileChange(".pre-commit-config.yaml", 5),
+    ]
+    files = ["src/app.py", ".pre-commit-config.yaml"]
+    hard_stop = "Bot/CI config changes require human review under current policy"
+    path_reason = "Files not in any allowed self-merge category: src/app.py"
+    with patch.object(smc, "fetch_pr_file_changes", return_value=changes):
+        remaining, warning, verdict = smc.merge_policy_tier_waiver(
+            [path_reason, hard_stop],
+            repo=REPO,
+            number=1,
+            files=files,
+            title="fix: x",
+        )
+    assert remaining == [hard_stop]
+    assert warning and "merge-policy tier 1" in warning
+
+
 def test_aw_src_fix_is_waived_as_tier1() -> None:
     changes = [mp.FileChange("src/app.py", 120)]
     with patch.object(smc, "fetch_pr_file_changes", return_value=changes):

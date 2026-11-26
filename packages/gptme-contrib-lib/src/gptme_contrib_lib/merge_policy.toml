@@ -91,6 +91,7 @@ hold_globs = [
   "**/*datastore*/**",
   "**/aw-sync/**",
   "**/schema*",
+  "**/schema*/**",
   "**/Cargo.toml",
   "**/pyproject.toml",
   "**/package.json",

@@ -4137,12 +4137,20 @@ def merge_policy_tier_waiver(
     )
     if not merge_policy.tier_self_merges(policy, verdict.tier) or not reasons:
         return reasons, None, verdict.as_dict()
+    # The security/infra stops survive a tier waiver exactly as they survive an
+    # operator approval: a tier admits paths, it does not admit credential, CI
+    # or bot-policy changes (tier 1 admits class ``code``, which includes
+    # ``.pre-commit-config.yaml``).
+    waivable = [r for r in reasons if r not in _OPERATOR_APPROVAL_HARD_STOPS]
+    if not waivable:
+        return reasons, None, verdict.as_dict()
+    remaining = [r for r in reasons if r in _OPERATOR_APPROVAL_HARD_STOPS]
     warning = (
         f"Path/category policy waived: merge-policy tier {verdict.tier} "
         f"({verdict.counted_lines} counted lines, {verdict.counted_files} counted "
-        f"files; {len(reasons)} reason(s) overridden, gptme_contrib_lib/merge_policy.toml)"
+        f"files; {len(waivable)} reason(s) overridden, gptme_contrib_lib/merge_policy.toml)"
     )
-    return [], warning, verdict.as_dict()
+    return remaining, warning, verdict.as_dict()
 
 
 def evaluate_pr(

@@ -203,6 +203,7 @@ def test_hold_glob_star_does_not_cross_slash() -> None:
     assert merge_policy.hold_glob_match("Cargo.toml", "**/Cargo.toml")
     assert merge_policy.hold_glob_match("foo/Cargo.toml", "**/Cargo.toml")
     assert merge_policy.hold_glob_match("schema.json", "**/schema*")
+    assert merge_policy.hold_glob_match("aw_core/schemas/event.json", "**/schema*/**")
     assert not merge_policy.hold_glob_match("src/app.py", "scripts/**")
 
 
@@ -285,6 +286,15 @@ def test_aw_small_fix_holds_scripts_lockfile_migration_gitlink(policy) -> None:
         title=title,
     )
     assert migration.tier == 2
+    schema = merge_policy.assign_tier(
+        [FileChange("aw_core/schemas/event.json", 8)],
+        policy,
+        C,
+        repo=repo,
+        title=title,
+    )
+    assert schema.tier == 2
+    assert "hold glob:" in schema.misses[1]
     gitlink = merge_policy.assign_tier(
         [FileChange("aw-server", 1, 1, GITLINK_PATCH)],
         policy,
