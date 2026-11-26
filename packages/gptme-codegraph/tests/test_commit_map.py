@@ -591,3 +591,32 @@ def test_generate_map_survives_undecodable_name(tmp_path, monkeypatch):
     second = commit_map.generate_map(repo)
     assert second["source_digest"] == first["source_digest"]
     assert second["files"] == first["files"]
+
+
+def test_fingerprint_covers_every_builder_extension(tmp_path):
+    """The fingerprint must use the builder's extension list, not a subset.
+
+    ``core._iter_source_files`` indexes every extension in ``_LANG_MAP``, so a
+    hand-maintained 5-extension list here left a repo whose only sources were
+    .go/.java/.cs/... with an empty, unchanging fingerprint: the stale outline
+    was served until the cache TTL expired.
+    """
+    subprocess.run(
+        ["git", "init", "-q", str(tmp_path)], check=True, capture_output=True
+    )
+    (tmp_path / "main.go").write_text("package main\n")
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "add", "main.go"], check=True, capture_output=True
+    )
+
+    before, count_before = commit_map._stat_fingerprint(tmp_path)
+    assert (
+        count_before == 1
+    ), "a .go file is builder source; the fingerprint must see it"
+    assert commit_map._source_digest(tmp_path)[1] == 1
+
+    (tmp_path / "main.go").write_text("package main\n\nfunc main() {}\n")
+
+    after, count_after = commit_map._stat_fingerprint(tmp_path)
+    assert count_after == 1
+    assert after != before

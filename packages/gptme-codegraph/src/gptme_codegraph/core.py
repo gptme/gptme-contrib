@@ -87,7 +87,9 @@ _GRAMMAR_MODULES: dict[str, str] = {
 
 _SOURCE_EXTENSIONS: tuple[str, ...] = tuple(_LANG_MAP.keys())
 _NOISE_PATH_PARTS: frozenset[str] = frozenset(
-    {"__pycache__", "node_modules", ".git", "target", "vendor"}
+    # ``venv`` is not dot-prefixed, so it needs the explicit entry: a virtualenv
+    # in the repo would otherwise be indexed as project source.
+    {"__pycache__", "node_modules", ".git", "target", "vendor", "venv"}
 )
 
 

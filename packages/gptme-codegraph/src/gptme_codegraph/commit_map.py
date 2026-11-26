@@ -31,12 +31,16 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from .core import build_repo_map, format_repo_map
+from .core import _SOURCE_EXTENSIONS, build_repo_map, format_repo_map
 
 DEFAULT_OUTPUT_FILE = ".gptme-codegraph-map.json"
 DEFAULT_STALE_DAYS = 1
 ARTIFACT_VERSION = 2
-SOURCE_PATTERNS = ("*.py", "*.ts", "*.tsx", "*.js", "*.rs")
+# Derived from the builder's own extension list (``core._LANG_MAP``) so the
+# cache fingerprint can never cover a narrower set than ``build_repo_map``
+# consumes: a hand-maintained subset silently skipped .go/.java/.cs/.rb/.c/...
+# and left a stale outline cached for them.
+SOURCE_PATTERNS: tuple[str, ...] = tuple(f"*{ext}" for ext in _SOURCE_EXTENSIONS)
 
 # Stat-fingerprint cache: avoids re-running tree-sitter when source is unchanged.
 # Located outside the repo so it never shows up in git status / committed artifacts.
