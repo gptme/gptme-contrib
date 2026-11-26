@@ -173,3 +173,37 @@ gptme-contrib deploys its own dashboard this way; see
 ```bash
 uv run pytest packages/gptme-dashboard/tests/ -v
 ```
+
+## `codesize` — where code is hard to review
+
+A repo-agnostic size report, meant to be the shared tool behind gptme's
+[arewetiny](https://gptme.org/docs/arewetiny.html) page, the gptme-contrib
+dashboard, and an agent workspace's own code-shape review.
+
+```bash
+# markdown (default) — leads with the largest source files
+gptme-dashboard codesize --repo .
+
+# machine-readable, for a dashboard section or CI artifact
+gptme-dashboard codesize --repo . --json
+
+# monolith with internal areas: map path prefixes to groups
+gptme-dashboard codesize --repo ../gptme --groups ../gptme/codesize-groups.json
+```
+
+What it reports, in priority order:
+
+1. **largest source files** — a 3,000-line module is a review problem regardless of
+   repo size;
+2. **files over thresholds** (default 1,500 and 3,000 lines);
+3. **hotspots** — size × change frequency over a 90-day window: big *and* churning;
+4. **lines per group**, split into source and tests with a test ratio;
+5. **weekly trend** sampled from git history, so growth is visible without stored state.
+
+Profiles only decide the grouping: `monorepo` (by `packages/*`), `brain`
+(`tasks/` + `lessons/` + `journal/`, by top-level surface), `metarepo` (by
+submodule) and `monolith` (by top-level directory). Override with
+`--groups file.json` or a `codesize-groups.json` in the repo root.
+
+It only reads: nothing is deleted or rewritten. Use it to decide what to split,
+upstream or drop.

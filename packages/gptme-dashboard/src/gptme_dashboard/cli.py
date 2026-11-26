@@ -137,6 +137,88 @@ def generate(
 
 @main.command()
 @click.option(
+    "--repo",
+    "repo",
+    type=click.Path(exists=True, file_okay=False),
+    default=".",
+    show_default=True,
+    help="Repository (or workspace) to report on.",
+)
+@click.option(
+    "--json",
+    "print_json",
+    is_flag=True,
+    default=False,
+    help="Print the report as JSON instead of markdown.",
+)
+@click.option(
+    "--groups",
+    type=click.Path(exists=True, dir_okay=False),
+    default=None,
+    help=(
+        "JSON file mapping path prefixes to group names, e.g. "
+        '{"src/core": "core", "src/llm": "llm"}. Defaults to '
+        "<repo>/codesize-groups.json when present."
+    ),
+)
+@click.option(
+    "--threshold",
+    "thresholds",
+    multiple=True,
+    type=int,
+    help="File-size threshold in lines to flag (repeatable). Default: 1500 and 3000.",
+)
+@click.option(
+    "--history-weeks",
+    type=click.IntRange(min=0, max=104),
+    default=8,
+    show_default=True,
+    help="Weekly git samples for the trend. 0 disables the history scan.",
+)
+@click.option(
+    "--largest",
+    type=click.IntRange(min=1),
+    default=15,
+    show_default=True,
+    help="How many of the largest files and hotspots to list.",
+)
+def codesize(
+    repo: str,
+    print_json: bool,
+    groups: str | None,
+    thresholds: tuple[int, ...],
+    history_weeks: int,
+    largest: int,
+) -> None:
+    """Report where code is hard to understand, review or change.
+
+    Leads with the largest source files, then over-threshold files, hotspots
+    (size x churn), a per-group breakdown and a weekly trend sampled from git.
+    """
+    from gptme_dashboard.codesize import (
+        DEFAULT_THRESHOLDS,
+        build_report,
+        render_markdown,
+    )
+
+    group_map = None
+    if groups is not None:
+        import json as _json
+
+        group_map = _json.loads(Path(groups).read_text(encoding="utf-8"))
+
+    report = build_report(
+        Path(repo),
+        group_map=group_map,
+        thresholds=thresholds or DEFAULT_THRESHOLDS,
+        history_weeks=history_weeks,
+        largest_n=largest,
+    )
+    click.echo(report.to_json() if print_json else render_markdown(report))
+
+
+@main.command()
+@click.option(
     "--workspace",
     type=click.Path(exists=True),
     default=".",
