@@ -23,6 +23,9 @@ class TwilioPlayback:
         self.stream_sid = stream_sid
         self.hangup_task: asyncio.Task[None] | None = None
         self.interrupted = False
+        # True once a new caller turn arrives after an interruption, so a
+        # subsequent provider response may legitimately re-arm hangup.
+        self._user_turn_after_interrupt = False
         self.terminating = False
         self.stopped = False
         # The media stream dropped without Twilio's ``stop``: playback can no
@@ -37,9 +40,18 @@ class TwilioPlayback:
         self._played = asyncio.Event()
 
     def response_started(self) -> None:
-        self.interrupted = False
+        # Only clear ``interrupted`` for a genuinely new turn. Clearing it on
+        # every response start would let a late transcript from the response
+        # the caller interrupted re-arm a hangup and end the call.
+        if self._user_turn_after_interrupt:
+            self.interrupted = False
+            self._user_turn_after_interrupt = False
         self._revision += 1
         self._response_done.clear()
+
+    def user_turn_started(self) -> None:
+        """Record that the caller has taken a new turn after an interruption."""
+        self._user_turn_after_interrupt = True
 
     def response_finished(self) -> None:
         self._response_done.set()
@@ -53,6 +65,7 @@ class TwilioPlayback:
 
     def cancel_hangup(self) -> None:
         self.interrupted = True
+        self._user_turn_after_interrupt = False
         if self.hangup_task is not None and not self.terminating:
             self.hangup_task.cancel()
         # A clear echo must not satisfy a later farewell's mark.
@@ -64,7 +77,24 @@ class TwilioPlayback:
         try:
             while True:
                 remaining = max(0.0, deadline - asyncio.get_running_loop().time())
-                revision = await asyncio.wait_for(self._drain(), timeout=remaining)
+                try:
+                    revision = await asyncio.wait_for(self._drain(), timeout=remaining)
+                except asyncio.TimeoutError:
+                    raise
+                except Exception as exc:
+                    # The media stream closed while the mark was being sent or
+                    # awaited (``websockets.ConnectionClosed`` and friends).
+                    # Playback cannot be confirmed, but a transport error must
+                    # not skip the caller's authoritative kill: closing the
+                    # WebSocket does not end the call at the platform level.
+                    # Cancellation stays a BaseException and still propagates.
+                    logger.warning(
+                        "Farewell playback unconfirmed: transport error for "
+                        "stream %s: %s",
+                        self.stream_sid,
+                        exc,
+                    )
+                    return
                 # wait_for resumes us after its child task finishes: recheck here
                 # too, in case audio arrived during that event-loop handoff.
                 if revision == self._revision and self._response_done.is_set():

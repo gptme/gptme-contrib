@@ -277,6 +277,53 @@ def test_disconnect_during_drain_still_completes_call(monkeypatch):
     asyncio.run(run())
 
 
+def test_transport_error_during_drain_still_completes_call(monkeypatch):
+    """A closed socket mid-mark must not raise out of the hangup task.
+
+    ``websockets.ConnectionClosed`` (an ``Exception``, not an ``OSError``)
+    escapes ``_drain``'s ``send_text``. Before this was handled, the exception
+    propagated out of ``_schedule_hangup`` and the authoritative REST kill
+    never ran, leaving the call live at the platform level.
+    """
+
+    from gptme_voice.realtime.playback import TwilioPlayback
+
+    class DroppingSocket(PlaybackSocket):
+        def __init__(self):
+            super().__init__()
+            self.dropped = True
+
+        async def send_text(self, message):
+            if self.dropped:
+                # Stand-in for websockets.exceptions.ConnectionClosed.
+                raise ConnectionError("no close frame received or sent")
+            await super().send_text(message)
+
+    async def run():
+        server = VoiceServer(openai_api_key="test")
+        rest = Mock()
+        monkeypatch.setattr("twilio.rest.Client", rest)
+        monkeypatch.setattr(server_module, "_get_config_env", lambda key: "test")
+        ws = DroppingSocket()
+        playback = TwilioPlayback(ws, "MZ-test")
+        task = asyncio.create_task(
+            server._schedule_hangup(
+                ws,
+                source="twilio:tool",
+                reason="bye",
+                call_sid="CA-test",
+                playback=playback,
+            )
+        )
+        playback.hangup_task = task
+        await asyncio.wait_for(task, timeout=2)
+        rest.return_value.calls.return_value.update.assert_called_once_with(
+            status="completed"
+        )
+
+    asyncio.run(run())
+
+
 def test_response_callbacks_preserve_legacy_positional_transcript_arguments():
     from gptme_voice.realtime.openai_client import OpenAIRealtimeClient
 
@@ -285,3 +332,26 @@ def test_response_callbacks_preserve_legacy_positional_transcript_arguments():
     assert client.on_transcript is transcript_callback
     assert client.on_response_start is None
     assert client.on_response_end is None
+
+
+def test_late_transcript_after_interruption_does_not_rearm_hangup():
+    """``response_started`` must not clear ``interrupted`` without a new turn."""
+
+    from gptme_voice.realtime.playback import TwilioPlayback
+
+    async def run():
+        playback = TwilioPlayback(PlaybackSocket(), "MZ-test")
+        playback.cancel_hangup()
+        assert playback.interrupted is True
+
+        # A new provider response alone (late transcript of the interrupted
+        # response) must not clear the interruption.
+        playback.response_started()
+        assert playback.interrupted is True
+
+        # Only an actual new caller turn re-arms hangup.
+        playback.user_turn_started()
+        playback.response_started()
+        assert playback.interrupted is False
+
+    asyncio.run(run())

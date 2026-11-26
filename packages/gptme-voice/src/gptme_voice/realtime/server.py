@@ -3241,9 +3241,15 @@ class VoiceServer:
 
         def _request_hangup(trigger: str, reason: str | None) -> None:
             nonlocal hangup_task
-            if playback is not None and (
-                playback.interrupted or playback.terminating or playback.stopped
+            if playback is not None and (playback.terminating or playback.stopped):
+                return
+            if (
+                playback is not None
+                and trigger == "transcript-fallback"
+                and playback.interrupted
             ):
+                # Only a late transcript from the interrupted response is
+                # suppressed. An explicit tool hangup is always honoured.
                 return
             if hangup_task is not None and not hangup_task.done():
                 logger.info(
@@ -3284,6 +3290,10 @@ class VoiceServer:
 
         def _on_user_transcript(text: str, item_id: str | None = None) -> None:
             _append_transcript_turn(transcript, "user", text, item_id=item_id)
+            if playback is not None:
+                # A new caller turn re-arms hangup after an interruption, so a
+                # later response may terminate the call again.
+                playback.user_turn_started()
 
         return _on_ai_transcript, _on_user_transcript, _on_hangup
 
@@ -3617,6 +3627,17 @@ class VoiceServer:
                     "Farewell playback unconfirmed on disconnect; "
                     "completing call anyway: stream=%s",
                     playback.stream_sid,
+                )
+            except Exception as exc:
+                # A transport error while draining (for example a closed
+                # WebSocket raised from ``send_text``/mark wait) must not skip
+                # the authoritative REST kill either. Swallowing it here is
+                # safe: the terminal teardown below closes the socket anyway.
+                logger.warning(
+                    "Farewell playback drain failed; completing call anyway: "
+                    "stream=%s error=%s",
+                    playback.stream_sid,
+                    exc,
                 )
             playback.terminating = True
         else:
