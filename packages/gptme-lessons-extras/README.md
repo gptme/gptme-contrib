@@ -134,11 +134,11 @@ steps. Installing this package alone is not evidence of production adoption.
 
 ## Lesson outcome associations (`lesson-loo`)
 
-`lesson-loo` extracts the comparison math from Bob's lesson leave-one-out analysis.
-It compares session outcomes with and without each lesson. This is an
+`lesson-loo` compares session outcomes with and without each lesson. This is an
 **observational association**, despite the historical LOO name: sessions are not
 rerun with one lesson removed, and a delta does not establish benefit or harm.
-Bob's bandit, grading, lifecycle decisions and record adapters remain local.
+Agent-specific bandits, grading, lifecycle decisions and record adapters stay
+outside the shared core.
 
 ```bash
 lesson-loo sessions.jsonl --min-sessions 5
@@ -222,7 +222,7 @@ rubric (task resolved without correction), meaningful validation results, or a
 blinded session judge. Keep outcome collection independent of whether the lesson
 was present, and include scored sessions both with and without it.
 
-An interactive agent such as erbot with no recorded outcomes **cannot compute a
+An interactive agent with no recorded outcomes **cannot compute a
 meaningful outcome delta yet**. Record a consistent outcome signal first; injection
 logs alone support exposure counts, not lesson effectiveness claims. This command
 does not grade sessions, change lesson status, or update a bandit.
