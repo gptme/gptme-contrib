@@ -361,14 +361,20 @@ class VoiceRag:
         found.sort(key=lambda item: item[0], reverse=True)
         return [path for _, path in found[:_MAX_FILES]]
 
-    def _safe_source(self, path: Path) -> bool:
-        """Reject symlinks (including parents), escapes and non-files before reading."""
+    def _safe_source(self, path: Path, root: Path | None = None) -> bool:
+        """Reject symlinks (including parents), escapes and non-files before reading.
+
+        ``root`` must be the root that was pinned for the read. Resolving the
+        workspace again here would validate a different tree when the workspace
+        root is (or contains) a symlink that is retargeted mid-search, so the
+        file that passes this check would not be the file that gets read.
+        """
         if self.workspace is None:
             return False
         try:
-            root = self.workspace.resolve()
+            resolved_root = root if root is not None else self.workspace.resolve()
             relative = path.absolute().relative_to(self.workspace.absolute())
-            candidate = root / relative
+            candidate = resolved_root / relative
             return candidate.resolve() == candidate and candidate.is_file()
         except (OSError, ValueError, RuntimeError):
             return False
@@ -412,30 +418,42 @@ class VoiceRag:
         return (paths + [p for p in recent if p not in seen])[:_MAX_FILES]
 
     @contextmanager
-    def _pinned_root(self) -> Iterator[int | None]:
-        """Hold one workspace directory open across source selection and reads.
+    def _pinned_corpus(self) -> Iterator[tuple[int | None, Path | None]]:
+        """Pin one workspace root and yield it alongside the descriptor.
 
-        Retargeting a symlinked workspace root mid-search must not redirect reads
-        into a different tree. Yields None when the root cannot be pinned safely.
+        The resolved root is captured here, next to the ``os.open`` that pins it,
+        so validation and reads share one tree even if the workspace path is a
+        symlink that is retargeted mid-search. Yields ``(None, None)`` when the
+        root cannot be pinned safely.
         """
         fd = None
+        root: Path | None = None
         if (
             self.workspace is not None
             and hasattr(os, "O_NOFOLLOW")
             and os.open in os.supports_dir_fd
         ):
             try:
+                root = self.workspace.resolve()
                 fd = os.open(
-                    self.workspace.resolve(),
+                    root,
                     os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
                 )
             except (OSError, RuntimeError) as exc:
+                fd = None
+                root = None
                 logger.debug("cannot open workspace root: %s", exc)
         try:
-            yield fd
+            yield fd, root
         finally:
             if fd is not None:
                 os.close(fd)
+
+    @contextmanager
+    def _pinned_root(self) -> Iterator[int | None]:
+        """Hold one workspace directory open across source selection and reads."""
+        with self._pinned_corpus() as (fd, _root):
+            yield fd
 
     def _read_source(self, path: Path, root_fd: int) -> tuple[bytes, float, str]:
         """Read below the pinned root, never following source symlinks."""
@@ -462,7 +480,12 @@ class VoiceRag:
             return stream.read(_MAX_FILE_BYTES + 1), info.st_mtime, relative.as_posix()
 
     def _load_documents(
-        self, paths: list[Path], root_fd: int | None, *, pinned: bool = True
+        self,
+        paths: list[Path],
+        root_fd: int | None,
+        *,
+        pinned: bool = True,
+        root: Path | None = None,
     ) -> list[Any]:
         """Load documents, either through the pinned root or by direct read.
 
@@ -486,7 +509,7 @@ class VoiceRag:
             try:
                 if pinned:
                     assert root_fd is not None
-                    if not self._safe_source(path):
+                    if not self._safe_source(path, root):
                         continue
                     raw, modified, rel = self._read_source(path, root_fd)
                     if len(raw) > _MAX_FILE_BYTES:
@@ -608,9 +631,11 @@ class VoiceRag:
         if filtered:
             # Open the root before selecting, so reads cannot move to a later
             # target, and read only below that one pinned handle.
-            with self._pinned_root() as root_fd:
+            with self._pinned_corpus() as (root_fd, pinned_root):
                 paths = self._collect_filtered_files(includes, excludes)
-                docs = self._load_documents(paths, root_fd, pinned=True)
+                docs = self._load_documents(
+                    paths, root_fd, pinned=True, root=pinned_root
+                )
         else:
             # Legacy recap path: no pinned descriptor requirement, so it keeps
             # working on platforms without no-follow directory descriptors.

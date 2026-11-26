@@ -306,8 +306,8 @@ def test_symlink_swap_between_validation_and_read_is_rejected(
     source = corpus / "scripts/voice/brief.py"
     safe_source = rag._safe_source
 
-    def swap_after_check(path: Path) -> bool:
-        safe = safe_source(path)
+    def swap_after_check(path: Path, root: Path | None = None) -> bool:
+        safe = safe_source(path, root)
         if swap_parent:
             parent = source.parent
             parent.rename(parent.with_name("original"))
@@ -492,3 +492,40 @@ async def test_retargeted_workspace_root_cannot_redirect_reads(
     assert result["status"] == "ok"
     assert "standup-brief.json" in result["results"][0]["snippet"]
     assert "unsearched" not in result["results"][0]["snippet"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("lexical")
+async def test_validation_uses_the_pinned_root_not_the_retargeted_one(
+    corpus: Path,
+    tmp_path_factory: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Validation must check the tree that is read, not a re-resolved root.
+
+    Retargeting the workspace symlink after selection must not make validation
+    inspect the new tree while the read still happens under the pinned one: if
+    the new tree lacks the selected source, the current behaviour would reject
+    a file it then reads from the pinned tree (or, worse, validate a different
+    file than the one returned).
+    """
+    other = tmp_path_factory.mktemp("other")
+    write(other, "unrelated/notes.md", "nothing here")
+    link = tmp_path_factory.mktemp("links") / "active"
+    link.symlink_to(corpus, target_is_directory=True)
+    rag = VoiceRag(str(link), enabled=True)
+    collect = rag._collect_filtered_files
+
+    def retarget_after_selection(
+        includes: tuple[str, ...], excludes: tuple[str, ...]
+    ) -> list[Path]:
+        paths = collect(includes, excludes)
+        link.unlink()
+        link.symlink_to(other, target_is_directory=True)
+        return paths
+
+    monkeypatch.setattr(rag, "_collect_filtered_files", retarget_after_selection)
+    result = await rag.search("brief", include_paths=["scripts/"])
+    assert link.resolve() == other.resolve()
+    assert result["status"] == "ok"
+    assert "standup-brief.json" in result["results"][0]["snippet"]
