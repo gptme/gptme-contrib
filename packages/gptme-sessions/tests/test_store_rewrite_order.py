@@ -523,3 +523,29 @@ def test_unpersisted_derived_id_ignores_record_defaults(tmp_path: Path) -> None:
 
     digest = hashlib.sha256(b'{"model": "opus"}').hexdigest()[:12]
     assert record.session_id == f"noid-{digest}"
+
+
+@pytest.mark.parametrize("legacy_first", [False, True])
+def test_colliding_persisted_derived_id_keeps_both_rows(tmp_path: Path, legacy_first: bool) -> None:
+    """Rows appended from another store can repeat a derived id (#2338)."""
+    legacy = '{"model":"opus"}\n'
+    src = SessionStore(sessions_dir=tmp_path / "src")
+    src.sessions_dir.mkdir()
+    src.path.write_text(legacy, encoding="utf-8")
+    copied = src.load_all()[0]
+
+    store = SessionStore(sessions_dir=tmp_path / "dst")
+    store.sessions_dir.mkdir()
+    if legacy_first:
+        store.path.write_text(legacy, encoding="utf-8")
+        store.append(copied)
+    else:
+        store.append(copied)
+        store.append(copied)
+
+    records = store.load_all()
+    assert len({r.session_id for r in records}) == 2
+    records[1].category = "code"
+    store.rewrite([records[1]])
+
+    assert [r.category for r in store.load_all()] == [None, "code"]

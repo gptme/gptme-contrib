@@ -87,9 +87,10 @@ def _parse_row(line: str, taken_ids: set[str]) -> SessionRecord:
     ``_row_json`` keeps it out of the file until a caller sets a real one.
 
     ``taken_ids`` holds the ids of the rows already read from the same file and
-    is updated here. Identical id-less rows are distinct sessions, so each later
-    copy gets a numbered id (``noid-…-2``); sharing one id would let a subset
-    ``rewrite()`` drop all but one of them as superseded duplicates.
+    is updated here. Identical id-less rows are distinct sessions, so a derived
+    id (new or already persisted) that is taken gets a number (``noid-…-2``);
+    sharing one id would let a subset ``rewrite()`` drop all but one of those
+    rows as superseded duplicates.
 
     Raises the same exceptions as ``SessionRecord.from_dict(json.loads(line))``.
     """
@@ -111,20 +112,17 @@ def _parse_row(line: str, taken_ids: set[str]) -> SessionRecord:
         # writes the marker, so no caller-assigned id can be mistaken for one.
         # Remember it so a later caller-assigned id is treated as a rename of
         # this row rather than a second, duplicate row (#2338).
-        record._store_invented["session_id"] = record.session_id
         record._store_invented[_DERIVED_ID_FIELD] = True
     if isinstance(data, dict) and not session_id:
         content = {k: v for k, v in data.items() if v or k not in ("session_id", "timestamp")}
-        base = f"noid-{_line_digest(json.dumps(content, sort_keys=True))[:12]}"
-        record.session_id = base
-        copy = 1
+        record.session_id = f"noid-{_line_digest(json.dumps(content, sort_keys=True))[:12]}"
+        record._store_invented[_DERIVED_ID_FIELD] = True
+    if record._store_invented.get(_DERIVED_ID_FIELD):
+        base, copy = record.session_id, 1
         while record.session_id in taken_ids:
             copy += 1
             record.session_id = f"{base}-{copy}"
         record._store_invented["session_id"] = record.session_id
-        record._store_invented[_DERIVED_ID_FIELD] = True
-        if not has_timestamp:
-            record._store_invented["timestamp"] = record.timestamp
     taken_ids.add(record.session_id)
     return record
 
