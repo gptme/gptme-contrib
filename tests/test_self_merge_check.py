@@ -2777,7 +2777,7 @@ def test_gptme_core_modified_existing_module_is_not_new() -> None:
     assert reasons == []
 
 
-_UNSET_CHANGED_FILES = object()
+_UNSET_TOTALS = object()
 
 
 def _evaluate_gptme_core(
@@ -2786,10 +2786,13 @@ def _evaluate_gptme_core(
     *,
     title: str = "fix(reduce): cache result",
     body: str = "",
-    changed_files: int | None | object = _UNSET_CHANGED_FILES,
+    totals: dict[str, int] | None | object = _UNSET_TOTALS,
 ) -> Any:
-    if changed_files is _UNSET_CHANGED_FILES:
-        changed_files = len(files)
+    if totals is _UNSET_TOTALS:
+        totals = {
+            "changed_files": len(files),
+            "additions": sum(int(s.get("additions") or 0) for s in file_shapes),
+        }
     pr_data = _make_clean_pr_data(
         title=title,
         body=body,
@@ -2823,8 +2826,8 @@ def _evaluate_gptme_core(
         ),
         patch.object(
             self_merge_check,
-            "_fetch_pr_changed_files_count",
-            return_value=changed_files,
+            "_fetch_pr_file_totals",
+            return_value=totals,
         ),
     ):
         return self_merge_check.evaluate_pr(
@@ -2931,14 +2934,48 @@ def test_evaluate_pr_gptme_core_capped_listing_refuses_eligibility() -> None:
             "additions": 1,
         },
     ]
-    result = _evaluate_gptme_core(files, file_shapes, changed_files=3001)
+    result = _evaluate_gptme_core(
+        files, file_shapes, totals={"changed_files": 3001, "additions": 2}
+    )
     assert not result.eligible
     assert result.category is None
     assert any("diff shape" in reason for reason in result.reasons), result.reasons
 
 
-def test_evaluate_pr_gptme_core_unknown_changed_files_refuses_eligibility() -> None:
-    """An unavailable changedFiles count is an incomplete read, not a pass."""
+def test_evaluate_pr_gptme_core_capped_count_caught_by_additions_sum() -> None:
+    """Even if GitHub caps `changedFiles` at the same point as the listing, the
+    truncated shapes cannot account for every added line in the PR's own
+    `additions` total. The sum is the second, independent completeness signal."""
+    files = [
+        {"path": "gptme/util/reduce.py"},
+        {"path": "tests/test_reduce.py"},
+    ]
+    file_shapes = [
+        {
+            "path": "gptme/util/reduce.py",
+            "status": "modified",
+            "patch": "@@ -1,1 +1,2 @@\n+x = 1\n",
+            "additions": 1,
+        },
+        {
+            "path": "tests/test_reduce.py",
+            "status": "modified",
+            "patch": "@@ -1,1 +1,2 @@\n+y = 1\n",
+            "additions": 1,
+        },
+    ]
+    # Count agrees with the truncated listing, but the PR added 900 lines in
+    # the files that fell past the cap.
+    result = _evaluate_gptme_core(
+        files, file_shapes, totals={"changed_files": 2, "additions": 900}
+    )
+    assert not result.eligible
+    assert result.category is None
+    assert any("diff shape" in reason for reason in result.reasons), result.reasons
+
+
+def test_evaluate_pr_gptme_core_unknown_totals_refuses_eligibility() -> None:
+    """An unavailable changedFiles/additions read is an incomplete read."""
     files = [{"path": "gptme/util/reduce.py"}]
     file_shapes = [
         {
@@ -2948,7 +2985,7 @@ def test_evaluate_pr_gptme_core_unknown_changed_files_refuses_eligibility() -> N
             "additions": 1,
         }
     ]
-    result = _evaluate_gptme_core(files, file_shapes, changed_files=None)
+    result = _evaluate_gptme_core(files, file_shapes, totals=None)
     assert not result.eligible
     assert result.category is None
     assert any("diff shape" in reason for reason in result.reasons), result.reasons

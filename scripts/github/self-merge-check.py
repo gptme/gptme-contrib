@@ -2830,13 +2830,14 @@ def _fetch_pr_file_shapes(repo: str, number: int) -> list[dict[str, Any]]:
     return [doc for doc in _iter_json_documents(result.stdout) if isinstance(doc, dict)]
 
 
-def _fetch_pr_changed_files_count(repo: str, number: int) -> int | None:
-    """Independent changed-file total for the diff-shape completeness check.
+def _fetch_pr_file_totals(repo: str, number: int) -> dict[str, int] | None:
+    """Independent PR totals for the diff-shape completeness check.
 
     The `pulls/{number}/files` listing is capped at 3000 entries, so comparing
     the shape read to `files` (same capped endpoint) cannot prove completeness.
-    `gh pr view --json changedFiles` reports the true total. Returns None when
-    the count is unavailable; callers must treat that as an incomplete read.
+    The PR object's own `changedFiles` and `additions` are computed from the
+    full diff. Returns None when either total is unavailable; callers must
+    treat that as an incomplete read.
     """
     try:
         result = subprocess.run(
@@ -2848,9 +2849,9 @@ def _fetch_pr_changed_files_count(repo: str, number: int) -> int | None:
                 "--repo",
                 repo,
                 "--json",
-                "changedFiles",
+                "changedFiles,additions",
                 "--jq",
-                ".changedFiles",
+                "{changed_files: .changedFiles, additions: .additions}",
             ],
             capture_output=True,
             text=True,
@@ -2861,15 +2862,22 @@ def _fetch_pr_changed_files_count(repo: str, number: int) -> int | None:
     if result.returncode != 0:
         return None
     try:
-        return int(result.stdout.strip())
-    except ValueError:
+        totals = json.loads(result.stdout)
+    except json.JSONDecodeError:
         return None
+    if not isinstance(totals, dict):
+        return None
+    if not all(
+        isinstance(totals.get(key), int) for key in ("changed_files", "additions")
+    ):
+        return None
+    return cast("dict[str, int]", totals)
 
 
 def _gptme_core_shapes_cover_files(
     file_shapes: list[dict[str, Any]],
     files: list[str],
-    changed_files: int | None,
+    totals: dict[str, int] | None,
 ) -> bool:
     """True when the shape read provably covers exactly the changed files.
 
@@ -2881,17 +2889,25 @@ def _gptme_core_shapes_cover_files(
 
     `files` and `file_shapes` come from the same capped `pulls/files` listing,
     so matching them proves nothing on its own: a PR over GitHub's 3000-file
-    cap truncates both at the same point. `changed_files` is the independent
-    total from `gh pr view --json changedFiles`; unknown or mismatched refuses.
+    cap truncates both at the same point. `totals` comes from the PR object
+    (`changedFiles`, `additions`), which is computed from the full diff. The
+    file count catches a capped listing; the added-line sum catches the case
+    where GitHub caps that count too, because the truncated shapes cannot
+    account for every added line. Unknown or mismatched totals refuse.
     """
-    if changed_files is None:
+    if not totals:
         return False
     shape_paths = {
         str(shape.get("path", "")).replace("\\", "/").removeprefix("./")
         for shape in file_shapes
     }
     changed = {path.replace("\\", "/").removeprefix("./") for path in files}
-    return changed_files == len(files) == len(file_shapes) and shape_paths == changed
+    shape_additions = sum(int(shape.get("additions") or 0) for shape in file_shapes)
+    return (
+        totals["changed_files"] == len(files) == len(file_shapes)
+        and shape_paths == changed
+        and shape_additions == totals["additions"]
+    )
 
 
 def _gptme_core_unread_patches(file_shapes: list[dict[str, Any]]) -> list[str]:
@@ -4853,13 +4869,13 @@ def evaluate_pr(
             )
         else:
             file_shapes = _fetch_pr_file_shapes(repo, number)
-            changed_files = _fetch_pr_changed_files_count(repo, number)
-            if not _gptme_core_shapes_cover_files(file_shapes, files, changed_files):
+            totals = _fetch_pr_file_totals(repo, number)
+            if not _gptme_core_shapes_cover_files(file_shapes, files, totals):
                 result.category = None
                 category_reasons.append(
                     "Could not read the complete PR diff shape "
                     f"({len(file_shapes)} shape(s) for {len(files)} changed "
-                    f"file(s); GitHub reports {changed_files}); gptme/gptme "
+                    f"file(s); GitHub reports {totals}); gptme/gptme "
                     "eligibility requires a complete read"
                 )
             elif unread := _gptme_core_unread_patches(file_shapes):
