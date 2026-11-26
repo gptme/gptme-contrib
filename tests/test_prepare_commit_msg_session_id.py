@@ -450,11 +450,11 @@ def test_scissors_keeps_trailer_above_diff(tmp_path: Path) -> None:
     assert body.index("Git-Session-Id: s4") < body.index(">8")
 
 
-def _real_commit(tmp_path: Path, *args: str) -> str:
+def _real_commit(tmp_path: Path, *args: str, editor: str = "true") -> str:
     repo = tmp_path / "repo"
     env = _clean_env(
         GIT_COMMITTER_SESSION_ID="s10",
-        GIT_EDITOR="true",
+        GIT_EDITOR=editor,
         GIT_AUTHOR_NAME="T",
         GIT_AUTHOR_EMAIL="t@example.com",
         GIT_COMMITTER_NAME="T",
@@ -488,9 +488,10 @@ def _real_commit(tmp_path: Path, *args: str) -> str:
     ).stdout
 
 
+@pytest.mark.parametrize("editor", ["true", ":"])
 @pytest.mark.parametrize("edit", [False, True])
 def test_signoff_and_session_trailer_share_one_block(
-    tmp_path: Path, edit: bool
+    tmp_path: Path, edit: bool, editor: str
 ) -> None:
     """`git commit -s -m x -e` must keep Signed-off-by in the parsed trailers.
 
@@ -499,7 +500,9 @@ def test_signoff_and_session_trailer_share_one_block(
     trailer landed in a new paragraph after cleanup and Signed-off-by dropped
     out of the trailer block.
     """
-    trailers = _real_commit(tmp_path, "-s", "-m", "feat: x", *(["-e"] if edit else []))
+    trailers = _real_commit(
+        tmp_path, "-s", "-m", "feat: x", *(["-e"] if edit else []), editor=editor
+    )
     assert "Signed-off-by: T <t@example.com>" in trailers
     assert "Git-Session-Id: s10" in trailers
 

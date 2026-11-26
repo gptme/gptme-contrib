@@ -122,11 +122,11 @@ _SCISSORS = b"------------------------ >8 ------------------------"
 
 
 def editor_will_run(env: dict[str, str]) -> bool:
-    """Whether git will open an editor after this hook.
+    """Whether the environment indicates an editor after this hook.
 
-    git exports ``GIT_EDITOR=:`` to prepare-commit-msg exactly when it will
-    not run the editor (builtin/commit.c ``run_commit_hook``); with ``-e`` the
-    caller's own value (or none) is passed through.
+    Git exports ``GIT_EDITOR=:`` when it will not run the editor; with ``-e``
+    the caller's value is passed through. A caller can also choose ``:`` as
+    their editor, so existing parsed trailers take precedence in main().
     """
     return env.get("GIT_EDITOR") != ":"
 
@@ -162,18 +162,24 @@ def main() -> int:
         return 0
     message = sys.argv[1]
     source = sys.argv[2] if len(sys.argv) > 2 else ""
+    # Existing trailers prove the default comment character already finds
+    # the trailer block. Keep it even for a caller-selected GIT_EDITOR=:,
+    # which is indistinguishable from Git disabling the editor.
+    trailers = subprocess.check_output(
+        ["git", "interpret-trailers", "--parse", message]
+    )
     git = [
         "git",
         *comment_char_override(
-            Path(message).read_bytes(), source, editor_will_run(dict(os.environ))
+            Path(message).read_bytes(),
+            source,
+            editor_will_run(dict(os.environ)) or bool(trailers),
         ),
     ]
-    # Check under both comment chars: with -m ... -e an existing trailer sits
-    # above git's '#' editor block, which only the default char sees through.
-    trailers = b"".join(
-        subprocess.check_output([*args, "interpret-trailers", "--parse", message])
-        for args in {tuple(git), ("git",)}
-    )
+    if git != ["git"]:
+        trailers += subprocess.check_output(
+            [*git, "interpret-trailers", "--parse", message]
+        )
     if any(
         line.partition(b":")[0].lower() in (b"git-session-id", b"git-session-ids")
         for line in trailers.splitlines()

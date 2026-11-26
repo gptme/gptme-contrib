@@ -11,6 +11,7 @@ message must show a bare tag line.
 
 from __future__ import annotations
 
+import os
 import re
 import sys
 from pathlib import Path
@@ -32,10 +33,17 @@ def _verbose_diff_follows(lines: list[bytes], scissors: int) -> bool:
     marker = _SCISSORS.fullmatch(lines[scissors])
     if marker is None:
         return False
+    # Without an editor, Git retains scissors-shaped -m/-F text. Its hook
+    # environment explicitly sets GIT_EDITOR=: in that case; do not infer
+    # discarded output from the message alone.
+    if os.environ.get("GIT_EDITOR") == ":":
+        return False
     for line in lines[scissors + 1 :]:
+        if line.startswith(b"diff --git "):
+            return True
         if line.startswith(marker[1]):
             continue
-        return line.startswith(b"diff --git ")
+        return False
     return False
 
 

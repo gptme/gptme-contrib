@@ -126,11 +126,25 @@ def test_real_commit_is_blocked_then_allowed(tmp_path: Path) -> None:
     assert "rejected" in scissors.stderr
     assert git("rev-parse", "--verify", "HEAD").returncode != 0
 
+    synthetic_diff = git(
+        "commit",
+        "--allow-empty",
+        "-m",
+        "fix: x\n\n# ------------------------ >8 ------------------------\n"
+        "diff --git a/f b/f\n</think>",
+    )
+    assert synthetic_diff.returncode != 0
+    assert "rejected" in synthetic_diff.stderr
+    assert git("rev-parse", "--verify", "HEAD").returncode != 0
+
     ok = git("commit", "--allow-empty", "-m", "fix: handle `</think>` leaks")
     assert ok.returncode == 0, ok.stderr
 
 
-def test_verbose_commit_with_tag_in_diff_context_passes(tmp_path: Path) -> None:
+@pytest.mark.parametrize("comment_char", ["#", "d"])
+def test_verbose_commit_with_tag_in_diff_context_passes(
+    tmp_path: Path, comment_char: str
+) -> None:
     """#2346 item 11: `git commit -v` must not reject on unchanged diff context."""
     repo = tmp_path / "repo"
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
@@ -142,7 +156,7 @@ def test_verbose_commit_with_tag_in_diff_context_passes(tmp_path: Path) -> None:
         GIT_CONFIG_GLOBAL=os.devnull,
         GIT_CONFIG_NOSYSTEM="1",
         # Prepend a subject to the editor template (which holds the -v diff).
-        GIT_EDITOR='sh -c \'printf "docs: y\\n" | cat - "$1" > "$1.t"'
+        GIT_EDITOR='sh -c \'printf "fix: y\\n" | cat - "$1" > "$1.t"'
         ' && mv "$1.t" "$1"\' sh',
     )
     hooks = tmp_path / "hooks"
@@ -152,7 +166,16 @@ def test_verbose_commit_with_tag_in_diff_context_passes(tmp_path: Path) -> None:
 
     def git(*args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            ["git", "-C", str(repo), "-c", f"core.hooksPath={hooks}", *args],
+            [
+                "git",
+                "-C",
+                str(repo),
+                "-c",
+                f"core.hooksPath={hooks}",
+                "-c",
+                f"core.commentChar={comment_char}",
+                *args,
+            ],
             capture_output=True,
             text=True,
             env=env,
@@ -167,4 +190,4 @@ def test_verbose_commit_with_tag_in_diff_context_passes(tmp_path: Path) -> None:
     result = git("commit", "-q", "-a", "-v")
 
     assert result.returncode == 0, result.stderr
-    assert git("log", "-1", "--format=%s").stdout.strip() == "docs: y"
+    assert git("log", "-1", "--format=%s").stdout.strip() == "fix: y"
