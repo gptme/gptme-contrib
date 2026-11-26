@@ -142,6 +142,11 @@ def _parse_aria_to_elements(snapshot: str) -> list[dict[str, Any]]:
     )
     # Split on "\n" only: str.splitlines() also splits on \x0b etc., which a
     # page title can contain, letting the page fabricate element lines.
+    #
+    # A literal "\n" in a title cannot do that: the document.title getter
+    # collapses ASCII whitespace, so page.title() returns "x - button ..." for
+    # document.title = 'x\n- button ...'. Only \x0b survives the getter, and it
+    # no longer starts a line here. Measured in Chromium 1255.
     lines = snapshot.split("\n")
     for line in lines:
         item = item_re.match(line)
