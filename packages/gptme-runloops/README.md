@@ -537,10 +537,10 @@ make typecheck
 
 Running `uv run pytest packages/gptme-runloops/tests/` from the repository root fails
 with `No module named gptme_runloops`, because the package is not installed into the
-root environment. Some tests (`test_worker_records.py`, `test_session_store_isolation.py`)
-also import `gptme_sessions`, which `pyproject.toml` does not declare; install
-`packages/gptme-sessions` alongside when running the full suite outside the
-workspace.
+root environment. `gptme-sessions>=0.2.0` is a declared runtime dependency: PM
+routing requires its shared bandit serialization and lock-path hooks. When
+installing from source outside the workspace, install the matching
+`packages/gptme-sessions` alongside `packages/gptme-runloops` as shown above.
 
 ## License
 
