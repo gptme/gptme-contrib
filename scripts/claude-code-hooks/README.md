@@ -15,7 +15,8 @@ When you open a CC session in a gptme agent workspace, this hook automatically
 injects relevant lessons as `additionalContext` based on:
 
 - **UserPromptSubmit**: matches the user's prompt text (fires once at session start)
-- **PreToolUse**: matches tool inputs (file paths, shell commands, search patterns)
+- **PreToolUse**: matches tool inputs (file paths, shell commands, search patterns,
+  `SendMessage` text to peer agents)
   and recent transcript output — so lessons fire on *what just happened*
 
 ### Features
@@ -62,7 +63,7 @@ injects relevant lessons as `additionalContext` based on:
           }]
         }],
         "PreToolUse": [{
-          "matcher": "Read|Bash|Grep|WebFetch|WebSearch",
+          "matcher": "Read|Bash|Grep|WebFetch|WebSearch|SendMessage",
           "hooks": [{
             "type": "command",
             "command": "\"$CLAUDE_PROJECT_DIR/.venv/bin/python3\" \"$CLAUDE_PROJECT_DIR/.claude/hooks/match-lessons.py\"",
