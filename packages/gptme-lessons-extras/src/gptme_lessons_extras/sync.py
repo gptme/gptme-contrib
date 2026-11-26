@@ -69,34 +69,113 @@ def init_repo(network_dir: Path = DEFAULT_NETWORK_DIR, force: bool = False) -> P
     Raises:
         SyncError: If initialization fails
     """
-    if network_dir.exists() and not force:
-        # Verify it's a valid git repo
-        try:
-            run_git(["rev-parse", "--git-dir"], network_dir)
+    # is_symlink() matters too: a dangling link does not exist() but renaming
+    # the clone over it would silently discard the link without --force.
+    if (network_dir.exists() or network_dir.is_symlink()) and not force:
+        if not network_dir.is_dir():
+            raise SyncError(
+                f"{network_dir} exists but is not a directory. "
+                "Move it aside; --force replaces it."
+            )
+        # It must be the root of its own work tree: a directory inside an
+        # enclosing repo (e.g. a versioned home) would make us push that repo.
+        top = run_git(["rev-parse", "--show-toplevel"], network_dir, check=False)
+        if top.returncode == 0 and network_dir.samefile(top.stdout.rstrip("\n")):
             print(f"✓ Network repo exists: {network_dir}")
             return network_dir
-        except SyncError:
-            print(f"⚠ Invalid repo at {network_dir}, re-cloning...")
+        # Never delete a directory we did not create without --force. Git can
+        # also refuse a valid clone (e.g. "dubious ownership"), so show why and
+        # do not steer the user straight to --force.
+        if top.returncode == 0:
+            reason = f"it is inside the work tree {top.stdout.strip()}"
+        else:
+            reason = top.stderr.strip()
+        raise SyncError(
+            f"{network_dir} exists but cannot be used as the network repo: "
+            f"{reason}\nFix the problem or move the directory aside. "
+            "To start over, run `--init --force`: it replaces the directory, "
+            "deleting anything in it, including unpushed commits."
+        )
 
-    # Clone repository
+    # Clone next to the target first, so a failed clone (offline, auth)
+    # leaves any existing directory untouched.
     network_dir.parent.mkdir(parents=True, exist_ok=True)
-    if network_dir.exists():
-        import shutil
+    import shutil
+    import tempfile
 
-        shutil.rmtree(network_dir)
-
+    try:
+        staging = Path(
+            tempfile.mkdtemp(prefix=f".{network_dir.name}.", dir=network_dir.parent)
+        )
+    except OSError as e:
+        raise SyncError(f"Failed to create a staging directory: {e}") from e
+    clone_dir = staging / network_dir.name
+    # Only clear the staging directory when the old directory is not parked in
+    # it: the cleanup must never be able to delete the user's data.
+    keep_staging = False
     print(f"📥 Cloning {NETWORK_REPO}...")
     try:
         subprocess.run(
-            ["git", "clone", NETWORK_REPO_URL, str(network_dir)],
+            ["git", "clone", NETWORK_REPO_URL, str(clone_dir)],
             check=True,
             capture_output=True,
             text=True,
         )
+        # Move the old directory into staging instead of deleting it in place,
+        # so a failed swap can put it back. A symlink is moved as a link: its
+        # target is left alone.
+        old_dir = staging / "old"
+        replace = force and (network_dir.exists() or network_dir.is_symlink())
+        if replace:
+            # Set the guard before the rename: staging holds the user's only
+            # copy from that point on, and a signal delivered after the rename
+            # syscall completes but before the next statement must not let the
+            # cleanup delete it.
+            keep_staging = True
+            try:
+                network_dir.rename(old_dir)
+            except OSError:
+                keep_staging = False
+                raise
+        try:
+            clone_dir.rename(network_dir)
+        except OSError as swap_error:
+            if replace:
+                try:
+                    old_dir.rename(network_dir)
+                except OSError as restore_error:
+                    # Keep the original directory: report where it is instead
+                    # of letting the staging cleanup delete it.
+                    raise SyncError(
+                        f"Failed to move the clone into {network_dir} "
+                        f"({swap_error}) and could not restore the original "
+                        f"directory; it is kept at {old_dir} ({restore_error})."
+                    ) from restore_error
+                keep_staging = False
+            raise
+        keep_staging = False
         print(f"✓ Cloned to {network_dir}")
         return network_dir
     except subprocess.CalledProcessError as e:
         raise SyncError(f"Failed to clone: {e.stderr}") from e
+    except OSError as e:
+        raise SyncError(f"Failed to replace {network_dir}: {e}") from e
+    finally:
+        parked = staging / "old"
+        if keep_staging and parked.exists():
+            # The original directory is parked here and the target path no
+            # longer holds it; say where, or the user cannot find it back.
+            print(
+                f"⚠ The original directory is kept at {parked}; "
+                "move it back if the new clone is not usable."
+            )
+        else:
+            shutil.rmtree(staging, ignore_errors=True)
+            if staging.exists():
+                print(
+                    f"⚠ Could not fully remove the staging directory {staging}; "
+                    "it may still hold a copy of the replaced repository."
+                )
 
 
 def export_to_network(
@@ -155,6 +234,14 @@ def push_lessons(
     # Check for changes
     status = run_git(["status", "--porcelain"], network_dir)
     if not status.stdout.strip():
+        # A commit from an earlier sync whose push failed leaves the tree
+        # clean, so also check for commits the upstream does not have yet.
+        ahead = run_git(["rev-list", "--count", "@{u}..HEAD"], network_dir, check=False)
+        if ahead.returncode == 0 and ahead.stdout.strip() not in ("", "0"):
+            print("📤 Pushing commits from an earlier failed push...")
+            run_git(["push"], network_dir)
+            print("✓ Pushed successfully")
+            return True
         print("ℹ No changes to push")
         return False
 
