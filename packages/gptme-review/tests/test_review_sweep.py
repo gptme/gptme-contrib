@@ -385,6 +385,27 @@ def test_complete_single_pass_is_evidence_for_sweep_and_preflight() -> None:
     assert self_merge_eligible_from_marker(marker) is True
 
 
+def test_complete_single_pass_still_needs_its_findings_disposed() -> None:
+    """Complete counts are not merge evidence while a P1 is undisposed.
+
+    The single-pass shortcut is taken after ``marker_findings_non_blocking``,
+    so it must not become a way for a blocking finding to reach the merge gate.
+    """
+    marker = {
+        "sha": "abc",
+        "score": 3,
+        "findings": [{"fp": "af42d2177065", "severity": "P1"}],
+        "consensus": COMPLETE_SINGLE_PASS,
+    }
+    assert self_merge_eligible_from_marker(marker) is False
+
+    disposed = {
+        **marker,
+        "dispositions": {"af42d2177065": {"reason": "fixed in abc123"}},
+    }
+    assert self_merge_eligible_from_marker(disposed) is True
+
+
 def test_outage_single_pass_is_upgraded_and_not_preflight_eligible() -> None:
     """Outage coverage has complete counts but is not merge evidence."""
     marker = {
