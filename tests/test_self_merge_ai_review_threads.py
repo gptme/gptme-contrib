@@ -108,7 +108,7 @@ def test_resolved_ai_thread_is_also_excluded_from_total() -> None:
 def test_missing_body_is_treated_as_human() -> None:
     """Fail closed: if the body is absent we cannot prove it is machine-authored."""
     threads = [
-        {"isResolved": False, "comments": {"nodes": [{"author": {"login": "x"}}]}}
+        {"isResolved": False, "comments": {"nodes": [{"author": {"login": REVIEWER}}]}}
     ]
     assert _count(threads)["unresolved"] == 1
 
