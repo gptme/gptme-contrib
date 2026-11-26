@@ -686,9 +686,9 @@ fi
 # branches without an open PR. The URL filter keeps it out of other pushes.
 case "${2:-}" in
     *github.com*/[Gg][Pp][Tt][Mm][Ee]*)
-        if [ -n "$_HOOK_REPO" ] && [ -x "$_HOOK_REPO/scripts/hooks/disarm-auto-merge" ]; then
+        if [ -n "$_HOOK_REPO" ] && [ -x "$_HOOK_REPO/scripts/hooks/disarm_auto_merge.py" ]; then
             printf '%s\n' "${STDIN_LINES[@]}" |
-                "$_HOOK_REPO/scripts/hooks/disarm-auto-merge" "$@" || exit 1
+                "$_HOOK_REPO/scripts/hooks/disarm_auto_merge.py" "$@" || exit 1
         fi
         ;;
 esac

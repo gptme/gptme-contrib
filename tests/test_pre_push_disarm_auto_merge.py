@@ -10,7 +10,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 HOOK = ROOT / "dotfiles" / ".config" / "git" / "hooks" / "pre-push"
-SCRIPT = ROOT / "scripts" / "hooks" / "disarm-auto-merge"
+SCRIPT = ROOT / "scripts" / "hooks" / "disarm_auto_merge.py"
 FORK = "git@github.com:SomeAgent/gptme.git"
 ZERO = "0" * 40
 SHA = "a" * 40
