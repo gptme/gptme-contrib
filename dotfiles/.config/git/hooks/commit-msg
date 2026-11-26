@@ -56,6 +56,8 @@ def stray_tag_lines(content: bytes) -> list[int]:
             in_diff = True
         if in_diff and line.startswith(b" "):
             continue
+        if not line:
+            in_diff = False
         marker = _FENCE.fullmatch(line)
         if fence is not None:
             if (

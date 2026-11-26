@@ -510,6 +510,15 @@ def test_signoff_and_session_trailer_share_one_block(
     assert "Git-Session-Id: s10" in trailers
 
 
+def test_literal_hash_paragraph_stays_before_session_trailer(tmp_path: Path) -> None:
+    trailers = _real_commit(
+        tmp_path,
+        "-m",
+        "feat: x\n\nSigned-off-by: T <t@example.com>\n\n#2077 follow-up",
+    )
+    assert "Git-Session-Id: s10" in trailers
+
+
 def test_editor_runs_unless_git_exports_noop_editor() -> None:
     ns = runpy.run_path(str(HOOK))
     assert ns["editor_will_run"]({}) is True
