@@ -2,6 +2,7 @@
 
 import os
 import stat
+from pathlib import Path
 
 import pytest
 from gptme_lessons_extras.evolution import (
@@ -426,3 +427,27 @@ def test_file_mode_follows_umask_then_survives_rewrite(tmp_path, umask, new_mode
         assert os.umask(umask) == umask  # the writer restored the process umask
     finally:
         os.umask(previous)
+
+
+@pytest.mark.skipif(
+    not Path("/proc/self/status").exists(), reason="needs /proc/self/status"
+)
+def test_writer_does_not_mutate_the_process_umask(tmp_path, monkeypatch):
+    # os.umask() is process-wide: setting it even briefly races with file
+    # creation in other threads, which would inherit the temporary mask. On
+    # Linux the mask is readable from /proc/self/status, so the writer must
+    # never call os.umask at all.
+    from gptme_lessons_extras.evolution import EvolutionTracker
+
+    calls = []
+
+    def _record(mask):
+        calls.append(mask)
+        return 0o022
+
+    monkeypatch.setattr(os, "umask", _record)
+    t = EvolutionTracker(history_dir=tmp_path / "hist")
+    t.initialize_lesson("bob-tools-git", "bob", "v1 body")
+    t.suggest_refinement("bob-tools-git", "alice", "clarity", "first")
+    t.track_change("bob-tools-git", "alice", "tighten rule", "v2 body")
+    assert calls == []
