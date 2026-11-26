@@ -69,7 +69,9 @@ def init_repo(network_dir: Path = DEFAULT_NETWORK_DIR, force: bool = False) -> P
     Raises:
         SyncError: If initialization fails
     """
-    if network_dir.exists() and not force:
+    # is_symlink() matters too: a dangling link does not exist() but renaming
+    # the clone over it would silently discard the link without --force.
+    if (network_dir.exists() or network_dir.is_symlink()) and not force:
         if not network_dir.is_dir():
             raise SyncError(
                 f"{network_dir} exists but is not a directory. "

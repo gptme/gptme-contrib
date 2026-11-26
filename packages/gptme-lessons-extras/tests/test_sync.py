@@ -110,6 +110,17 @@ def test_init_repo_refuses_a_non_directory_target(tmp_path, sync):
     assert target.read_text() == "not a directory\n"
 
 
+def test_init_repo_refuses_a_broken_symlink_without_force(tmp_path, sync):
+    # A dangling link does not exist(), but renaming a clone over it would
+    # silently discard the link, which the --force contract forbids.
+    link = tmp_path / "network"
+    link.symlink_to(tmp_path / "missing", target_is_directory=True)
+
+    with pytest.raises(sync.SyncError, match="not a directory"):
+        sync.init_repo(link)
+    assert link.is_symlink()
+
+
 def test_init_repo_refuses_directory_inside_enclosing_repo(tmp_path, monkeypatch, sync):
     # e.g. ~/.gptme/network inside a version-controlled home: accepting it would
     # let push_lessons push the enclosing repo's commits.
