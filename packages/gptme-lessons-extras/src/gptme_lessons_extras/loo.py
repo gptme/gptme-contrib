@@ -52,8 +52,8 @@ def welch_z(group_a: Sequence[float], group_b: Sequence[float]) -> tuple[float, 
     var_a = sum((x - mean_a) ** 2 for x in group_a) / (n_a - 1)
     var_b = sum((x - mean_b) ** 2 for x in group_b) / (n_b - 1)
     se = math.sqrt(var_a / n_a + var_b / n_b)
-    if se < 1e-10:
-        if abs(mean_a - mean_b) > 1e-10:
+    if se == 0.0:
+        if mean_a != mean_b:
             return (100.0 if mean_a > mean_b else -100.0), 0.0
         return 0.0, 1.0
     z = (mean_a - mean_b) / se

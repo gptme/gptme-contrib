@@ -242,3 +242,12 @@ def test_cli_bad_input_exits_with_error_without_partial_report(tmp_path, content
     assert proc.returncode == 2
     assert not proc.stdout
     assert "error:" in proc.stderr
+
+
+def test_welch_statistic_is_invariant_to_small_outcome_units():
+    a = [2.0, 3.0, 4.0, 3.0, 3.0]
+    b = [0.0, 1.0, 2.0, 1.0, 1.0]
+    assert welch_z([x * 1e-11 for x in a], [x * 1e-11 for x in b]) == pytest.approx(
+        welch_z(a, b)
+    )
+    assert welch_z([1e-11] * 5, [0.0] * 5) == (100.0, 0.0)
