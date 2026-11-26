@@ -29,11 +29,12 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import subprocess
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # Directories that never belong to the report: generated output, vendored deps,
@@ -210,13 +211,11 @@ def _git(root: Path, *args: str) -> str:
     proc = subprocess.run(
         ["git", *pinned, "-C", str(root), *args],
         capture_output=True,
-        encoding="utf-8",
-        errors="replace",
         check=False,
     )
     if proc.returncode != 0:
         return ""
-    return proc.stdout
+    return proc.stdout.decode("utf-8", errors="replace")
 
 
 def _is_git_repo(root: Path) -> bool:
@@ -266,17 +265,13 @@ def _change_counts(root: Path, since: str) -> dict[str, int]:
         "log",
         f"--since={since}",
         "--name-only",
+        "-z",
         "--relative",
         "--pretty=format:",
         "--",
         ".",
     )
-    counts: dict[str, int] = {}
-    for line in out.splitlines():
-        path = line.strip()
-        if path:
-            counts[path] = counts.get(path, 0) + 1
-    return counts
+    return dict(Counter(path for path in out.split("\0") if path))
 
 
 def _last_commit_date(root: Path, path: str, submodules: list[str]) -> str:
@@ -555,28 +550,25 @@ def build_report(
 
 def _weekly_commits(root: Path, weeks: int) -> list[tuple[str, str]]:
     """One (iso week, commit) pair per week, oldest first, for the last N weeks."""
-    if weeks <= 0:
-        return []
-    # --first-parent: sample states the branch was actually in, not side branches.
-    out = _git(
-        root,
-        "log",
-        f"--since={weeks * 7}.days.ago",
-        "--first-parent",
-        "--reverse",
-        "--format=%H %cs",
-        "HEAD",
-    )
-    by_week: dict[str, str] = {}
-    for line in out.splitlines():
-        commit, _, date = line.partition(" ")
-        try:
-            iso = datetime.strptime(date, "%Y-%m-%d").isocalendar()
-        except ValueError:
-            continue
-        by_week[f"{iso.year}-W{iso.week:02d}"] = commit
-    # the window can straddle one more ISO week than asked for
-    return sorted(by_week.items())[-weeks:]
+    now = datetime.now(timezone.utc)
+    monday = now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=now.weekday())
+    samples = []
+    for ago in range(weeks - 1, -1, -1):
+        start = monday - timedelta(weeks=ago)
+        end = min(now, start + timedelta(weeks=1, seconds=-1))
+        commit = _git(
+            root,
+            "log",
+            "-1",
+            "--first-parent",
+            f"--before={end.isoformat()}",
+            "--format=%H",
+            "HEAD",
+        ).strip()
+        if commit:
+            iso = start.isocalendar()
+            samples.append((f"{iso.year}-W{iso.week:02d}", commit))
+    return samples
 
 
 def _lines_at_commit(
@@ -595,18 +587,16 @@ def _lines_at_commit(
     """
     suffixes = SOURCE_SUFFIXES - CONTENT_SUFFIXES if code_only else SOURCE_SUFFIXES
     patterns = [f":(icase)*{suffix}" for suffix in sorted(suffixes)]
-    out = _git(root, "grep", "--no-color", "-c", "-I", "", commit, "--", *patterns)
+    out = _git(root, "grep", "--no-color", "-z", "-c", "-I", "", commit, "--", *patterns)
     rows: list[tuple[str, int]] = []
     marker = f"{commit}:"
-    for line in out.splitlines():
-        if not line.startswith(marker):
-            continue
-        rest = line[len(marker) :]
-        path, _, count = rest.rpartition(":")
-        if not path or not count.isdigit():
-            continue
-        if _is_source_path(path, code_only):
-            rows.append((prefix + path, int(count)))
+    # -z leaves one NUL between the path and count. Only the count is line-delimited.
+    for match in re.finditer(r"([^\0]+)\0([0-9]+)\n", out):
+        label, count = match.groups()
+        if label.startswith(marker):
+            path = label[len(marker) :]
+            if _is_source_path(path, code_only):
+                rows.append((prefix + path, int(count)))
     if not recurse:
         return rows
     for entry in _git(root, "ls-tree", "-r", "-z", commit).split("\0"):
@@ -634,8 +624,12 @@ def _history(
     group_for_path: Callable[[str], str] | None,
 ) -> list[HistoryPoint]:
     points: list[HistoryPoint] = []
+    previous_commit = ""
+    rows: list[tuple[str, int]] = []
     for week, commit in _weekly_commits(root, weeks):
-        rows = _lines_at_commit(root, commit, recurse, unreadable, code_only=code_only)
+        if commit != previous_commit:
+            rows = _lines_at_commit(root, commit, recurse, unreadable, code_only=code_only)
+            previous_commit = commit
         if not rows:
             continue
         source = test = 0

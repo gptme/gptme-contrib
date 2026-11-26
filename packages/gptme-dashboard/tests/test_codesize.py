@@ -721,3 +721,31 @@ def test_dashboard_codesize_uses_matrix_and_distinct_agent_checkouts(tmp_path: P
     assert rows["old"]["external_dependents"] is None
     assert rows["old"]["ci_selected"] is None
     assert rows["old"]["flags"] == []
+
+
+def test_history_carries_the_last_commit_across_quiet_weeks(tmp_path: Path) -> None:
+    _init_repo(tmp_path)
+    _write(tmp_path, "src/steady.py", 42)
+    _git(tmp_path, "add", "-A")
+    old = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
+    _git(tmp_path, "commit", "-qm", "initial", date=old)
+
+    report = build_report(tmp_path, history_weeks=4)
+    assert len(report.history) == 4
+    assert len({point.week for point in report.history}) == 4
+    assert {point.source_lines for point in report.history} == {42}
+    assert len({point.commit for point in report.history}) == 1
+
+
+def test_git_paths_keep_whitespace_in_history_and_churn(tmp_path: Path) -> None:
+    _init_repo(tmp_path)
+    path = " src/long\nname\r.py"
+    _write(tmp_path, path, 17)
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-qm", "initial")
+
+    report = build_report(tmp_path)
+    assert report.largest_files[0].path == path
+    assert report.largest_files[0].changes == 1
+    assert report.history[-1].largest_file == path
+    assert report.history[-1].source_lines == report.total_source_lines == 17
