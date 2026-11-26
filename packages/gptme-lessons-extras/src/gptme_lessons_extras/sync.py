@@ -70,6 +70,11 @@ def init_repo(network_dir: Path = DEFAULT_NETWORK_DIR, force: bool = False) -> P
         SyncError: If initialization fails
     """
     if network_dir.exists() and not force:
+        if not network_dir.is_dir():
+            raise SyncError(
+                f"{network_dir} exists but is not a directory. "
+                "Move it aside; --force replaces it."
+            )
         # It must be the root of its own work tree: a directory inside an
         # enclosing repo (e.g. a versioned home) would make us push that repo.
         top = run_git(["rev-parse", "--show-toplevel"], network_dir, check=False)
@@ -95,9 +100,12 @@ def init_repo(network_dir: Path = DEFAULT_NETWORK_DIR, force: bool = False) -> P
     import shutil
     import tempfile
 
-    staging = Path(
-        tempfile.mkdtemp(prefix=f".{network_dir.name}.", dir=network_dir.parent)
-    )
+    try:
+        staging = Path(
+            tempfile.mkdtemp(prefix=f".{network_dir.name}.", dir=network_dir.parent)
+        )
+    except OSError as e:
+        raise SyncError(f"Failed to create a staging directory: {e}") from e
     clone_dir = staging / network_dir.name
     # Only clear the staging directory when the old directory is not parked in
     # it: the cleanup must never be able to delete the user's data.
@@ -116,12 +124,16 @@ def init_repo(network_dir: Path = DEFAULT_NETWORK_DIR, force: bool = False) -> P
         old_dir = staging / "old"
         replace = force and (network_dir.exists() or network_dir.is_symlink())
         if replace:
-            network_dir.rename(old_dir)
-            # From here until the clone is in place (or the original is
-            # restored) staging holds the user's only copy. Keep it even if
-            # something that is not an OSError (e.g. KeyboardInterrupt)
-            # unwinds through the finally block.
+            # Set the guard before the rename: staging holds the user's only
+            # copy from that point on, and a signal delivered after the rename
+            # syscall completes but before the next statement must not let the
+            # cleanup delete it.
             keep_staging = True
+            try:
+                network_dir.rename(old_dir)
+            except OSError:
+                keep_staging = False
+                raise
         try:
             clone_dir.rename(network_dir)
         except OSError as swap_error:

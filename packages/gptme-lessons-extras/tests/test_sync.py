@@ -69,6 +69,10 @@ def test_init_repo_refuses_non_repo_directory_without_force(
 
 
 def test_init_repo_reports_why_git_refused_a_valid_clone(tmp_path, monkeypatch, sync):
+    # Git can refuse a valid clone (e.g. "dubious ownership") and the error
+    # must show why instead of steering the user to --force. Simulate git's
+    # refusal rather than relying on a git-internal test hook, so the test
+    # behaves the same on every git build.
     remote = _bare_remote_with_seed(tmp_path)
     clone = tmp_path / "network"
     subprocess.run(
@@ -76,10 +80,31 @@ def test_init_repo_reports_why_git_refused_a_valid_clone(tmp_path, monkeypatch, 
         check=True,
         capture_output=True,
     )
-    monkeypatch.setenv("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
+    real_run_git = sync.run_git
+
+    def refuse_rev_parse(args, cwd, check=True):
+        if args[:2] == ["rev-parse", "--show-toplevel"]:
+            return subprocess.CompletedProcess(
+                args=["git", *args],
+                returncode=128,
+                stdout="",
+                stderr="fatal: detected dubious ownership in repository at ...",
+            )
+        return real_run_git(args, cwd, check=check)
+
+    monkeypatch.setattr(sync, "run_git", refuse_rev_parse)
 
     with pytest.raises(sync.SyncError, match="dubious ownership"):
         sync.init_repo(clone)
+
+
+def test_init_repo_refuses_a_non_directory_target(tmp_path, sync):
+    target = tmp_path / "network"
+    target.write_text("not a directory\n")
+
+    with pytest.raises(sync.SyncError, match="not a directory"):
+        sync.init_repo(target)
+    assert target.read_text() == "not a directory\n"
 
 
 def test_init_repo_refuses_directory_inside_enclosing_repo(tmp_path, monkeypatch, sync):
