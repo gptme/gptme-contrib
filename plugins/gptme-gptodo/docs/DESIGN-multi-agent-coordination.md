@@ -22,11 +22,7 @@ This document proposes **minimal extensions** to gptodo for coordinating work ac
 |---------|---------------|----------|
 | **Dependency tracking** | `requires`, `blocks`, `waiting_for`, `related` fields | `utils.py` TaskInfo |
 | **Auto-unblocking** | `auto_unblock_tasks()` - clears waiting_for when deps complete | `unblock.py` |
-| **File-based locking** | `fcntl.flock()` atomic locks | `locks.py` |
-| **Lock CLI** | `gptodo lock`, `unlock`, `locks` commands | `cli.py` |
-| **Lock timeout** | Default 4 hours with auto-cleanup | `TaskLock` dataclass |
 | **Ready detection** | `gptodo ready` - finds tasks with no unmet dependencies | `cli.py` |
-| **Lock expiry** | `is_expired()`, `cleanup_expired_locks()` | `locks.py` |
 | **Task state machine** | backlog → todo → active → waiting → done | `utils.py` |
 
 ### What We're Actually Adding
@@ -42,10 +38,10 @@ The genuine gaps are **much smaller** than initially proposed:
 
 ## Design Principles
 
-1. **Leverage existing code**: Don't reinvent gptodo's locking/unblocking
+1. **Leverage existing code**: Reuse dependency tracking and auto-unblocking
 2. **gptodo format superset**: Extend existing YAML frontmatter
 3. **All fields optional**: Backward compatible with existing tasks
-4. **File-based coordination**: No server required (NFS-compatible)
+4. **Workspace-local state**: No server required
 
 ## Extended YAML Frontmatter
 
@@ -62,10 +58,9 @@ requires: [other-task]     # Already exists
 blocks: [dependent-task]   # Already exists
 waiting_for: some-thing    # Already exists
 
-# NEW: Agent assignment (extends existing locking)
+# NEW: Agent assignment
 assigned_to: bob-session-abc123    # Which agent instance owns this
 assigned_at: 2026-01-27T10:05:00Z  # When assignment started
-lock_timeout_hours: 4              # Override default (existing field in locks)
 
 # NEW: Parallel execution hints
 parallelizable: true               # Can run concurrently with other work
@@ -82,7 +77,7 @@ coordination_mode: parallel        # sequential, parallel, fan-out-fan-in
 ### Backward Compatibility
 
 All new fields are optional:
-- Missing `assigned_to` → task unassigned (use existing lock mechanism)
+- Missing `assigned_to` → task unassigned
 - Missing `parallelizable` → defaults to false (conservative)
 - Missing `spawned_from` → standalone task
 
@@ -112,29 +107,12 @@ Location: `state/agents/{agent-id}.status`
 - `waiting`: Blocked on dependency
 - `stopping`: Graceful shutdown
 
-### Integration with Existing Locks
+### Task leases and agent status
 
-The agent registry **complements** existing task locks:
-- **Task locks** (`state/locks/`) → Which task is being worked on
-- **Agent status** (`state/agents/`) → Which agents exist and their status
-
-```python
-# Agent startup
-def register_agent(agent_id: str, workspace: str):
-    status_path = Path(f"state/agents/{agent_id}.status")
-    status_path.write_text(json.dumps({
-        "agent_id": agent_id,
-        "started": datetime.utcnow().isoformat() + "Z",
-        "status": "starting",
-        "workspace": workspace,
-    }))
-
-# Uses EXISTING lock mechanism for task assignment
-def claim_task(task_id: str, agent_id: str):
-    # Use gptodo's existing acquire_lock!
-    from gptodo.locks import acquire_lock
-    return acquire_lock(task_id, agent_id)
-```
+Agent status describes which workers exist and what they are doing. It does not
+reserve a task. Use `gptme-coordination work-claim` for a task lease and
+`gptodo claim` to persist assignment. See [Coordinating task execution](../../../packages/gptodo/README.md#coordinating-task-execution)
+for the database and key convention recognized by `gptodo ready --skip-claimed`.
 
 ## Swarm Orchestration
 
@@ -215,17 +193,13 @@ gptodo ready --json
     }
   ]
 }
-
-# Locks command (ALREADY EXISTS) continues to work
-gptodo locks
-# Shows existing lock state
 ```
 
 ## Implementation Phases
 
 ### Phase 1: Agent Registry (MVP)
 - [ ] `state/agents/` directory and status files
-- [ ] Agent heartbeat mechanism (using existing pattern from locks)
+- [ ] Agent heartbeat mechanism
 - [ ] `gptodo agents` command
 - [ ] Cleanup stale agent registrations
 
@@ -242,7 +216,7 @@ gptodo locks
 
 ### Phase 4: OTel Observability (Optional)
 - [ ] Span instrumentation for agent activity
-- [ ] Metrics export (tasks active, locks held, etc.)
+- [ ] Metrics export (tasks active, leases held, etc.)
 
 ## What We're NOT Building
 
@@ -250,9 +224,6 @@ These were in the initial design but are **already provided by gptodo**:
 
 | Feature | Why Not Needed |
 |---------|----------------|
-| Task locking mechanism | ✅ `locks.py` with `fcntl.flock` |
-| Lock timeout/expiry | ✅ `TaskLock.is_expired()` |
-| Lock CLI | ✅ `gptodo lock/unlock/locks` |
 | Dependency tracking | ✅ `requires`, `blocks` fields |
 | Auto-unblocking | ✅ `unblock.py` |
 | Ready detection | ✅ `gptodo ready` |
@@ -277,17 +248,14 @@ git worktree remove worktree/feature-x
 
 ## Open Questions
 
-1. **NFS locking**: Does `fcntl.flock` work reliably on NFS? May need atomic rename fallback.
+1. **Heartbeat frequency**: 5 minutes? Balance freshness vs overhead.
 
-2. **Heartbeat frequency**: 5 minutes? Balance freshness vs overhead.
+2. **Spawn depth limit**: Limit fan-out depth to 2-3 levels?
 
-3. **Spawn depth limit**: Limit fan-out depth to 2-3 levels?
-
-4. **Cross-repo tasks**: How to coordinate across multiple repositories?
+3. **Cross-repo tasks**: How to coordinate across multiple repositories?
 
 ## References
 
-- gptodo locks: `packages/gptodo/src/gptodo/locks.py`
 - gptodo auto-unblock: `packages/gptodo/src/gptodo/unblock.py`
 - gptodo TaskInfo: `packages/gptodo/src/gptodo/utils.py`
 - [Issue #263](https://github.com/ErikBjare/bob/issues/263) - Feature discussion
