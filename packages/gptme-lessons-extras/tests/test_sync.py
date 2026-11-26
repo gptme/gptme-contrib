@@ -227,7 +227,7 @@ def test_init_repo_force_keeps_original_when_restore_fails(tmp_path, monkeypatch
 
 
 def test_init_repo_force_keeps_original_on_interrupt_between_renames(
-    tmp_path, monkeypatch, sync
+    tmp_path, monkeypatch, sync, capsys
 ):
     # A BaseException that is not an OSError (the CLI exits 130 on
     # KeyboardInterrupt) between parking the old dir and moving the clone in
@@ -250,6 +250,11 @@ def test_init_repo_force_keeps_original_on_interrupt_between_renames(
     kept = list(tmp_path.rglob("my-notes.md"))
     assert len(kept) == 1
     assert kept[0].read_text() == "user content\n"
+    # The target path no longer holds the directory, so the message has to
+    # name where it was kept.
+    out = capsys.readouterr().out
+    assert "The original directory is kept at" in out
+    assert str(kept[0].parent) in out
 
 
 def test_init_repo_force_warns_when_staging_cleanup_fails(

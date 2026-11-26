@@ -158,7 +158,15 @@ def init_repo(network_dir: Path = DEFAULT_NETWORK_DIR, force: bool = False) -> P
     except OSError as e:
         raise SyncError(f"Failed to replace {network_dir}: {e}") from e
     finally:
-        if not keep_staging:
+        parked = staging / "old"
+        if keep_staging and parked.exists():
+            # The original directory is parked here and the target path no
+            # longer holds it; say where, or the user cannot find it back.
+            print(
+                f"⚠ The original directory is kept at {parked}; "
+                "move it back if the new clone is not usable."
+            )
+        else:
             shutil.rmtree(staging, ignore_errors=True)
             if staging.exists():
                 print(
