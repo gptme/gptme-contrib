@@ -100,8 +100,13 @@ test('a timed-out run holds the queue until close and sends no partial reply', a
     const second = receive('second');
     await tick();
     children[0].answer('partial answer');
-    [...timers][0]();
+    const [timeout] = timers;
+    timeout();
     assert.equal(children[0].detached, true);
+    // The group is asked to stop cleanly first, then force-killed if it does not.
+    assert.equal(children[0].signal, 'SIGTERM');
+    const escalation = [...timers][1];
+    escalation();
     assert.equal(children[0].signal, 'SIGKILL');
     await tick();
     assert.equal(children.length, 1);
@@ -124,7 +129,9 @@ test('a timed-out run that never closes is abandoned after the grace period', as
     children[0].answer('partial answer');
     const [timeout] = timers;
     timeout();
-    const [grace] = [...timers].filter((timer) => timer !== timeout);
+    // Fire the escalation and then the grace fallback.
+    const [, escalation, grace] = [...timers];
+    escalation();
     grace();
     await first;
     assert.equal(children[0].stdout.destroyed, true);

@@ -56,6 +56,8 @@ if (BACKEND === 'claude-code' && !existsSync(SYSTEM_PROMPT_FILE)) {
 const senderQueue = createKeyedQueue();
 
 const RUN_TIMEOUT_MS = 120_000;
+// How long a timed-out run gets to stop cleanly before it is force-killed.
+const KILL_TERM_MS = 2_000;
 // How long a killed run gets to release its pipes before we stop waiting.
 const KILL_GRACE_MS = 5_000;
 // Agent subprocesses still running.
@@ -224,9 +226,11 @@ function spawnAndCapture(cmd, args, responseExtractor) {
         proc.stderr.on('data', (data) => { stderr += data.toString(); });
 
         let timedOut = false;
+        let killTimer;
         let graceTimer;
         const finish = (result) => {
             clearTimeout(timer);
+            clearTimeout(killTimer);
             clearTimeout(graceTimer);
             running.delete(proc);
             resolve(result);
@@ -240,6 +244,8 @@ function spawnAndCapture(cmd, args, responseExtractor) {
                 return;
             }
 
+            // A successful run can still emit diagnostics on stderr.
+            if (stderr.trim()) console.error(`${cmd} stderr:`, stderr.slice(-500));
             finish(responseExtractor(stdout));
         });
 
@@ -253,7 +259,10 @@ function spawnAndCapture(cmd, args, responseExtractor) {
         const timer = setTimeout(() => {
             timedOut = true;
             console.error(`${cmd} timed out`);
-            signalTree(proc, 'SIGKILL');
+            // Ask the whole group to stop cleanly, then force it if the agent
+            // does not exit in time.
+            signalTree(proc, 'SIGTERM');
+            killTimer = setTimeout(() => signalTree(proc, 'SIGKILL'), KILL_TERM_MS);
             // A process that left the group can hold the pipes open, so `close`
             // may never fire. Stop waiting, or this sender stays blocked.
             graceTimer = setTimeout(() => {
