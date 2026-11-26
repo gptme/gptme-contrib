@@ -171,11 +171,11 @@ _HOLD_LABELS = frozenset({"do-not-merge", "hold", "on-hold"})
 MIN_SHA_PREFIX_LEN = 7
 
 DOC_EXTENSIONS = {".md", ".rst", ".txt", ".adoc"}
-# ``.txt`` files that are build or dependency inputs, not prose: pip
-# requirement/constraint files (``requirements-dev.txt``,
-# ``dev-requirements.txt``) and CMake's project file.
+# ``.txt``/``.in`` files that are build or dependency inputs, not prose: pip
+# requirement/constraint files (``requirements3.txt``, ``dev-requirements.in``,
+# ``constraints.txt``) and CMake's project file.
 BUILD_INPUT_TXT_RE = re.compile(
-    r"^(?:cmakelists|(?:.*[-_.])?(?:requirements|constraints)(?:[-_.].*)?)\.txt$",
+    r"^(?:cmakelists\.txt|(?:.*[-_.])?(?:requirements|constraints).*\.(?:txt|in))$",
     re.IGNORECASE,
 )
 BUILD_INPUT_TXT_DIRS = frozenset({"requirements", "constraints"})
@@ -2337,11 +2337,11 @@ def checks_green(status_checks: list[dict[str, Any]]) -> bool:
 
 
 def is_build_input_txt(path: str) -> bool:
-    """A ``.txt`` file that feeds a build or dependency install."""
+    """A ``.txt``/``.in`` file that feeds a build or dependency install."""
     pure = Path(path)
     # Directory form covers pip's split layouts (``requirements/base.txt``).
     return bool(BUILD_INPUT_TXT_RE.match(pure.name)) or (
-        pure.suffix.lower() == ".txt"
+        pure.suffix.lower() in {".txt", ".in"}
         and any(part.lower() in BUILD_INPUT_TXT_DIRS for part in pure.parent.parts)
     )
 

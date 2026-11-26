@@ -164,6 +164,11 @@ def test_tier_waiver_classifies_the_rename_source() -> None:
         "tests/requirements/base.txt",
         "tests/CMakeLists.txt",
         "e2e/constraints.txt",
+        "requirements3.txt",
+        "requirementsdev.txt",
+        "tests/dev-requirements.in",
+        "tests/constraints.in",
+        "tests/requirements/base.in",
     ],
 )
 def test_build_input_txt_is_not_docs(path: str) -> None:
