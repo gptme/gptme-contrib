@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import statistics
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass
@@ -48,9 +49,8 @@ def welch_z(group_a: Sequence[float], group_b: Sequence[float]) -> tuple[float, 
     n_a, n_b = len(group_a), len(group_b)
     if min(n_a, n_b) < 2:
         return 0.0, 1.0
-    mean_a, mean_b = sum(group_a) / n_a, sum(group_b) / n_b
-    var_a = sum((x - mean_a) ** 2 for x in group_a) / (n_a - 1)
-    var_b = sum((x - mean_b) ** 2 for x in group_b) / (n_b - 1)
+    mean_a, mean_b = statistics.mean(group_a), statistics.mean(group_b)
+    var_a, var_b = statistics.variance(group_a), statistics.variance(group_b)
     se = math.sqrt(var_a / n_a + var_b / n_b)
     if se == 0.0:
         if mean_a != mean_b:

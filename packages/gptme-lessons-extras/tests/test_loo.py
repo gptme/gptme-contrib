@@ -264,3 +264,8 @@ def test_outcome_contract_requires_normalized_scores(outcome, tmp_path):
     assert result.stdout == ""
     assert "normalized between 0 and 1" in result.stderr
     assert "Traceback" not in result.stderr
+
+
+@pytest.mark.parametrize(("a_n", "b_n"), [(30, 60), (3, 7)])
+def test_identical_constant_outcomes_have_no_significance(a_n, b_n):
+    assert welch_z([0.1] * a_n, [0.1] * b_n) == (0.0, 1.0)
