@@ -803,6 +803,10 @@ class GptmeToolBridge:
                 logger.warning(
                     "Timed out delivering result of task %s; dropping it", task_id
                 )
+            except Exception:
+                # A closing socket must not skip the cleanup below: an entry
+                # left behind by a raising delivery is an unlisted zombie.
+                logger.exception("Failed to deliver result of task %s", task_id)
 
         # Clean up
         self._pending_tasks.pop(task_id, None)
