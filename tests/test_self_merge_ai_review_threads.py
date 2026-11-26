@@ -14,8 +14,8 @@ PR *less* mergeable. Observed live on gptme/gptme-contrib#1383 —
 where all four "human" threads were the AI reviewer's own findings, on a PR
 authored by the same account.
 
-Detection is by explicit marker, not by author login: the login is shared with
-Bob's genuine human-directed review comments, which must keep blocking.
+Detection requires both the reviewer's login and the finding marker on the
+root. Unmarked feedback from the shared account still counts as human.
 """
 
 from __future__ import annotations
@@ -47,9 +47,14 @@ def _thread(author: str, body: str, resolved: bool = False) -> dict[str, Any]:
     }
 
 
-def _count(threads: list[dict[str, Any]]) -> dict[str, Any]:
+REVIEWER = "TimeToBuildBob"
+
+
+def _count(
+    threads: list[dict[str, Any]], expected_author: str | None = REVIEWER
+) -> dict[str, Any]:
     result: dict[str, Any] = smc.fetch_unresolved_human_threads(
-        "o/r", 1, review_data=([], threads)
+        "o/r", 1, review_data=([], threads), expected_author=expected_author
     )
     return result
 
@@ -76,7 +81,7 @@ def test_genuine_human_thread_still_blocks() -> None:
 def test_same_account_human_comment_still_blocks() -> None:
     """Unmarked comments from Bob's account are human-directed and still count.
 
-    This is why detection keys on the marker rather than the author login.
+    The expected author's login alone is not sufficient for the exemption.
     """
     result = _count([_thread("TimeToBuildBob", "Erik — should we drop this flag?")])
     assert result["unresolved"] == 1
@@ -113,3 +118,23 @@ def test_graphql_query_requests_comment_body() -> None:
     src = MODULE_PATH.read_text()
     threads_block = src.split("reviewThreads(", 1)[1].split("checks_green", 1)[0]
     assert "body" in threads_block, "reviewThreads query must select comment body"
+
+
+def test_marker_on_human_thread_does_not_hide_it() -> None:
+    """gptme-contrib#2346 item 4: the marker is a label, not a signature.
+
+    A human who prefixes an unresolved review thread with the finding marker
+    must not make it vanish from the gate — only the reviewer's own account
+    can open an exempt AI finding thread.
+    """
+    result = _count([_thread("ErikBjare", f"{MARKER}\n\nplease fix this")])
+    assert result["unresolved"] == 1
+    assert result["authors"] == ["ErikBjare"]
+
+
+def test_marker_thread_without_known_reviewer_fails_closed() -> None:
+    """Without the reviewer identity, nothing is exempted from the gate."""
+    result = _count(
+        [_thread(REVIEWER, f"{MARKER}\n\nP1 — finding")], expected_author=None
+    )
+    assert result["unresolved"] == 1

@@ -536,7 +536,7 @@ def evaluate(monkeypatch: pytest.MonkeyPatch) -> Any:
         monkeypatch.setattr(
             smc,
             "fetch_unresolved_human_threads",
-            lambda r, n, review_data=None: {
+            lambda r, n, review_data=None, **k: {
                 "unresolved": 0,
                 "total": 0,
                 "authors": [],
