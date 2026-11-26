@@ -141,9 +141,10 @@ def test_real_commit_is_blocked_then_allowed(tmp_path: Path) -> None:
     assert ok.returncode == 0, ok.stderr
 
 
+@pytest.mark.parametrize("editor", ["rewrite", ":"])
 @pytest.mark.parametrize("comment_char", ["#", "d"])
 def test_verbose_commit_with_tag_in_diff_context_passes(
-    tmp_path: Path, comment_char: str
+    tmp_path: Path, comment_char: str, editor: str
 ) -> None:
     """#2346 item 11: `git commit -v` must not reject on unchanged diff context."""
     repo = tmp_path / "repo"
@@ -187,7 +188,11 @@ def test_verbose_commit_with_tag_in_diff_context_passes(
     assert git("commit", "-q", "-m", "docs: x").returncode == 0
     (repo / "doc.txt").write_text("<think>\nnew\n")
 
-    result = git("commit", "-q", "-a", "-v")
+    if editor == ":":
+        env["GIT_EDITOR"] = ":"
+        result = git("commit", "-q", "-a", "-v", "-e", "-m", "fix: y")
+    else:
+        result = git("commit", "-q", "-a", "-v")
 
     assert result.returncode == 0, result.stderr
     assert git("log", "-1", "--format=%s").stdout.strip() == "fix: y"

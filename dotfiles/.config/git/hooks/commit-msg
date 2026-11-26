@@ -11,7 +11,6 @@ message must show a bare tag line.
 
 from __future__ import annotations
 
-import os
 import re
 import sys
 from pathlib import Path
@@ -24,20 +23,16 @@ _SCISSORS = re.compile(rb"(\S) -{24} >8 -{24}")
 
 
 def _verbose_diff_follows(lines: list[bytes], scissors: int) -> bool:
-    """True when the scissors line at ``scissors`` opens `git commit -v` output.
+    """True when a scissors line is followed by a verbose-shaped diff block.
 
     Git writes the scissors line, its own comment lines, then ``diff --git``.
-    That suffix is always cut before the commit is made, and its unchanged
-    context lines (`` <think>``) would otherwise strip to a bare tag.
+    Its unchanged context lines (`` <think>``) would otherwise strip to a bare
+    tag. This shape alone does not prove Git will discard the suffix.
     """
     marker = _SCISSORS.fullmatch(lines[scissors])
     if marker is None:
         return False
-    # Without an editor, Git retains scissors-shaped -m/-F text. Its hook
-    # environment explicitly sets GIT_EDITOR=: in that case; do not infer
-    # discarded output from the message alone.
-    if os.environ.get("GIT_EDITOR") == ":":
-        return False
+
     for line in lines[scissors + 1 :]:
         if line.startswith(b"diff --git "):
             return True
@@ -52,11 +47,15 @@ def stray_tag_lines(content: bytes) -> list[int]:
     found: list[int] = []
     fence: bytes | None = None
     lines = content.splitlines()
-    # Scan past other scissors-shaped lines: commit-msg is not told whether
-    # Git will discard that suffix. Only a verbose diff block ends the scan.
+    # Diff context has a single-space prefix. Ignore that prefix only inside
+    # a scissors/diff block, but keep checking unprefixed tags: -m can retain
+    # diff-shaped text, and GIT_EDITOR=: is also a valid explicit editor.
+    in_diff = False
     for number, line in enumerate(lines, start=1):
         if fence is None and _verbose_diff_follows(lines, number - 1):
-            break
+            in_diff = True
+        if in_diff and line.startswith(b" "):
+            continue
         marker = _FENCE.fullmatch(line)
         if fence is not None:
             if (

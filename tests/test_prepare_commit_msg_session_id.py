@@ -360,14 +360,17 @@ def _run_hook_with_source(
     )
 
 
-def test_hash_body_line_from_dash_m_is_not_treated_as_comment(tmp_path: Path) -> None:
+@pytest.mark.parametrize("body_prefix", ["Re-pins onto", "Re-pins: onto"])
+def test_hash_body_line_from_dash_m_is_not_treated_as_comment(
+    tmp_path: Path, body_prefix: str
+) -> None:
     """`git commit -m` body ending in '#2077 ...' must keep the trailer last.
 
     Regression: interpret-trailers read the '#' line as a comment and spliced
     the trailer above it, into the middle of the body.
     """
     msg = tmp_path / "COMMIT_EDITMSG"
-    msg.write_text("feat: x\n\nRe-pins onto the still-open\n#2077 branch.\n")
+    msg.write_text(f"feat: x\n\n{body_prefix} the still-open\n#2077 branch.\n")
     # git exports GIT_EDITOR=: to the hook when no editor will run.
     env = _clean_env(GIT_COMMITTER_SESSION_ID="s1", GIT_EDITOR=":")
 
@@ -375,7 +378,7 @@ def test_hash_body_line_from_dash_m_is_not_treated_as_comment(tmp_path: Path) ->
 
     assert result.returncode == 0, result.stderr
     assert msg.read_text() == (
-        "feat: x\n\nRe-pins onto the still-open\n#2077 branch.\n\nGit-Session-Id: s1\n"
+        f"feat: x\n\n{body_prefix} the still-open\n#2077 branch.\n\nGit-Session-Id: s1\n"
     )
 
 
