@@ -178,6 +178,7 @@ BUILD_INPUT_TXT_RE = re.compile(
     r"^(?:cmakelists|(?:.*[-_.])?(?:requirements|constraints)(?:[-_.].*)?)\.txt$",
     re.IGNORECASE,
 )
+BUILD_INPUT_TXT_DIRS = frozenset({"requirements", "constraints"})
 SPEC_LIKE_DOCS = {
     "README.md",
     "ABOUT.md",
@@ -2338,9 +2339,10 @@ def checks_green(status_checks: list[dict[str, Any]]) -> bool:
 def is_doc_file(path: str) -> bool:
     pure = Path(path)
     suffix = pure.suffix.lower()
-    # pip's split layout: ``requirements/base.txt``.
+    # pip's split layouts: ``requirements/base.txt``, ``constraints/py311/ci.txt``.
     if BUILD_INPUT_TXT_RE.match(pure.name) or (
-        suffix == ".txt" and pure.parent.name.lower() == "requirements"
+        suffix == ".txt"
+        and any(part.lower() in BUILD_INPUT_TXT_DIRS for part in pure.parent.parts)
     ):
         return False
     return suffix in DOC_EXTENSIONS

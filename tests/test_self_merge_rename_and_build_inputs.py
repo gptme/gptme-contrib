@@ -57,6 +57,7 @@ def _evaluate(repo: str, files: list[dict]):
         patch.object(smc, "fetch_ai_review_status", return_value=marker),
         patch.object(smc, "_fetch_pr_file_shapes", return_value=[]),
         patch.object(smc, "_fetch_contrib_pr_file_shapes", return_value=[]),
+        patch.object(smc, "fetch_pr_file_changes", return_value=None),
         patch.object(
             smc, "operator_approval_category_waiver", lambda r, **_: (r, None)
         ),
@@ -154,6 +155,8 @@ def test_tier_waiver_classifies_the_rename_source() -> None:
         "dev-requirements.txt",
         "constraints.txt",
         "requirements/base.txt",
+        "requirements/py311/base.txt",
+        "constraints/base.txt",
         "CMakeLists.txt",
         "native/CMakeLists.txt",
         "tests/requirements.txt",
