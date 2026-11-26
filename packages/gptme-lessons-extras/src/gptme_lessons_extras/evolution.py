@@ -376,8 +376,11 @@ def _write_json_atomic(path: Path, data: object) -> None:
     An existing file keeps its mode; a new one gets the umask default.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    mode = 0o644 if path.exists() else _new_file_mode(path.parent)
-    safe_write(path, json.dumps(data, indent=2), mode=mode)
+    # safe_write keeps an existing file's mode, so the probe only decides the
+    # mode of a file that turns out not to exist — including one deleted
+    # between here and the write, which must not fall back to a world-readable
+    # default.
+    safe_write(path, json.dumps(data, indent=2), mode=_new_file_mode(path.parent))
 
 
 def main():
