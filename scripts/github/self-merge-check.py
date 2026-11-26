@@ -2907,12 +2907,41 @@ def _gptme_core_shapes_cover_files(
         for shape in file_shapes
     }
     changed = {path.replace("\\", "/").removeprefix("./") for path in files}
-    shape_additions = sum(int(shape.get("additions") or 0) for shape in file_shapes)
+    additions_values = [shape.get("additions") for shape in file_shapes]
+    if any(value is not None and type(value) is not int for value in additions_values):
+        # A malformed field means the shape read is not provably complete:
+        # fail closed instead of crashing evaluate_pr with a ValueError.
+        # `type(...) is int`, not isinstance: a JSON bool would sum as 0/1.
+        return False
+    shape_additions = sum(value or 0 for value in additions_values)
     return (
         totals["changed_files"] == len(files) == len(file_shapes)
         and shape_paths == changed
         and shape_additions == totals["additions"]
     )
+
+
+# Reason prefixes marking a diff-shape completeness refusal. Unlike
+# path/category policy refusals, these must never be waived (tier-0 waiver
+# or operator approval): they exist so the patch-reading detectors cannot be
+# silently skipped on an incomplete read.
+GPTME_CORE_COMPLETENESS_REASON_PREFIXES = (
+    "Could not read the complete PR diff shape",
+    "GitHub omitted the patch for",
+)
+
+
+def _split_completeness_reasons(
+    reasons: list[str],
+) -> tuple[list[str], list[str]]:
+    """Split completeness refusals (never waivable) from policy refusals."""
+    completeness = [
+        reason
+        for reason in reasons
+        if reason.startswith(GPTME_CORE_COMPLETENESS_REASON_PREFIXES)
+    ]
+    policy = [reason for reason in reasons if reason not in completeness]
+    return completeness, policy
 
 
 def _gptme_core_unread_patches(file_shapes: list[dict[str, Any]]) -> list[str]:
@@ -4921,7 +4950,13 @@ def evaluate_pr(
 
     # ErikBjare/bob#1480: a tier-0 PR in a rollout repo of gptme_contrib_lib/merge_policy.toml
     # needs no category. Evaluated before operator approval so the tier is
-    # recorded even when Erik also approved the head.
+    # recorded even when Erik also approved the head. Diff-shape completeness
+    # refusals are not path/category policy and never waive: a tier-0 file set
+    # with an incomplete read still routes to human review, or the fail-closed
+    # gptme/gptme guard above could be silently bypassed by the waiver.
+    completeness_reasons, category_reasons = _split_completeness_reasons(
+        category_reasons
+    )
     category_reasons, tier_waiver, result.merge_tier = merge_policy_tier_waiver(
         category_reasons,
         repo=repo,
@@ -4933,10 +4968,18 @@ def evaluate_pr(
         result.warnings.append(tier_waiver)
         if result.merge_tier is not None:  # a waiver, not an unavailable policy
             result.category = "merge-policy-tier-0"
+    category_reasons = completeness_reasons + category_reasons
+    if completeness_reasons:
+        result.category = None
 
     # ErikBjare/bob#1471 phase 2/3: an operator approval of the head, or of an
     # earlier commit followed only by small review fixes, overrides
-    # path/category policy, never the sensitive-path or bot-config stop.
+    # path/category policy, never the sensitive-path or bot-config stop —
+    # and never a diff-shape completeness refusal, which is gate integrity,
+    # not policy.
+    completeness_reasons, category_reasons = _split_completeness_reasons(
+        category_reasons
+    )
     if category_reasons:
         category_reasons, category_waiver = operator_approval_category_waiver(
             category_reasons,
@@ -4948,8 +4991,9 @@ def evaluate_pr(
         )
         if category_waiver is not None:
             result.warnings.append(category_waiver)
-            if not category_reasons:
+            if not category_reasons and not completeness_reasons:
                 result.category = "operator-approved"
+    category_reasons = completeness_reasons + category_reasons
 
     # Erik 2026-11-24: a declared slice of a listed epic gets the placement /
     # category waiver without his per-PR approval; per-repo holds survive.

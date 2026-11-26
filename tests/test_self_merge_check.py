@@ -3012,6 +3012,51 @@ def test_gptme_core_shapes_cover_files_compares_independent_totals() -> None:
     assert not cover(shapes, files, None)
 
 
+@pytest.mark.parametrize("bad", ["3", True, 2.5])
+def test_gptme_core_shapes_cover_files_rejects_malformed_additions(bad: object) -> None:
+    """A malformed per-shape `additions` is a completeness failure, not a
+    ValueError crashing evaluate_pr; a JSON bool must not sum as 0/1."""
+    cover = self_merge_check._gptme_core_shapes_cover_files
+    shapes = [{"path": "gptme/a.py", "additions": bad}]
+    assert not cover(shapes, ["gptme/a.py"], {"changed_files": 1, "additions": 3})
+
+
+def test_split_completeness_reasons_separates_never_waivable_refusals() -> None:
+    """Diff-shape completeness refusals are gate integrity, not category policy."""
+    reasons = [
+        "Touches sensitive/security/infra paths",
+        "Could not read the complete PR diff shape (0 shape(s) for 2 changed "
+        "file(s); GitHub reports {'changed_files': 2, 'additions': 5}); "
+        "gptme/gptme eligibility requires a complete read",
+    ]
+    completeness, policy = self_merge_check._split_completeness_reasons(reasons)
+    assert len(completeness) == 1 and "diff shape" in completeness[0]
+    assert policy == ["Touches sensitive/security/infra paths"]
+
+
+def test_evaluate_pr_gptme_core_completeness_refusal_survives_tier0_waiver() -> None:
+    """A tier-0 file set with an incomplete shape read still refuses.
+
+    merge_policy_tier_waiver's contract is path/category refusals only; a
+    tier-0 docs/tests PR whose shape read failed must route to human review,
+    or the fail-closed gptme/gptme guard would be silently bypassed by the
+    waiver once gptme/gptme enters the rollout list (gptme-contrib#2527).
+    """
+    mp = self_merge_check.merge_policy
+    files = [{"path": "docs/a.md"}, {"path": "tests/test_a.py"}]
+    changes = [mp.FileChange("docs/a.md", 10, 0), mp.FileChange("tests/test_a.py", 50)]
+    policy = {**mp.load_policy(mp.POLICY_PATH), "rollout": {"repos": ["gptme/gptme"]}}
+    with (
+        patch.object(mp, "load_policy", return_value=policy),
+        patch.object(self_merge_check, "fetch_pr_file_changes", return_value=changes),
+    ):
+        # Empty shapes: the shape read failed, though the file set is tier 0.
+        result = _evaluate_gptme_core(files, [])
+    assert not result.eligible
+    assert result.category is None
+    assert any("diff shape" in reason for reason in result.reasons), result.reasons
+
+
 @pytest.mark.parametrize("bad", [True, False])
 def test_fetch_pr_file_totals_rejects_bool_totals(bad: bool) -> None:
     """JSON booleans are ints in Python; the type guard must still refuse."""
