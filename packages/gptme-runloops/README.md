@@ -231,6 +231,12 @@ measures.
 
 ## Review artifact output
 
+**Retirement note (2026-11-26):** `review-pr` no longer routes a PR (see the
+command table above), and `review` is legacy. The wire format below still
+describes what `review --output` writes and what existing consumers can read;
+it is not the output of the live review engines (`gptme-review`, or
+`scripts/github/ai-review-local.py` in the agent workspace).
+
 `review` and `review-pr` now write **canonical core v2 JSON**, both on stdout
 and with `--output`. Consumers can load it directly with
 `gptme.util.review.ReviewArtifact.from_json()`; no forge-neutral reader is needed
