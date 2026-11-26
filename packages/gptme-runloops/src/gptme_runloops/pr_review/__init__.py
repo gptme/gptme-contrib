@@ -8,8 +8,10 @@ What this package is for
 Reviewing a **local diff with no forge involved**: ``gptme-runloops review
 --working-tree`` (or ``--base``/``--head``). ``reviewer.py`` makes zero forge
 API calls by construction; ``github_adapter.py`` is the quarantined I/O
-boundary that callers use, not a dependency of the review logic. This is the
-entry point to reach for when you want findings on uncommitted work.
+boundary that callers use, not a dependency of the review logic. For findings
+on uncommitted work today, use ``scripts/github/ai-review-local.py`` in the
+agent workspace (see Superseded below); this package's ``review`` CLI is
+legacy.
 
 What this package is NOT
 ------------------------
