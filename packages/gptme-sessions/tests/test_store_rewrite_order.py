@@ -193,10 +193,31 @@ def test_caller_assigned_id_on_id_less_row_is_persisted(tmp_path: Path) -> None:
     store.rewrite([record])
 
     rows = [json.loads(line) for line in store.path.read_text(encoding="utf-8").splitlines()]
-    # The derived id no longer matches the re-read row, so the caller's copy is
-    # appended (upsert semantics); its explicitly set values are written.
-    assert rows[-1]["session_id"] == "assigned"
-    assert rows[-1]["timestamp"] == "2026-01-02T03:04:05+00:00"
+    # Assigning an id to a loaded id-less row renames it in place: the derived
+    # id is indexed alongside the new one, so the row is not kept as a second
+    # copy (#2338).
+    assert len(rows) == 1
+    assert rows[0]["session_id"] == "assigned"
+    assert rows[0]["timestamp"] == "2026-01-02T03:04:05+00:00"
+    # Content the caller did not touch survives the rename.
+    assert rows[0]["model"] == "opus"
+
+
+def test_rename_of_persisted_synthetic_id_replaces_in_place(tmp_path: Path) -> None:
+    """A reloaded ``noid-`` row is renamed in place, not duplicated (#2338)."""
+    store = SessionStore(sessions_dir=tmp_path)
+    store.path.write_text(json.dumps({"model": "opus"}) + "\n", encoding="utf-8")
+    store.rewrite(store.load_all())  # persist the derived id
+
+    record = store.load_all()[0]
+    assert record.session_id.startswith("noid-")
+    record.session_id = "assigned"
+    store.rewrite([record])
+
+    rows = [json.loads(line) for line in store.path.read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == 1
+    assert rows[0]["session_id"] == "assigned"
+    assert rows[0]["model"] == "opus"
 
 
 def test_store_invented_marker_is_never_serialized() -> None:

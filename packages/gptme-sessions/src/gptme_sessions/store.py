@@ -90,10 +90,14 @@ def _parse_row(line: str) -> SessionRecord:
     session_id = data.get("session_id") if isinstance(data, dict) else None
     has_timestamp = isinstance(data, dict) and bool(data.get("timestamp"))
     record = SessionRecord.from_dict(data)
-    if _is_synthetic_id(session_id) and not has_timestamp:
-        # A row we previously derived an id for keeps its invented timestamp
-        # out of the file, even after the id was persisted.
-        record._store_invented["timestamp"] = record.timestamp
+    if _is_synthetic_id(session_id):
+        # Remember the derived id so a later caller-assigned id is treated as a
+        # rename of this row rather than a second, duplicate row (#2338).
+        record._store_invented["session_id"] = record.session_id
+        if not has_timestamp:
+            # A row we previously derived an id for keeps its invented timestamp
+            # out of the file, even after the id was persisted.
+            record._store_invented["timestamp"] = record.timestamp
     if isinstance(data, dict) and not session_id:
         content = record.to_dict()
         content.pop("session_id", None)
@@ -391,6 +395,13 @@ class SessionStore:
             by_id: dict[str, deque[int]] = {}
             for index, record in enumerate(records):
                 by_id.setdefault(record.session_id, deque()).append(index)
+                # A caller that assigns a real id to a loaded id-less row is
+                # renaming it. Index the derived id too, so the on-disk row is
+                # replaced in place instead of being kept *and* duplicated by
+                # the appended record (#2338).
+                invented_id = record._store_invented.get("session_id")
+                if invented_id and invented_id != record.session_id:
+                    by_id.setdefault(invented_id, deque()).append(index)
             emitted_indices: set[int] = set()
             out_lines: list[str] = []
 
@@ -423,6 +434,10 @@ class SessionStore:
                             out_lines.append(_row_json(rec) + "\n")
                         elif replacements:
                             index = replacements.popleft()
+                            if index in emitted_indices:
+                                # The same record is indexed under its current
+                                # and its derived id; emit it only once.
+                                continue
                             emitted_indices.add(index)
                             out_lines.append(_row_json(records[index]) + "\n")
                         # Excess on-disk copies of an upserted id are superseded.
