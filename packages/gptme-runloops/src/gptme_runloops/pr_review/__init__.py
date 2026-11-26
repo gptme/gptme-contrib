@@ -8,8 +8,10 @@ What this package is for
 Reviewing a **local diff with no forge involved**: ``gptme-runloops review
 --working-tree`` (or ``--base``/``--head``). ``reviewer.py`` makes zero forge
 API calls by construction; ``github_adapter.py`` is the quarantined I/O
-boundary that callers use, not a dependency of the review logic. This is the
-entry point to reach for when you want findings on uncommitted work.
+boundary that callers use, not a dependency of the review logic. For findings
+on uncommitted work today, use ``scripts/github/ai-review-local.py`` in the
+agent workspace (see Superseded below); this package's ``review`` CLI is
+legacy.
 
 What this package is NOT
 ------------------------
@@ -17,9 +19,14 @@ It is **not** the reviewer that reviews Bob's PRs. It has never carried
 production traffic, and it has no consensus passes, finding suppression, or
 soundness gates — the machinery that makes posted findings tolerable to a
 human. Do not extend it into a second GitHub-posting reviewer, and do not
-treat its review prompt as canonical: per the decision below this package is
-the *destination shell*, and the production review engine is being lifted into
-it rather than reimplemented here.
+treat its review prompt as canonical.
+
+Superseded (2026-11-26): this package is **not** the destination shell any
+more. The production review engine lives in the separate ``gptme-review``
+package (``gptme_review.core`` + its writer), and local-diff review runs
+through ``scripts/github/ai-review-local.py`` in the agent workspace. The
+``review-pr`` CLI here is a retired path — ``pm-run-item-slot.sh`` refuses to
+route a PR to it.
 
 Related implementations
 -----------------------

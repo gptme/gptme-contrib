@@ -78,8 +78,8 @@ Other options: `--prompt-file`, `--timeout` (default 1800 s); `--backend` defaul
 | `run-item --workspace DIR [--work-file F] ...` | Execute a single project-monitoring work item (`--dry-run` prints the execution plan) |
 | `email` | Sync mail (`mbsync -a`), then answer unreplied messages using [gptmail](../gptmail/README.md) |
 | `team [--tools LIST]` | Coordinator agent with restricted tools that delegates work to subagents via gptodo. The restriction is only enforced on the `gptme` backend: claude-code, codex and grok-build log a warning and run with their normal tools |
-| `review [--working-tree \| --base SHA --head SHA] [--output F] [--model M]` | LLM review of a local diff, emitted as `ReviewArtifact` JSON (no forge access needed) |
-| `review-pr OWNER/REPO#NUM [--shadow\|--publish] [--min-confidence X]` | Review a GitHub PR; `--publish` posts findings as inline comments (default is shadow mode) |
+| `review [--working-tree \| --base SHA --head SHA] [--output F] [--model M]` | Legacy: LLM review of a local diff, emitted as `ReviewArtifact` JSON (no forge access needed). Production local-diff review is `scripts/github/ai-review-local.py` in the agent workspace |
+| `review-pr OWNER/REPO#NUM [--shadow\|--publish] [--min-confidence X]` | **Retired path.** `pm-run-item-slot.sh` refuses to route a PR here. Production GitHub-posting review is the separate [`gptme-review`](../gptme-review/README.md) package (`gptme_review.core` + writer) |
 
 `autonomous`, `email`, `team` and `monitoring` accept `--workspace` (default: current
 directory), `--model`, `--tool-format markdown|xml|tool` and `--backend`.
@@ -230,6 +230,12 @@ one-slot request while five granted slots sit idle is the starvation this
 measures.
 
 ## Review artifact output
+
+**Retirement note (2026-11-26):** `review-pr` no longer routes a PR (see the
+command table above), and `review` is legacy. The wire format below still
+describes what `review --output` writes and what existing consumers can read;
+it is not the output of the live review engines (`gptme-review`, or
+`scripts/github/ai-review-local.py` in the agent workspace).
 
 `review` and `review-pr` now write **canonical core v2 JSON**, both on stdout
 and with `--output`. Consumers can load it directly with
