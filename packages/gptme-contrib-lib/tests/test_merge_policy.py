@@ -316,6 +316,7 @@ def test_aw_small_fix_holds_scripts_lockfile_migration_gitlink(policy) -> None:
         "gradle/wrapper/gradle-wrapper.properties",
         "src-tauri/tauri.conf.json",
         "VERSION",
+        "fastlane/Fastfile",
     ],
 )
 def test_aw_small_fix_holds_build_and_version_files(policy, path: str) -> None:
@@ -328,6 +329,36 @@ def test_aw_small_fix_holds_build_and_version_files(policy, path: str) -> None:
     )
     assert v.tier == 2
     assert "hold glob:" in v.misses[1]
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "requirements.txt",
+        "docs/requirements-dev.txt",
+        "CMakeLists.txt",
+        "tests/CMakeLists.txt",
+        "fastlane/metadata/android/en-US/changelogs/49.txt",
+    ],
+)
+@pytest.mark.parametrize("title", ["chore: bump deps", "fix: a", "docs: a"])
+def test_txt_inputs_never_reach_a_self_merge_tier(
+    policy, path: str, title: str
+) -> None:
+    # The real gate predicate calls every .txt a doc; model that here.
+    class TxtIsDoc(Classifier):
+        def is_doc_file(self, path: str) -> bool:
+            return path.endswith((".md", ".txt"))
+
+    v = merge_policy.assign_tier(
+        [FileChange(path, 5)],
+        policy,
+        TxtIsDoc(),
+        repo="ActivityWatch/aw-client",
+        title=title,
+    )
+    assert v.tier == 2
+    assert v.classes[path] == "plain-text"
 
 
 def test_aw_small_fix_ignores_repo_outside_tier_list(policy) -> None:

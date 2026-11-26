@@ -17,6 +17,8 @@
 #   gitlink    submodule pointer (patch is only Subproject commit lines)
 #   sensitive  is_sensitive_path()
 #   lockfile   is_lockfile()
+#   plain-text any other .txt, test dirs included: dependency, build and
+#              release inputs share the suffix, so no tier below admits it
 #   tests      is_test_file()
 #   spec-doc   repo-root README/ARCHITECTURE/CLAUDE/... (is_spec_like_doc)
 #   docs       other doc files (is_doc_file)
@@ -106,6 +108,7 @@ hold_globs = [
   "**/gradle.properties",
   "**/gradle/**",
   "**/tauri.conf.json",
+  "**/fastlane/**",
   "scripts/**",
 ]
 

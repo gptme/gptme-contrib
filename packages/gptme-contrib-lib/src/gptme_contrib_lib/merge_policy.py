@@ -195,6 +195,11 @@ def file_class(
         return "sensitive"
     if classifier.is_lockfile(path):
         return "lockfile"
+    if path.lower().endswith(".txt"):
+        # The suffix proves nothing: requirements*.txt, CMakeLists.txt and
+        # store release notes are dependency, build and release inputs. No
+        # tier admits this class by name, so it falls to the catch-all.
+        return "plain-text"
     if classifier.is_test_file(path):
         return "tests"
     if classifier.is_doc_file(path):

@@ -155,3 +155,18 @@ def test_aw_src_fix_is_waived_as_tier1() -> None:
     assert remaining == []
     assert warning and "merge-policy tier 1" in warning
     assert verdict and verdict["tier"] == 1
+
+
+def test_aw_requirements_bump_is_not_waived_as_docs() -> None:
+    """The gate's own ``is_doc_file`` matches .txt; the tier must still hold it."""
+    changes = [mp.FileChange("requirements.txt", 5)]
+    with patch.object(smc, "fetch_pr_file_changes", return_value=changes):
+        remaining, warning, verdict = smc.merge_policy_tier_waiver(
+            [REASON],
+            repo="ActivityWatch/aw-client",
+            number=1,
+            files=["requirements.txt"],
+            title="chore: bump deps",
+        )
+    assert remaining == [REASON] and warning is None
+    assert verdict and verdict["tier"] == 2
