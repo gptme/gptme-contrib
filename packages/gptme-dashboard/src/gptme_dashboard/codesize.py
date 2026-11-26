@@ -30,6 +30,8 @@ from __future__ import annotations
 import json
 import math
 import subprocess
+from collections import Counter
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -65,6 +67,11 @@ SOURCE_SUFFIXES = {
     ".js",
     ".jsx",
     ".vue",
+    ".svelte",
+    ".html",
+    ".css",
+    ".scss",
+    ".sql",
     ".kt",
     ".java",
     ".go",
@@ -77,6 +84,8 @@ SOURCE_SUFFIXES = {
     ".md",
     ".rst",
 }
+
+CONTENT_SUFFIXES = {".md", ".rst", ".toml", ".yaml", ".yml"}
 
 DEFAULT_THRESHOLDS = (1500, 3000)
 
@@ -135,6 +144,8 @@ class HistoryPoint:
     test_lines: int
     largest_file: str = ""
     largest_file_lines: int = 0
+    threshold_counts: dict[str, int] = field(default_factory=dict)
+    group_source_lines: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -149,6 +160,7 @@ class CodeSizeReport:
     hotspots: list[FileSize] = field(default_factory=list)
     history: list[HistoryPoint] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    code_only: bool = False
 
     @property
     def total_source_lines(self) -> int:
@@ -385,21 +397,23 @@ def _is_test_path(rel_path: str) -> bool:
     return path.suffix in JS_SUFFIXES and path.stem.endswith((".test", ".spec"))
 
 
-def _is_source_path(path: str) -> bool:
+def _is_source_path(path: str, code_only: bool = False) -> bool:
     """Whether a path, relative to the repository that tracks it, is reported.
 
     The current numbers and the trend both filter through this. A submodule's
     mount path is not part of it: one mounted at ``build/toolchain`` still counts.
     """
     *dirs, name = path.split("/")
+    suffix = Path(name).suffix.lower()
     return (
-        Path(name).suffix.lower() in SOURCE_SUFFIXES
+        suffix in SOURCE_SUFFIXES
+        and (not code_only or suffix not in CONTENT_SUFFIXES)
         and name not in SKIP_FILES
         and not any(d in SKIP_DIRS for d in dirs)
     )
 
 
-def iter_source_files(root: Path, submodules: list[str] | None = None):
+def iter_source_files(root: Path, submodules: list[str] | None = None, *, code_only: bool = False):
     """Yield (relative path, absolute path) for source files.
 
     In a git repository these are the tracked files of ``root`` and of each listed
@@ -418,7 +432,7 @@ def iter_source_files(root: Path, submodules: list[str] | None = None):
         candidates = [(p, p.relative_to(root).as_posix()) for p in root.rglob("*")]
     for path, own_path in candidates:
         # a symlink would count its target a second time
-        if not _is_source_path(own_path) or path.is_symlink() or not path.is_file():
+        if not _is_source_path(own_path, code_only) or path.is_symlink() or not path.is_file():
             continue
         yield path.relative_to(root).as_posix(), path
 
@@ -431,6 +445,7 @@ def build_report(
     history_weeks: int = 8,
     hotspot_window: str = "90 days ago",
     largest_n: int = 15,
+    code_only: bool = False,
 ) -> CodeSizeReport:
     """Compute the size report for ``repo``."""
     root = Path(repo).resolve()
@@ -440,6 +455,7 @@ def build_report(
         profile=profile,
         generated_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
         thresholds=sorted(set(thresholds)),
+        code_only=code_only,
     )
     overrides = _load_group_map(root, group_map, report.warnings)
     shadowed = _shadowed_packages(root)
@@ -464,7 +480,7 @@ def build_report(
             for path, count in _change_counts(root / sub, hotspot_window).items():
                 change_counts[f"{sub}/{path}"] = count
 
-    for rel, path in iter_source_files(root, submodules):
+    for rel, path in iter_source_files(root, submodules, code_only=code_only):
         lines = _count_lines(path)
         if lines == 0:
             continue
@@ -511,7 +527,19 @@ def build_report(
         report.warnings.append("not a git repository: history trend unavailable")
     elif history_weeks > 0:
         unreadable: set[str] = set()
-        report.history = _history(root, history_weeks, recurse, unreadable)
+
+        def group_for_path(path: str) -> str:
+            return assign_group(path, profile, overrides, submodules, shadowed)[0]
+
+        report.history = _history(
+            root,
+            history_weeks,
+            recurse,
+            unreadable,
+            code_only,
+            report.thresholds,
+            group_for_path if not recurse else None,
+        )
         report.warnings += [
             f"trend omits submodule {p} where its pinned commit is not available locally"
             for p in sorted(unreadable)
@@ -557,13 +585,16 @@ def _lines_at_commit(
     recurse: bool,
     unreadable: set[str],
     prefix: str = "",
+    *,
+    code_only: bool = False,
 ) -> list[tuple[str, int]]:
     """Line counts for every text source file at ``commit`` via one git grep.
 
     With ``recurse``, follows each submodule pin recorded in that commit; pins that
     cannot be read are added to ``unreadable``.
     """
-    patterns = [f":(icase)*{suffix}" for suffix in sorted(SOURCE_SUFFIXES)]
+    suffixes = SOURCE_SUFFIXES - CONTENT_SUFFIXES if code_only else SOURCE_SUFFIXES
+    patterns = [f":(icase)*{suffix}" for suffix in sorted(suffixes)]
     out = _git(root, "grep", "--no-color", "-c", "-I", "", commit, "--", *patterns)
     rows: list[tuple[str, int]] = []
     marker = f"{commit}:"
@@ -574,7 +605,7 @@ def _lines_at_commit(
         path, _, count = rest.rpartition(":")
         if not path or not count.isdigit():
             continue
-        if _is_source_path(path):
+        if _is_source_path(path, code_only):
             rows.append((prefix + path, int(count)))
     if not recurse:
         return rows
@@ -587,7 +618,9 @@ def _lines_at_commit(
         if not (subroot / ".git").exists() or not _git(subroot, "cat-file", "-t", pin):
             unreadable.add(prefix + path)
             continue
-        rows += _lines_at_commit(subroot, pin, recurse, unreadable, f"{prefix}{path}/")
+        rows += _lines_at_commit(
+            subroot, pin, recurse, unreadable, f"{prefix}{path}/", code_only=code_only
+        )
     return rows
 
 
@@ -596,19 +629,29 @@ def _history(
     weeks: int,
     recurse: bool,
     unreadable: set[str],
+    code_only: bool,
+    thresholds: list[int],
+    group_for_path: Callable[[str], str] | None,
 ) -> list[HistoryPoint]:
     points: list[HistoryPoint] = []
     for week, commit in _weekly_commits(root, weeks):
-        rows = _lines_at_commit(root, commit, recurse, unreadable)
+        rows = _lines_at_commit(root, commit, recurse, unreadable, code_only=code_only)
         if not rows:
             continue
         source = test = 0
+        threshold_counts = dict.fromkeys(map(str, thresholds), 0)
+        group_source_lines: Counter[str] = Counter()
         largest_path, largest_lines = "", 0
         for path, lines in rows:
             if _is_test_path(path):
                 test += lines
             else:
                 source += lines
+                if group_for_path is not None:
+                    group_source_lines[group_for_path(path)] += lines
+                for threshold in thresholds:
+                    if lines >= threshold:
+                        threshold_counts[str(threshold)] += 1
                 if lines > largest_lines:
                     largest_path, largest_lines = path, lines
         points.append(
@@ -619,6 +662,8 @@ def _history(
                 test_lines=test,
                 largest_file=largest_path,
                 largest_file_lines=largest_lines,
+                threshold_counts=threshold_counts,
+                group_source_lines=dict(group_source_lines),
             )
         )
     return points
@@ -642,6 +687,8 @@ def render_markdown(report: CodeSizeReport) -> str:
         ),
         "",
     ]
+    if report.code_only:
+        lines += ["Counts exclude prose and configuration files.", ""]
     if report.warnings:
         lines += [f"> warning: {w}" for w in report.warnings] + [""]
 

@@ -1,5 +1,6 @@
 """CLI for gptme-dashboard."""
 
+import json
 import sys
 from pathlib import Path
 
@@ -89,6 +90,21 @@ def main() -> None:
         "their detail pages are always generated."
     ),
 )
+@click.option(
+    "--codesize", "include_codesize", is_flag=True, help="Include the code-size section and trend."
+)
+@click.option(
+    "--dependent-repo",
+    "dependent_repos",
+    multiple=True,
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Count declared dependents in this agent checkout (repeatable, requires --codesize).",
+)
+@click.option(
+    "--ci-packages",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="JSON array of package directories selected by CI (requires --codesize).",
+)
 def generate(
     workspace: str,
     output: str | None,
@@ -98,6 +114,9 @@ def generate(
     sessions_days: int,
     base_url: str,
     include_terminal_tasks: bool,
+    include_codesize: bool,
+    dependent_repos: tuple[Path, ...],
+    ci_packages: Path | None,
 ) -> None:
     """Generate a static dashboard and JSON data dump for a gptme workspace."""
     from gptme_dashboard.generate import generate as do_generate
@@ -107,6 +126,28 @@ def generate(
     tmpl = Path(templates) if templates is not None else None
     omit_terminal = not include_terminal_tasks
 
+    if not include_codesize and (dependent_repos or ci_packages is not None):
+        raise click.UsageError("--dependent-repo and --ci-packages require --codesize")
+    codesize_data = None
+    if include_codesize:
+        from gptme_dashboard.codesize_section import collect_codesize_section
+
+        matrix = None
+        if ci_packages is not None:
+            try:
+                names = json.loads(ci_packages.read_text(encoding="utf-8"))
+                if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
+                    raise ValueError("expected an array of package directory names")
+                matrix = set(names)
+            except (OSError, ValueError) as exc:
+                raise click.BadParameter(str(exc), param_hint="--ci-packages") from exc
+        try:
+            codesize_data = collect_codesize_section(
+                ws, agent_repos=dependent_repos, ci_packages=matrix
+            )
+        except (OSError, ValueError) as exc:
+            raise click.ClickException(f"Code-size section: {exc}") from exc
+
     if print_json and output is None:
         # Stdout-only JSON mode (for piping to jq, CI artifacts, etc.)
         click.echo(
@@ -115,6 +156,7 @@ def generate(
                 include_sessions=sessions,
                 sessions_days=sessions_days,
                 omit_terminal_tasks=omit_terminal,
+                codesize=codesize_data,
             )
         )
         return
@@ -128,6 +170,7 @@ def generate(
         sessions_days=sessions_days,
         base_url=base_url,
         omit_terminal_tasks=omit_terminal,
+        codesize=codesize_data,
     )
     json_str = generate_json(ws, out, _data=data)
 
@@ -182,6 +225,7 @@ def generate(
     show_default=True,
     help="How many of the largest files and hotspots to list.",
 )
+@click.option("--code-only", is_flag=True, help="Exclude prose and configuration files.")
 def codesize(
     repo: str,
     print_json: bool,
@@ -189,6 +233,7 @@ def codesize(
     thresholds: tuple[int, ...],
     history_weeks: int,
     largest: int,
+    code_only: bool,
 ) -> None:
     """Report where code is hard to understand, review or change.
 
@@ -204,10 +249,8 @@ def codesize(
 
     group_map = None
     if groups is not None:
-        import json as _json
-
         try:
-            group_map = parse_group_map(_json.loads(Path(groups).read_text(encoding="utf-8")))
+            group_map = parse_group_map(json.loads(Path(groups).read_text(encoding="utf-8")))
         except (OSError, ValueError) as exc:
             raise click.BadParameter(str(exc), param_hint="'--groups'") from exc
 
@@ -217,6 +260,7 @@ def codesize(
         thresholds=thresholds or DEFAULT_THRESHOLDS,
         history_weeks=history_weeks,
         largest_n=largest,
+        code_only=code_only,
     )
     click.echo(report.to_json() if print_json else render_markdown(report))
 

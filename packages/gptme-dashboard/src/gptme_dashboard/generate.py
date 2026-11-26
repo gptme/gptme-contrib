@@ -2024,6 +2024,8 @@ def generate(
     sessions_days: int = 30,
     base_url: str = "",
     omit_terminal_tasks: bool = True,
+    *,
+    codesize: dict | None = None,
 ) -> dict:
     """Generate static HTML dashboard from workspace.
 
@@ -2050,6 +2052,9 @@ def generate(
         sessions_days=sessions_days,
         omit_terminal_tasks=omit_terminal_tasks,
     )
+
+    if codesize is not None:
+        data["codesize"] = codesize
 
     template = env.get_template("index.html")
     readme_html = (
@@ -2331,6 +2336,8 @@ def generate_json(
     sessions_days: int = 30,
     omit_terminal_tasks: bool = True,
     _data: dict | None = None,
+    *,
+    codesize: dict | None = None,
 ) -> str:
     """Generate JSON data dump from workspace.
 
@@ -2389,6 +2396,8 @@ def generate_json(
             {k: v for k, v in s.items() if k not in _JSON_EXCLUDE} for s in data["summaries"]
         ],
     }
+    if codesize is not None:
+        export_data["codesize"] = codesize
     json_str = json.dumps(export_data, indent=2)
 
     if output is not None:

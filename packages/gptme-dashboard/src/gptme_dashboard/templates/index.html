@@ -614,6 +614,7 @@ tr:hover { background: var(--accent-dim); }
     <div class="dashboard-nav-group">
       <h3 class="dashboard-nav-group-title">Workspace</h3>
       <div class="dashboard-nav-links">
+        {% if codesize %}<a href="#codesize"><span>Code size</span></a>{% endif %}
         <a href="#packages"><span>Packages</span><span class="nav-count">{{ stats.total_packages }}</span></a>
         <a href="#plugins"><span>Plugins</span><span class="nav-count">{{ stats.total_plugins }}</span></a>
         {% if community_plugins %}<a href="#community-plugins"><span>Community</span><span class="nav-count">{{ stats.total_community_plugins }}</span></a>{% endif %}
@@ -909,6 +910,8 @@ tr:hover { background: var(--accent-dim); }
   {% endif %}
 </section>
 {% endif %}
+
+{% if codesize %}{% include "codesize.html" %}{% endif %}
 
 <!-- Packages & Plugins (short, infrastructure overview) -->
 <div class="two-col">

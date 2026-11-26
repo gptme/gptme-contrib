@@ -31,6 +31,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Weekly code-size samples use branch history.
 
       - name: Install uv
         uses: astral-sh/setup-uv@v4
@@ -62,7 +64,9 @@ jobs:
         run: uv pip install --system -e packages/gptme-dashboard
 
       - name: Build dashboard
-        run: gptme-dashboard --workspace . --output _site
+        run: |
+          make --no-print-directory ci-list-packages-json > "$RUNNER_TEMP/ci-packages.json"
+          gptme-dashboard generate --workspace . --output _site --codesize --ci-packages "$RUNNER_TEMP/ci-packages.json"
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3

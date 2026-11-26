@@ -185,7 +185,7 @@ dashboard, and an agent workspace's own code-shape review.
 gptme-dashboard codesize --repo .
 
 # machine-readable, for a dashboard section or CI artifact
-gptme-dashboard codesize --repo . --json
+gptme-dashboard codesize --repo . --code-only --json
 
 # monolith with internal areas: map path prefixes to groups
 gptme-dashboard codesize --repo ../gptme --groups ../gptme/codesize-groups.json
@@ -213,3 +213,18 @@ that is missing or off its pin is reported as a warning.
 
 It only reads: nothing is deleted or rewritten. Use it to decide what to split,
 upstream or drop.
+
+### Code size on the dashboard
+
+```bash
+make --no-print-directory ci-list-packages-json > /tmp/ci-packages.json
+gptme-dashboard generate --workspace . --codesize --ci-packages /tmp/ci-packages.json
+```
+
+The Code size section leads with large files, then shows package size and growth,
+declared dependents, last commit, and package test matrix membership. Counts
+use physical lines in tracked code files. The published dashboard has no agent
+checkouts. For a private review, pass `--dependent-repo PATH` for each agent
+checkout you want to count. Checkout counts use declared Python dependencies
+and extras. Review command-line consumers and dynamic imports before acting on
+a removal flag. See [the shared report tracking issue](https://github.com/gptme/gptme/issues/5291).

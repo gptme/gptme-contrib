@@ -620,3 +620,104 @@ def test_non_python_workspaces_group_by_package(tmp_path: Path, manifest: str) -
 
     assert report.profile == "monorepo"
     assert {g.name for g in report.groups} == {"alpha", "beta"}
+
+
+def test_code_only_filters_current_and_history(tmp_path: Path) -> None:
+    _init_repo(tmp_path)
+    _write(tmp_path, "src/logic.py", 10)
+    _write(tmp_path, "tests/test_logic.py", 20)
+    _write(tmp_path, "tests/fixtures/config.yml", 100)
+    _write(tmp_path, "docs/big.md", 3000)
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-qm", "initial")
+
+    report = build_report(tmp_path, code_only=True)
+    assert [f.path for f in report.largest_files] == ["src/logic.py"]
+    assert report.total_source_lines == report.history[-1].source_lines == 10
+    assert report.total_test_lines == report.history[-1].test_lines == 20
+    assert report.history[-1].group_source_lines == {"src": 10}
+    assert report.history[-1].threshold_counts == {"1500": 0, "3000": 0}
+    assert build_report(tmp_path).largest_files[0].path == "docs/big.md"
+
+
+def test_dashboard_codesize_uses_matrix_and_distinct_agent_checkouts(tmp_path: Path) -> None:
+    repo = tmp_path / "workspace"
+    _init_repo(repo)
+    for name, stage in [("core", "5 - Production/Stable"), ("old", "3 - Alpha")]:
+        _write(repo, f"packages/{name}/src/logic.py", 1500 if name == "core" else 10)
+        manifest = repo / f"packages/{name}/pyproject.toml"
+        manifest.write_text(
+            f'[project]\nname = "{name}"\nclassifiers = ["Development Status :: {stage}"]\n'
+        )
+    _git(repo, "add", "-A")
+    old_date = (datetime.now(timezone.utc) - timedelta(days=100)).isoformat()
+    _git(repo, "commit", "-qm", "scaffold", date=old_date)
+
+    prior_week = (datetime.now(timezone.utc) - timedelta(days=8)).isoformat()
+    _write(repo, "packages/core/src/logic.py", 1504)
+    _git(repo, "add", "packages/core/src/logic.py")
+    _git(repo, "commit", "-qm", "grow package", date=prior_week)
+    _write(repo, "packages/core/src/logic.py", 1505)
+    _git(repo, "add", "packages/core/src/logic.py")
+
+    (repo / "pyproject.toml").write_text(
+        '[project]\nname = "workspace"\ndependencies = ["Core>=0.1"]\n'
+    )
+    _git(repo, "add", "pyproject.toml")
+    _git(repo, "commit", "-qm", "workspace dependency")
+    agents = [tmp_path / "agent1", tmp_path / "agent2"]
+    for agent in agents:
+        agent.mkdir()
+        (agent / "pyproject.toml").write_text(
+            '[project]\nname = "agent"\n[project.optional-dependencies]\nall = ["core[client]"]\n'
+        )
+    matrix = tmp_path / "matrix.json"
+    matrix.write_text('["core"]')
+    output = tmp_path / "site"
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "generate",
+            "--workspace",
+            str(repo),
+            "--output",
+            str(output),
+            "--codesize",
+            "--ci-packages",
+            str(matrix),
+            "--dependent-repo",
+            str(agents[0]),
+            "--dependent-repo",
+            str(agents[0]),
+            "--dependent-repo",
+            str(agents[1]),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    report = json.loads((output / "data.json").read_text())["codesize"]
+    assert report["agent_repos_scanned"] == 2
+    assert "root" not in report
+    rows = {row["name"]: row for row in report["packages"]}
+    assert rows["core"]["flags"] == ["Upstream", "Split"]
+    assert rows["core"]["internal_dependents"] == 1
+    assert rows["core"]["source_delta"] == 1
+    assert report["history"][-1]["threshold_counts"] == {"1500": 1, "3000": 0}
+    assert rows["core"]["external_dependents"] == 2
+    assert rows["core"]["ci_selected"] is True
+    assert rows["old"]["flags"] == ["Remove"]
+    assert rows["old"]["ci_selected"] is False
+    page = (output / "index.html").read_text()
+    assert '<section id="codesize">' in page
+    assert "Largest source files" in page
+    assert "Upstream, Split" in page
+
+    public = CliRunner().invoke(
+        main, ["generate", "--workspace", str(repo), "--codesize", "--json"]
+    )
+    assert public.exit_code == 0, public.output
+    rows = {row["name"]: row for row in json.loads(public.output)["codesize"]["packages"]}
+    assert rows["old"]["external_dependents"] is None
+    assert rows["old"]["ci_selected"] is None
+    assert rows["old"]["flags"] == []
