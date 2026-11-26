@@ -9,6 +9,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+from click.testing import CliRunner
+from gptme_dashboard.cli import main
 from gptme_dashboard.codesize import (
     _is_test_path,
     build_report,
@@ -414,3 +416,67 @@ def test_longest_group_prefix_wins_and_merged_groups_take_newest_commit(
     assert by_name["merged"].last_commit == "2021-01-01"
     assert by_name["(root)"].last_commit == "2022-01-01"
     assert report.thresholds == [2]
+
+
+def test_submodule_paths_with_spaces(tmp_path: Path) -> None:
+    meta = _metarepo(tmp_path)
+    _add_submodule(meta, tmp_path / "alpha-src", "modules/my lib")
+    _commit_all(meta, "spaced")
+    spaced = meta / "modules/my lib"
+    _write(spaced, "src/mod.py", 60)
+    _commit_all(spaced, "grow")
+
+    report = build_report(meta, history_weeks=0)
+
+    assert "modules/my lib" in {g.name for g in report.groups}
+    assert report.warnings == [
+        "submodule modules/my lib is not at its pinned commit: current numbers and trend differ"
+    ]
+    assert {f.path: f.changes for f in report.hotspots}["modules/my lib/src/mod.py"] == 2
+
+
+@pytest.mark.parametrize("content", ["[]", '{"src": null}', "{not json"])
+def test_malformed_group_file_warns_or_rejects(tmp_path: Path, content: str) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    _write(repo, "src/a.py", 5)
+    (repo / "codesize-groups.json").write_text(content, encoding="utf-8")
+    _commit_all(repo)
+
+    # found in the repo: report anyway, and say it was ignored
+    report = build_report(repo, history_weeks=0)
+    assert any("ignoring codesize-groups.json" in w for w in report.warnings)
+    assert "src" in {g.name for g in report.groups}
+
+    # passed explicitly: a usage error, not a traceback
+    result = CliRunner().invoke(
+        main,
+        ["codesize", "--repo", str(repo), "--groups", str(repo / "codesize-groups.json")],
+    )
+    assert result.exit_code == 2
+    assert "Invalid value for '--groups'" in result.output
+
+
+def test_package_and_top_level_directory_of_same_name_stay_apart(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    _write(repo, "packages/docs/pyproject.toml", 2)
+    _write(repo, "docs/guide.md", 7)
+    _commit_all(repo)
+
+    report = build_report(repo, history_weeks=0)
+
+    assert {g.name: g.source_lines for g in report.groups} == {"packages/docs": 2, "docs": 7}
+
+
+def test_pnpm_lockfile_is_not_source(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    _write(repo, "src/a.ts", 5)
+    _write(repo, "web/pnpm-lock.yaml", 9000)
+    _commit_all(repo)
+
+    report = build_report(repo, history_weeks=4)
+
+    assert [f.path for f in report.largest_files] == ["src/a.ts"]
+    assert report.history[-1].source_lines == 5

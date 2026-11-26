@@ -198,6 +198,7 @@ def codesize(
     from gptme_dashboard.codesize import (
         DEFAULT_THRESHOLDS,
         build_report,
+        parse_group_map,
         render_markdown,
     )
 
@@ -205,7 +206,10 @@ def codesize(
     if groups is not None:
         import json as _json
 
-        group_map = _json.loads(Path(groups).read_text(encoding="utf-8"))
+        try:
+            group_map = parse_group_map(_json.loads(Path(groups).read_text(encoding="utf-8")))
+        except (OSError, ValueError) as exc:
+            raise click.BadParameter(str(exc), param_hint="'--groups'") from exc
 
     report = build_report(
         Path(repo),

@@ -80,6 +80,9 @@ SOURCE_SUFFIXES = {
 
 DEFAULT_THRESHOLDS = (1500, 3000)
 
+# Generated files that carry a source suffix and would otherwise top every list.
+SKIP_FILES = {"pnpm-lock.yaml"}
+
 # A file counts as a test when a directory or its file name says so. Matching is
 # on whole path components: "latest/" and "contest_rules.py" are not tests.
 TEST_DIRS = {"test", "tests", "__tests__", "androidtest"}
@@ -191,8 +194,9 @@ def _declared_submodules(root: Path) -> list[str]:
     """Submodule paths listed in this repo's own ``.gitmodules``."""
     if not (root / ".gitmodules").exists():
         return []
-    out = _git(root, "config", "--file", ".gitmodules", "--get-regexp", r"\.path$")
-    return [line.split(" ", 1)[1] for line in out.splitlines() if " " in line]
+    out = _git(root, "config", "--file", ".gitmodules", "-z", "--get-regexp", r"\.path$")
+    # -z gives "key\nvalue\0": both the key and the path may contain spaces
+    return [entry.split("\n", 1)[1] for entry in out.split("\0") if "\n" in entry]
 
 
 def _submodules(root: Path) -> tuple[list[str], list[str]]:
@@ -214,7 +218,12 @@ def _submodules(root: Path) -> tuple[list[str], list[str]]:
 def _off_pin_submodules(root: Path) -> list[str]:
     """Submodules checked out at a commit other than the one their parent pins."""
     out = _git(root, "submodule", "status", "--recursive")
-    return [line.split()[1] for line in out.splitlines() if line.startswith("+")]
+    # "+<sha> <path> (<describe>)"; the path may contain spaces
+    return [
+        line.split(" ", 1)[1].rsplit(" (", 1)[0]
+        for line in out.splitlines()
+        if line.startswith("+")
+    ]
 
 
 def _change_counts(root: Path, since: str) -> dict[str, int]:
@@ -267,17 +276,27 @@ def detect_profile(root: Path) -> str:
     return "monolith"
 
 
-def _load_group_map(root: Path, group_map: dict[str, str] | None) -> dict[str, str]:
-    """Prefix -> group override. Accepts an inline dict or a JSON file path."""
-    if group_map is None:
-        candidate = root / "codesize-groups.json"
-        if not candidate.exists():
-            return {}
-        try:
-            group_map = json.loads(candidate.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return {}
-    return {k.strip("/"): v for k, v in group_map.items()}
+def parse_group_map(data: object) -> dict[str, str]:
+    """Validate a prefix -> group name mapping. Raises ``ValueError``."""
+    if not isinstance(data, dict) or not all(isinstance(v, str) for v in data.values()):
+        raise ValueError("group map must be a JSON object of path prefix -> group name")
+    return {k.strip("/"): v for k, v in data.items()}
+
+
+def _load_group_map(
+    root: Path, group_map: dict[str, str] | None, warnings: list[str]
+) -> dict[str, str]:
+    """The caller's override, else the repo's ``codesize-groups.json`` if usable."""
+    if group_map is not None:
+        return parse_group_map(group_map)
+    candidate = root / "codesize-groups.json"
+    if not candidate.exists():
+        return {}
+    try:
+        return parse_group_map(json.loads(candidate.read_text(encoding="utf-8")))
+    except (OSError, ValueError) as exc:
+        warnings.append(f"ignoring {candidate.name}: {exc}")
+        return {}
 
 
 def assign_group(
@@ -285,10 +304,12 @@ def assign_group(
     profile: str,
     overrides: dict[str, str],
     submodules: list[str] | None = None,
+    shadowed: set[str] | None = None,
 ) -> tuple[str, str]:
     """(group name, directory that defines it) for a file.
 
     The longest matching prefix wins, so overrides and submodules may nest.
+    ``shadowed`` names packages that share a name with a top-level directory.
     """
     for prefix in sorted(overrides, key=len, reverse=True):
         if rel_path == prefix or rel_path.startswith(prefix + "/"):
@@ -298,7 +319,8 @@ def assign_group(
             return sub, sub
     parts = rel_path.split("/")
     if profile == "monorepo" and parts[0] == "packages" and len(parts) > 2:
-        return parts[1], f"packages/{parts[1]}"
+        path = f"packages/{parts[1]}"
+        return (path if parts[1] in (shadowed or ()) else parts[1]), path
     # everything else groups by the first path component
     return (parts[0], parts[0]) if len(parts) > 1 else ("(root)", ".")
 
@@ -306,6 +328,13 @@ def assign_group(
 # --------------------------------------------------------------------------- #
 # working-tree scan
 # --------------------------------------------------------------------------- #
+
+
+def _shadowed_packages(root: Path) -> set[str]:
+    packages = root / "packages"
+    if not packages.is_dir():
+        return set()
+    return {p.name for p in packages.iterdir() if p.is_dir() and (root / p.name).is_dir()}
 
 
 def _looks_binary(sample: bytes) -> bool:
@@ -352,7 +381,7 @@ def iter_source_files(root: Path, *, recurse_submodules: bool = False):
         rel = path.relative_to(root)
         if any(part in SKIP_DIRS for part in rel.parts[:-1]):
             continue
-        if path.suffix.lower() not in SOURCE_SUFFIXES:
+        if path.suffix.lower() not in SOURCE_SUFFIXES or path.name in SKIP_FILES:
             continue
         yield rel.as_posix(), path
 
@@ -369,13 +398,14 @@ def build_report(
     """Compute the size report for ``repo``."""
     root = Path(repo).resolve()
     profile = detect_profile(root)
-    overrides = _load_group_map(root, group_map)
     report = CodeSizeReport(
         root=str(root),
         profile=profile,
         generated_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
         thresholds=sorted(set(thresholds)),
     )
+    overrides = _load_group_map(root, group_map, report.warnings)
+    shadowed = _shadowed_packages(root)
 
     is_git = _is_git_repo(root)
     recurse = profile == "metarepo"
@@ -401,7 +431,7 @@ def build_report(
         lines = _count_lines(path)
         if lines == 0:
             continue
-        group, group_path = assign_group(rel, profile, overrides, submodules)
+        group, group_path = assign_group(rel, profile, overrides, submodules, shadowed)
         is_test = _is_test_path(rel)
         entry = groups.setdefault(group, GroupSize(name=group, path=group_path))
         group_paths.setdefault(group, set()).add(group_path)
@@ -507,7 +537,8 @@ def _lines_at_commit(
         path, _, count = rest.rpartition(":")
         if not path or not count.isdigit():
             continue
-        if any(part in SKIP_DIRS for part in path.split("/")[:-1]):
+        *dirs, name = path.split("/")
+        if name in SKIP_FILES or any(part in SKIP_DIRS for part in dirs):
             continue
         rows.append((prefix + path, int(count)))
     if not recurse:

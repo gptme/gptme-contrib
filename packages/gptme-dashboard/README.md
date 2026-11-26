@@ -206,7 +206,7 @@ The profile is detected from the layout, first match wins: `brain`
 `monolith` (by top-level directory). Override the grouping with
 `--groups file.json` or a `codesize-groups.json` in the repo root.
 
-In a git repository only tracked files are counted. Submodule contents are
+In a git repository only tracked files are counted (`pnpm-lock.yaml` excluded). Submodule contents are
 counted for a `metarepo` only (including churn and trend). The current numbers
 read what is checked out, while the trend reads the pinned commits; a submodule
 that is missing or off its pin is reported as a warning.
