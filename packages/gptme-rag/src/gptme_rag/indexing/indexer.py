@@ -237,6 +237,20 @@ logger = logging.getLogger(__name__)
 # Kept separate from the global/ancestor rules so no negation can re-include them.
 _ALWAYS_IGNORED = GitIgnoreSpec.from_lines([".git", "*.sqlite3", "*.db"])
 
+
+def _compile_ignore_lines(lines: list[str], source: Path) -> GitIgnoreSpec:
+    """Compile ignore rules, skipping lines pathspec rejects, as git does."""
+    valid: list[str] = []
+    for line in lines:
+        try:
+            GitIgnoreSpec.from_lines([line])
+        except (ValueError, re.error) as e:
+            logger.warning(f"Skipping invalid ignore pattern {line!r} in {source}: {e}")
+        else:
+            valid.append(line)
+    return GitIgnoreSpec.from_lines(valid)
+
+
 QueryEmbeddings = list[Sequence[float]]
 
 
@@ -1056,7 +1070,7 @@ class Indexer:
             except Exception as e:
                 logger.warning(f"Error reading global gitignore: {e}")
 
-        specs = [(root, GitIgnoreSpec.from_lines(base_lines))]
+        specs = [(root, _compile_ignore_lines(base_lines, global_gitignore))]
 
         # Collect .gitignore files from the ancestors, outermost first so the
         # nearest one ends up last (highest precedence).
@@ -1069,7 +1083,8 @@ class Indexer:
             if gitignore_path.exists():
                 try:
                     lines = gitignore_path.read_text().splitlines()
-                    ancestors.append((current_dir, GitIgnoreSpec.from_lines(lines)))
+                    spec = _compile_ignore_lines(lines, gitignore_path)
+                    ancestors.append((current_dir, spec))
                 except Exception as e:
                     logger.warning(f"Error reading {gitignore_path}: {e}")
             current_dir = current_dir.parent

@@ -1711,3 +1711,23 @@ def test_non_git_gitignore_negated_dir_does_not_reinclude_files(
     specs = indexer._load_gitignore(root)
 
     assert indexer._is_ignored(file_path, specs) is ignored
+
+
+@pytest.mark.parametrize("bad_line", ["trailing\\", "!", "[z-a]"])
+def test_non_git_gitignore_skips_only_the_invalid_line(
+    tmp_path, isolated_gitignore_files, bad_line
+):
+    """One untranslatable line must not abort loading or drop the file's other rules."""
+    indexer = object.__new__(Indexer)  # Ignore matching needs no database or embeddings.
+    global_ignore = tmp_path / "home" / ".config" / "git" / "ignore"
+    global_ignore.parent.mkdir(parents=True)
+    global_ignore.write_text(f"{bad_line}\n*.log\n")
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / ".gitignore").write_text(f"secrets/\n{bad_line}\n*.key\n")
+
+    specs = indexer._load_gitignore(root)
+
+    for rel in ["secrets/token.md", "id.key", "debug.log"]:
+        assert indexer._is_ignored(root / rel, specs), rel
+    assert not indexer._is_ignored(root / "public.md", specs)
