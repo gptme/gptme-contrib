@@ -1021,12 +1021,19 @@ class Indexer:
                 "Re-index with a model that is available, or provide the required credentials."
             )
 
-        for source in sources:
-            self.delete_documents({"source": source})
+        # Empty files yield a content-less tombstone; the tombstone itself is not
+        # a document to store, and it leaves its source with no new ids so the
+        # stale sweep below drops its old chunks.
+        stored = [doc for doc in documents if not _is_tombstone(doc)]
+        new_ids = {doc_id for doc in stored if (doc_id := self._generate_doc_id(doc).doc_id)}
 
-        # Empty files yield a content-less tombstone so their old chunks get
-        # deleted above; the tombstone itself is not a document to store.
-        self.add_documents([doc for doc in documents if not _is_tombstone(doc)])
+        # Add first, sweep stale ids after: deleting before the add means one
+        # failed add (embedding backend, quota, transient Chroma error) leaves
+        # every source in the directory with neither its old nor its new chunks.
+        if stored:
+            self.add_documents(stored)
+        for source in sources:
+            self._delete_stale_source_ids(source, new_ids)
 
         logger.info(f"Indexed {n_files} files from {directory}")
         return n_files
@@ -1558,6 +1565,19 @@ class Indexer:
                 return
             offset += len(page)
 
+    def _delete_stale_source_ids(self, source: str, keep_ids: set[str]) -> int:
+        """Delete the ids stored for ``source`` that are not in ``keep_ids``.
+
+        Runs after the new chunks are added, so a failed add cannot leave a
+        source with neither its old chunks nor new ones. A re-index whose chunk
+        layout changed would otherwise keep the old ids beside the new ones.
+        """
+        stale = [i for i in self._iter_ids(where={"source": source}) if i not in keep_ids]
+        for start in range(0, len(stale), _PAGE_SIZE):
+            with self._index_writer_lock():
+                self.collection.delete(ids=stale[start : start + _PAGE_SIZE])
+        return len(stale)
+
     def _document_ids(self, base_doc_id: str) -> list[str]:
         """Ids of a document and its chunks.
 
@@ -1974,18 +1994,17 @@ class Indexer:
         """
         documents = self.collect_documents(path)
         stored = [doc for doc in documents if not _is_tombstone(doc)]
+        new_ids = {doc_id for doc in stored if (doc_id := self._generate_doc_id(doc).doc_id)}
+
+        # Add first, then drop whatever old ids the source no longer produces.
+        # Deleting before the add would lose the old chunks whenever the add
+        # fails, and skipping the sweep leaves stale chunks behind when the
+        # chunk layout changed. An emptied file has no new ids, so the sweep
+        # removes everything for it.
         if stored:
             self.add_documents(stored)
-        else:
-            # The file was emptied: drop whatever was indexed for it. Delete
-            # only after the add path is ruled out, so a failed add can never
-            # leave the file with neither its old chunks nor new ones.
-            for source in {
-                doc.metadata["source"]
-                for doc in documents
-                if _is_tombstone(doc) and doc.metadata.get("source")
-            }:
-                self.delete_documents({"source": source})
+        for source in sorted({str(s) for doc in documents if (s := doc.metadata.get("source"))}):
+            self._delete_stale_source_ids(source, new_ids)
         return len(stored)
 
     def get_all_documents(self) -> list[Document]:

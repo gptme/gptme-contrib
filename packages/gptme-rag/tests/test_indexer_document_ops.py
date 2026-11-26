@@ -253,3 +253,40 @@ def test_index_file_keeps_old_chunks_when_add_fails(indexer, tmp_path):
         indexer.index_file(f)
 
     assert indexer.collection.get(where={"source": source})["ids"] == before
+
+
+def test_index_file_replaces_stale_chunks(indexer, tmp_path):
+    """R1: re-indexing changed content must not keep the old chunks."""
+    f = tmp_path / "note.md"
+    f.write_text(_words(200))
+    indexer.index_file(f)
+
+    f.write_text(_words(200) + " rewritten tail words")
+    indexer.index_file(f)
+
+    doc = indexer.reconstruct_document(_base_id(indexer))
+    assert doc.content == _words(200) + " rewritten tail words"
+    assert doc.content.count("rewritten") == 1
+
+
+def test_index_directory_keeps_old_chunks_when_add_fails(indexer, tmp_path):
+    """R1: index_directory must not delete before the add succeeds."""
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    f = corpus / "note.md"
+    f.write_text(_words(200))
+    indexer.index_directory(corpus, glob_pattern="**/*.md")
+    source = str(f.resolve())
+    before = indexer.collection.get(where={"source": source})["ids"]
+    assert before
+
+    f.write_text(_words(200) + " changed")
+
+    def failing_add(documents, batch_size=10):
+        raise RuntimeError("embedding backend unavailable")
+
+    indexer.add_documents = failing_add  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError):
+        indexer.index_directory(corpus, glob_pattern="**/*.md")
+
+    assert indexer.collection.get(where={"source": source})["ids"] == before
