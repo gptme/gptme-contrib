@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import logging
+import os
 import sys
 import types
 from collections.abc import Generator
@@ -3033,11 +3034,23 @@ def test_saving_or_moving_an_old_review_does_not_launder_its_digest(
 
 
 def _save_review_draft(module: Any, name: str, created: datetime, **kwargs) -> Path:
+    """Write a review/ draft as if it had been parked at ``created``.
+
+    Age is measured from the file (parking time), so the mtime is stamped to
+    match: ``save_draft(..., "review")`` writes the file when the draft is
+    parked.
+    """
     path: Path = module.REVIEW_DIR / name
     draft = module.TweetDraft(text="Parked draft", **kwargs)
     draft.created_at = created
     draft.save(path)
+    _stamp_mtime(path, created)
     return path
+
+
+def _stamp_mtime(path: Path, when: datetime) -> None:
+    stamp = when.timestamp()
+    os.utime(path, (stamp, stamp))
 
 
 def test_expire_review_drafts_rejects_stale_with_reason_and_keeps_fresh(
@@ -3092,6 +3105,22 @@ def test_expire_review_drafts_accepts_timezone_aware_times(
     assert workflow_module.expire_review_drafts(7, now=now) == (2, 0)
 
 
+def test_expire_review_drafts_ages_from_parking_not_creation(
+    workflow_module: Any, tmp_path: Path
+) -> None:
+    """A requeued draft keeps created_at, so age must come from the file."""
+    _set_status_dirs(workflow_module, tmp_path)
+    now = datetime(2026, 11, 25, 12, 0)
+    requeued = _save_review_draft(
+        workflow_module, "reply_requeued.yml", datetime(2026, 10, 1)
+    )
+    # Parked (written) just now, despite the old creation time.
+    _stamp_mtime(requeued, datetime(2026, 11, 24, 12, 0))
+
+    assert workflow_module.expire_review_drafts(7, now=now) == (0, 1)
+    assert requeued.exists()
+
+
 def test_expire_review_drafts_continues_past_a_draft_that_fails(
     workflow_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3116,7 +3145,15 @@ def test_expire_review_drafts_continues_past_a_draft_that_fails(
     assert (workflow_module.REJECTED_DIR / other.name).exists()
 
 
-@pytest.mark.parametrize(("configured", "expired"), [(None, True), ("0", False)])
+@pytest.mark.parametrize(
+    ("configured", "expired"),
+    [
+        (None, True),
+        ("0", False),
+        # A non-integer value must not abort the cycle; the default applies.
+        ("7 days", True),
+    ],
+)
 def test_auto_reads_review_expiry_from_env_at_run_time(
     workflow_module: Any,
     tmp_path: Path,

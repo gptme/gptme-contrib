@@ -801,6 +801,21 @@ def _naive_local(value: datetime) -> datetime:
     return value.astimezone().replace(tzinfo=None)
 
 
+def _parked_at(path: Path, draft: TweetDraft) -> datetime:
+    """When the draft was written into review/, as a naive local datetime.
+
+    Age is measured from the file, not from ``created_at``: a draft requeued to
+    new/ (e.g. by the writing-style gate) keeps its creation time, so a
+    created_at-based age would expire it the same cycle it re-enters review/,
+    before a human sees it. ``save_draft(..., "review")`` writes the file when
+    the draft is parked, so mtime is the parking time.
+    """
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime)
+    except OSError:
+        return _naive_local(draft.created_at)
+
+
 def expire_review_drafts(
     max_age_days: int = DEFAULT_REVIEW_EXPIRY_DAYS,
     dry_run: bool = False,
@@ -809,7 +824,7 @@ def expire_review_drafts(
     """Move review/ drafts older than ``max_age_days`` to rejected/.
 
     Returns ``(expired, remaining)``. A non-positive ``max_age_days`` disables
-    expiry. Age is measured from the draft's ``created_at``.
+    expiry. Age is measured from when the draft was parked in review/.
     """
     now = _naive_local(now or datetime.now())
     expired = 0
@@ -819,7 +834,7 @@ def expire_review_drafts(
         # posting everything else, so each draft fails on its own.
         try:
             draft = TweetDraft.load(path)
-            age_days = (now - _naive_local(draft.created_at)).total_seconds() / 86400
+            age_days = (now - _parked_at(path, draft)).total_seconds() / 86400
             if max_age_days <= 0 or age_days < max_age_days:
                 remaining += 1
                 continue
@@ -829,7 +844,7 @@ def expire_review_drafts(
                 else f"quality_score {draft.quality_score}/3"
             )
             reason = (
-                f"Expired: {score}, still in review/ {age_days:.0f}d after creation "
+                f"Expired: {score}, parked in review/ {age_days:.0f}d "
                 f"(limit {max_age_days}d) with no human disposition"
             )
             if dry_run:
@@ -3021,10 +3036,20 @@ def auto(
 
     # Step 2: Review drafts
     console.print("\n[bold]Step 2: Reviewing drafts[/bold]")
-    # Read at run time: cli() loads .env after this module is imported.
-    expiry_days = int(
-        os.environ.get("TWITTER_REVIEW_EXPIRY_DAYS", DEFAULT_REVIEW_EXPIRY_DAYS)
+    # Read at run time: cli() loads .env after this module is imported. A
+    # non-integer value must not abort the whole cycle (new drafts unreviewed,
+    # approved drafts unposted), so fall back to the default instead.
+    raw_expiry = os.environ.get(
+        "TWITTER_REVIEW_EXPIRY_DAYS", str(DEFAULT_REVIEW_EXPIRY_DAYS)
     )
+    try:
+        expiry_days = int(raw_expiry)
+    except ValueError:
+        console.print(
+            f"[red]Invalid TWITTER_REVIEW_EXPIRY_DAYS={raw_expiry!r}, "
+            f"using {DEFAULT_REVIEW_EXPIRY_DAYS}d"
+        )
+        expiry_days = DEFAULT_REVIEW_EXPIRY_DAYS
     expired, parked = expire_review_drafts(expiry_days, dry_run=dry_run)
     console.print(
         f"Parked in review/: {parked} (expired this cycle: {expired}, "
