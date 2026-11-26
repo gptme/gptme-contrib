@@ -4709,6 +4709,13 @@ def test_tool_activity_and_cancellation_cues_reach_transport(
     from gptme_voice.realtime.sounds import CANCEL_CUE_MULAW, DISPATCH_CUE_MULAW
     from gptme_voice.realtime.tool_bridge import PendingTask
 
+    # ``handle_twilio_websocket`` validates the stream signature through
+    # ``_get_config_env``. That lookup also reads the machine's user config, so
+    # without this stub a developer machine with a real TWILIO_AUTH_TOKEN
+    # rejects the unsigned start event (close code 1008) and the twilio
+    # variants fail for an environment reason, not the code under test.
+    _fake_config_env(monkeypatch, {})
+
     async def exercise():
         server = VoiceServer(workspace=tmp_path, enable_browser_transport=True)
         server.openai_g711_passthrough = False

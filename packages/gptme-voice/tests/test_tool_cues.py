@@ -130,16 +130,43 @@ async def test_completed_work_awaiting_delivery_is_not_cancelled(cancel_all):
     arguments = {} if cancel_all else {"task_id": "one"}
     result = await bridge.handle_function_call("subagent_cancel", arguments)
     assert result["status"] == ("no_pending" if cancel_all else "not_pending")
-    if cancel_all:
-        assert result["message"]
+    assert result["message"]
+    assert result.get("completed") in (["one"], True)
     assert not task.done()
     await _flush_cues(bridge)
     cue.assert_not_awaited()
-    # A completed entry is not cancellable, so the cancel request reclaims it
-    # instead of leaving an unlisted zombie behind.
-    assert "one" not in bridge._pending_tasks
+    # The work is done but the delivery is still outstanding: keep the entry so
+    # the task stays visible to subagent_status instead of becoming an orphan
+    # that no later request can see. _run_subagent bounds the delivery and pops
+    # the entry itself.
+    assert "one" in bridge._pending_tasks
     task.cancel()
     await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_hung_result_delivery_is_bounded_and_reclaimed(monkeypatch):
+    """A stalled delivery cannot keep the task and its entry alive forever."""
+    from gptme_voice.realtime import tool_bridge as tb
+
+    monkeypatch.setattr(tb, "_RESULT_DELIVERY_TIMEOUT_SECONDS", 0.05)
+    never = asyncio.Event()
+
+    async def hung_delivery(_text):
+        await never.wait()
+
+    bridge = GptmeToolBridge(on_result=hung_delivery)
+
+    async def execute(*args, **kwargs):
+        return tb.ToolResult(success=True, output="done")
+
+    monkeypatch.setattr(bridge, "_execute", execute)
+    receipt = await bridge.handle_function_call("subagent", {"task": "Test lookup"})
+    task_id = receipt["task_id"]
+    task = bridge._pending_tasks[task_id].task
+    await asyncio.wait_for(asyncio.shield(task), timeout=5)
+    assert task.done() and not task.cancelled()
+    assert task_id not in bridge._pending_tasks
 
 
 @pytest.mark.asyncio

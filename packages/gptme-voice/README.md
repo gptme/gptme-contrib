@@ -309,7 +309,12 @@ per-progress-line tones are added.
 
 Cancellation sound follows confirmed cancellation, not merely a request: already
 finished/missing tasks, concurrent repeat requests (reported as `cancelling`),
-suppressed cancellation and connection cleanup stay silent. Cues are best-effort, bounded and do not block
+suppressed cancellation and connection cleanup stay silent. A task whose work
+finished while its result is still being delivered is reported as `not_pending`
+with a message and stays listed by `subagent_status`; cancelling it would discard
+a real result and announce a cancellation that never happened. Result delivery is
+bounded, so a stalled provider socket cannot leave that task alive indefinitely.
+Cues are best-effort, bounded and do not block
 tool execution, clear speech buffers, close sockets or start replacement lookups.
 They are queued through the existing audio transport; local tests establish
 payload/order and level limits, while handset audibility needs a natural call.
