@@ -115,6 +115,15 @@ def _has_mature_arm(document: object) -> bool:
     return False
 
 
+def _document_holds_mature_history(text: str) -> bool:
+    """Whether serialized state that strict decoding rejects still holds mature arms."""
+    try:
+        document = json.loads(text)
+    except ValueError:
+        return False
+    return _has_mature_arm(document)
+
+
 def _arm_evidence(arm: dict) -> float:
     """Observations a raw arm document claims, whatever its writer called the counter.
 
@@ -751,6 +760,9 @@ class Bandit:
         from it — and writing that recovered state back would drop everything a
         richer writer recorded in its newer state file. Moving the unreadable
         file aside keeps that evidence without blocking the save.
+
+        If that move fails while the file still holds a mature arm, the save
+        aborts: overwriting it would erase the history this path exists to keep.
         """
         try:
             text = self.state_file.read_text()
@@ -761,17 +773,31 @@ class Bandit:
             return
         except (ValueError, TypeError, KeyError, AttributeError):
             pass
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        target = self.state_file.with_name(f"{self.state_file.name}.undecodable-{stamp}")
+        target = self._undecodable_state_archive()
         try:
             self.state_file.replace(target)
-        except OSError:
+        except OSError as e:
+            if _document_holds_mature_history(text):
+                raise ValueError(
+                    f"refusing to overwrite bandit state that cannot be decoded: "
+                    f"{self.state_file} holds mature arms and could not be kept "
+                    f"aside at {target} ({e})"
+                ) from e
+            print(
+                f"Warning: could not keep unreadable bandit state aside ({e}); overwriting it",
+                file=sys.stderr,
+            )
             return
         print(
             f"Warning: kept unreadable bandit state as {target.name} "
             "(it may hold observations this reader cannot load)",
             file=sys.stderr,
         )
+
+    def _undecodable_state_archive(self) -> Path:
+        """Destination for a state file this writer cannot load."""
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        return self.state_file.with_name(f"{self.state_file.name}.undecodable-{stamp}")
 
     def _persisted_document(self) -> dict:
         """Return the first loadable persisted state document, or ``{}``.
@@ -810,7 +836,8 @@ class Bandit:
 
         A decodable backup is not enough on its own when the state file is the
         newer of the two: ``_set_aside_undecodable_state()`` keeps that file
-        before it is replaced, so the observations it holds survive.
+        before it is replaced, so the observations it holds survive.  That
+        archival step aborts the save if it cannot move mature evidence aside.
         """
         unreadable: list[str] = []
         for path in (self.state_file, self.backup_file):

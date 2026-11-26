@@ -1429,3 +1429,33 @@ def test_undecodable_state_with_decodable_backup_is_kept_aside(tmp_path, capsys)
     assert bandit.backup_file.read_text() == backup_before
     assert json.loads(bandit.state_file.read_text())["total_sessions"] == 13
     assert "kept unreadable bandit state" in capsys.readouterr().err
+
+
+def test_undecodable_state_that_cannot_be_kept_aside_aborts_the_save(tmp_path, monkeypatch):
+    """A failed archival rename must not let the save overwrite mature history (#2449).
+
+    The backup decodes, so the guard lets the save through and the primary is
+    moved aside first. If that move fails, writing the recovered backup would
+    erase the newer observations the move was meant to preserve.
+    """
+    bandit = Bandit(state_dir=tmp_path)
+    for _ in range(13):
+        bandit.update(["a"], outcome=1.0)
+    data = json.loads(bandit.state_file.read_text())
+    data["arms"]["a"]["extra"] = "from a richer arm_class"
+    data["arms"]["a"]["total_selections"] = 40
+    data["total_sessions"] = 40
+    state_before = json.dumps(data)
+    bandit.state_file.write_text(state_before)
+    backup_before = bandit.backup_file.read_text()
+
+    blocked = tmp_path / "bandit-state.json.undecodable-blocked"
+    blocked.mkdir()  # a directory where the archive copy would go
+    monkeypatch.setattr(Bandit, "_undecodable_state_archive", lambda self: blocked)
+
+    reader = Bandit(state_dir=tmp_path)
+    with pytest.raises(ValueError, match="cannot be decoded"):
+        reader.update(["a"], outcome=1.0)
+
+    assert bandit.state_file.read_text() == state_before
+    assert bandit.backup_file.read_text() == backup_before
