@@ -20,6 +20,7 @@ import argparse
 import contextlib
 import fcntl
 import importlib
+import json
 import os
 import sys
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -47,6 +48,7 @@ from gptme_vitals.publish import (
 )
 from gptme_vitals.routes import RouteRegistry, RouteRegistryError
 from gptme_vitals.theme import render_head_assets, render_theme_toggle
+from gptme_vitals.thread_view import ThreadViewError, write_threads
 from gptme_vitals.timers import CALENDAR, TimerError, render_units
 
 Emitter = Callable[[], PageEnvelope]
@@ -355,8 +357,24 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="absolute path of the gptme-vitals executable the units run",
     )
     timers.add_argument("--unit-prefix", default="gptme-vitals")
+    threads = sub.add_parser(
+        "threads", help="render an opt-in private thread map and log"
+    )
+    threads.add_argument(
+        "--input", required=True, type=Path, help="threads --json export"
+    )
+    threads.add_argument("--private-root", required=True, type=Path)
+    threads.add_argument("--public-root", required=True, type=Path)
     args = parser.parse_args(argv)
     try:
+        if args.command == "threads":
+            payload = json.loads(args.input.read_text(encoding="utf-8"))
+            paths = write_threads(
+                payload, private_root=args.private_root, public_root=args.public_root
+            )
+            for path in paths:
+                print(f"wrote {path} (private)")
+            return 0
         registry = _load(args.registry, RouteRegistry, "registry")
         emitters = _load(args.emitters, Mapping, "emitters")
         assert isinstance(registry, RouteRegistry) and isinstance(emitters, Mapping)
@@ -422,7 +440,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     except OSError as exc:
         print(f"gptme-vitals: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
-    except (UsageError, PublishError, TimerError) as exc:
+    except (
+        UsageError,
+        PublishError,
+        TimerError,
+        ThreadViewError,
+        json.JSONDecodeError,
+        UnicodeError,
+    ) as exc:
         print(f"gptme-vitals: {exc}", file=sys.stderr)
         return 2
 

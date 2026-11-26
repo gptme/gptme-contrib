@@ -9,8 +9,14 @@ gptme-contrib catalog on GitHub Pages.
 
 ## Status
 
-Slice 1, in progress. This commit lands the piece the rest depends on: the
-typed **page envelope**.
+The skeleton is shipped: typed page envelopes, route registry, shared light/dark
+theme, derived fleet envelopes, portal, static envelope pages, build CLI and
+generated timers. Agents register their own collectors and specialized pages.
+
+`gptme-vitals threads` adds opt-in private thread map/log pages from the existing
+`gptme-sessions threads --json` export. Dedicated sessions/tasks/vitals pages and
+the optional fleet card grid/multi-agent join remain outside this implementation;
+the parent issue stays open.
 
 ## The page envelope
 
@@ -169,9 +175,36 @@ and badges meet WCAG AA (4.5:1) on every surface in both schemes. The light
 accent is `#9c5204`, darker than a straight inversion would give, because the
 first draft measured 4.46:1 on the tile surface.
 
-## Next in slice 1
+## Private thread map and log
 
-The portal and `build` emitting the derived `core.json`/`headline.json` pair.
+The viewer consumes the existing session-lineage export; it does not mine a new
+forest, join agents, fetch sources or read journal files. Run it explicitly:
+
+```sh
+gptme-sessions threads --since 1d --agent bob --no-journals --json > /private/threads.json
+gptme-vitals threads --input /private/threads.json \
+  --private-root /private/vitals --public-root /served/vitals
+```
+
+It writes `/private/vitals/threads/index.html` (a per-thread UTC timeline with
+predecessor links) and `log.html` (a chronological session log). Each node links
+to its log row; log rows link to predecessors and their map. Evidence kinds,
+keys and weights stay visible, and references outside the export stay marked.
+An absent link is not proof of independent work or causality.
+
+Both HTML files use the shared theme/toggle and are atomically replaced with mode
+0600. The public root is a required exclusion boundary: it must be disjoint from
+the private root and receives no files. Output symlink aliases are rejected.
+Complete input validation happens before either file is written. Pair replacement
+is not a two-file transaction; serialize concurrent invocations, as for
+`core.json`/`headline.json`.
+
+Session titles and evidence are private. Do not serve the private root through an
+unauthenticated HTTP server or copy it into the public tree. The viewer ignores
+extra fields, including journal excerpts; `--no-journals` also prevents the exporter
+from reading journal text for titles/evidence. This command does not create a
+public registry route or enable a timer. Exit codes are 0 for success, 2 for
+invalid input/roots, and 1 for I/O failure.
 
 ## Derived `core.json` / `headline.json`
 
