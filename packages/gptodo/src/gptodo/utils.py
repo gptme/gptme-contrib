@@ -590,7 +590,7 @@ class TaskInfo:
     worktree_path: str | None = None  # If using worktree isolation
     assigned_to: str | None = None  # Which agent instance owns this
     assigned_at: datetime | None = None  # When assignment started
-    lock_timeout_hours: int | None = None  # Override default lock timeout
+    lock_timeout_hours: int | None = None  # Legacy metadata; no effect on leases
     spawned_from: str | None = None  # Parent task that spawned this
     spawned_tasks: List[str] = field(default_factory=list)  # Child tasks
     coordination_mode: str | None = None  # sequential, parallel, fan-out-fan-in

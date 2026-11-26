@@ -42,9 +42,9 @@ means:
 - **Picking work, not just listing it.** `gptodo ready` and `gptodo next` only return work
   that is actually unblocked: dependencies resolved (`requires:`), no outstanding
   `waiting_for:`, no future `wait:` date, and not parked as `draft` or `someday`.
-- **Safe with several agents at once.** `gptodo claim` records an owner, `gptodo lock`
-  holds file-based locks with a timeout, and `ready --skip-claimed` hides work that
-  another session has already claimed.
+- **Coordination across sessions.** `gptodo claim` records the task's owner in
+  frontmatter. Use a [coordination lease](#coordinating-task-execution) to reserve
+  execution; `ready --skip-claimed` hides tasks leased by another session.
 - **Agent-proof state.** A defined state machine (`gptodo transitions`) plus a frontmatter
   linter (`gptodo lint`) catch the usual drift, such as tasks left in `active`
   indefinitely or made-up frontmatter fields.
@@ -419,7 +419,6 @@ Every command has `--help`. The top-level options are `-v/--verbose` and
 
 | Command | What it does |
 |---------|--------------|
-| `lock <id> [--worker W] [--timeout H]`, `unlock <id>`, `locks [--cleanup]` | File locks in `state/locks/` that expire after a timeout. |
 | `agents [--all] [--cleanup] [--json]` | Agents registered in `state/agents/`, by heartbeat. |
 | `run <id>` / `spawn <id>` `[--backend gptme\|claude] [--type general\|explore\|plan\|execute] [--model M] [--prompt P]` | Run a sub-agent on a task, in the foreground or in the background (tmux). Session records go in `state/sessions/`. |
 | `sessions [--status S]`, `output <session>`, `kill <session>`, `cleanup-sessions` | Manage spawned sessions. |
@@ -669,12 +668,30 @@ extra_frontmatter_fields = ["review_owner", "premise_check"]
 export GPTODO_EXTRA_FRONTMATTER_FIELDS="review_owner,premise_check"
 ```
 
+## Coordinating task execution
+
+The legacy task-file lease commands (`lock`, `unlock`, `locks`) and Python
+module `gptodo.locks` were removed. Use [gptme-coordination](../gptme-coordination/README.md)
+for execution leases. All workers must use the same coordination database and
+key. From the workspace root, with `worker-a` as a unique session ID:
+
+```sh
+gptme-coordination --db state/coordination/coord.db work-claim worker-a cascade:task:my-task --ttl 60
+```
+
+Proceed only if the claim succeeds. The `cascade:task:` prefix and database path
+above are what `gptodo ready --skip-claimed` reads. Use `gptodo claim my-task`
+separately to update task state and assignment, then `work-complete` (or
+`work-abandon` if stopping without finishing) with the same DB, worker, and key.
+The TTL is in minutes; make sure the lease covers the work. Legacy lock files are
+not migrated. The short-lived task-write locks are unchanged.
+
 ## Configuration
 
 | Variable | Effect |
 |----------|--------|
 | `GPTODO_TASKS_DIR` / `--tasks-dir` | Use this tasks directory. Its parent becomes the workspace root. |
-| `TASKS_REPO_ROOT` | Start root detection from this path. The `lock`, `unlock`, `locks` and `agents` commands use it directly as the root, defaulting to the current directory. |
+| `TASKS_REPO_ROOT` | Start root detection from this path. The `agents` command uses it directly as the root, defaulting to the current directory. |
 | `GPTODO_AGENT_NAME` | Default owner for `claim` and `add`. Without it, gptodo uses `[agent].name` from `gptme.toml`, then `agent`. |
 | `GPTODO_STRICT_TRANSITIONS=1` | Refuse illegal state transitions instead of warning. |
 | `GPTODO_EXPIRE_DAYS` | Default `--days` for `expire`. |
@@ -685,7 +702,7 @@ export GPTODO_EXTRA_FRONTMATTER_FIELDS="review_owner,premise_check"
 | `LINEAR_API_KEY` | Required for `import --source linear`. |
 
 gptodo writes its runtime state under `state/` in the workspace: `issue-cache.json`,
-`locks/`, `agents/`, `sessions/` and `queue-generated.md`. Add the volatile parts to
+`agents/`, `sessions/` and `queue-generated.md`. Add the volatile parts to
 `.gitignore`.
 
 ## Development
@@ -717,8 +734,8 @@ returns `False`.
   use it for decisions depending on metadata/body, not a stale whole-Post write.
   `("set_body", "", text)` joins evidence/body changes to the same transaction.
   `dry_run=True` computes the result without file writes, hooks or propagation.
-- Locks use POSIX `fcntl.flock`, consistent with existing execution locks. This
-  mutation facade currently targets Unix. They are short-lived mutation locks,
+- Locks use POSIX `fcntl.flock`, so this mutation facade currently targets Unix.
+  They are short-lived mutation locks,
   **not** execution leases; only cooperating writers are serialized. Atomic rename
   prevents partial YAML visibility for unlocked readers. Validation/replace errors
   leave the exact old bytes intact; existing unrelated schema defects may remain
