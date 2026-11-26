@@ -305,3 +305,25 @@ def test_null_session_utilization_is_unavailable_under_errexit() -> None:
     assert "5h: N/A" in r.stderr
     assert "weekly: 50%" in r.stderr
     assert "Traceback" not in r.stderr
+
+
+def test_sonnet_without_sonnet_window_falls_back_to_all_models_weekly() -> None:
+    """Regression (contrib#2346 item 3): a pane with no Sonnet window is not
+    0% Sonnet quota; the all-models weekly counter still caps Sonnet usage."""
+    hot = (
+        '{"seven_day": {"utilization": 0.95, "time_left": "2d"}, '
+        '"seven_day_fable": {"utilization": 0.1}}'
+    )
+    r = _run_gate(hot, model="sonnet")
+    assert r.returncode == 1, r.stderr
+    assert "SKIPPING" in r.stderr
+    assert "95%" in r.stderr
+    assert "resets 2d" in r.stderr
+
+    cold = (
+        '{"seven_day": {"utilization": 0.2, "time_left": "2d"}, '
+        '"seven_day_sonnet": null}'
+    )
+    r = _run_gate(cold, model="sonnet")
+    assert r.returncode == 0, r.stderr
+    assert "weekly: 20%" in r.stderr
