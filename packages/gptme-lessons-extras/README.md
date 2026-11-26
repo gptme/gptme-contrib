@@ -5,7 +5,7 @@ LLM-assisted lesson generation, usage analytics, similarity/duplicate detection 
 effectiveness tracking from conversation logs.
 
 **Status:** internal toolbox, experimental. `lesson-select` is the opt-in shared selector CLI;
-other modules run with `python3 -m` or by path. The validator is the most actively maintained part; the
+`lesson-loo` measures observational outcome associations. Other modules run with `python3 -m` or by path. The validator is the most actively maintained part; the
 analytics, generation and agent-network sharing modules (`export`, `import`, `sync`, `review`,
 `adopt`, `evolution`, `metrics`) are older and less polished.
 
@@ -131,6 +131,101 @@ Provider diagnostics cannot contaminate protocol stdout.
 
 Runtime adapters and a paired-runtime efficacy experiment are separate rollout
 steps. Installing this package alone is not evidence of production adoption.
+
+## Lesson outcome associations (`lesson-loo`)
+
+`lesson-loo` extracts the comparison math from Bob's lesson leave-one-out analysis.
+It compares session outcomes with and without each lesson. This is an
+**observational association**, despite the historical LOO name: sessions are not
+rerun with one lesson removed, and a delta does not establish benefit or harm.
+Bob's bandit, grading, lifecycle decisions and record adapters remain local.
+
+```bash
+lesson-loo sessions.jsonl --min-sessions 5
+python3 -m gptme_lessons_extras.loo sessions.jsonl --category-controlled
+```
+
+The input is one JSON object per session, with a stable unique `session_id`, a
+finite numeric `outcome` (higher is better), and a `lessons` array:
+
+```json
+{"session_id":"run-1","outcome":0.8,"category":"code","lessons":[{"id":"verify-before-claiming","trigger_accuracy":0.9,"keyword":"claiming fixed without testing","event":"user_prompt"}]}
+```
+
+Lesson IDs are opaque strings; the command never opens them as file paths.
+`category`, `keyword`, `event` and `trigger_accuracy` are optional. An empty
+`lessons` array means **confirmed no injections**; missing exposure evidence must
+be excluded before export, rather than represented as an empty array. Repeated
+lesson IDs within a session count once, retaining the first entry. Duplicate
+session IDs are rejected: join and deduplicate source events before analysis.
+
+Outcomes must use one comparable scale and rubric across the cohort; booleans,
+missing values and non-finite numbers are invalid. For example, encode an
+independently assessed success as numeric `1` and failure as `0`.
+`trigger_accuracy`, when available, is a separate relevance judgment in `[0, 1]`.
+It is averaged across rated injections and remains null when unmeasured; do not
+infer it from the outcome or treat a matcher score as a measured accuracy.
+
+A minimal runnable example (too small for interpretation):
+
+```bash
+cat > sessions.jsonl <<'JSONL'
+{"session_id":"a","outcome":0.8,"lessons":[{"id":"verify"}]}
+{"session_id":"b","outcome":0.6,"lessons":[]}
+JSONL
+lesson-loo sessions.jsonl --min-sessions 1
+```
+
+The JSON report on stdout includes per-lesson counts, means, `delta` (with minus
+without), sample-support `confidence`, trigger accuracy and warnings. Here the
+raw delta is `0.2`; with one session per arm this says little. Confidence is
+`min(1, min(n_with, n_without) / 30)`, **not a probability that the lesson works**.
+Rows below `--min-sessions` per arm have null comparison statistics. The Welch
+statistic uses an unadjusted normal-approximation p-value, which is unreliable for
+small samples and does not correct for testing many lessons.
+
+`--category-controlled` compares within each category with enough sessions in
+both arms, then averages deltas weighted by category size. Categories lacking an
+arm are excluded. Comparison counts and trigger averages use only eligible
+categories; `exposed_sessions` and `unexposed_sessions` count the full corpus.
+Its pooled p-value is descriptive, not a category-adjusted
+significance test. Category control cannot remove all selection effects.
+
+Warnings keep three recurring failure modes visible:
+
+- **Error-recovery confounds:** lessons fired because work was already failing
+  can correlate with worse outcomes. Set `event` to `error_recovery` when known;
+  the report flags these exposures. Other trigger events can also be confounded.
+- **Ghost lessons:** pass `--catalog catalog.json`, an object whose keys are the
+  current lesson IDs (for example `{"verify": {}}`). Unlisted IDs are flagged;
+  catalog values are ignored. A historical positive delta alone does not justify
+  recreating a deleted or superseded lesson.
+- **Over-grazing:** set `--analysis-passes` to the number of passes over this
+  cohort. At two or more passes the report warns about repeated same-data tuning.
+  It does not block read-only analysis. Preserve a holdout or collect fresh data
+  before using a tuned ranking to justify changes.
+
+### Producing rows from Claude Code sessions
+
+Instrument the hook that emits lesson hints through `additionalContext` to record
+**the IDs actually emitted**, keyed to the same stable session ID as the outcome.
+Union those emitted IDs per session, then join the independent outcome signal and
+export the JSONL contract above. Preserve optional matched keyword and hook-event
+metadata when recorded. Hook output records establish emission; they do not prove
+that the model read or followed the hint. Transcript prose, candidate-selection
+receipts and keyword-match logs alone do not establish actual lesson injection.
+
+A transcript importer is intentionally not supplied: emission provenance and
+transcript layouts vary by recorder. Verify the local recording contract instead
+of guessing exposure from mentions. Use comparable outcomes such as a fixed human
+rubric (task resolved without correction), meaningful validation results, or a
+blinded session judge. Keep outcome collection independent of whether the lesson
+was present, and include scored sessions both with and without it.
+
+An interactive agent such as erbot with no recorded outcomes **cannot compute a
+meaningful outcome delta yet**. Record a consistent outcome signal first; injection
+logs alone support exposure counts, not lesson effectiveness claims. This command
+does not grade sessions, change lesson status, or update a bandit.
 
 ## Quickstart: validate lessons
 

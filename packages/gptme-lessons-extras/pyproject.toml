@@ -17,6 +17,7 @@ dependencies = [
 ]
 
 [project.scripts]
+lesson-loo = "gptme_lessons_extras.loo:main"
 lesson-select = "gptme_lessons_extras.selector:main"
 
 [project.optional-dependencies]
