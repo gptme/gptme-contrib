@@ -369,7 +369,10 @@ class ProjectMonitoringRun(BaseRunLoop):
                         if line.strip()
                     ]
 
-                new_failures = set(current_failures) - set(prev_failures)
+                # Keep admitted failures deduplicated until they stop failing.
+                # A suppressed observation must remain eligible next tick.
+                admitted_failures = set(current_failures) & set(prev_failures)
+                new_failures = set(current_failures) - admitted_failures
                 for pr_number in new_failures:
                     pr_data = next((p for p in prs if p["number"] == pr_number), None)
                     if pr_data and self.should_post_comment(
@@ -385,9 +388,10 @@ class ProjectMonitoringRun(BaseRunLoop):
                                 details=f"PR #{pr_number} CI failing (NEW)",
                             )
                         )
+                        admitted_failures.add(pr_number)
 
                 atomic_write_text(
-                    state_file, "\n".join(str(n) for n in current_failures)
+                    state_file, "\n".join(str(n) for n in sorted(admitted_failures))
                 )
 
         except Exception as e:
