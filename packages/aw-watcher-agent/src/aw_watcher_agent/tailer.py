@@ -3,8 +3,8 @@
 Phase 2 fallback for harnesses that cannot host an in-process gptme plugin hook.
 Codex writes rollout transcripts to ``~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl``.
 Each line is ``{"timestamp", "type", "payload"}``. A tool call is a
-``response_item`` whose ``payload.type == "function_call"`` (carrying ``name``,
-``call_id``, ``arguments``); its result is a later ``function_call_output`` with
+``response_item`` whose ``payload.type`` is ``function_call`` or
+``custom_tool_call``; its result is the corresponding ``*_output`` item with
 the matching ``call_id``. We pair them, compute a duration, derive a coarse
 status from the output, and emit one activity event per call into the
 ``aw-watcher-agent-activity_<hostname>`` bucket.
@@ -47,8 +47,8 @@ ORPHAN_GRACE = timedelta(minutes=10)
 
 # ---------------------------------------------------------------------------
 # Cursor helpers: prevent duplicate emission when tail-codex is re-run on the
-# same rollout file (e.g. from a timer).  We persist the 0-based index and
-# timestamp of the last emitted activity so emit_file only sends new calls.
+# same rollout file (e.g. from a timer). Persist the last accepted call ID,
+# 0-based index and timestamp. Legacy cursors hold a function-only ordinal.
 # ---------------------------------------------------------------------------
 
 
@@ -69,11 +69,18 @@ def _read_cursor(rollout_path: Path) -> dict[str, Any] | None:
         return None
 
 
-def _write_cursor(rollout_path: Path, last_index: int, last_timestamp: str) -> None:
+def _write_cursor(
+    rollout_path: Path,
+    last_index: int,
+    last_timestamp: str,
+    last_call_id: str | None = None,
+) -> None:
     """Persist the cursor after emitting activities."""
     path = _cursor_path(rollout_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload: dict[str, Any] = {"last_index": last_index, "last_timestamp": last_timestamp}
+    if last_call_id is not None:
+        payload["last_call_id"] = last_call_id
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
@@ -99,10 +106,11 @@ class ToolActivity:
     tool: str
     status: str
     duration_ms: int
-    timestamp: str  # ISO 8601 start time (the function_call timestamp)
+    timestamp: str  # ISO 8601 start time of the tool call
     call_id: str
     session_id: str
-    paired: bool = True  # False when function_call_output not yet in transcript
+    paired: bool = True  # False when the matching output is not yet in the transcript.
+    call_kind: str = "function_call"  # Internal cursor upgrade metadata, not event data.
 
     def to_event(self, *, min_duration_s: float = 0.0) -> Event:
         """Build an AW event. ``data`` excludes duration so same-tool/status
@@ -123,7 +131,7 @@ class ToolActivity:
 
 
 def _status_from_output(output: Any) -> str:
-    """Coarse success/error/completed status from a function_call_output."""
+    """Coarse success/error/completed status from a tool call output."""
     if not isinstance(output, str) or not output.strip():
         return "completed"
     match = _EXIT_CODE_RE.search(output)
@@ -158,7 +166,7 @@ def _iter_records(lines: Iterable[str]) -> Iterable[dict[str, Any]]:
 def parse_rollout(lines: Iterable[str]) -> tuple[str, list[ToolActivity]]:
     """Parse Codex rollout JSONL into ``(session_id, [ToolActivity, ...])``.
 
-    Pairs each ``function_call`` with its matching ``function_call_output`` by
+    Pairs each function/custom tool call with its matching output variant by
     ``call_id``. A call with no output (crash/truncation) is still emitted with
     a zero duration and ``completed`` status so the Timeline marks that it ran.
     """
@@ -179,19 +187,20 @@ def parse_rollout(lines: Iterable[str]) -> tuple[str, list[ToolActivity]]:
                 session_id = sid
             continue
 
-        if ptype == "function_call":
+        if ptype in ("function_call", "custom_tool_call"):
             call_id = payload.get("call_id")
             if not isinstance(call_id, str) or call_id in pending:
                 continue
             pending[call_id] = {
                 "tool": str(payload.get("name") or "unknown"),
                 "start": rec.get("timestamp"),
+                "call_kind": ptype,
             }
             order.append(call_id)
-        elif ptype == "function_call_output":
+        elif ptype in ("function_call_output", "custom_tool_call_output"):
             call_id = payload.get("call_id")
             call = pending.get(call_id) if isinstance(call_id, str) else None
-            if call is not None:
+            if call is not None and ptype == f"{call['call_kind']}_output":
                 call["end"] = rec.get("timestamp")
                 call["status"] = _status_from_output(payload.get("output"))
 
@@ -216,6 +225,7 @@ def parse_rollout(lines: Iterable[str]) -> tuple[str, list[ToolActivity]]:
                 call_id=call_id,
                 session_id=session_id,
                 paired="end" in call,
+                call_kind=call["call_kind"],
             )
         )
     return session_id, activities
@@ -245,6 +255,32 @@ def emit_file(
     # Split on "\n" only: splitlines() also breaks on U+2028/U+0085, which JSON
     # encoders leave unescaped inside strings, and would cut a row in two.
     _, activities = parse_rollout(text.split("\n"))
+
+    if cursor and last_index >= 0:
+        last_call_id = cursor.get("last_call_id")
+        if last_call_id is not None:
+            last_index = next(
+                (
+                    index
+                    for index, activity in enumerate(activities)
+                    if activity.call_id == last_call_id
+                ),
+                len(activities),
+            )
+        else:
+            # Legacy indices counted function calls only. Map that boundary into
+            # the mixed list, skipping historical custom calls without replaying
+            # functions already accepted by the server.
+            function_positions = [
+                index
+                for index, activity in enumerate(activities)
+                if activity.call_kind == "function_call"
+            ]
+            last_index = (
+                function_positions[last_index]
+                if last_index < len(function_positions)
+                else len(activities) - 1
+            )
 
     # Only emit calls that are new since the last cursor position.
     new = activities[last_index + 1 :]
@@ -281,5 +317,5 @@ def emit_file(
     # merge, so they would become duplicate events).
     for offset, activity in enumerate(to_emit, start=1):
         client.heartbeat(bucket, activity.to_event(), pulsetime=pulsetime)
-        _write_cursor(path, last_index + offset, activity.timestamp)
+        _write_cursor(path, last_index + offset, activity.timestamp, activity.call_id)
     return len(to_emit)
