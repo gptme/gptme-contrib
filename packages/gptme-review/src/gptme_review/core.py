@@ -6171,7 +6171,7 @@ def _claim_tokens(body: str) -> set[str]:
     return {w for w in words if w not in _DEDUP_STOPWORDS}
 
 
-def _same_defect(a: dict, b: dict) -> bool:
+def _same_defect(a: dict, b: dict, *, min_similarity: float = DEDUP_SIMILARITY) -> bool:
     """Whether two findings describe the same underlying defect."""
     if str(a.get("file") or "") != str(b.get("file") or ""):
         return False
@@ -6199,7 +6199,7 @@ def _same_defect(a: dict, b: dict) -> bool:
     shared = len(ta & tb)
     if shared < DEDUP_MIN_SHARED:
         return False
-    return shared / min(len(ta), len(tb)) >= DEDUP_SIMILARITY
+    return shared / min(len(ta), len(tb)) >= min_similarity
 
 
 _ABSENCE_CLAIM_RE = re.compile(
@@ -7186,6 +7186,13 @@ def _add_distinct_key_consensus(findings: Sequence[dict]) -> None:
 #: short prose words are shared by every finding ever written.
 FINGERPRINT_TOKENS = 12
 
+#: Compact markers keep only identifying tokens, not the full claim. Compare
+#: like-sized summaries and require half the smaller token set, instead of the
+#: full-body 0.15 floor against an arbitrarily long body. The #2437
+#: distinct SQL defects share 4/12; the response-leak paraphrases share 6/8.
+#: Weak paraphrases may get an extra thread; silently hiding a defect is worse.
+MARKER_DEDUP_SIMILARITY = 0.5
+
 #: Suppression entries retained in the marker. The marker rides inside a GitHub
 #: comment, so the list cannot grow without bound; oldest settled arguments fall
 #: off first, which is also the order in which they stop being relevant.
@@ -7249,7 +7256,11 @@ def matches_entry(f: Mapping[str, object], entry: Mapping[str, object]) -> bool:
     """Whether a fresh finding is the same argument as a stored entry."""
     if entry.get("fp") and entry.get("fp") == finding_fingerprint(f):
         return True
-    return _same_defect(_entry_as_finding(entry), dict(f))
+    return _same_defect(
+        _entry_as_finding(entry),
+        _entry_as_finding(suppression_entry(f)),
+        min_similarity=MARKER_DEDUP_SIMILARITY,
+    )
 
 
 def union_finding_groups(
