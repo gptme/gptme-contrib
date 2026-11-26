@@ -70,6 +70,7 @@ jobs:
       actions: read
     outputs:
       plugins: ${{ steps.discover.outputs.plugins }}
+      shards: ${{ steps.shard.outputs.shards }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -156,17 +157,50 @@ jobs:
           echo "plugins=$plugins" >> $GITHUB_OUTPUT
           echo "Discovered plugins: $plugins"
 
-  # Test each plugin in parallel
+      # Bundle the plugins into a few shards for the test matrix, as
+      # test-packages.yml does: a plugin's install + tests take ~0.5 min,
+      # while each job pays its own runner provisioning, checkout and Python
+      # setup and holds one of the org's 20 shared concurrent job slots.
+      # Shards: min(5, ceil(n/8)); round-robin over the sorted list so a
+      # plugin keeps its shard between runs. Timeout: ~1.5 min per plugin
+      # plus setup, capped at 25.
+      - name: Shard plugins
+        id: shard
+        env:
+          ITEMS: ${{ steps.discover.outputs.plugins }}
+        run: |
+          python3 - <<'PY'
+          import json, math, os
+          items = sorted(json.loads(os.environ["ITEMS"]))
+          count = min(5, math.ceil(len(items) / 8))
+          shards = []
+          for i in range(count):
+              members = items[i::count]
+              shards.append({
+                  "id": i + 1,
+                  "of": count,
+                  "plugins": " ".join(members),
+                  "timeout": min(25, 10 + math.ceil(1.5 * len(members))),
+              })
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f"shards={json.dumps(shards)}\n")
+          for shard in shards:
+              print(f"shard {shard['id']}/{shard['of']}: {shard['plugins']}")
+          PY
+
+
+  # Test the plugins in a few shards (see "Shard plugins" in discover)
   test:
+    name: test (${{ matrix.python-version }}, shard ${{ matrix.shard.id }}/${{ matrix.shard.of }})
     needs: discover
     if: needs.discover.result == 'success' && needs.discover.outputs.plugins != '[]'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: ${{ matrix.shard.timeout }}
     strategy:
       fail-fast: false
       matrix:
         python-version: ['3.10', '3.13']
-        plugin: ${{ fromJson(needs.discover.outputs.plugins) }}
+        shard: ${{ fromJson(needs.discover.outputs.shards) }}
 
     steps:
       - uses: actions/checkout@v4
@@ -176,26 +210,63 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Install dependencies
+      - name: Run unit tests for each plugin in the shard
+        env:
+          SHARD_PLUGINS: ${{ matrix.shard.plugins }}
         run: |
-          python3 -m pip install --upgrade pip
-          pip install pytest pytest-cov pytest-timeout
-          pip install -e "plugins/${{ matrix.plugin }}[test]"
+          # Each plugin gets a fresh venv, so it is installed and tested in
+          # isolation as in the old one-job-per-plugin matrix (a plugin must
+          # not pass on another plugin's dependencies). Every plugin runs even
+          # after a failure; the step fails at the end and names the failed
+          # plugins.
+          test_plugin() {
+            # Activate by hand (what bin/activate does) after creating the
+            # venv: the PATH change also resets bash's command hash, so
+            # python3, pip, pytest and anything the tests spawn use the venv.
+            python3 -m venv "$RUNNER_TEMP/venv-$1" &&
+              export VIRTUAL_ENV="$RUNNER_TEMP/venv-$1" PATH="$RUNNER_TEMP/venv-$1/bin:$PATH" &&
+              python3 -m pip install --upgrade pip &&
+              pip install pytest pytest-cov pytest-timeout &&
+              pip install -e "plugins/$1[test]" &&
+              pytest "plugins/$1/tests" -v -m "not slow" --timeout=30
+          }
+          failed=()
+          summary=()
+          for plugin in $SHARD_PLUGINS; do
+            echo "::group::$plugin"
+            start=$SECONDS
+            # Subshell: the venv activation must not leak into the next plugin.
+            if (test_plugin "$plugin"); then
+              result=pass
+            else
+              result=FAIL
+              failed+=("$plugin")
+            fi
+            echo "::endgroup::"
+            summary+=("$(printf '%-32s %-4s %4ss' "$plugin" "$result" "$((SECONDS - start))")")
+          done
+          echo "Shard summary:"
+          printf '  %s\n' "${summary[@]}"
+          {
+            echo '```'
+            printf '%s\n' "${summary[@]}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if (( ${#failed[@]} > 0 )); then
+            echo "::error::Plugin tests failed: ${failed[*]}"
+            exit 1
+          fi
 
-      - name: Run unit tests for ${{ matrix.plugin }}
-        run: |
-          pytest plugins/${{ matrix.plugin }}/tests -v -m "not slow" --timeout=30
-
-  # Integration tests (only on master push, with API keys)
+  # Integration tests (only on master push, with API keys). One job: few
+  # plugins have tests/integration, and the old one-job-per-plugin matrix
+  # spent a runner on every discovered plugin just to print "No integration
+  # tests found". Plugins without tests/integration are skipped before
+  # install; the rest get a fresh venv each, as before.
   integration-tests:
     needs: discover
     if: github.event_name == 'push' && github.ref == 'refs/heads/master' && needs.discover.result == 'success' && needs.discover.outputs.plugins != '[]'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        plugin: ${{ fromJson(needs.discover.outputs.plugins) }}
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v4
@@ -205,22 +276,39 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install dependencies
-        run: |
-          python3 -m pip install --upgrade pip
-          pip install pytest pytest-timeout
-          pip install -e plugins/${{ matrix.plugin }}
-
-      - name: Run integration tests for ${{ matrix.plugin }}
+      - name: Run integration tests for each plugin
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          PLUGINS: ${{ needs.discover.outputs.plugins }}
         run: |
-          if [ -d "plugins/${{ matrix.plugin }}/tests/integration" ]; then
-            pytest plugins/${{ matrix.plugin }}/tests/integration -v --timeout=120
-          else
-            echo "No integration tests found for ${{ matrix.plugin }}"
+          integration_test_plugin() {
+            # Activate by hand (what bin/activate does) after creating the
+            # venv: the PATH change also resets bash's command hash, so
+            # python3, pip, pytest and anything the tests spawn use the venv.
+            python3 -m venv "$RUNNER_TEMP/venv-$1" &&
+              export VIRTUAL_ENV="$RUNNER_TEMP/venv-$1" PATH="$RUNNER_TEMP/venv-$1/bin:$PATH" &&
+              python3 -m pip install --upgrade pip &&
+              pip install pytest pytest-timeout &&
+              pip install -e "plugins/$1" &&
+              pytest "plugins/$1/tests/integration" -v --timeout=120
+          }
+          failed=()
+          for plugin in $(python3 -c 'import json, os; print(" ".join(json.loads(os.environ["PLUGINS"])))'); do
+            if [ ! -d "plugins/$plugin/tests/integration" ]; then
+              echo "No integration tests found for $plugin"
+              continue
+            fi
+            echo "::group::$plugin"
+            if ! (integration_test_plugin "$plugin"); then
+              failed+=("$plugin")
+            fi
+            echo "::endgroup::"
+          done
+          if (( ${#failed[@]} > 0 )); then
+            echo "::error::Plugin integration tests failed: ${failed[*]}"
+            exit 1
           fi
 
   # Coverage report (combined for all plugins)
