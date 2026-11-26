@@ -160,6 +160,10 @@ def test_tier_waiver_classifies_the_rename_source() -> None:
         "CMakeLists.txt",
         "native/CMakeLists.txt",
         "tests/requirements.txt",
+        "tests/requirements-dev.txt",
+        "tests/requirements/base.txt",
+        "tests/CMakeLists.txt",
+        "e2e/constraints.txt",
     ],
 )
 def test_build_input_txt_is_not_docs(path: str) -> None:

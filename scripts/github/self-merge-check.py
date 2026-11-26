@@ -2336,16 +2336,18 @@ def checks_green(status_checks: list[dict[str, Any]]) -> bool:
     return True
 
 
-def is_doc_file(path: str) -> bool:
+def is_build_input_txt(path: str) -> bool:
+    """A ``.txt`` file that feeds a build or dependency install."""
     pure = Path(path)
-    suffix = pure.suffix.lower()
-    # pip's split layouts: ``requirements/base.txt``, ``constraints/py311/ci.txt``.
-    if BUILD_INPUT_TXT_RE.match(pure.name) or (
-        suffix == ".txt"
+    # Directory form covers pip's split layouts (``requirements/base.txt``).
+    return bool(BUILD_INPUT_TXT_RE.match(pure.name)) or (
+        pure.suffix.lower() == ".txt"
         and any(part.lower() in BUILD_INPUT_TXT_DIRS for part in pure.parent.parts)
-    ):
-        return False
-    return suffix in DOC_EXTENSIONS
+    )
+
+
+def is_doc_file(path: str) -> bool:
+    return Path(path).suffix.lower() in DOC_EXTENSIONS and not is_build_input_txt(path)
 
 
 def is_spec_like_doc(path: str) -> bool:
@@ -2395,7 +2397,7 @@ def is_test_file(path: str) -> bool:
     normalized = path.replace("\\", "/").removeprefix("./")
     parts = normalized.split("/")
     name = parts[-1]
-    if is_never_test_file(name):
+    if is_never_test_file(name) or is_build_input_txt(normalized):
         return False
     if any(part in TEST_DIR_SEGMENTS for part in parts[:-1]):
         return True
