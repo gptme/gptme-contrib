@@ -496,6 +496,12 @@ class SessionStore:
                     tmp_path.unlink()
                     _fsync_directory(self.sessions_dir)
                 raise
+            # A rename has now landed, so retire its alias: the old derived id is
+            # free again and a later row that derives it is a different session.
+            for record in records:
+                if record._store_invented.get("session_id") not in (None, record.session_id):
+                    del record._store_invented["session_id"]
+                    record._store_invented.pop(_DERIVED_ID_FIELD, None)
         return self.path
 
     def rotate(self, keep_days: int = 30, now: datetime | None = None) -> dict[str, int]:

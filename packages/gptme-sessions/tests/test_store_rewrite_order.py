@@ -549,3 +549,22 @@ def test_colliding_persisted_derived_id_keeps_both_rows(tmp_path: Path, legacy_f
     store.rewrite([records[1]])
 
     assert [r.category for r in store.load_all()] == [None, "code"]
+
+
+def test_landed_rename_retires_the_derived_id_alias(tmp_path: Path) -> None:
+    """A later row that derives the freed id must not be swallowed (#2338)."""
+    legacy = '{"model":"opus"}\n'
+    store = SessionStore(sessions_dir=tmp_path)
+    store.path.write_text(legacy, encoding="utf-8")
+    record = store.load_all()[0]
+    record.session_id = "assigned"
+    store.rewrite([record])
+
+    with store.path.open("a", encoding="utf-8") as f:
+        f.write(legacy)
+    store.rewrite([record])
+
+    ids = _ids(store)
+    assert len(ids) == 2
+    assert ids[0] == "assigned"
+    assert ids[1].startswith("noid-")
