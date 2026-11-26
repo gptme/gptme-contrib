@@ -1651,6 +1651,42 @@ def test_summarize_daily_prompt_stays_bounded(n_entries: int):
     assert "truncated:" in prompt or "omitted from this summary prompt budget" in prompt
 
 
+@pytest.mark.parametrize("builder", ["journal", "weekly", "monthly"])
+def test_non_daily_extra_context_stays_bounded(builder: str):
+    """Weekly/monthly/journal builders cap extra_context the same way daily does."""
+    from gptme_activity_summary import cc_backend
+    from gptme_activity_summary.cc_backend import DAILY_CONTEXT_CHAR_BUDGET
+
+    captured: dict[str, str] = {}
+
+    def fake_call(prompt: str, **kwargs: object) -> str:
+        captured["prompt"] = prompt
+        return '{"narrative": ""}'
+
+    huge = "c" * (DAILY_CONTEXT_CHAR_BUDGET + 100_000)
+    with patch.object(cc_backend, "call_claude_code", fake_call):
+        if builder == "journal":
+            cc_backend.summarize_journal_with_cc("entry", "2026-11-26", extra_context=huge)
+        elif builder == "weekly":
+            cc_backend.summarize_weekly_with_cc(
+                [{"themes": [], "narrative": "n", "key_insight": "k"}],
+                "2026-W48",
+                extra_context=huge,
+            )
+        else:
+            cc_backend.summarize_monthly_with_cc(
+                [{"narrative": "n"}],
+                "2026-11",
+                extra_context=huge,
+            )
+
+    prompt = captured["prompt"]
+    assert "truncated:" in prompt
+    assert "c" * 1_000 in prompt
+    assert "c" * (DAILY_CONTEXT_CHAR_BUDGET + 1) not in prompt
+    assert len(prompt) < DAILY_CONTEXT_CHAR_BUDGET + 50_000
+
+
 @pytest.mark.parametrize(
     "sizes",
     [
