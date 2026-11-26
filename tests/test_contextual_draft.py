@@ -148,7 +148,17 @@ def test_sqlite_source_truncation(database):
     assert "middle omitted" in row["content"]
 
 
-@pytest.mark.parametrize("content", ["abc\0def", "\0" + "x" * 11999, "é\0fin"])
+@pytest.mark.parametrize(
+    "content",
+    [
+        "abc\0def",
+        "\0" + "x" * 11999,
+        "é\0fin",
+        "é" * 6000 + "\0fin",
+        "😀" * 11996 + "\0fin",
+    ],
+    ids=["embedded", "ascii-boundary", "unicode", "two-byte", "four-byte-boundary"],
+)
 def test_small_nul_snapshot_preserved(database, content):
     with sqlite3.connect(database) as db:
         db.execute("UPDATE snapshots SET content=?", (content,))
