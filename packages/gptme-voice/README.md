@@ -33,7 +33,8 @@ integrations (Twilio phone calls, callbacks, cross-agent handoff, physical
 - **Subagent tools**: `subagent`, `subagent_status`, `subagent_cancel`
   dispatch tasks to gptme in the background while the conversation continues
 - **`workspace_search`** (opt-in): fast gptme-rag lookup over recent journals
-  for "what have you been doing?" questions, without a subagent
+  for "what have you been doing?" questions, with source-path filters for
+  operator-configured briefs, docs and code, without a subagent
 - **Phone calls via Twilio**: inbound (`/incoming` webhook + `/twilio` media
   stream) and outbound (`gptme-voice-call`), with a caller allowlist
 - **Call continuity**: quick reconnects resume the previous transcript, and
@@ -183,6 +184,48 @@ automatically if gptme-rag is not installed. Recap questions search recent
 `journal/` files (lexical first) and return in a few seconds. Tunables:
 `GPTME_VOICE_RAG_TIMEOUT_SECONDS` (default 8) and
 `GPTME_VOICE_RAG_RECENCY_HOURS` (default 24).
+
+Unfiltered searches keep the recent-journal recap corpus. To make briefs,
+design docs or implementation sources available for targeted searches, set
+`GPTME_VOICE_RAG_SOURCE_PATHS` to an `os.pathsep`-separated list of reviewed,
+workspace-relative glob patterns (colon-separated on Linux), for example:
+
+```bash
+export GPTME_VOICE_RAG_SOURCE_PATHS='state/standup-brief.json:scripts/runs/voice/*.py:knowledge/voice.md'
+```
+
+The tool accepts optional `include_paths` and `exclude_paths` arrays of exact
+files or directory prefixes rooted at the workspace. For example:
+
+```json
+{"query": "standup brief", "include_paths": ["scripts/runs/voice/", "state/standup-brief.json"], "exclude_paths": ["journal/"]}
+```
+
+Prefixes match whole path segments; lists use OR, and exclusions win.
+Filters do not accept globs, absolute paths or traversal. A nonempty filter
+opts into the configured sources; filters can only narrow that corpus, never
+read an arbitrary requested path. In filtered mode symlinks, including
+directory symlinks, are excluded; reads pin directory descriptors and refuse
+symlink replacements, and platforms without no-follow directory-descriptor
+support skip filtered file reads. Unfiltered recaps keep their previous
+behavior: they read `journal/` directly, so a workspace whose journal
+directory is a symlink to another repo or volume still works. A custom
+`search_impl` backend is also intersected with the selected corpus in filtered
+mode, so it cannot surface files outside the operator-approved sources.
+Existing caller authorization still controls tool exposure. Configure narrow,
+reviewed sources rather than a whole-workspace glob.
+
+Filtered topic queries use `gptme-rag[lexical]` (scikit-learn) and return
+matching passages; without that optional backend they return an explicit
+error. Filtered queries with no topic terms (for example, “what have you been
+doing today”) also return an error: name a topic or omit the filters for a
+recent-journal recap. Default recaps retain their recency fallback. Searches
+read at most 80 selected files of at most 200KB each under the existing timeout, with
+configured sources first in filtered searches. Journal sources keep their
+recency window; configured sources can be older. The returned `coverage`
+describes source patterns, active filters and limits: an empty result is
+**not evidence that a brief or file does not exist**. This bounded lookup
+does not query the persistent embedding index or scan the whole workspace.
 
 ### Cross-agent handoff
 
