@@ -3326,13 +3326,16 @@ def build_call_graph(
         return qid
 
     # Conditional branches can define one symbol twice, so calls accumulate per
-    # symbol. Different symbols that share a graph key are not merged.
+    # symbol. Keying by the symbol's own qualified ID keeps same-named symbols
+    # (two classes with a ``log`` method, a top-level ``run`` and
+    # ``Runner.run``) as separate nodes instead of collapsing them onto the
+    # last bare-name registration.
     calls_by_symbol: dict[str, set[str]] = defaultdict(set)
 
     for sym in symbols:
         if sym.kind == "class":
             continue
-        qid = name_to_qid.get(sym.name, sym.qualified_id())
+        qid = sym.qualified_id()
         # Filter to known symbols only: excludes external builtins and dotted
         # attribute calls like 'calc.add' that can't be resolved locally.
         filtered_calls = {
@@ -3340,7 +3343,7 @@ def build_call_graph(
             for c in sym.calls
             if c in known_names and (resolved := _resolve_call(c, sym)) is not None
         }
-        symbol_calls = calls_by_symbol[sym.qualified_id()]
+        symbol_calls = calls_by_symbol[qid]
         symbol_calls.update(filtered_calls)
         callees[qid] = symbol_calls
         for called_qid in filtered_calls:
