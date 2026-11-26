@@ -108,12 +108,13 @@ state = browser_extract()                       # ExtractResult; .data is the AR
   query and the action retried on the same element: same role and name, and
   either the same selector or the only such match. If it cannot be identified
   (for example, one of two duplicates disappeared), the first failure is
-  returned. `>> nth=i` selectors are positional: duplicate role/name pairs are
-  indistinguishable and can reorder, so a duplicate is never retried — the
-  first failure is returned instead of risking a lookalike. Errors that suggest
-  the action already ran (navigation, detached target) are not retried, to
-  avoid double-acting. `retry_on_stale=False` returns the first failure
-  immediately.
+  returned. A duplicate role/name pair is never retried: twins are
+  indistinguishable, so neither a positional `>> nth=i` ordinal (the page can
+  reorder them) nor a `[ref=eN]` (refs are reassigned on re-render) identifies
+  which twin the caller chose — the first failure is returned instead of
+  risking a lookalike. Errors that suggest the action already ran (navigation,
+  detached target) are not retried, to avoid double-acting.
+  `retry_on_stale=False` returns the first failure immediately.
 
 - **`browser_extract(instruction=None, *, schema=None) -> ExtractResult`**
   Always returns the raw ARIA snapshot in `.data`; `instruction` is ignored.

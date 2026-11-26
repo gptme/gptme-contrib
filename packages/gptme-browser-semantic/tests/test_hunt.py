@@ -307,6 +307,57 @@ def test_retry_skips_the_reobserve_for_a_duplicate(
     assert rec.snapshots == snapshots
 
 
+def test_retry_is_skipped_for_ref_duplicate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Refs give twins distinct selectors, but they are still twins."""
+    snap = (
+        HEADER + '- main:\n  - button "Reply" [ref=e3]\n  - button "Reply" [ref=e4]\n'
+    )
+    rec = _wire(Recorder(snap), monkeypatch)
+    second = browser_observe("reply")[1]
+    assert second.ambiguous
+    rec.click_error = TimeoutError("Timeout 30000ms exceeded.")
+    result = browser_act(second)
+    assert not result.success
+    assert rec.clicks == [second.selector]
+
+
+def test_retry_handles_a_name_containing_the_nth_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A literal " >> nth=" in an accessible name is not a positional ordinal."""
+    snap = HEADER + '- main:\n  - button "Proceed >> nth=0"\n'
+    rec = _wire(Recorder(snap), monkeypatch)
+    chosen = browser_observe("proceed")[0]
+    assert not chosen.ambiguous
+    rec.click_error = TimeoutError("Timeout 30000ms exceeded.")
+    browser_act(chosen)
+    assert rec.clicks == [chosen.selector, chosen.selector]
+
+
+class PermissionErrorLike(Exception):
+    """Name starts with "PermissionError" but is not the refusal type."""
+
+
+def test_retry_only_suppresses_an_exact_permission_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snap = HEADER + '- main:\n  - textbox "Secret"\n'
+    rec = _wire(Recorder(snap), monkeypatch)
+    chosen = browser_observe("secret")[0]
+    rec.fill_error = PermissionError("user denied")
+    result = browser_act(chosen, arguments=["x"])
+    assert not result.success
+    assert rec.fills == [(chosen.selector, "x")]
+
+    rec = _wire(Recorder(snap), monkeypatch)
+    chosen = browser_observe("secret")[0]
+    rec.fill_error = PermissionErrorLike("transient")
+    browser_act(chosen, arguments=["x"])
+    assert len(rec.fills) == 2
+
+
 def test_retry_does_not_follow_a_reordered_duplicate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

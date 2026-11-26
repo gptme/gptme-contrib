@@ -57,6 +57,17 @@ from typing import Any
 # loaded standalone for the prototype harness.
 
 
+# Playwright's positional ordinal, anchored at the end of the selector. A
+# page-controlled accessible name may contain the literal text " >> nth=", so a
+# substring test would misclassify a unique element as a duplicate.
+_POSITIONAL_SELECTOR_RE = re.compile(r" >> nth=\d+$")
+
+
+def _is_positional(selector: str) -> bool:
+    """True when the selector ends in Playwright's ``>> nth=N`` ordinal."""
+    return _POSITIONAL_SELECTOR_RE.search(selector) is not None
+
+
 @dataclass
 class ObserveResult:
     """A single Playwright-anchored observation returned by browser_observe.
@@ -69,6 +80,9 @@ class ObserveResult:
     method: str = "click"  # click | fill | hover | select | press
     arguments: list[str] = field(default_factory=list)
     instruction: str = ""  # original instruction passed to browser_observe
+    # True when the snapshot held more than one element with this role+name, so
+    # the selector (an ordinal, or a ref among twins) is not a unique identity.
+    ambiguous: bool = False
 
 
 @dataclass
@@ -107,14 +121,14 @@ def _aria_snapshot() -> str:
     return snapshot
 
 
-def _parse_aria_to_elements(snapshot: str) -> list[dict[str, str]]:
+def _parse_aria_to_elements(snapshot: str) -> list[dict[str, Any]]:
     """Parse the gptme ARIA snapshot format into a flat element list.
 
     gptme's snapshot_page returns a human-readable tree with roles + names +
     optional selectors like `[ref=e5]`. We extract every (role, name, ref)
     triple into a flat list so observe() can rank them.
     """
-    elements: list[dict[str, str]] = []
+    elements: list[dict[str, Any]] = []
     # Lines look like:
     #   - link "Home" [ref=e1]
     #   - button "Submit" [ref=e3]
@@ -179,12 +193,19 @@ def _parse_aria_to_elements(snapshot: str) -> list[dict[str, str]]:
     counts: dict[str, int] = {}
     for e in elements:
         counts[e["selector"]] = counts.get(e["selector"], 0) + 1
+    # role+name twins are indistinguishable even when refs give them distinct
+    # selectors, so ambiguity is keyed on role+name, not on the selector.
+    twins: dict[tuple[str, str], int] = {}
+    for e in elements:
+        key = (e["role"], e["name"])
+        twins[key] = twins.get(key, 0) + 1
     seen: dict[str, int] = {}
     for e in elements:
         sel = e["selector"]
         if counts[sel] > 1 and sel.startswith("role="):
             e["selector"] = f"{sel} >> nth={seen.get(sel, 0)}"
             seen[sel] = seen.get(sel, 0) + 1
+        e["ambiguous"] = twins[(e["role"], e["name"])] > 1
     return elements
 
 
@@ -198,7 +219,7 @@ def _method_for_role(role: str) -> str:
     return "click"
 
 
-def _score_match(query: str, element: dict[str, str]) -> float:
+def _score_match(query: str, element: dict[str, Any]) -> float:
     """Score how well an element matches a natural-language instruction.
 
     Cheap token-overlap scorer so observe() works without an LLM round-trip in
@@ -275,6 +296,7 @@ def browser_observe(
             selector=e["selector"],
             method=_method_for_role(e["role"]),
             instruction=instruction,
+            ambiguous=bool(e["ambiguous"]),
         )
         for _, e in scored
     ]
@@ -288,14 +310,12 @@ def _find_same_element(
     Returns None when it cannot be identified, so a retry never acts on a
     lookalike or on whichever element merely ranks first.
     """
-    # A positional ordinal is not an identity. Duplicate role/name pairs are
-    # indistinguishable (same description, same role, same accessible name),
-    # so ``>> nth=i`` carries no information beyond DOM order — and that order
-    # can change between the original observation and the retry re-observation.
-    # Matching on an equal ``>> nth=i`` selector would therefore let the retry
-    # act on a lookalike, the exact failure this guard exists to prevent.
-    # Never retry a duplicate; return the first failure instead.
-    if " >> nth=" in chosen.selector:
+    # A duplicate is not an identity. Twins share role and accessible name, so
+    # neither a positional ``>> nth=i`` ordinal (DOM order can change) nor a
+    # ``[ref=eN]`` (refs are reassigned on re-render, and a vanished twin's ref
+    # may be reused by a lookalike) says which one the caller chose. Never retry
+    # a duplicate; return the first failure instead.
+    if chosen.ambiguous or _is_positional(chosen.selector):
         return None
     same = [r for r in fresh if r.description == chosen.description]
     for result in same:
@@ -411,10 +431,11 @@ def browser_act(
     re-observed once with the same query and the same element is retried: same
     role and name, and either the same selector or the only such match. If it
     cannot be identified, the first failure is returned. A duplicate role/name
-    pair (``>> nth=i``) is never retried: its ordinal is positional and the
-    duplicates are indistinguishable, so a reordered page would make the retry
-    act on a lookalike. The re-observe makes no model call on the token-scoring
-    path. `retry_on_stale=False` returns the first failure immediately.
+    pair is never retried: twins are indistinguishable, so neither a positional
+    ``>> nth=i`` ordinal nor a ``[ref=eN]`` identifies which one the caller
+    chose after a re-render, and the retry could act on a lookalike. The
+    re-observe makes no model call on the token-scoring path.
+    `retry_on_stale=False` returns the first failure immediately.
 
     Returns ActResult with `success`, the selector used, and elapsed time.
     """
@@ -479,14 +500,16 @@ def browser_act(
     )
     msg_lower = result.message.lower()
     # A refusal (e.g. the user denied a sensitive fill) must not re-prompt.
-    if result.message.startswith("PermissionError"):
+    # _dispatch_action formats the message as f"{type(exc).__name__}: {exc}", so
+    # anchor on the full "PermissionError:" prefix: a bare startswith() would
+    # also suppress an unrelated exception whose name merely begins that way.
+    if result.message.startswith("PermissionError:"):
         return result
     if any(phrase in msg_lower for phrase in _no_retry_phrases):
         return result  # post-action failure — don't retry (avoid double-acting)
-    # A duplicate (positional ``>> nth=i``) is never retried, so skip the
-    # re-observe entirely rather than paying a browser round-trip whose result
-    # _find_same_element would discard.
-    if " >> nth=" in best.selector:
+    # A duplicate is never retried, so skip the re-observe entirely rather than
+    # paying a browser round-trip whose result _find_same_element would discard.
+    if best.ambiguous or _is_positional(best.selector):
         return result
 
     target = _find_same_element(
