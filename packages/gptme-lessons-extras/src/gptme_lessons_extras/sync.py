@@ -93,7 +93,8 @@ def init_repo(network_dir: Path = DEFAULT_NETWORK_DIR, force: bool = False) -> P
         raise SyncError(
             f"{network_dir} exists but cannot be used as the network repo: "
             f"{reason}\nFix the problem or move the directory aside. "
-            "--force deletes it, including any unpushed commits."
+            "To start over, run `--init --force`: it replaces the directory, "
+            "deleting anything in it, including unpushed commits."
         )
 
     # Clone next to the target first, so a failed clone (offline, auth)

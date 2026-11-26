@@ -66,8 +66,11 @@ def test_init_repo_refuses_non_repo_directory_without_force(
     monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
     monkeypatch.setattr(sync, "NETWORK_REPO_URL", str(_bare_remote_with_seed(tmp_path)))
 
-    with pytest.raises(sync.SyncError, match="not a git repository"):
+    # The normal sync path cannot pass --force, so the refusal has to name the
+    # command that can recover from a broken directory.
+    with pytest.raises(sync.SyncError, match="not a git repository") as excinfo:
         sync.init_repo(target)
+    assert "--init --force" in str(excinfo.value)
     assert (target / "my-notes.md").read_text() == "user content\n"
 
 
