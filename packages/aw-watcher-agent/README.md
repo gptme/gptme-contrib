@@ -157,6 +157,14 @@ A cursor per transcript (in the same state directory) records what was already
 emitted, so it is safe to run `tail-codex` repeatedly from a timer or after
 each Codex run.
 
+Both `function_call` and `custom_tool_call` records are paired with their
+corresponding outputs. Each accepted heartbeat checkpoints the call ID locally;
+call IDs and call kinds are not added to ActivityWatch event data. On upgrade,
+older function-only cursor indices are mapped to the same function call in the
+mixed stream. Custom calls at or before that boundary are deliberately not
+backfilled, so previously emitted function calls are never replayed. A cursor
+is updated only after a new heartbeat is accepted.
+
 ## Command reference
 
 | Command | Purpose |
