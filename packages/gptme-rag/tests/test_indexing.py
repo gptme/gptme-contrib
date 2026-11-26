@@ -1574,6 +1574,29 @@ def test_non_git_gitignore_fallback_honours_dir_and_anchored_patterns(
     assert ignored == {"top.md", "build/a.md", "sub/build/b.md"}
 
 
+def test_non_git_gitignore_plain_directory_patterns_and_builtins(
+    indexer, tmp_path, isolated_gitignore_files
+):
+    """A slash-less pattern excludes a directory's contents; `.git` is always excluded."""
+    root = tmp_path / "docs"
+    root.mkdir()
+    (root / ".gitignore").write_text("node_modules\ncache\n")
+    expected = {
+        "node_modules/foo.js": True,
+        "cache/foo.txt": True,
+        ".git/config": True,
+        "src/app.js": False,
+    }
+    for rel in expected:
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x")
+
+    specs = indexer._load_gitignore(root)
+    for rel, ignored in expected.items():
+        assert indexer._is_ignored(root / rel, specs) is ignored, rel
+
+
 def test_non_git_gitignore_from_a_parent_applies_relative_to_that_parent(
     indexer, tmp_path, isolated_gitignore_files
 ):
