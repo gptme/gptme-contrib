@@ -321,13 +321,19 @@ class VoiceRag:
             journal / (today + timedelta(days=d)).isoformat() for d in range(-n_days, 3)
         ]
 
+        # Symlink rejection belongs to the filtered corpus, where an operator
+        # grant is being narrowed. The legacy unfiltered recap follows the
+        # workspace layout as-is: agents commonly keep journals on a separate
+        # repo or volume behind a symlinked `journal/` (or day) directory, and
+        # rejecting those would silently turn every recap into an empty result.
+        filtered = bool(include_paths or exclude_paths)
         found: list[tuple[float, Path]] = []
         seen: set[Path] = set()
         for day_dir in day_dirs:
             if not day_dir.is_dir():
                 continue
             for path in day_dir.glob("*.md"):
-                if not self._safe_source(path):
+                if filtered and not self._safe_source(path):
                     continue
                 if not _selected(self._relpath(path), include_paths, exclude_paths):
                     continue
@@ -442,8 +448,17 @@ class VoiceRag:
                 raise OSError("Source is not a regular file")
             return stream.read(_MAX_FILE_BYTES + 1), info.st_mtime, relative.as_posix()
 
-    def _load_documents(self, paths: list[Path], root_fd: int | None) -> list[Any]:
-        if root_fd is None:
+    def _load_documents(
+        self, paths: list[Path], root_fd: int | None, *, pinned: bool = True
+    ) -> list[Any]:
+        """Load documents, either through the pinned root or by direct read.
+
+        `pinned=True` is the hardened filtered path: it requires a pinned root
+        descriptor and rejects symlinks. `pinned=False` preserves the legacy
+        unfiltered recap behavior, which reads journal files directly and works
+        on platforms without no-follow directory descriptors.
+        """
+        if pinned and root_fd is None:
             return []
         try:
             from gptme_rag.indexing.document import Document
@@ -455,13 +470,21 @@ class VoiceRag:
 
         docs = []
         for path in paths:
-            if not self._safe_source(path):
-                continue
             try:
-                raw, modified, rel = self._read_source(path, root_fd)
-                if len(raw) > _MAX_FILE_BYTES:
-                    continue
-                content = raw.decode("utf-8", errors="replace")
+                if pinned:
+                    assert root_fd is not None
+                    if not self._safe_source(path):
+                        continue
+                    raw, modified, rel = self._read_source(path, root_fd)
+                    if len(raw) > _MAX_FILE_BYTES:
+                        continue
+                    content = raw.decode("utf-8", errors="replace")
+                else:
+                    content = path.read_text(encoding="utf-8", errors="replace")
+                    if len(content.encode("utf-8")) > _MAX_FILE_BYTES:
+                        continue
+                    rel = self._relpath(path)
+                    modified = path.stat().st_mtime
             except OSError as exc:
                 logger.debug("skip unreadable %s: %s", path, exc)
                 continue
@@ -541,12 +564,26 @@ class VoiceRag:
             }
         n_results = max(1, min(int(n_results), 8))
         if self._search_impl is not None:
-            results = self._search_impl(query, n_results)
-            results = [
-                r
-                for r in results
-                if _selected(str(r.get("source", "")), includes, excludes)
-            ]
+            if filtered:
+                # An injected backend has its own corpus. Filters may only
+                # narrow the operator-approved corpus, so intersect its hits
+                # with the selected files instead of trusting backend sources.
+                approved_paths = self._collect_filtered_files(includes, excludes)
+                approved = {self._relpath(path) for path in approved_paths}
+                coverage["selected_files"] = len(approved_paths)
+                # Ask for the whole bounded corpus: post-filtering a top-N list
+                # would drop matching hits that rank below excluded sources.
+                candidates = self._search_impl(query, max(n_results, _MAX_FILES))
+                results = [
+                    r for r in candidates if str(r.get("source", "")) in approved
+                ]
+            else:
+                results = self._search_impl(query, n_results)
+                results = [
+                    r
+                    for r in results
+                    if _selected(str(r.get("source", "")), includes, excludes)
+                ]
             return {
                 "status": "ok" if results else "empty",
                 "query": query,
@@ -555,14 +592,17 @@ class VoiceRag:
                 "results": results[:n_results],
             }
 
-        # Open the root before selecting, so reads cannot move to a later target.
-        with self._pinned_root() as root_fd:
-            paths = (
-                self._collect_filtered_files(includes, excludes)
-                if filtered
-                else self.collect_recent_files()
-            )
-            docs = self._load_documents(paths, root_fd)
+        if filtered:
+            # Open the root before selecting, so reads cannot move to a later
+            # target, and read only below that one pinned handle.
+            with self._pinned_root() as root_fd:
+                paths = self._collect_filtered_files(includes, excludes)
+                docs = self._load_documents(paths, root_fd, pinned=True)
+        else:
+            # Legacy recap path: no pinned descriptor requirement, so it keeps
+            # working on platforms without no-follow directory descriptors.
+            paths = self.collect_recent_files()
+            docs = self._load_documents(paths, None, pinned=False)
         coverage["selected_files"] = len(paths)
         if not paths:
             return {

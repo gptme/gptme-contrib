@@ -204,9 +204,14 @@ files or directory prefixes rooted at the workspace. For example:
 Prefixes match whole path segments; lists use OR, and exclusions win.
 Filters do not accept globs, absolute paths or traversal. A nonempty filter
 opts into the configured sources; filters can only narrow that corpus, never
-read an arbitrary requested path. Symlinks, including directory symlinks, are
-excluded. Reads pin directory descriptors and refuse symlink replacements;
-platforms without no-follow directory-descriptor support skip file reads.
+read an arbitrary requested path. In filtered mode symlinks, including
+directory symlinks, are excluded; reads pin directory descriptors and refuse
+symlink replacements, and platforms without no-follow directory-descriptor
+support skip filtered file reads. Unfiltered recaps keep their previous
+behavior: they read `journal/` directly, so a workspace whose journal
+directory is a symlink to another repo or volume still works. A custom
+`search_impl` backend is also intersected with the selected corpus in filtered
+mode, so it cannot surface files outside the operator-approved sources.
 Existing caller authorization still controls tool exposure. Configure narrow,
 reviewed sources rather than a whole-workspace glob.
 

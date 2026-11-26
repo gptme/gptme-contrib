@@ -185,6 +185,7 @@ async def test_bridge_forwards_both_filters(corpus: Path) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("lexical")
 async def test_symlinks_cannot_extend_declared_corpus(
     corpus: Path, tmp_path: Path
 ) -> None:
@@ -197,10 +198,68 @@ async def test_symlinks_cannot_extend_declared_corpus(
     today = datetime.now(timezone.utc).date().isoformat()
     (corpus / f"journal/{today}/leak.md").symlink_to(private)
     rag = VoiceRag(str(corpus), enabled=True)
-    for kwargs in [{}, {"include_paths": ["scripts/", "knowledge/"]}]:
-        result = await rag.search("secret", **kwargs)
-        assert all("secret" not in r["snippet"].lower() for r in result["results"])
-        assert all("leak" not in r["source"] for r in result["results"])
+    result = await rag.search("secret", include_paths=["scripts/", "knowledge/"])
+    assert result["status"] == "empty"
+    assert all("secret" not in r["snippet"].lower() for r in result["results"])
+    assert all("leak" not in r["source"] for r in result["results"])
+
+
+@pytest.mark.asyncio
+async def test_unfiltered_recap_follows_a_symlinked_journal_directory(
+    tmp_path: Path,
+) -> None:
+    """Journal directories kept on another repo or volume must keep working."""
+    pytest.importorskip("gptme_rag")
+    today = datetime.now(timezone.utc).date().isoformat()
+    journals = tmp_path / "journals"
+    write(journals, f"{today}/work.md", "Shipped the standup brief")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "journal").symlink_to(journals, target_is_directory=True)
+
+    result = await VoiceRag(str(workspace), enabled=True).search(
+        "what have you been doing today"
+    )
+
+    assert result["status"] == "ok"
+    assert [r["source"] for r in result["results"]] == [f"journal/{today}/work.md"]
+    assert "standup brief" in result["results"][0]["snippet"]
+
+
+def test_unfiltered_documents_load_without_a_pinned_root(corpus: Path) -> None:
+    """Platforms without no-follow directory descriptors keep working unfiltered."""
+    rag = VoiceRag(str(corpus), enabled=True)
+    paths = rag.collect_recent_files()
+    assert paths
+    assert rag._load_documents(paths, None, pinned=False)
+
+
+@pytest.mark.asyncio
+async def test_injected_backend_hits_intersect_the_approved_corpus(
+    corpus: Path,
+) -> None:
+    """A custom backend may only surface files inside the selected corpus."""
+    journal = next((corpus / "journal").rglob("*.md"))
+    requested: list[int] = []
+
+    def search_impl(query: str, n_results: int) -> list[dict[str, str]]:
+        requested.append(n_results)
+        # Non-approved and excluded sources rank above the approved one.
+        return [
+            {"source": "private/ungranted.md", "snippet": "Ungrantable secret"},
+            {"source": journal.relative_to(corpus).as_posix(), "snippet": "brief"},
+            {"source": "state/standup-brief.json", "snippet": "standup brief"},
+            {"source": "knowledge/voice.md", "snippet": "standup brief"},
+        ]
+
+    rag = VoiceRag(str(corpus), enabled=True, search_impl=search_impl)
+    result = await rag.search(
+        "brief", n_results=1, include_paths=["knowledge/"], exclude_paths=[]
+    )
+
+    assert [r["source"] for r in result["results"]] == ["knowledge/voice.md"]
+    assert result["coverage"]["selected_files"] == 1
+    assert requested == [80]
 
 
 @pytest.mark.parametrize("swap_parent", [False, True])
