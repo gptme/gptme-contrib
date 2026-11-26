@@ -68,6 +68,7 @@ def evaluate(monkeypatch):
     )
     monkeypatch.setattr(smc, "run_gh", lambda *a, **kw: "")
     monkeypatch.setattr(smc, "run_gh_bytes", lambda *a, **kw: None)
+    monkeypatch.setenv("SELF_MERGE_ACCEPT_AI_REVIEW", "1")
     monkeypatch.setenv("SELF_MERGE_MIN_GREPTILE_SCORE", "4")
     return lambda: smc.evaluate_pr(
         "gptme/gptme-contrib", 999, workspace_repos=["gptme/gptme-contrib"]
