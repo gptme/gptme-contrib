@@ -12,6 +12,8 @@ Tracks:
 
 import json
 import os
+import stat
+import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -348,25 +350,23 @@ class EvolutionTracker:
         return stats
 
 
-def _current_umask() -> int:
-    """The process umask, read without mutating process-wide state.
+def _new_file_mode(directory: Path) -> int:
+    """The mode a plain ``open()`` would give a new file in *directory*.
 
+    Probed through the kernel so the process umask applies without being read.
     ``os.umask`` can only be *read* by setting it, and the umask is shared by
     every thread: a file created elsewhere in the process between the set and
-    the restore would silently inherit the temporary mask. Linux reports the
-    mask in ``/proc/self/status``, so read it there. Elsewhere the set/restore
-    read is the only option.
+    the restore would silently inherit the temporary mask.
     """
+    fd, name = tempfile.mkstemp(dir=directory)
+    os.close(fd)
+    os.unlink(name)
+    fd = os.open(name, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
     try:
-        with open("/proc/self/status", encoding="utf-8") as f:
-            for line in f:
-                if line.startswith("Umask:"):
-                    return int(line.split()[1], 8)
-    except (OSError, ValueError, IndexError):
-        pass
-    umask = os.umask(0o077)
-    os.umask(umask)
-    return umask
+        return stat.S_IMODE(os.fstat(fd).st_mode)
+    finally:
+        os.close(fd)
+        os.unlink(name)
 
 
 def _write_json_atomic(path: Path, data: object) -> None:
@@ -376,7 +376,8 @@ def _write_json_atomic(path: Path, data: object) -> None:
     An existing file keeps its mode; a new one gets the umask default.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    safe_write(path, json.dumps(data, indent=2), mode=0o666 & ~_current_umask())
+    mode = 0o644 if path.exists() else _new_file_mode(path.parent)
+    safe_write(path, json.dumps(data, indent=2), mode=mode)
 
 
 def main():

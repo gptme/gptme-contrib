@@ -1,8 +1,8 @@
 """Tests for the lesson evolution tracking module."""
 
 import os
-import stat
-from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 from gptme_lessons_extras.evolution import (
@@ -402,40 +402,49 @@ def test_failed_write_keeps_previous_file(tmp_path, monkeypatch, target):
     assert sorted((tmp_path / "hist").rglob("*")) == files_before  # no temp file
 
 
+_UMASK_CHILD = """
+import os, stat, sys
+from pathlib import Path
+from gptme_lessons_extras.evolution import EvolutionTracker
+
+hist = Path(sys.argv[1])
+os.umask(int(sys.argv[2], 8))
+t = EvolutionTracker(history_dir=hist)
+t.initialize_lesson("bob-tools-git", "bob", "v1 body")
+t.suggest_refinement("bob-tools-git", "alice", "clarity", "first")
+paths = [hist / "bob-tools-git.json", hist / "refinements" / "bob-tools-git.json"]
+print(" ".join(str(stat.S_IMODE(p.stat().st_mode)) for p in paths))
+for p in paths:
+    p.chmod(0o640)
+t.track_change("bob-tools-git", "alice", "tighten rule", "v2 body")
+t.update_refinement_status("bob-tools-git", 0, "accepted")
+print(" ".join(str(stat.S_IMODE(p.stat().st_mode)) for p in paths))
+"""
+
+
 @pytest.mark.parametrize(("umask", "new_mode"), [(0o077, 0o600), (0o002, 0o664)])
 def test_file_mode_follows_umask_then_survives_rewrite(tmp_path, umask, new_mode):
     # New files get the umask default, as a plain open() would. A rewrite keeps
     # the mode the file has: the temp file's 0600 must not replace it.
-    from gptme_lessons_extras.evolution import EvolutionTracker
-
-    previous = os.umask(umask)
-    try:
-        t = EvolutionTracker(history_dir=tmp_path / "hist")
-        t.initialize_lesson("bob-tools-git", "bob", "v1 body")
-        t.suggest_refinement("bob-tools-git", "alice", "clarity", "first")
-        paths = [
-            tmp_path / "hist" / "bob-tools-git.json",
-            tmp_path / "hist" / "refinements" / "bob-tools-git.json",
-        ]
-        assert [stat.S_IMODE(p.stat().st_mode) for p in paths] == [new_mode] * 2
-
-        for p in paths:
-            p.chmod(0o640)
-        t.track_change("bob-tools-git", "alice", "tighten rule", "v2 body")
-        t.update_refinement_status("bob-tools-git", 0, "accepted")
-        assert [stat.S_IMODE(p.stat().st_mode) for p in paths] == [0o640] * 2
-        assert os.umask(umask) == umask  # the writer restored the process umask
-    finally:
-        os.umask(previous)
+    # The umask is process-wide, so it is set in a child process — mutating it
+    # here would expose every concurrent file creation in this process to the
+    # temporary mask.
+    out = subprocess.run(
+        [sys.executable, "-c", _UMASK_CHILD, str(tmp_path / "hist"), oct(umask)],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split("\n")
+    fresh = [int(m) for m in out[0].split()]
+    rewritten = [int(m) for m in out[1].split()]
+    assert fresh == [new_mode] * 2
+    assert rewritten == [0o640] * 2
 
 
-@pytest.mark.skipif(
-    not Path("/proc/self/status").exists(), reason="needs /proc/self/status"
-)
 def test_writer_does_not_mutate_the_process_umask(tmp_path, monkeypatch):
     # os.umask() is process-wide: setting it even briefly races with file
-    # creation in other threads, which would inherit the temporary mask. On
-    # Linux the mask is readable from /proc/self/status, so the writer must
+    # creation in other threads, which would inherit the temporary mask. The
+    # writer probes a new file's mode through the kernel instead, so it must
     # never call os.umask at all.
     from gptme_lessons_extras.evolution import EvolutionTracker
 
