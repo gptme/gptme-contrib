@@ -10,26 +10,40 @@ import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
+SMOKE_PACKAGES = ["gptme-contrib-lib", "gptme-rag", "gptodo"]
+ALL_PACKAGES = ["alpha", "beta", *SMOKE_PACKAGES]
 
 # jq executes the workflow's actual --jq expression rather than duplicating
 # the selector in Python. Missing tooling must not masquerade as a regression.
 pytestmark = pytest.mark.skipif(shutil.which("jq") is None, reason="requires jq")
 
 
-@pytest.mark.parametrize("kind", ["packages", "plugins"])
 @pytest.mark.parametrize(
-    "scenario,expected",
+    "kind,scenario,expected",
     [
-        ("success", ["alpha"]),
-        ("failed_discovery", ["alpha"]),
-        ("only_failure", ["alpha", "beta"]),
-        ("in_progress", ["alpha", "beta"]),
-        ("empty", ["alpha", "beta"]),
-        ("api_error", ["alpha", "beta"]),
-        ("nonancestor", ["alpha", "beta"]),
-        ("burst", ["alpha"]),
-        ("pr", ["alpha"]),
-        ("schedule", ["alpha", "beta"]),
+        (kind, scenario, expected)
+        for kind in ("packages", "plugins")
+        for scenario, expected in (
+            ("success", ["alpha"]),
+            ("failed_discovery", ["alpha"]),
+            ("only_failure", ALL_PACKAGES),
+            ("in_progress", ALL_PACKAGES),
+            ("empty", ALL_PACKAGES),
+            ("api_error", ALL_PACKAGES),
+            ("nonancestor", ALL_PACKAGES),
+            ("burst", ["alpha"]),
+            ("pr", ["alpha"]),
+            ("schedule", ALL_PACKAGES),
+            ("dispatch", ALL_PACKAGES),
+        )
+    ]
+    + [
+        ("packages", "pr_shared_only", SMOKE_PACKAGES),
+        ("packages", "pr_shared", ["alpha", *SMOKE_PACKAGES]),
+        ("packages", "pr_root", ["alpha", *SMOKE_PACKAGES]),
+        ("packages", "pr_near_match", ["alpha"]),
+        ("packages", "push_shared", ALL_PACKAGES),
+        ("packages", "queue_shared", ALL_PACKAGES),
     ],
 )
 def test_discovery_retains_uncovered_changes(tmp_path, kind, scenario, expected):
@@ -53,7 +67,15 @@ def test_discovery_retains_uncovered_changes(tmp_path, kind, scenario, expected)
 
     base = commit("README.md", "baseline")
     git("update-ref", "refs/remotes/origin/master", base)
-    commit(f"{kind}/alpha/src.py", "uncovered change")
+
+    if scenario != "pr_shared_only":
+        commit(f"{kind}/alpha/src.py", "uncovered change")
+    if scenario in {"pr_shared_only", "pr_shared", "push_shared", "queue_shared"}:
+        commit("uv.lock", "shared config change")
+    elif scenario == "pr_root":
+        commit("packages/README.md", "shared package root file")
+    elif scenario == "pr_near_match":
+        commit("uv.lock.notes", "not the lockfile")
     before = commit("README.md", "first documentation push")
     commit("README.md", "surviving documentation push")
 
@@ -87,7 +109,7 @@ def test_discovery_retains_uncovered_changes(tmp_path, kind, scenario, expected)
     make.write_text(
         "#!/bin/sh\n"
         'case "$*" in *excluded*) exit 0;; esac\n'
-        "printf '%s\\n' '[\"alpha\", \"beta\"]'\n"
+        f"printf '%s\\n' '{json.dumps(ALL_PACKAGES)}'\n"
     )
     make.chmod(0o755)
     gh = bin_dir / "gh"
@@ -112,9 +134,13 @@ def test_discovery_retains_uncovered_changes(tmp_path, kind, scenario, expected)
     )
     event = (
         "pull_request"
-        if scenario == "pr"
+        if scenario.startswith("pr")
+        else "merge_group"
+        if scenario == "queue_shared"
         else "schedule"
         if scenario == "schedule"
+        else "workflow_dispatch"
+        if scenario == "dispatch"
         else "push"
     )
     script = step["run"]
@@ -137,6 +163,7 @@ def test_discovery_retains_uncovered_changes(tmp_path, kind, scenario, expected)
             "PATH": f"{bin_dir}:{os.environ['PATH']}",
             "BASE_REF": "master",
             "BEFORE": before,
+            "MERGE_GROUP_BASE": base,
             "GITHUB_OUTPUT": "output",
             "SCENARIO": scenario,
             "RUNS": json.dumps(runs),

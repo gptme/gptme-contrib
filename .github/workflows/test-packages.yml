@@ -67,7 +67,7 @@ jobs:
             - '.github/workflows/test-packages.yml'
 
   # Discovery job - outputs package matrix dynamically using Makefile (single source of truth)
-  # On PRs, filters the matrix to only packages with actual file changes
+  # On PRs, test changed packages plus a small smoke set for shared changes.
   discover:
     needs: changes
     # Always run on push to master; on PRs and in the merge queue, only when
@@ -144,28 +144,26 @@ jobs:
           fi
 
           if [[ "$full" == "0" ]]; then
+            shared=0
+            if grep -qE '^(Makefile|conftest\.py|pyproject\.toml|uv\.lock|\.github/workflows/test-packages\.yml|packages/[^/]+)$' <<< "$changed"; then
+              shared=1
+            fi
 
-            # If shared config changed, run all packages (can't tell which are affected)
-            if echo "$changed" | grep -qE '^(Makefile|conftest\.py|pyproject\.toml|uv\.lock|\.github/workflows/test-packages\.yml)'; then
+            if [[ "$shared" == "1" && "${{ github.event_name }}" != "pull_request" ]]; then
               echo "Shared config changed, running all packages"
               packages=$(cat /tmp/all_packages.json)
             else
-              # Files directly under packages/ (not in a subdirectory) also trigger full run
-              if echo "$changed" | grep -qE '^packages/[^/]+$'; then
-                echo "Root-level packages/ file changed, running all packages"
-                packages=$(cat /tmp/all_packages.json)
-              else
-                # Extract affected package names from changed paths (packages/<name>/...)
-                affected=$(echo "$changed" | sed -n 's|^packages/\([^/]*\)/.*|\1|p' | sort -u)
-
-                if [ -z "$affected" ]; then
-                  echo "No package files changed, skipping tests"
-                  packages="[]"
-                else
-                  # Filter all packages to only affected ones
-                  packages=$(echo "$affected" | python3 -c "import json,sys; all_pkgs=json.load(open('/tmp/all_packages.json')); affected=set(sys.stdin.read().strip().split('\n')); print(json.dumps([p for p in all_pkgs if p in affected]))")
-                fi
+              affected=$(sed -n 's|^packages/\([^/]*\)/.*|\1|p' <<< "$changed")
+              if [[ "$shared" == "1" ]]; then
+                # Shared library, CLI and retrieval package exercise different
+                # parts of the workspace on PRs. Push/merge queue still run
+                # all packages for shared changes, and nightly always does.
+                echo "Shared config changed, adding PR smoke packages"
+                affected+=$'\ngptme-contrib-lib\ngptodo\ngptme-rag'
               fi
+              # Keep Makefile ordering; set membership deduplicates packages
+              # selected both through their paths and through the smoke set.
+              packages=$(echo "$affected" | python3 -c "import json,sys; all_pkgs=json.load(open('/tmp/all_packages.json')); affected=set(sys.stdin.read().splitlines()); print(json.dumps([p for p in all_pkgs if p in affected]))")
             fi
           else
             packages=$(cat /tmp/all_packages.json)
@@ -470,7 +468,7 @@ jobs:
 
       - name: Run script tests
         run: |
-          uv run --with pytest --with pyyaml pytest tests/test_check_install_size.py tests/test_ci_python_runtime.py tests/test_ci_test_shards.py -v
+          uv run --with pytest --with pyyaml pytest tests/test_check_install_size.py tests/test_ci_python_runtime.py tests/test_ci_test_shards.py tests/test_ci_coalesced_push.py -v
 
       - name: Run install-size check
         run: |
