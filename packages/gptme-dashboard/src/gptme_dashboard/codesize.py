@@ -12,9 +12,15 @@ pain, not how easy it is to count:
 - **history**: the same totals sampled from git at weekly points, so a trend is
   visible without storing any state.
 
-Profiles only decide how files are *grouped*; the measures are shared. A monorepo
-groups by package, a brain groups by workspace surface, a metarepo groups by
-submodule, a monolith groups by top-level source directory.
+Profiles only decide which files belong to the repo and how they are *grouped*;
+the measures are shared. A monorepo groups by package, a brain groups by workspace
+surface, a metarepo groups by submodule, a monolith groups by top-level source
+directory. Only a metarepo counts submodule contents; elsewhere a submodule is
+someone else's code.
+
+In a git repository only tracked files are counted, in the current numbers and in
+the trend alike. The trend reads commits (and, in a metarepo, the submodule commits
+they pin); the current numbers read the working tree.
 
 Nothing here deletes or rewrites anything: the report is a review aid.
 """
@@ -74,8 +80,10 @@ SOURCE_SUFFIXES = {
 
 DEFAULT_THRESHOLDS = (1500, 3000)
 
-# A file counts as a test when any path component says so.
-TEST_MARKERS = ("test_", "_test.", "tests/", "/tests/", "test/", "/test/", "spec.")
+# A file counts as a test when a directory or its file name says so. Matching is
+# on whole path components: "latest/" and "contest_rules.py" are not tests.
+TEST_DIRS = {"test", "tests", "__tests__", "androidtest"}
+JS_SUFFIXES = {".js", ".jsx", ".ts", ".tsx"}
 
 
 @dataclass
@@ -163,9 +171,11 @@ class CodeSizeReport:
 
 def _git(root: Path, *args: str) -> str:
     proc = subprocess.run(
-        ["git", "-C", str(root), *args],
+        # quotePath=false: non-ASCII paths must come out verbatim to match up.
+        ["git", "-c", "core.quotePath=false", "-C", str(root), *args],
         capture_output=True,
-        text=True,
+        encoding="utf-8",
+        errors="replace",
         check=False,
     )
     if proc.returncode != 0:
@@ -177,9 +187,48 @@ def _is_git_repo(root: Path) -> bool:
     return bool(_git(root, "rev-parse", "--git-dir").strip())
 
 
+def _declared_submodules(root: Path) -> list[str]:
+    """Submodule paths listed in this repo's own ``.gitmodules``."""
+    if not (root / ".gitmodules").exists():
+        return []
+    out = _git(root, "config", "--file", ".gitmodules", "--get-regexp", r"\.path$")
+    return [line.split(" ", 1)[1] for line in out.splitlines() if " " in line]
+
+
+def _submodules(root: Path) -> tuple[list[str], list[str]]:
+    """(checked-out, missing) submodule paths relative to ``root``, nested included."""
+    present: list[str] = []
+    missing: list[str] = []
+    for path in _declared_submodules(root):
+        # Without its own .git, `git -C path` would silently answer for the parent.
+        if not (root / path / ".git").exists():
+            missing.append(path)
+            continue
+        present.append(path)
+        nested_present, nested_missing = _submodules(root / path)
+        present += [f"{path}/{p}" for p in nested_present]
+        missing += [f"{path}/{p}" for p in nested_missing]
+    return present, missing
+
+
+def _off_pin_submodules(root: Path) -> list[str]:
+    """Submodules checked out at a commit other than the one their parent pins."""
+    out = _git(root, "submodule", "status", "--recursive")
+    return [line.split()[1] for line in out.splitlines() if line.startswith("+")]
+
+
 def _change_counts(root: Path, since: str) -> dict[str, int]:
-    """Number of commits touching each path since ``since`` (git date spec)."""
-    out = _git(root, "log", f"--since={since}", "--name-only", "--pretty=format:")
+    """Number of commits touching each path since ``since``, relative to ``root``."""
+    out = _git(
+        root,
+        "log",
+        f"--since={since}",
+        "--name-only",
+        "--relative",
+        "--pretty=format:",
+        "--",
+        ".",
+    )
     counts: dict[str, int] = {}
     for line in out.splitlines():
         path = line.strip()
@@ -188,9 +237,15 @@ def _change_counts(root: Path, since: str) -> dict[str, int]:
     return counts
 
 
-def _last_commit_date(root: Path, path: str) -> str:
-    out = _git(root, "log", "-1", "--format=%cs", "--", path).strip()
-    return out
+def _last_commit_date(root: Path, path: str, submodules: list[str]) -> str:
+    # "." is the (root) group: top-level files only, not the whole tree.
+    pathspec = ":(glob)*" if path == "." else path
+    # Inside a submodule, ask the submodule: the parent only sees pin bumps.
+    for sub in sorted(submodules, key=len, reverse=True):
+        if path == sub or path.startswith(sub + "/"):
+            root, pathspec = root / sub, path[len(sub) :].lstrip("/") or "."
+            break
+    return _git(root, "log", "-1", "--format=%cs", "--", pathspec).strip()
 
 
 # --------------------------------------------------------------------------- #
@@ -200,16 +255,15 @@ def _last_commit_date(root: Path, path: str) -> str:
 
 def detect_profile(root: Path) -> str:
     """Classify the repo so the report groups files the way that repo is shaped."""
-    if (root / ".gitmodules").exists():
-        modules = _git(root, "config", "--file", ".gitmodules", "--get-regexp", "path")
-        if len([ln for ln in modules.splitlines() if ln.strip()]) >= 2:
-            return "metarepo"
+    # Brain first: agent workspaces usually also have packages/ and submodules.
+    if (root / "tasks").is_dir() and (root / "lessons").is_dir() and (root / "journal").is_dir():
+        return "brain"
+    if len(_declared_submodules(root)) >= 2:
+        return "metarepo"
     if (root / "packages").is_dir() and any(
         (p / "pyproject.toml").exists() for p in (root / "packages").iterdir() if p.is_dir()
     ):
         return "monorepo"
-    if (root / "tasks").is_dir() and (root / "lessons").is_dir() and (root / "journal").is_dir():
-        return "brain"
     return "monolith"
 
 
@@ -226,28 +280,27 @@ def _load_group_map(root: Path, group_map: dict[str, str] | None) -> dict[str, s
     return {k.strip("/"): v for k, v in group_map.items()}
 
 
-def _group_path(rel_path: str, profile: str, overrides: dict[str, str]) -> str:
-    """The directory that defines a group, used for its last-commit date."""
-    for prefix in overrides:
-        if rel_path == prefix or rel_path.startswith(prefix + "/"):
-            return prefix
-    parts = rel_path.split("/")
-    if profile == "monorepo" and parts[0] == "packages" and len(parts) > 1:
-        return f"packages/{parts[1]}"
-    return parts[0] if len(parts) > 1 else "."
+def assign_group(
+    rel_path: str,
+    profile: str,
+    overrides: dict[str, str],
+    submodules: list[str] | None = None,
+) -> tuple[str, str]:
+    """(group name, directory that defines it) for a file.
 
-
-def assign_group(root: Path, rel_path: str, profile: str, overrides: dict[str, str]) -> str:
-    for prefix, name in overrides.items():
+    The longest matching prefix wins, so overrides and submodules may nest.
+    """
+    for prefix in sorted(overrides, key=len, reverse=True):
         if rel_path == prefix or rel_path.startswith(prefix + "/"):
-            return name
+            return overrides[prefix], prefix
+    for sub in sorted(submodules or [], key=len, reverse=True):
+        if rel_path.startswith(sub + "/"):
+            return sub, sub
     parts = rel_path.split("/")
-    if profile == "monorepo":
-        if parts[0] == "packages" and len(parts) > 1:
-            return parts[1]
-        return parts[0] if len(parts) > 1 else "(root)"
-    # metarepo, brain and monolith all group by the first path component
-    return parts[0] if len(parts) > 1 else "(root)"
+    if profile == "monorepo" and parts[0] == "packages" and len(parts) > 2:
+        return parts[1], f"packages/{parts[1]}"
+    # everything else groups by the first path component
+    return (parts[0], parts[0]) if len(parts) > 1 else ("(root)", ".")
 
 
 # --------------------------------------------------------------------------- #
@@ -264,31 +317,44 @@ def _count_lines(path: Path) -> int:
         data = path.read_bytes()
     except OSError:
         return 0
-    if not data:
+    if not data or _looks_binary(data):
         return 0
     return data.count(b"\n") + (0 if data.endswith(b"\n") else 1)
 
 
 def _is_test_path(rel_path: str) -> bool:
-    lowered = rel_path.lower()
-    return any(marker in lowered for marker in TEST_MARKERS)
+    *dirs, name = rel_path.lower().split("/")
+    if any(d in TEST_DIRS for d in dirs):
+        return True
+    path = Path(name)
+    if name == "conftest.py" or name.startswith("test_") or path.stem.endswith("_test"):
+        return True
+    # foo.test.ts / foo.spec.tsx; an openapi.spec.yaml is not a test
+    return path.suffix in JS_SUFFIXES and path.stem.endswith((".test", ".spec"))
 
 
-def iter_source_files(root: Path):
-    """Yield (relative path, absolute path) for tracked-looking source files."""
-    for path in root.rglob("*"):
-        if not path.is_file():
+def iter_source_files(root: Path, *, recurse_submodules: bool = False):
+    """Yield (relative path, absolute path) for source files.
+
+    In a git repository these are the tracked files; elsewhere every file.
+    """
+    if _is_git_repo(root):
+        args = ["ls-files", "-z"]
+        if recurse_submodules:
+            args.append("--recurse-submodules")
+        candidates = [root / p for p in _git(root, *args).split("\0") if p]
+    else:
+        candidates = list(root.rglob("*"))
+    for path in candidates:
+        # a symlink would count its target a second time
+        if path.is_symlink() or not path.is_file():
             continue
-        try:
-            rel = path.relative_to(root)
-        except ValueError:
-            continue
-        parts = rel.parts
-        if any(part in SKIP_DIRS for part in parts[:-1]):
+        rel = path.relative_to(root)
+        if any(part in SKIP_DIRS for part in rel.parts[:-1]):
             continue
         if path.suffix.lower() not in SOURCE_SUFFIXES:
             continue
-        yield str(rel), path
+        yield rel.as_posix(), path
 
 
 def build_report(
@@ -308,23 +374,37 @@ def build_report(
         root=str(root),
         profile=profile,
         generated_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        thresholds=sorted(thresholds),
+        thresholds=sorted(set(thresholds)),
     )
 
-    groups: dict[str, GroupSize] = {}
-    files: list[FileSize] = []
-    change_counts = _change_counts(root, hotspot_window) if _is_git_repo(root) else {}
+    is_git = _is_git_repo(root)
+    recurse = profile == "metarepo"
+    submodules, missing = _submodules(root) if recurse else ([], [])
+    report.warnings += [f"submodule {p} is not checked out: not counted" for p in missing]
+    if recurse:
+        report.warnings += [
+            f"submodule {p} is not at its pinned commit: current numbers and trend differ"
+            for p in _off_pin_submodules(root)
+        ]
 
-    for rel, path in iter_source_files(root):
+    groups: dict[str, GroupSize] = {}
+    group_paths: dict[str, set[str]] = {}
+    files: list[FileSize] = []
+    change_counts: dict[str, int] = {}
+    if is_git:
+        change_counts = _change_counts(root, hotspot_window)
+        for sub in submodules:
+            for path, count in _change_counts(root / sub, hotspot_window).items():
+                change_counts[f"{sub}/{path}"] = count
+
+    for rel, path in iter_source_files(root, recurse_submodules=recurse):
         lines = _count_lines(path)
         if lines == 0:
             continue
-        group = assign_group(root, rel, profile, overrides)
+        group, group_path = assign_group(rel, profile, overrides, submodules)
         is_test = _is_test_path(rel)
-        entry = groups.setdefault(
-            group,
-            GroupSize(name=group, path=_group_path(rel, profile, overrides)),
-        )
+        entry = groups.setdefault(group, GroupSize(name=group, path=group_path))
+        group_paths.setdefault(group, set()).add(group_path)
         if is_test:
             entry.test_lines += lines
             entry.test_files += 1
@@ -341,9 +421,12 @@ def build_report(
             )
         )
 
-    for sized in groups.values():
-        if _is_git_repo(root):
-            sized.last_commit = _last_commit_date(root, sized.path)
+    if is_git:
+        for name, sized in groups.items():
+            # several prefixes can map to one group: take the newest
+            sized.last_commit = max(
+                _last_commit_date(root, p, submodules) for p in group_paths[name]
+            )
 
     source_files = [f for f in files if not f.is_test]
     source_files.sort(key=lambda f: f.lines, reverse=True)
@@ -357,10 +440,15 @@ def build_report(
         reverse=True,
     )[:largest_n]
 
-    if _is_git_repo(root):
-        report.history = _history(root, history_weeks, profile, overrides)
-    else:
+    if not is_git:
         report.warnings.append("not a git repository: history trend unavailable")
+    elif history_weeks > 0:
+        unreadable: set[str] = set()
+        report.history = _history(root, history_weeks, recurse, unreadable)
+        report.warnings += [
+            f"trend omits submodule {p} where its pinned commit is not available locally"
+            for p in sorted(unreadable)
+        ]
 
     return report
 
@@ -372,55 +460,80 @@ def build_report(
 
 def _weekly_commits(root: Path, weeks: int) -> list[tuple[str, str]]:
     """One (iso week, commit) pair per week, oldest first, for the last N weeks."""
+    if weeks <= 0:
+        return []
+    # --first-parent: sample states the branch was actually in, not side branches.
     out = _git(
         root,
-        "rev-list",
-        f"--since={weeks * 7 + 7}.days.ago",
+        "log",
+        f"--since={weeks * 7}.days.ago",
+        "--first-parent",
         "--reverse",
+        "--format=%H %cs",
         "HEAD",
     )
-    commits = [c for c in out.split() if c]
     by_week: dict[str, str] = {}
-    for commit in commits:
-        date = _git(root, "show", "-s", "--format=%cs", commit).strip()
-        if not date:
-            continue
+    for line in out.splitlines():
+        commit, _, date = line.partition(" ")
         try:
             iso = datetime.strptime(date, "%Y-%m-%d").isocalendar()
         except ValueError:
             continue
         by_week[f"{iso.year}-W{iso.week:02d}"] = commit
-    return sorted(by_week.items())
+    # the window can straddle one more ISO week than asked for
+    return sorted(by_week.items())[-weeks:]
 
 
-def _lines_at_commit(root: Path, commit: str) -> list[tuple[str, int]]:
-    """Line counts for every text source file at ``commit`` via one git grep."""
-    patterns = [f"*{suffix}" for suffix in sorted(SOURCE_SUFFIXES)]
+def _lines_at_commit(
+    root: Path,
+    commit: str,
+    recurse: bool,
+    unreadable: set[str],
+    prefix: str = "",
+) -> list[tuple[str, int]]:
+    """Line counts for every text source file at ``commit`` via one git grep.
+
+    With ``recurse``, follows each submodule pin recorded in that commit; pins that
+    cannot be read are added to ``unreadable``.
+    """
+    patterns = [f":(icase)*{suffix}" for suffix in sorted(SOURCE_SUFFIXES)]
     out = _git(root, "grep", "-c", "-I", "", commit, "--", *patterns)
     rows: list[tuple[str, int]] = []
-    prefix = f"{commit}:"
+    marker = f"{commit}:"
     for line in out.splitlines():
-        if not line.startswith(prefix):
+        if not line.startswith(marker):
             continue
-        rest = line[len(prefix) :]
+        rest = line[len(marker) :]
         path, _, count = rest.rpartition(":")
         if not path or not count.isdigit():
             continue
         if any(part in SKIP_DIRS for part in path.split("/")[:-1]):
             continue
-        rows.append((path, int(count)))
+        rows.append((prefix + path, int(count)))
+    if not recurse:
+        return rows
+    for entry in _git(root, "ls-tree", "-r", "-z", commit).split("\0"):
+        meta, _, path = entry.partition("\t")
+        if not meta.startswith("160000 "):
+            continue
+        pin = meta.split()[2]
+        subroot = root / path
+        if not (subroot / ".git").exists() or not _git(subroot, "cat-file", "-t", pin):
+            unreadable.add(prefix + path)
+            continue
+        rows += _lines_at_commit(subroot, pin, recurse, unreadable, f"{prefix}{path}/")
     return rows
 
 
 def _history(
     root: Path,
     weeks: int,
-    profile: str,
-    overrides: dict[str, str],
+    recurse: bool,
+    unreadable: set[str],
 ) -> list[HistoryPoint]:
     points: list[HistoryPoint] = []
     for week, commit in _weekly_commits(root, weeks):
-        rows = _lines_at_commit(root, commit)
+        rows = _lines_at_commit(root, commit, recurse, unreadable)
         if not rows:
             continue
         source = test = 0
