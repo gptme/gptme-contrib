@@ -1582,8 +1582,19 @@ class Indexer:
     def _delete_ids(self, ids: list[str]) -> int:
         """Delete ids in bounded pages, each under the writer lock."""
         for start in range(0, len(ids), _PAGE_SIZE):
-            with self._index_writer_lock():
-                self.collection.delete(ids=ids[start : start + _PAGE_SIZE])
+            page = ids[start : start + _PAGE_SIZE]
+            try:
+                with self._index_writer_lock():
+                    self.collection.delete(ids=page)
+            except NotFoundError:
+                # The cached Collection object is stale: the collection was
+                # recreated (reset_collection in another process) between our
+                # snapshot and this delete. Re-bind and retry once, as
+                # delete_documents does — never wipe the index to recover.
+                logger.debug("Collection handle stale on sweep; refreshing and retrying")
+                self._refresh_collection()
+                with self._index_writer_lock():
+                    self.collection.delete(ids=page)
         return len(ids)
 
     def _add_then_sweep(

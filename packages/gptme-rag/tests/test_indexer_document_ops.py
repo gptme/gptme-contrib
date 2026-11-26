@@ -242,6 +242,38 @@ def test_stale_sweep_scan_holds_the_writer_lock(indexer, tmp_path):
     assert probes and all(probes), "the stale-id scan read ids without the writer lock"
 
 
+def test_sweep_refreshes_a_stale_collection_handle(indexer, tmp_path, monkeypatch):
+    """P1: a NotFoundError on the sweep delete re-binds the handle and retries.
+
+    reset_collection in another process replaces the collection, so the cached
+    Collection object raises NotFoundError. The sweep must refresh and retry
+    once (as delete_documents does) instead of propagating out of index_file.
+    """
+    from chromadb.errors import NotFoundError
+
+    f = tmp_path / "note.md"
+    f.write_text(_words(200))
+    indexer.index_file(f)
+    stale_ids = set(indexer.collection.get()["ids"])
+    f.write_text(_words(200) + " changed")
+
+    real_delete = indexer.collection.delete
+    calls: list[int] = []
+
+    def delete_raising_once(*args, **kwargs):
+        if not calls:
+            calls.append(1)
+            raise NotFoundError("stale collection handle")
+        return real_delete(*args, **kwargs)
+
+    monkeypatch.setattr(indexer.collection, "delete", delete_raising_once)
+    indexer.index_file(f)
+
+    assert calls, "the sweep never hit the stale handle"
+    remaining = set(indexer.collection.get()["ids"])
+    assert not (stale_ids & remaining), f"stale chunks survived the retried sweep: {remaining}"
+
+
 def test_sweep_keeps_chunks_added_by_a_concurrent_writer(indexer, tmp_path, monkeypatch):
     """P1: the sweep deletes only ids that existed before this run's add.
 
