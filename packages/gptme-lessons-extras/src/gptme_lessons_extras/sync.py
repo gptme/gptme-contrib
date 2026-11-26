@@ -99,6 +99,9 @@ def init_repo(network_dir: Path = DEFAULT_NETWORK_DIR, force: bool = False) -> P
         tempfile.mkdtemp(prefix=f".{network_dir.name}.", dir=network_dir.parent)
     )
     clone_dir = staging / network_dir.name
+    # Only clear the staging directory when the old directory is not parked in
+    # it: the cleanup must never be able to delete the user's data.
+    keep_staging = False
     print(f"📥 Cloning {NETWORK_REPO}...")
     try:
         subprocess.run(
@@ -116,9 +119,19 @@ def init_repo(network_dir: Path = DEFAULT_NETWORK_DIR, force: bool = False) -> P
             network_dir.rename(old_dir)
         try:
             clone_dir.rename(network_dir)
-        except OSError:
+        except OSError as swap_error:
             if replace:
-                old_dir.rename(network_dir)
+                try:
+                    old_dir.rename(network_dir)
+                except OSError as restore_error:
+                    # Keep the original directory: report where it is instead
+                    # of letting the staging cleanup delete it.
+                    keep_staging = True
+                    raise SyncError(
+                        f"Failed to move the clone into {network_dir} "
+                        f"({swap_error}) and could not restore the original "
+                        f"directory; it is kept at {old_dir} ({restore_error})."
+                    ) from restore_error
             raise
         print(f"✓ Cloned to {network_dir}")
         return network_dir
@@ -127,7 +140,8 @@ def init_repo(network_dir: Path = DEFAULT_NETWORK_DIR, force: bool = False) -> P
     except OSError as e:
         raise SyncError(f"Failed to replace {network_dir}: {e}") from e
     finally:
-        shutil.rmtree(staging, ignore_errors=True)
+        if not keep_staging:
+            shutil.rmtree(staging, ignore_errors=True)
 
 
 def export_to_network(
