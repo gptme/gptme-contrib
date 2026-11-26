@@ -1459,3 +1459,29 @@ def test_undecodable_state_that_cannot_be_kept_aside_aborts_the_save(tmp_path, m
 
     assert bandit.state_file.read_text() == state_before
     assert bandit.backup_file.read_text() == backup_before
+
+
+def test_state_file_with_invalid_utf8_is_kept_aside_not_fatal(tmp_path, capsys):
+    """A torn or binary state file must not wedge every future save (#2449).
+
+    ``_set_aside_undecodable_state()`` used to catch only ``OSError`` on the
+    read, so invalid UTF-8 raised ``UnicodeDecodeError`` out of ``save()`` and
+    every later ``update()`` failed. The bytes hold nothing this reader can
+    parse, so they are kept aside and the save proceeds from the backup.
+    """
+    bandit = Bandit(state_dir=tmp_path)
+    for _ in range(13):
+        bandit.update(["a"], outcome=1.0)
+    garbage = b"\xff\xfe not utf-8 \x80\x00"
+    bandit.state_file.write_bytes(garbage)
+    backup_before = bandit.backup_file.read_text()
+
+    reader = Bandit(state_dir=tmp_path)
+    reader.update(["a"], outcome=1.0)
+
+    kept = sorted(tmp_path.glob("bandit-state.json.undecodable-*"))
+    assert len(kept) == 1
+    assert kept[0].read_bytes() == garbage
+    assert bandit.backup_file.read_text() == backup_before
+    assert json.loads(bandit.state_file.read_text())["arms"]["a"]["total_selections"] == 13
+    assert "kept unreadable bandit state" in capsys.readouterr().err

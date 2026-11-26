@@ -763,21 +763,30 @@ class Bandit:
 
         If that move fails while the file still holds a mature arm, the save
         aborts: overwriting it would erase the history this path exists to keep.
+
+        Bytes that are not valid UTF-8 are kept aside too, but never abort the
+        save: nothing here can read them, so refusing would wedge every future
+        ``update()``/``decay()``/``prune()`` on a file the next write repairs.
         """
         try:
-            text = self.state_file.read_text()
+            raw = self.state_file.read_bytes()
         except OSError:
             return
         try:
-            self._decode_state(text)
-            return
-        except (ValueError, TypeError, KeyError, AttributeError):
-            pass
+            text: str | None = raw.decode()
+        except UnicodeDecodeError:
+            text = None
+        if text is not None:
+            try:
+                self._decode_state(text)
+                return
+            except (ValueError, TypeError, KeyError, AttributeError):
+                pass
         target = self._undecodable_state_archive()
         try:
             self.state_file.replace(target)
         except OSError as e:
-            if _document_holds_mature_history(text):
+            if text is not None and _document_holds_mature_history(text):
                 raise ValueError(
                     f"refusing to overwrite bandit state that cannot be decoded: "
                     f"{self.state_file} holds mature arms and could not be kept "
