@@ -157,3 +157,75 @@ def test_deeply_nested_json_is_usage_error_before_writes(
     assert not captured.out
     assert not private.exists()
     assert not public.exists()
+
+
+def test_fleet_cli_writes_private_grid_from_multiple_native_cores(
+    tmp_path: Path,
+) -> None:
+    from datetime import datetime, timezone
+
+    sources = []
+    for agent in ("bob", "alice"):
+        source = tmp_path / f"{agent}.json"
+        source.write_text(
+            json.dumps(
+                {
+                    "schema": "fleet-vitals/core@1",
+                    "agent": agent,
+                    "status": "healthy",
+                    "generated_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+        )
+        sources.extend(["--input", str(source)])
+    private, public = tmp_path / "private", tmp_path / "public"
+    assert (
+        main(
+            [
+                "fleet",
+                *sources,
+                "--private-root",
+                str(private),
+                "--public-root",
+                str(public),
+            ]
+        )
+        == 0
+    )
+    result = private / "fleet" / "index.html"
+    assert "bob" in result.read_text() and "alice" in result.read_text()
+    assert 'class="fleet-grid"' in result.read_text()
+    assert stat.S_IMODE(result.stat().st_mode) == 0o600
+    assert not public.exists()
+
+
+def test_fleet_cli_duplicate_core_is_usage_error_before_writes(tmp_path: Path) -> None:
+    source = tmp_path / "core.json"
+    source.write_text(
+        json.dumps(
+            {
+                "schema": "fleet-vitals/core@1",
+                "agent": "bob",
+                "status": "healthy",
+                "generated_at": "2026-11-26T23:00:00Z",
+            }
+        )
+    )
+    private, public = tmp_path / "private", tmp_path / "public"
+    assert (
+        main(
+            [
+                "fleet",
+                "--input",
+                str(source),
+                "--input",
+                str(source),
+                "--private-root",
+                str(private),
+                "--public-root",
+                str(public),
+            ]
+        )
+        == 2
+    )
+    assert not private.exists()

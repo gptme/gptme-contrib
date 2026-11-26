@@ -29,6 +29,7 @@ from urllib.parse import urlsplit
 
 from gptme_vitals.build import BuildError, derive_core, headline_link, write_core_files
 from gptme_vitals.envelope import PageEnvelope
+from gptme_vitals.fleet_view import FLEET_SCHEMA, render_fleet
 from gptme_vitals.portal import (
     ENVELOPE_PAGE_MARKER,
     render_envelope_page,
@@ -50,7 +51,7 @@ from gptme_vitals.publish import (
 from gptme_vitals.routes import RouteRegistry, RouteRegistryError
 from gptme_vitals.standard_pages import render_standard_page
 from gptme_vitals.theme import render_head_assets, render_theme_toggle
-from gptme_vitals.thread_view import ThreadViewError, write_threads
+from gptme_vitals.thread_view import ThreadViewError, join_thread_exports, write_threads
 from gptme_vitals.timers import CALENDAR, TimerError, render_units
 
 Emitter = Callable[[], PageEnvelope]
@@ -359,18 +360,44 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="absolute path of the gptme-vitals executable the units run",
     )
     timers.add_argument("--unit-prefix", default="gptme-vitals")
-    for command in ("threads", "sessions", "tasks", "vitals"):
+    for command in ("threads", "sessions", "tasks", "vitals", "fleet"):
         view = sub.add_parser(command, help=f"render opt-in private {command} views")
         view.add_argument(
-            "--input", required=True, type=Path, help="native JSON export"
+            "--input",
+            required=True,
+            type=Path,
+            action="append" if command in {"threads", "fleet"} else "store",
+            help="native JSON export (repeat for threads or fleet cores)",
         )
         view.add_argument("--private-root", required=True, type=Path)
         view.add_argument("--public-root", required=True, type=Path)
+        if command == "fleet":
+            view.add_argument("--stale-after-seconds", type=float, default=900)
     args = parser.parse_args(argv)
     try:
-        if args.command in {"threads", "sessions", "tasks", "vitals"}:
+        if args.command in {"threads", "sessions", "tasks", "vitals", "fleet"}:
             try:
-                payload = json.loads(args.input.read_text(encoding="utf-8"))
+                if args.command in {"threads", "fleet"}:
+                    exports = [
+                        json.loads(path.read_text(encoding="utf-8"))
+                        for path in args.input
+                    ]
+                    if args.command == "threads":
+                        payload = (
+                            join_thread_exports(exports)
+                            if len(exports) > 1
+                            else exports[0]
+                        )
+                    else:
+                        payload = (
+                            exports[0]
+                            if len(exports) == 1
+                            and isinstance(exports[0], dict)
+                            and exports[0].get("schema") == FLEET_SCHEMA
+                            else exports
+                        )
+                else:
+                    payload = json.loads(args.input.read_text(encoding="utf-8"))
             except (ValueError, RecursionError) as exc:
                 raise UsageError(str(exc)) from exc
             paths: tuple[Path, ...]
@@ -382,7 +409,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             else:
                 try:
-                    html = render_standard_page(args.command, payload)
+                    html = (
+                        render_fleet(
+                            payload, stale_after_seconds=args.stale_after_seconds
+                        )
+                        if args.command == "fleet"
+                        else render_standard_page(args.command, payload)
+                    )
                 except ValueError as exc:
                     raise UsageError(str(exc)) from exc
                 paths = write_private_html(

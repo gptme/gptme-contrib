@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from html import escape
 from pathlib import Path
@@ -105,6 +105,41 @@ def _sessions(payload: dict[str, Any]) -> list[_Session]:
         if row.predecessor in positions and positions[row.predecessor] >= i:
             raise ThreadViewError(f"session {row.id}: predecessor must be earlier")
     return rows
+
+
+def join_thread_exports(exports: list[dict[str, Any]]) -> dict[str, Any]:
+    """Join explicit IDs from native exports without mining new evidence.
+
+    Identical overlapping rows collapse; conflicting identities refuse the join.
+    No short-ID, title, or agent-name guessing is performed. Predecessors newly
+    present in the union connect the existing forests, including across agents.
+    """
+    by_id: dict[str, _Session] = {}
+    for payload in exports:
+        for row in _sessions(payload):
+            previous = by_id.get(row.id)
+            if previous is not None and previous != row:
+                raise ThreadViewError(f"conflicting session id: {row.id}")
+            by_id[row.id] = row
+    # Validate chronology over the union as well as over each source. An edge
+    # outside one export can become a time-inverted edge in the joined set.
+    rows = _sessions({"sessions": [asdict(row) for row in by_id.values()]})
+    roots: dict[str, str] = {}
+    joined = []
+    for row in rows:
+        root = (
+            roots.get(row.predecessor, row.predecessor) if row.predecessor else row.id
+        )
+        roots[row.id] = root
+        joined.append({**asdict(row), "thread": root})
+    return {
+        "sessions": joined,
+        "stats": {
+            "sessions": len(rows),
+            "linked": sum(row.predecessor is not None for row in rows),
+            "threads": len(set(roots.values())),
+        },
+    }
 
 
 CSS = """
