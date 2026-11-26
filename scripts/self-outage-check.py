@@ -555,7 +555,28 @@ def assess(
 
 
 def _gh(args: list[str]) -> subprocess.CompletedProcess:
-    return subprocess.run(["gh", *args], capture_output=True, text=True, timeout=30)
+    # A hung network (TimeoutExpired) or missing gh (FileNotFoundError) becomes a
+    # failed result, so callers' returncode checks and fallbacks still run.
+    try:
+        return subprocess.run(["gh", *args], capture_output=True, text=True, timeout=30)
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return subprocess.CompletedProcess(["gh", *args], 1, "", str(e))
+
+
+def _report_gh_failure(action: str, res: subprocess.CompletedProcess) -> bool:
+    """Print a failed gh call to stderr; return True when it failed.
+
+    Every `_gh` caller that does not act on the result uses this, so turning an
+    exception into a failed CompletedProcess never makes a failure silent.
+    """
+    if res.returncode == 0:
+        return False
+    print(
+        f"[self-outage-check] {action} failed (rc={res.returncode}): "
+        f"{(res.stderr or res.stdout).strip()}",
+        file=sys.stderr,
+    )
+    return True
 
 
 def find_open_issue(cfg: Config) -> dict | None:
@@ -783,6 +804,23 @@ def _supplementary_notify(cfg: Config, status: dict) -> None:
         print(f"[supplementary-notify] skipped: {e}", file=sys.stderr)
 
 
+def _comment_outage(cfg: Config, number: int, status: dict) -> None:
+    """Post the current outage details on an existing open outage issue."""
+    res = _gh(
+        [
+            "issue",
+            "comment",
+            str(number),
+            "--repo",
+            cfg.repo or "",
+            "--body",
+            _issue_body(cfg, status),
+        ]
+    )
+    if not _report_gh_failure("comment on issue", res):
+        print(res.stdout.strip())
+
+
 def escalate(cfg: Config, status: dict, dry_run: bool, now: datetime) -> None:
     """File/update/close the outage issue and manage the local alert file."""
     cfg.alert_file.parent.mkdir(parents=True, exist_ok=True)
@@ -806,29 +844,54 @@ def escalate(cfg: Config, status: dict, dry_run: bool, now: datetime) -> None:
                 # #98 then minted). Reopen that thread instead of duplicating, so
                 # one continuous outage stays one issue.
                 reopen = find_recent_closed_issue(cfg)
+                surfaced = False  # an open issue is carrying this outage
                 if reopen is not None and _closed_during_outage(reopen, status, now):
                     if dry_run:
                         print(f"[dry-run] would REOPEN issue #{reopen['number']}")
                         return
-                    _gh(["issue", "reopen", str(reopen["number"]), "--repo", cfg.repo])
-                    _gh(
+                    # gh posts --comment first and reopens only if that worked, so
+                    # the issue is never left reopened without the details. The two
+                    # calls are not atomic: a closed issue can keep the comment.
+                    res = _gh(
                         [
                             "issue",
-                            "comment",
+                            "reopen",
                             str(reopen["number"]),
                             "--repo",
                             cfg.repo,
-                            "--body",
+                            "--comment",
                             _reopen_body(cfg, status),
                         ]
                     )
-                    print(f"Reopened issue #{reopen['number']} (outage still ongoing).")
-                    _supplementary_notify_pending = True
-                elif dry_run:
+                    if not _report_gh_failure(f"reopen of #{reopen['number']}", res):
+                        surfaced = True
+                        print(
+                            f"Reopened issue #{reopen['number']} (outage still ongoing)."
+                        )
+                    else:
+                        # A client-side failure is not proof the request failed (a
+                        # 30s timeout kills gh, not the call it already made), and
+                        # another run may have opened a thread meanwhile. Re-query
+                        # before minting a duplicate (#97/#98). If this lookup fails
+                        # too, we still file: a duplicate beats a silent alarm.
+                        open_issue = find_open_issue(cfg)
+                        if open_issue is not None:
+                            surfaced = True
+                            if open_issue["number"] == reopen["number"]:
+                                print(
+                                    f"Issue #{reopen['number']} is open again — its "
+                                    "reopen landed despite the client error."
+                                )
+                            else:
+                                # Not our reopen, so that thread may lack the
+                                # current details: post them there.
+                                _comment_outage(cfg, open_issue["number"], status)
+                    _supplementary_notify_pending = surfaced
+                if not surfaced and dry_run:
                     print("[dry-run] would CREATE issue:", cfg.issue_title)
                     print(_issue_body(cfg, status))
                     return
-                else:
+                elif not surfaced:
                     res = _gh(
                         [
                             "issue",
@@ -841,7 +904,8 @@ def escalate(cfg: Config, status: dict, dry_run: bool, now: datetime) -> None:
                             _issue_body(cfg, status),
                         ]
                     )
-                    print(res.stdout.strip() or res.stderr.strip())
+                    if not _report_gh_failure("create issue", res):
+                        print(res.stdout.strip())
                     _supplementary_notify_pending = True
             else:
                 updated = _parse_ts(existing.get("updatedAt", ""))
@@ -856,18 +920,7 @@ def escalate(cfg: Config, status: dict, dry_run: bool, now: datetime) -> None:
                 if dry_run:
                     print(f"[dry-run] would COMMENT on issue #{existing['number']}")
                     return
-                res = _gh(
-                    [
-                        "issue",
-                        "comment",
-                        str(existing["number"]),
-                        "--repo",
-                        cfg.repo,
-                        "--body",
-                        _issue_body(cfg, status),
-                    ]
-                )
-                print(res.stdout.strip() or res.stderr.strip())
+                _comment_outage(cfg, existing["number"], status)
         else:
             print(
                 "[self-outage-check] outage confirmed; no --repo set, skipping GitHub issue."
@@ -897,7 +950,7 @@ def escalate(cfg: Config, status: dict, dry_run: bool, now: datetime) -> None:
         if dry_run:
             print(f"[dry-run] would COMMENT+CLOSE issue #{existing['number']}")
             return
-        _gh(
+        res = _gh(
             [
                 "issue",
                 "comment",
@@ -908,8 +961,20 @@ def escalate(cfg: Config, status: dict, dry_run: bool, now: datetime) -> None:
                 recovery,
             ]
         )
-        _gh(["issue", "close", str(existing["number"]), "--repo", cfg.repo])
-        print(f"Closed issue #{existing['number']} (recovered).")
+        _report_gh_failure("recovery comment", res)
+        closed = _gh(["issue", "close", str(existing["number"]), "--repo", cfg.repo])
+        if closed.returncode != 0:
+            # `_gh` turns a timeout or a missing binary into a failed result, so
+            # the success message must not be printed unconditionally: the issue
+            # can still be open, and a false "recovered" hides a live outage.
+            print(
+                f"[self-outage-check] close of #{existing['number']} failed "
+                f"(rc={closed.returncode}): "
+                f"{(closed.stderr or closed.stdout).strip()}; issue remains open.",
+                file=sys.stderr,
+            )
+        else:
+            print(f"Closed issue #{existing['number']} (recovered).")
 
 
 def _resolve_config(args: argparse.Namespace) -> Config:
