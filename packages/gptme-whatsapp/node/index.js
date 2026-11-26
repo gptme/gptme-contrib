@@ -25,7 +25,8 @@
 import pkg from 'whatsapp-web.js';
 const { Client, LocalAuth } = pkg;
 import qrcode from 'qrcode-terminal';
-import { spawn } from 'child_process';
+import { extractReply } from './gptme-reply.js';
+import { spawn, spawnSync } from 'child_process';
 import { existsSync } from 'fs';
 import { sessionArgs, sessionName } from './claude-session.js';
 import { createKeyedQueue } from './serial-queue.js';
@@ -45,6 +46,18 @@ if (ALLOWED_CONTACTS.length > 0) {
 } else {
     console.log('Warning: ALLOWED_CONTACTS not set — accepting all contacts');
 }
+// The gptme backend reads replies from `--output-format json`. Refuse to start
+// on a gptme that cannot emit it rather than silently dropping every reply.
+const jsonOutput = BACKEND === 'gptme' ? gptmeSupportsJsonOutput() : 'unknown';
+if (jsonOutput === 'no') {
+    console.error(`${GPTME_CMD} does not support --output-format json.`);
+    console.error('Upgrade gptme (the flag was added in May 2026) or set BACKEND=claude-code.');
+    process.exit(1);
+}
+if (jsonOutput === 'unknown') {
+    console.log(`Warning: could not read ${GPTME_CMD} --help; assuming --output-format json works`);
+}
+
 if (BACKEND === 'claude-code' && !existsSync(SYSTEM_PROMPT_FILE)) {
     console.log(`Warning: SYSTEM_PROMPT_FILE not found at ${SYSTEM_PROMPT_FILE}`);
     console.log('Run: cd ${WORKSPACE} && ./scripts/build-system-prompt.sh > ${SYSTEM_PROMPT_FILE}');
@@ -53,6 +66,14 @@ if (BACKEND === 'claude-code' && !existsSync(SYSTEM_PROMPT_FILE)) {
 // Serializes messages per sender so two rapid messages cannot race for the
 // same agent session.
 const senderQueue = createKeyedQueue();
+
+const RUN_TIMEOUT_MS = 120_000;
+// How long a timed-out run gets to stop cleanly before it is force-killed.
+const KILL_TERM_MS = 2_000;
+// How long a killed run gets to release its pipes before we stop waiting.
+const KILL_GRACE_MS = 5_000;
+// Agent subprocesses still running.
+const running = new Set();
 
 const client = new Client({
     authStrategy: new LocalAuth({ dataPath: '.wwebjs_auth' }),
@@ -110,6 +131,26 @@ client.on('message', async (msg) => {
 });
 
 /**
+ * Whether the configured gptme understands `--output-format json`.
+ *
+ * Returns 'yes' or 'no' when its help text can be read, and 'unknown' when the
+ * probe itself fails (a wrapper command, a hang, a missing binary). A wrapper
+ * must not wedge startup, so the probe is bounded and an inconclusive answer
+ * does not stop the bridge.
+ */
+function gptmeSupportsJsonOutput() {
+    try {
+        const probe = spawnSync(GPTME_CMD, ['--help'], { encoding: 'utf8', timeout: 10_000 });
+        if (probe.error) return 'unknown';
+        const help = `${probe.stdout ?? ''}${probe.stderr ?? ''}`;
+        if (help.includes('--output-format')) return 'yes';
+        return help.trim() ? 'no' : 'unknown';
+    } catch {
+        return 'unknown';
+    }
+}
+
+/**
  * Call the agent backend with the message and return the response.
  * Supports both gptme and Claude Code backends.
  */
@@ -133,12 +174,17 @@ async function callGptme(sender, message) {
         '--name', convName,
         '--non-interactive',
         '-y',
+        // One JSON message per line on stdout, which this run's process owns.
+        // Plain text output also carries the echoed prompt, tool calls and exit
+        // chrome; the shared conversation log can be appended by a leftover
+        // process from an earlier run.
+        '--output-format', 'json',
         '--workspace', WORKSPACE,
         '--',
         message,
     ];
 
-    return spawnAndCapture(GPTME_CMD, args, extractResponse);
+    return truncate(await spawnAndCapture(GPTME_CMD, args, extractReply));
 }
 
 /**
@@ -172,6 +218,23 @@ async function callClaudeCode(sender, message) {
 }
 
 /**
+ * Signal a subprocess and everything it started (its process group), so a
+ * GPTME_CMD / CLAUDE_CMD wrapper does not leave the real agent running.
+ */
+function signalTree(proc, signal) {
+    try {
+        process.kill(-proc.pid, signal);
+    } catch {
+        // No such group: already gone, or a platform without process groups.
+        try {
+            proc.kill(signal);
+        } catch {
+            // Already reaped: nothing left to signal.
+        }
+    }
+}
+
+/**
  * Spawn a subprocess and capture its output.
  */
 function spawnAndCapture(cmd, args, responseExtractor) {
@@ -185,7 +248,10 @@ function spawnAndCapture(cmd, args, responseExtractor) {
                 CLAUDE_CODE_ENTRYPOINT: undefined,
             },
             stdio: ['pipe', 'pipe', 'pipe'],
+            // Lead a new process group, which signalTree() can target.
+            detached: process.platform !== 'win32',
         });
+        running.add(proc);
 
         // Close stdin immediately (prevents SIGSTOP in non-interactive contexts)
         proc.stdin.end();
@@ -196,78 +262,77 @@ function spawnAndCapture(cmd, args, responseExtractor) {
         proc.stdout.on('data', (data) => { stdout += data.toString(); });
         proc.stderr.on('data', (data) => { stderr += data.toString(); });
 
+        let timedOut = false;
+        let killTimer;
+        let graceTimer;
+        const finish = (result) => {
+            clearTimeout(timer);
+            clearTimeout(killTimer);
+            clearTimeout(graceTimer);
+            running.delete(proc);
+            resolve(result);
+        };
+
         proc.on('close', (code) => {
-            if (code !== 0) {
+            if (code !== 0 || timedOut) {
                 console.error(`${cmd} exited with code ${code}`);
                 console.error('stderr:', stderr.slice(-500));
-                resolve(null);
+                finish(false);
                 return;
             }
 
-            const response = responseExtractor(stdout);
-            resolve(response);
+            // A successful run can still emit diagnostics on stderr.
+            if (stderr.trim()) console.error(`${cmd} stderr:`, stderr.slice(-500));
+            finish(responseExtractor(stdout));
         });
 
         proc.on('error', (err) => {
             console.error(`Failed to spawn ${cmd}:`, err);
-            resolve(null);
+            finish(false);
         });
 
-        // Timeout: 120 seconds
-        setTimeout(() => {
-            proc.kill('SIGTERM');
+        // Do not resolve yet: that would let the sender's next run overlap a
+        // still-writing process.
+        const timer = setTimeout(() => {
+            timedOut = true;
             console.error(`${cmd} timed out`);
-            resolve(null);
-        }, 120_000);
+            // Ask the whole group to stop cleanly, then force it if the agent
+            // does not exit in time.
+            signalTree(proc, 'SIGTERM');
+            killTimer = setTimeout(() => signalTree(proc, 'SIGKILL'), KILL_TERM_MS);
+            // A process that left the group can hold the pipes open, so `close`
+            // may never fire. Stop waiting, or this sender stays blocked.
+            graceTimer = setTimeout(() => {
+                proc.stdout.destroy();
+                proc.stderr.destroy();
+                finish(false);
+            }, KILL_GRACE_MS);
+        }, RUN_TIMEOUT_MS);
     });
 }
 
-/**
- * Extract the last assistant response from gptme stdout.
- * gptme --non-interactive prints tool outputs and responses.
- * We want just the final text response.
- */
-function extractResponse(output) {
-    const lines = output.split('\n');
-    const responseLines = [];
-    let inResponse = false;
-
-    for (const line of lines) {
-        // gptme formats: "assistant: <text>" or just the response text
-        if (line.startsWith('assistant:') || line.startsWith('assistant ')) {
-            inResponse = true;
-            responseLines.push(line.replace(/^assistant:\s*/, '').replace(/^assistant\s+\w+:\s*/, ''));
-        } else if (inResponse && !line.startsWith('user:') && !line.startsWith('system:')) {
-            responseLines.push(line);
-        } else if (line.startsWith('user:') || line.startsWith('system:')) {
-            inResponse = false;
-        }
-    }
-
-    const response = responseLines.join('\n').trim();
-
-    // Fallback: return last non-empty lines if parsing fails
-    if (!response) {
-        const nonEmpty = lines.filter(l => l.trim()).slice(-10).join('\n');
-        return nonEmpty || null;
-    }
-
-    // WhatsApp has a 4096 char limit per message
+/** Fit a reply in one WhatsApp message (4096 char limit). */
+function truncate(response) {
+    if (!response) return null;
     if (response.length > 4000) {
         return response.slice(0, 3990) + '\n... (truncated)';
     }
-
     return response;
 }
 
-// Graceful shutdown
-process.on('SIGTERM', () => {
-    console.log('Shutting down WhatsApp bridge...');
-    client.destroy().then(() => process.exit(0));
-});
-process.on('SIGINT', () => {
-    console.log('Shutting down WhatsApp bridge...');
-    client.destroy().then(() => process.exit(0));
-});
+// Graceful shutdown. Agent runs lead their own process groups, so a terminal's
+// Ctrl-C or hangup no longer reaches them: pass the signal on.
+for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
+    process.on(signal, () => {
+        console.log('Shutting down WhatsApp bridge...');
+        for (const proc of running) signalTree(proc, signal);
+        // Exit even when WhatsApp teardown fails; a hung bridge is worse than a
+        // rejected destroy().
+        client.destroy().then(
+            () => process.exit(0),
+            () => process.exit(0),
+        );
+    });
+}
 
 client.initialize();
