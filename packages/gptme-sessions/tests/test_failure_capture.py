@@ -362,6 +362,7 @@ def test_classify_quota_grok_spending_limit():
     "message",
     [
         "Error code: 403 - Workspace daily budget of $10.00 exceeded.",
+        "Error code: 403 - Workspace daily budget of\n$10.00 exceeded.",
         "Error code: 403 - {'error': {'message': 'Workspace daily budget of\n"
         "$10.00 exceeded.', 'metadata': {'limit_source':\n"
         "'openrouter_workspace_budget'}}}",

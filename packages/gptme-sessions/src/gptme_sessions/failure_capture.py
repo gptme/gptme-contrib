@@ -382,11 +382,11 @@ def _extract_trajectory_error_line(trajectory_path: Path | None) -> str | None:
                 if _record_is_assistant(rec) or is_error_record:
                     content = _record_content_text(rec)
                     for part in (part.strip() for part in content.splitlines()):
-                        if part and (
-                            _ERROR_LINE_RE.search(part)
-                            or _OPENROUTER_WORKSPACE_BUDGET_RE.search(part)
-                        ):
+                        if part and _ERROR_LINE_RE.search(part):
                             last_content_match = part[:500]
+                    budget_match = _OPENROUTER_WORKSPACE_BUDGET_RE.search(content)
+                    if budget_match:
+                        last_content_match = budget_match.group()[:500]
     except OSError:
         return None
     return last_structured_match or last_content_match
