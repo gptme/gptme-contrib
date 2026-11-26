@@ -6,7 +6,6 @@ import hashlib
 import json
 import logging
 import os
-import re
 import sys
 import uuid
 from collections import deque
@@ -60,17 +59,12 @@ def _ensure_trailing_newline(path: Path) -> None:
         os.fsync(f.fileno())
 
 
-#: Exact shape of an id this store derives from a row that had none. The
-#: namespace is reserved: ``noid-`` followed by exactly 12 lowercase hex
-#: characters. Matching the *whole* shape (not just the prefix) keeps a
-#: user-assigned id such as ``noid-abc`` out of the synthetic path, where it
-#: would otherwise lose its timestamp and be aliased on rename (#2338).
-_SYNTHETIC_ID_RE = re.compile(r"noid-[0-9a-f]{12}\Z")
-
-
-def _is_synthetic_id(session_id: object) -> bool:
-    """True for an id this store derived from a row that had none."""
-    return isinstance(session_id, str) and _SYNTHETIC_ID_RE.match(session_id) is not None
+#: Row field this store writes next to a ``session_id`` it derived itself, so
+#: that a reloaded row can be told apart from one whose id a caller assigned.
+#: It is a *marker*, not part of the record model: ``_parse_row`` strips it
+#: before constructing the record, so it never reaches ``_legacy_fields`` or
+#: ``to_dict()`` (#2338).
+_DERIVED_ID_FIELD = "session_id_derived"
 
 
 def _parse_row(line: str) -> SessionRecord:
@@ -98,16 +92,23 @@ def _parse_row(line: str) -> SessionRecord:
     data = json.loads(line)
     session_id = data.get("session_id") if isinstance(data, dict) else None
     has_timestamp = isinstance(data, dict) and bool(data.get("timestamp"))
+    # Strip the store's own marker before the record is built: it is not a
+    # record field, and leaving it in would park it in ``_legacy_fields`` and
+    # re-emit it from ``to_dict()``.
+    id_is_derived = bool(isinstance(data, dict) and data.pop(_DERIVED_ID_FIELD, False))
     record = SessionRecord.from_dict(data)
     if isinstance(data, dict) and not has_timestamp:
         # The "now" timestamp was invented at parse time. Never write it back as
         # if it were recorded data — whatever the row's id shape, and whether or
         # not the derived id has since been persisted (#2338).
         record._store_invented["timestamp"] = record.timestamp
-    if _is_synthetic_id(session_id):
-        # Remember the derived id so a later caller-assigned id is treated as a
-        # rename of this row rather than a second, duplicate row (#2338).
+    if id_is_derived and session_id:
+        # A persisted id this store derived. Unambiguous: only ``_row_json``
+        # writes the marker, so no caller-assigned id can be mistaken for one.
+        # Remember it so a later caller-assigned id is treated as a rename of
+        # this row rather than a second, duplicate row (#2338).
         record._store_invented["session_id"] = record.session_id
+        record._store_invented[_DERIVED_ID_FIELD] = True
     if isinstance(data, dict) and not session_id:
         content = record.to_dict()
         content.pop("session_id", None)
@@ -116,6 +117,7 @@ def _parse_row(line: str) -> SessionRecord:
         digest = _line_digest(json.dumps(content, sort_keys=True, default=str))[:12]
         record.session_id = f"noid-{digest}"
         record._store_invented["session_id"] = record.session_id
+        record._store_invented[_DERIVED_ID_FIELD] = True
         if not has_timestamp:
             record._store_invented["timestamp"] = record.timestamp
     return record
@@ -129,8 +131,10 @@ def _line_digest(line: str) -> str:
 def _row_json(record: SessionRecord) -> str:
     """Serialize a record for the store, omitting a store-invented timestamp.
 
-    The derived ``session_id`` is *kept*: persisting it gives an id-less legacy
-    row a stable identity so later rewrites match it by id (#2338).
+    The derived ``session_id`` is *kept*, together with a
+    ``session_id_derived`` marker: persisting both gives an id-less legacy row a
+    stable identity so later rewrites match it by id, while the marker lets a
+    later read tell a store-derived id apart from one a caller assigned (#2338).
     """
     if not record._store_invented:
         return record.to_json()
@@ -138,6 +142,14 @@ def _row_json(record: SessionRecord) -> str:
     invented_ts = record._store_invented.get("timestamp")
     if invented_ts is not None and d.get("timestamp") == invented_ts:
         d.pop("timestamp", None)
+    # The marker describes *this* id. Once a caller renames the row the id is
+    # theirs, so the marker must not follow it onto disk.
+    if record._store_invented.get(_DERIVED_ID_FIELD) and (
+        d.get("session_id") == record._store_invented.get("session_id")
+    ):
+        d[_DERIVED_ID_FIELD] = True
+    else:
+        d.pop(_DERIVED_ID_FIELD, None)
     return json.dumps(d, default=str)
 
 

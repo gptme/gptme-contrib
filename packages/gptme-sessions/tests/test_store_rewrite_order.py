@@ -220,27 +220,63 @@ def test_rename_of_persisted_synthetic_id_replaces_in_place(tmp_path: Path) -> N
     assert rows[0]["model"] == "opus"
 
 
-def test_user_id_that_merely_starts_with_noid_is_not_synthetic(tmp_path: Path) -> None:
-    """Only ``noid-`` + 12 lowercase hex is the reserved derived-id shape.
+def test_user_id_that_looks_like_a_derived_id_is_not_synthetic(tmp_path: Path) -> None:
+    """A caller-assigned id is never reclassified as store-derived.
 
-    A user-assigned id such as ``noid-abc`` must not be reclassified as
-    store-invented: it keeps its id verbatim and is not aliased on rename.
+    The derived id used to be recognised by its *shape* (``noid-`` + 12 hex),
+    which made a user id that happened to match that shape indistinguishable
+    from ours — it would be aliased on rename and could drop a genuine row.
+    Identity now comes from the marker the store writes itself, so no id shape
+    is reserved (#2338).
     """
     store = SessionStore(sessions_dir=tmp_path)
-    store.path.write_text(
-        json.dumps({"session_id": "noid-abc", "model": "opus"}) + "\n", encoding="utf-8"
-    )
+    for user_id in ("noid-abc", "noid-0123456789ab"):
+        store.path.write_text(
+            json.dumps({"session_id": user_id, "model": "opus"}) + "\n",
+            encoding="utf-8",
+        )
 
-    record = store.load_all()[0]
-    assert record.session_id == "noid-abc"
-    # No rename alias is registered: the id is the caller's, not ours.
-    assert "session_id" not in record._store_invented
+        record = store.load_all()[0]
+        assert record.session_id == user_id
+        # No rename alias is registered: the id is the caller's, not ours.
+        assert "session_id" not in record._store_invented
 
-    store.rewrite([record])
+        store.rewrite([record])
+        rows = [json.loads(line) for line in store.path.read_text(encoding="utf-8").splitlines()]
+        assert [row["session_id"] for row in rows] == [user_id]
+        # The store did not stamp its marker onto a caller's row.
+        assert "session_id_derived" not in rows[0]
+        # A row that had no timestamp on disk still does not gain a fabricated one.
+        assert "timestamp" not in rows[0]
+
+
+def test_derived_id_is_marked_on_disk_and_read_back(tmp_path: Path) -> None:
+    """The persisted derived id carries a marker, and the marker is stripped.
+
+    ``session_id_derived`` is store metadata, not a record field: it must not
+    leak into ``to_dict()``/``_legacy_fields``, and it must not follow a row
+    that the caller renames (#2338).
+    """
+    store = SessionStore(sessions_dir=tmp_path)
+    store.path.write_text(json.dumps({"model": "opus"}) + "\n", encoding="utf-8")
+    store.rewrite(store.load_all())
+
     rows = [json.loads(line) for line in store.path.read_text(encoding="utf-8").splitlines()]
-    assert [row["session_id"] for row in rows] == ["noid-abc"]
-    # A row that had no timestamp on disk still does not gain a fabricated one.
-    assert "timestamp" not in rows[0]
+    assert rows[0]["session_id_derived"] is True
+    assert rows[0]["session_id"].startswith("noid-")
+
+    reloaded = store.load_all()[0]
+    assert reloaded.session_id == rows[0]["session_id"]
+    assert "session_id_derived" not in reloaded.to_dict()
+    assert "_store_invented" not in reloaded.to_dict()
+
+    # Renaming drops the marker: the id on disk is the caller's now.
+    reloaded.session_id = "assigned"
+    store.rewrite([reloaded])
+    rows = [json.loads(line) for line in store.path.read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == 1
+    assert rows[0]["session_id"] == "assigned"
+    assert "session_id_derived" not in rows[0]
 
 
 def test_store_invented_marker_is_never_serialized() -> None:
