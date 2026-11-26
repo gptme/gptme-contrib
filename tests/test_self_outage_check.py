@@ -1400,3 +1400,97 @@ def test_failed_close_is_not_reported_as_recovered(
     assert "Closed issue" not in out.out
     assert "close of #97 failed" in out.err
     assert any(a[:2] == ["issue", "close"] for a in calls)
+
+
+@pytest.mark.parametrize("bad_line", ["[1,2,3]", "null", "42", '"text"', "9" * 5000])
+def test_non_object_jsonl_line_is_skipped(tmp_path: Path, bad_line: str) -> None:
+    records = [rec(40, "productive")] + [
+        rec(h, "failed", "api_error_403") for h in (1, 2, 3, 4)
+    ]
+    write_records(tmp_path, records)
+    rf = cfg_for(tmp_path).records_file
+    with rf.open("a") as f:
+        f.write(bad_line + "\n")
+    status = assess(tmp_path)
+    assert status["outage"] is True
+    assert status["auth_failures_in_window"] == 4
+    assert soc.last_productive_ts(rf, NOW) == NOW - timedelta(hours=40)
+
+
+@pytest.mark.parametrize(
+    "credential",
+    [
+        "bob:s3cr3t@proxy.internal:8080",
+        "https://alice:hunter2pw@example.com/v1",
+        "user:pa@ss@proxy.internal:8080",
+        "http://bob:pa/ss@example.com/x",
+        "https://bob:/hunter2pw@proxy.internal",
+        "https://bob://hunter2pw@proxy.internal",
+        "bob://hunter2pw@proxy.internal",
+        "https://build$:hunter2pw@_proxy.internal",
+        "https://a~b:hunter2pw@bücher.example",
+        "https://ci!:hunter2pw@%41host",
+        "https://x&y:hunter2pw@proxy.internal",
+        "https://(tmp):hunter2pw@proxy.internal",
+        "https://bob:" + "a" * 5000 + "@proxy.internal",
+    ],
+)
+def test_url_embedded_credentials_redacted(tmp_path: Path, credential: str) -> None:
+    records = [rec(40, "productive")]
+    for h in (1, 2, 3, 4):
+        r = rec(h, "failed", "api_error_403")
+        r["error"] = "proxy auth failed for " + credential
+        records.append(r)
+    write_records(tmp_path, records)
+    status = assess(tmp_path)
+    body = soc._issue_body(cfg_for(tmp_path), status)
+    assert "[REDACTED]@" in status["sample_error"]
+    for secret in ("s3cr3t", "hunter2pw", "pa@ss", "pa/ss", "a" * 20):
+        assert secret not in status["sample_error"]
+        assert secret not in body
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "mail bob@example.com",
+        "git@github.com:o/r",
+        "https://registry.npmjs.org/@types/node",
+    ],
+)
+def test_passwordless_userinfo_lookalikes_are_preserved(text: str) -> None:
+    assert soc._redact(text) == text
+
+
+@pytest.mark.parametrize("bad_line", ["[]", "null", "42", '"text"', "9" * 5000])
+def test_last_productive_skips_non_object_records(
+    tmp_path: Path, bad_line: str
+) -> None:
+    write_records(tmp_path, [rec(40, "productive")])
+    rf = cfg_for(tmp_path).records_file
+    with rf.open("a") as f:
+        f.write(bad_line + "\n")
+    assert soc.last_productive_ts(rf, NOW) == NOW - timedelta(hours=40)
+
+
+def test_url_credential_scan_handles_colon_rich_input() -> None:
+    import time
+
+    start = time.process_time()
+    for text in (
+        "a:" * 100_000,
+        "a." * 100_000 + ":",
+        "a:" * 100_000 + "@h",
+        "a://" * 100_000 + "@h",
+        "a." * 100_000 + ":x@h",
+    ):
+        soc._redact(text)
+    assert time.process_time() - start < 2.0
+
+
+@pytest.mark.parametrize("quote", ['"', "'"])
+def test_url_redaction_preserves_quoted_secret_boundaries(quote: str) -> None:
+    text = f"password:{quote}alpha@host beta{quote}"
+    redacted = soc._redact(text)
+    assert "alpha" not in redacted
+    assert "beta" not in redacted

@@ -219,6 +219,39 @@ def _redact_ambiguous_quoted(text: str) -> str:
         pos = close + 1
 
 
+# Proxy errors may contain schemeless user:password@host values, including
+# unescaped @ and / inside the password. Match the last plausible host marker.
+_USERINFO_HOST = re.compile(r"@[^\s@/:?#]")
+
+
+def _redact_url_credential_token(token: str) -> str:
+    at = -1
+    for match in _USERINFO_HOST.finditer(token):
+        at = match.start()
+    if at <= 0:
+        return token
+    colon = token.find(":", 0, at)
+    # Skip a scheme delimiter when another colon separates user/password.
+    # Otherwise the token is ambiguous (bob://password@host versus ssh://git@host):
+    # redact conservatively rather than publish a schemeless password.
+    if colon != -1 and token.startswith("//", colon + 1):
+        user_colon = token.find(":", colon + 3, at)
+        if user_colon != -1:
+            colon = user_colon
+        elif token[:colon].lower() in {"http", "https", "ssh", "git", "ftp", "ftps"}:
+            # Recognized URLs without a user/password separator are not
+            # credentials (including scoped package paths containing @).
+            return token
+    if colon == -1 or colon + 1 == at:
+        return token
+    return token[: colon + 1] + "[REDACTED]" + token[at:]
+
+
+def _redact_url_credentials(text: str) -> str:
+    """Scan whitespace-delimited tokens in linear time, without a password cap."""
+    return re.sub(r"\S+", lambda m: _redact_url_credential_token(m.group(0)), text)
+
+
 def _redact(text: str) -> str:
     """Scrub credential-shaped substrings from text bound for outbound channels.
 
@@ -236,7 +269,8 @@ def _redact(text: str) -> str:
             text = pat.sub(lambda m: m.group(1) + "[REDACTED]", text)
         else:
             text = pat.sub("[REDACTED]", text)
-    return text
+    # Preserve quoted assignment boundaries until their whole value is scrubbed.
+    return _redact_url_credentials(text)
 
 
 _STATUS_KEYS = frozenset({"code", "status", "status_code", "statuscode", "http_status"})
@@ -408,7 +442,10 @@ def load_records(records_file: Path, window_hours: float, now: datetime) -> list
                 continue
             try:
                 rec = json.loads(line)
-            except (json.JSONDecodeError, RecursionError):
+            except (ValueError, RecursionError):
+                # ValueError also covers integers beyond Python's digit limit.
+                continue
+            if not isinstance(rec, dict):
                 continue
             ts = _parse_ts(rec.get("timestamp", ""))
             if ts is None or ts < cutoff or ts > now:
@@ -429,7 +466,10 @@ def last_productive_ts(records_file: Path, now: datetime) -> datetime | None:
                 continue
             try:
                 rec = json.loads(line)
-            except (json.JSONDecodeError, RecursionError):
+            except (ValueError, RecursionError):
+                # ValueError also covers integers beyond Python's digit limit.
+                continue
+            if not isinstance(rec, dict):
                 continue
             if rec.get("outcome") != "productive":
                 continue
