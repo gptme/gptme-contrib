@@ -2612,6 +2612,18 @@ def is_allowed_file(
     )
 
 
+_AW_BUNDLE_REPO = "activitywatch/activitywatch"
+
+
+def activitywatch_self_merge_repo(repo: str) -> bool:
+    """True for ActivityWatch component repos that may use the small-fix tier.
+
+    The bundle/release repo stays out: most of its diffs are release work.
+    """
+    lowered = repo.lower()
+    return lowered.startswith("activitywatch/") and lowered != _AW_BUNDLE_REPO
+
+
 def classify_category(
     paths: list[str], repo: str | None = None
 ) -> tuple[str | None, list[str]]:
@@ -4087,16 +4099,22 @@ def path_classifier() -> merge_policy.PathClassifier:
 
 
 def merge_policy_tier_waiver(
-    reasons: list[str], *, repo: str, number: int, files: list[str]
+    reasons: list[str],
+    *,
+    repo: str,
+    number: int,
+    files: list[str],
+    title: str | None = None,
 ) -> tuple[list[str], str | None, dict[str, Any] | None]:
-    """Drop path/category refusals for a tier-0 PR in a policy rollout repo.
+    """Drop path/category refusals for a self_merge tier in a rollout repo.
 
     gptme_contrib_lib/merge_policy.toml is the shared, Erik-approved tier definition
-    (ErikBjare/bob#1480 row 7). Tier 0 only replaces the path/category
-    policy; CI, review, thread and author gates are untouched. Outside
-    ``[rollout].repos`` nothing is fetched and nothing is waived. Returns the
-    remaining reasons, a warning (naming the waiver, or saying the policy could
-    not be loaded), and the tier verdict (None when nothing was evaluated).
+    (ErikBjare/bob#1480 row 7; ActivityWatch small-fix 2026-11-24). A self_merge
+    tier replaces the path/category policy; CI, review, thread and author gates
+    are untouched. Outside ``[rollout].repos`` nothing is fetched and nothing is
+    waived. Returns the remaining reasons, a warning (naming the waiver, or
+    saying the policy could not be loaded), and the tier verdict (None when
+    nothing was evaluated).
     """
     try:
         policy = merge_policy.load_policy()
@@ -4114,11 +4132,13 @@ def merge_policy_tier_waiver(
     changes = fetch_pr_file_changes(repo, number)
     if changes is None or {c.path for c in changes} != set(files):
         return reasons, None, None
-    verdict = merge_policy.assign_tier(changes, policy, path_classifier())
-    if verdict.tier != 0 or not reasons:
+    verdict = merge_policy.assign_tier(
+        changes, policy, path_classifier(), repo=repo, title=title
+    )
+    if not merge_policy.tier_self_merges(policy, verdict.tier) or not reasons:
         return reasons, None, verdict.as_dict()
     warning = (
-        f"Path/category policy waived: merge-policy tier 0 "
+        f"Path/category policy waived: merge-policy tier {verdict.tier} "
         f"({verdict.counted_lines} counted lines, {verdict.counted_files} counted "
         f"files; {len(reasons)} reason(s) overridden, gptme_contrib_lib/merge_policy.toml)"
     )
@@ -4635,16 +4655,31 @@ def evaluate_pr(
         category, category_reasons = classify_category(files, repo=repo)
         result.category = category
 
-    # ErikBjare/bob#1480: a tier-0 PR in a rollout repo of gptme_contrib_lib/merge_policy.toml
-    # needs no category. Evaluated before operator approval so the tier is
-    # recorded even when Erik also approved the head.
+    # ActivityWatch: generic classify_category over-grants (root scripts/ is
+    # packaging, lockfiles are dependency moves). Convert a successful category
+    # into a reason so only a self_merge merge-policy tier can waive it.
+    # Sensitive/bot-config/spec-doc refusals already in category_reasons stay.
+    if (
+        activitywatch_self_merge_repo(repo)
+        and result.category is not None
+        and not category_reasons
+    ):
+        result.category = None
+        category_reasons = [
+            "ActivityWatch PRs self-merge only through the merge-policy tier"
+        ]
+
+    # ErikBjare/bob#1480: a self_merge tier in a rollout repo of
+    # gptme_contrib_lib/merge_policy.toml needs no category. Evaluated before
+    # operator approval so the tier is recorded even when Erik also approved
+    # the head.
     category_reasons, tier_waiver, result.merge_tier = merge_policy_tier_waiver(
-        category_reasons, repo=repo, number=number, files=files
+        category_reasons, repo=repo, number=number, files=files, title=title
     )
     if tier_waiver is not None:
         result.warnings.append(tier_waiver)
         if result.merge_tier is not None:  # a waiver, not an unavailable policy
-            result.category = "merge-policy-tier-0"
+            result.category = f"merge-policy-tier-{result.merge_tier.get('tier', 0)}"
 
     # ErikBjare/bob#1471 phase 2/3: an operator approval of the head, or of an
     # earlier commit followed only by small review fixes, overrides

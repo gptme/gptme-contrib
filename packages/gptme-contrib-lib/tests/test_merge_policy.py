@@ -40,12 +40,14 @@ def tier(changes: list[FileChange], policy: dict) -> merge_policy.TierVerdict:
     return merge_policy.assign_tier(changes, policy, C)
 
 
-def test_shipped_policy_is_tier0_plus_catch_all_with_empty_rollout(policy) -> None:
-    assert [t["id"] for t in policy["tier"]] == [0, 2]
+def test_shipped_policy_is_tier0_aw_small_fix_and_catch_all(policy) -> None:
+    assert [t["id"] for t in policy["tier"]] == [0, 1, 2]
     assert policy["tier"][0]["classes"] == ["docs", "tests"]
+    assert policy["tier"][0]["self_merge"] is True
+    assert policy["tier"][1]["name"] == "ActivityWatch small fix"
     assert policy["size_exempt_classes"] == ["tests", "lockfile"]
-    # Rollout waits on Erik's merge-rights grant; he adds repos himself.
-    assert merge_policy.rollout_repos(policy) == frozenset()
+    assert "ActivityWatch/aw-webui" in merge_policy.rollout_repos(policy)
+    assert "ActivityWatch/activitywatch" not in merge_policy.rollout_repos(policy)
 
 
 def test_docs_and_tests_are_tier0(policy) -> None:
@@ -178,3 +180,129 @@ def test_default_loader_rejects_missing_trusted_revision(monkeypatch) -> None:
     monkeypatch.setattr(subprocess, "run", missing)
     with pytest.raises(ValueError, match="trusted merge policy unavailable"):
         merge_policy.load_policy()
+
+
+GITLINK_PATCH = (
+    "@@ -1 +1 @@\n"
+    "-Subproject commit 0123456789abcdef0123456789abcdef01234567\n"
+    "+Subproject commit 89abcdef0123456789abcdef0123456789abcdef\n"
+)
+
+
+def test_gitlink_patch_is_gitlink_class(policy) -> None:
+    v = tier([FileChange("aw-server", 1, 1, GITLINK_PATCH)], policy)
+    assert v.classes == {"aw-server": "gitlink"}
+    assert v.tier == 2
+
+
+def test_hold_glob_star_does_not_cross_slash() -> None:
+    assert merge_policy.hold_glob_match("scripts/package.sh", "scripts/*")
+    assert not merge_policy.hold_glob_match("scripts/pkg/foo.sh", "scripts/*")
+    assert merge_policy.hold_glob_match("scripts/pkg/foo.sh", "scripts/**")
+    assert merge_policy.hold_glob_match("src/datastore/x.py", "**/*datastore*/**")
+    assert merge_policy.hold_glob_match("Cargo.toml", "**/Cargo.toml")
+    assert merge_policy.hold_glob_match("foo/Cargo.toml", "**/Cargo.toml")
+    assert merge_policy.hold_glob_match("schema.json", "**/schema*")
+    assert not merge_policy.hold_glob_match("src/app.py", "scripts/**")
+
+
+def test_conventional_title_type_rejects_feat_and_breaking() -> None:
+    assert merge_policy.conventional_title_type("fix: a") == "fix"
+    assert merge_policy.conventional_title_type("fix(webui): a") == "fix"
+    assert merge_policy.conventional_title_type("docs: a") == "docs"
+    assert merge_policy.conventional_title_type("feat: a") == "feat"
+    assert merge_policy.conventional_title_type("fix!: a") is None
+    assert merge_policy.conventional_title_type("fix(api)!: a") is None
+    assert merge_policy.conventional_title_type("") is None
+
+
+def test_aw_small_fix_120_line_src_is_tier1(policy) -> None:
+    v = merge_policy.assign_tier(
+        [FileChange("src/app.py", 120)],
+        policy,
+        C,
+        repo="ActivityWatch/aw-webui",
+        title="fix: stop double-save on blur",
+    )
+    assert v.tier == 1
+    assert merge_policy.tier_self_merges(policy, v.tier)
+
+
+@pytest.mark.parametrize(
+    "title",
+    ["feat: new inspector", "fix!: breaking save path"],
+)
+def test_aw_small_fix_rejects_feat_and_breaking(policy, title: str) -> None:
+    v = merge_policy.assign_tier(
+        [FileChange("src/app.py", 10)],
+        policy,
+        C,
+        repo="ActivityWatch/aw-webui",
+        title=title,
+    )
+    assert v.tier == 2
+    assert "title type" in v.misses[1]
+
+
+def test_aw_small_fix_counts_tests_toward_size(policy) -> None:
+    v = merge_policy.assign_tier(
+        [FileChange("src/app.py", 1), FileChange("tests/t.py", 300)],
+        policy,
+        C,
+        repo="ActivityWatch/aw-webui",
+        title="fix: a",
+    )
+    assert v.tier == 2
+    assert "301 counted lines > 300" in v.misses[1]
+
+
+def test_aw_small_fix_holds_scripts_lockfile_migration_gitlink(policy) -> None:
+    repo = "ActivityWatch/aw-webui"
+    title = "fix: a"
+    scripts = merge_policy.assign_tier(
+        [FileChange("scripts/package/build.sh", 10)],
+        policy,
+        C,
+        repo=repo,
+        title=title,
+    )
+    assert scripts.tier == 2
+    assert "hold glob:" in scripts.misses[1]
+    lock = merge_policy.assign_tier(
+        [FileChange("uv.lock", 20)],
+        policy,
+        C,
+        repo=repo,
+        title=title,
+    )
+    assert lock.tier == 2
+    assert "lockfile" in lock.misses[1]
+    migration = merge_policy.assign_tier(
+        [FileChange("aw-server/migrations/001.sql", 8)],
+        policy,
+        C,
+        repo=repo,
+        title=title,
+    )
+    assert migration.tier == 2
+    gitlink = merge_policy.assign_tier(
+        [FileChange("aw-server", 1, 1, GITLINK_PATCH)],
+        policy,
+        C,
+        repo=repo,
+        title=title,
+    )
+    assert gitlink.tier == 2
+    assert gitlink.classes["aw-server"] == "gitlink"
+
+
+def test_aw_small_fix_ignores_repo_outside_tier_list(policy) -> None:
+    v = merge_policy.assign_tier(
+        [FileChange("src/app.py", 10)],
+        policy,
+        C,
+        repo="ActivityWatch/activitywatch",
+        title="fix: a",
+    )
+    assert v.tier == 2
+    assert v.misses[1] == "repo not in tier"

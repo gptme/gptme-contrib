@@ -10,10 +10,14 @@ Stdlib only (tomli on 3.10): the gate imports this from a plain script.
 
 from __future__ import annotations
 
+import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
+
+_GITLINK_LINE = re.compile(r"[+-]Subproject commit [0-9a-f]{40}\s*$")
+_TITLE_TYPE_RE = re.compile(r"^([A-Za-z]+)(?:\([^)]*\))?(!)?:\s+\S")
 
 try:
     import tomllib
@@ -106,6 +110,76 @@ def rollout_repos(policy: dict[str, Any]) -> frozenset[str]:
     return frozenset((policy.get("rollout") or {}).get("repos") or [])
 
 
+def is_gitlink_patch(patch: str | None) -> bool:
+    """True when the GitHub files-API patch is only a submodule pointer bump."""
+    if not patch:
+        return False
+    body = [
+        line
+        for line in patch.splitlines()
+        if line.startswith(("+", "-")) and not line.startswith(("+++", "---"))
+    ]
+    return bool(body) and all(_GITLINK_LINE.fullmatch(line) for line in body)
+
+
+def hold_glob_match(path: str, pattern: str) -> bool:
+    """Match a repo-relative path. ``*`` does not cross ``/``; ``**`` does.
+
+    ``**/`` as a prefix matches at any directory depth, including the root.
+    A trailing ``/**`` matches the directory and every descendant.
+    """
+    path = path.replace("\\", "/").removeprefix("./")
+    pattern = pattern.replace("\\", "/")
+    if not path or not pattern:
+        return False
+    out: list[str] = ["^"]
+    i = 0
+    n = len(pattern)
+    while i < n:
+        if pattern.startswith("**", i):
+            i += 2
+            if i < n and pattern[i] == "/":
+                i += 1
+                out.append("(?:.*/)?")
+            else:
+                out.append(".*")
+            continue
+        ch = pattern[i]
+        if ch == "*":
+            out.append("[^/]*")
+        elif ch == "?":
+            out.append("[^/]")
+        else:
+            out.append(re.escape(ch))
+        i += 1
+    out.append("$")
+    return re.match("".join(out), path) is not None
+
+
+def conventional_title_type(title: str | None) -> str | None:
+    """Return the conventional-commit type, or None if missing or breaking (``!``)."""
+    if not title:
+        return None
+    match = _TITLE_TYPE_RE.match(title.strip())
+    if match is None or match.group(2):
+        return None
+    return match.group(1).lower()
+
+
+def tier_self_merges(policy: dict[str, Any], tier_id: int) -> bool:
+    """Whether a matched tier waives path/category policy in a rollout repo.
+
+    Explicit ``self_merge`` wins. Absent that key, only tier 0 waives (the
+    original 2026-11-15 grant).
+    """
+    for tier in policy.get("tier") or []:
+        if tier.get("id") == tier_id:
+            if "self_merge" in tier:
+                return bool(tier["self_merge"])
+            return tier_id == 0
+    return False
+
+
 def file_class(
     change: FileChange, policy: dict[str, Any], classifier: PathClassifier
 ) -> str:
@@ -115,6 +189,8 @@ def file_class(
         # Diff fragments cannot prove YAML parent keys, aliases, permissions or
         # event safety. Until full base/head YAML is verified, no workflow waiver.
         return "ci-other"
+    if is_gitlink_patch(change.patch):
+        return "gitlink"
     if classifier.is_sensitive_path(path):
         return "sensitive"
     if classifier.is_lockfile(path):
@@ -127,16 +203,27 @@ def file_class(
 
 
 def assign_tier(
-    changes: list[FileChange], policy: dict[str, Any], classifier: PathClassifier
+    changes: list[FileChange],
+    policy: dict[str, Any],
+    classifier: PathClassifier,
+    *,
+    repo: str | None = None,
+    title: str | None = None,
 ) -> TierVerdict:
     classes = {c.path: file_class(c, policy, classifier) for c in changes}
-    exempt = set(policy.get("size_exempt_classes") or [])
-    counted = [c for c in changes if classes[c.path] not in exempt]
-    lines = sum(c.additions + c.deletions for c in counted)
+    global_exempt = set(policy.get("size_exempt_classes") or [])
     present = set(classes.values())
+    title_type = conventional_title_type(title)
     misses: dict[int, str] = {}
     for tier in policy["tier"]:
         allowed = set(tier["classes"])
+        exempt = (
+            set(tier.get("size_exempt_classes") or [])
+            if "size_exempt_classes" in tier
+            else global_exempt
+        )
+        counted = [c for c in changes if classes[c.path] not in exempt]
+        lines = sum(c.additions + c.deletions for c in counted)
         miss = None
         if "*" not in allowed:
             if not changes:
@@ -147,6 +234,23 @@ def assign_tier(
                 miss = f"{lines} counted lines > {tier['max_lines']}"
             elif len(counted) > tier.get("max_files", 10**9):
                 miss = f"{len(counted)} counted files > {tier['max_files']}"
+            elif (scoped := tier.get("repos")) is not None and (
+                repo is None or repo.lower() not in {r.lower() for r in scoped}
+            ):
+                miss = "repo not in tier"
+            elif (types := tier.get("title_types")) is not None and (
+                title_type is None or title_type not in {t.lower() for t in types}
+            ):
+                miss = f"title type {title_type or 'missing'} not in tier"
+            else:
+                held = [
+                    change.path
+                    for change in changes
+                    for glob in (tier.get("hold_globs") or [])
+                    if hold_glob_match(change.path, glob)
+                ]
+                if held:
+                    miss = f"hold glob: {held[0]}"
         if miss:
             misses[tier["id"]] = miss
             continue

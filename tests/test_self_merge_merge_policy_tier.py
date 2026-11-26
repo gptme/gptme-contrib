@@ -59,7 +59,7 @@ def _policy_with_rollout(*repos: str) -> dict:
 def test_outside_rollout_nothing_is_fetched_or_waived() -> None:
     with patch.object(smc, "fetch_pr_file_changes") as fetch:
         remaining, warning, verdict = smc.merge_policy_tier_waiver(
-            [CATEGORY], repo=REPO, number=1, files=["docs/a.md"]
+            [CATEGORY], repo="gptme/gptme", number=1, files=["docs/a.md"]
         )
     assert (remaining, warning, verdict) == ([CATEGORY], None, None)
     fetch.assert_not_called()
@@ -150,8 +150,8 @@ def test_scanner_cli_stdin_json(capsys) -> None:
         assert cli.main(["tier", "--stdin", "--json"]) == 0
     rows = json.loads(capsys.readouterr().out)
     assert [(r["number"], r["tier"], r["rollout"]) for r in rows] == [
-        (7, 0, False),
-        (8, 2, False),
+        (7, 0, True),
+        (8, 2, True),
     ]
 
 

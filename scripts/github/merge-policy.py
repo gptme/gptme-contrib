@@ -25,6 +25,7 @@ import argparse
 import importlib.util
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -45,6 +46,32 @@ def _gate_module() -> Any:
     sys.modules.setdefault(spec.name, mod)  # dataclasses resolve via sys.modules
     spec.loader.exec_module(mod)
     return mod
+
+
+def _pr_title(repo: str, number: int) -> str | None:
+    try:
+        proc = subprocess.run(
+            [
+                "gh",
+                "pr",
+                "view",
+                str(number),
+                "--repo",
+                repo,
+                "--json",
+                "title",
+                "--jq",
+                ".title",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.strip() or None
 
 
 def _changes(files: list[dict[str, Any]]) -> list[merge_policy.FileChange]:
@@ -77,7 +104,7 @@ def main(argv: list[str] | None = None) -> int:
     rollout = merge_policy.rollout_repos(policy)
     classifier = gate.path_classifier()
 
-    jobs: list[tuple[str, int, list[merge_policy.FileChange] | None]] = []
+    jobs: list[tuple[str, int, list[merge_policy.FileChange] | None, str | None]] = []
     if args.stdin:
         for item in json.load(sys.stdin):
             supplied = _changes(item.get("files") or [])
@@ -87,8 +114,14 @@ def main(argv: list[str] | None = None) -> int:
                 and total == len(supplied)
                 and len({c.path for c in supplied if c.path}) == total
             )
+            title = item.get("title")
             jobs.append(
-                (item["repo"], int(item["number"]), supplied if complete else None)
+                (
+                    item["repo"],
+                    int(item["number"]),
+                    supplied if complete else None,
+                    title if isinstance(title, str) else None,
+                )
             )
     for ref in args.refs:
         m = _REF_RE.match(ref)
@@ -96,19 +129,30 @@ def main(argv: list[str] | None = None) -> int:
             print(f"bad ref {ref!r}; expected OWNER/REPO#N", file=sys.stderr)
             return 2
         repo, number = m.group(1), int(m.group(2))
-        jobs.append((repo, number, gate.fetch_pr_file_changes(repo, number)))
+        jobs.append(
+            (
+                repo,
+                number,
+                gate.fetch_pr_file_changes(repo, number),
+                _pr_title(repo, number),
+            )
+        )
     if not jobs:
         ap.error("give PR refs or --stdin")
 
     out: list[dict[str, Any]] = []
     failed = False
-    for repo, number, changes in jobs:
+    for repo, number, changes, title in jobs:
         row: dict[str, Any] = {"repo": repo, "number": number}
         if changes is None:
             row["error"] = "could not establish complete PR file inventory"
             failed = True
         else:
-            row.update(merge_policy.assign_tier(changes, policy, classifier).as_dict())
+            row.update(
+                merge_policy.assign_tier(
+                    changes, policy, classifier, repo=repo, title=title
+                ).as_dict()
+            )
             row["rollout"] = repo in rollout
         out.append(row)
 

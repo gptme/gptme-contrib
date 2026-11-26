@@ -14,12 +14,16 @@
 # A PR's tier is the LOWEST tier whose every constraint it meets.
 # File classes (per changed path, first match wins):
 #   ci-other   every .github/ path; diff fragments cannot establish YAML safety
+#   gitlink    submodule pointer (patch is only Subproject commit lines)
 #   sensitive  is_sensitive_path()
 #   lockfile   is_lockfile()
 #   tests      is_test_file()
 #   spec-doc   repo-root README/ARCHITECTURE/CLAUDE/... (is_spec_like_doc)
 #   docs       other doc files (is_doc_file)
 #   code       everything else
+#
+# Optional per-tier keys (absent = today's behaviour):
+#   repos, title_types, hold_globs, size_exempt_classes, self_merge
 
 # CI is deliberately NOT in tier 0 yet. Permissions can change under an
 # unchanged parent key (and YAML aliases/quoted keys evade token scans).
@@ -31,10 +35,24 @@
 size_exempt_classes = ["tests", "lockfile"]
 
 [rollout]
-# Repos where a tier-0 verdict lets the self-merge gate waive its path/category
-# policy. Empty until Erik grants merge rights for a repo; he adds the repo here
-# himself. Outside this list the tier is reported, never acted on.
-repos = []
+# Repos where a self_merge tier lets the gate waive path/category policy.
+# Outside this list the tier is reported, never acted on.
+# ActivityWatch grant: Erik 2026-11-24 (align-self-merge-gate-with-erik-merge-rules
+# item 8). The bundle/release repo ActivityWatch/activitywatch stays out.
+repos = [
+  "ActivityWatch/aw-webui",
+  "ActivityWatch/aw-server-rust",
+  "ActivityWatch/aw-core",
+  "ActivityWatch/aw-client",
+  "ActivityWatch/aw-server",
+  "ActivityWatch/aw-android",
+  "ActivityWatch/aw-qt",
+  "ActivityWatch/aw-tauri",
+  "ActivityWatch/aw-watcher-web",
+  "ActivityWatch/aw-watcher-window",
+  "ActivityWatch/aw-watcher-afk",
+  "ActivityWatch/aw-client-js",
+]
 
 [[tier]]
 id = 0
@@ -43,6 +61,46 @@ action = "self-merge once CI is green on the head (review gates still apply)"
 classes = ["docs", "tests"]
 max_lines = 300
 max_files = 10
+self_merge = true
+
+[[tier]]
+id = 1
+name = "ActivityWatch small fix"
+action = "self-merge on a clean review at head, green CI, no open threads"
+repos = [
+  "ActivityWatch/aw-webui",
+  "ActivityWatch/aw-server-rust",
+  "ActivityWatch/aw-core",
+  "ActivityWatch/aw-client",
+  "ActivityWatch/aw-server",
+  "ActivityWatch/aw-android",
+  "ActivityWatch/aw-qt",
+  "ActivityWatch/aw-tauri",
+  "ActivityWatch/aw-watcher-web",
+  "ActivityWatch/aw-watcher-window",
+  "ActivityWatch/aw-watcher-afk",
+  "ActivityWatch/aw-client-js",
+]
+classes = ["code", "tests", "docs"]
+title_types = ["fix", "test", "docs"]
+size_exempt_classes = []
+max_lines = 300
+self_merge = true
+hold_globs = [
+  "**/migrations/**",
+  "**/*datastore*/**",
+  "**/aw-sync/**",
+  "**/schema*",
+  "**/Cargo.toml",
+  "**/pyproject.toml",
+  "**/package.json",
+  "**/setup.py",
+  "**/build.rs",
+  "**/Makefile",
+  "**/*.spec",
+  "**/version*",
+  "scripts/**",
+]
 
 [[tier]]
 id = 2
