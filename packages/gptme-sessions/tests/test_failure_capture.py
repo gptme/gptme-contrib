@@ -358,6 +358,35 @@ def test_classify_quota_grok_spending_limit():
     assert result == FAILURE_REASON_QUOTA
 
 
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Error code: 403 - Workspace daily budget of $10.00 exceeded.",
+        "Error code: 403 - {'error': {'message': 'Workspace daily budget of\n"
+        "$10.00 exceeded.', 'metadata': {'limit_source':\n"
+        "'openrouter_workspace_budget'}}}",
+    ],
+)
+def test_capture_openrouter_workspace_budget_as_quota(tmp_path: Path, message: str):
+    stderr = tmp_path / "stderr.log"
+    stderr.write_text(message, encoding="utf-8")
+    for trajectory, stderr_path in ((None, stderr), (tmp_path / "chat.jsonl", None)):
+        if trajectory:
+            trajectory.write_text(
+                json.dumps({"role": "system", "content": message, "metadata": {"error": True}})
+                + "\n",
+                encoding="utf-8",
+            )
+        reason, _ = capture_session_failure(
+            exit_code=76,
+            duration_seconds=360,
+            input_tokens=0,
+            trajectory_path=trajectory,
+            harness_stderr_path=stderr_path,
+        )
+        assert reason == FAILURE_REASON_QUOTA
+
+
 def test_classify_quota_insufficient_quota():
     """OpenAI-style 429 insufficient_quota → FAILURE_REASON_QUOTA, not rate_limit.
 

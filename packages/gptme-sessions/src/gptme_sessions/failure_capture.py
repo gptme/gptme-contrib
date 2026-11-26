@@ -52,6 +52,11 @@ _HTTP_429_RE = re.compile(
 # "Auto-generated conversation name" plus any `gh ... --limit 200` echo would
 # satisfy `"rate" in lower and "limit" in lower` on every nonzero exit.
 _RATE_LIMIT_PHRASE_RE = re.compile(r"rate[\s_-]?limit|too many requests", re.IGNORECASE)
+_OPENROUTER_WORKSPACE_BUDGET_RE = re.compile(
+    r"\b(?:openrouter_workspace_budget|workspace\s+daily\s+budget\s+of"
+    r"\s+\$\d+(?:\.\d+)?\s+exceeded)\b",
+    re.IGNORECASE,
+)
 
 
 # HTTP/API 402 as a status. Require a delimiter (`status: 402`, `status=402`)
@@ -377,7 +382,10 @@ def _extract_trajectory_error_line(trajectory_path: Path | None) -> str | None:
                 if _record_is_assistant(rec) or is_error_record:
                     content = _record_content_text(rec)
                     for part in (part.strip() for part in content.splitlines()):
-                        if part and _ERROR_LINE_RE.search(part):
+                        if part and (
+                            _ERROR_LINE_RE.search(part)
+                            or _OPENROUTER_WORKSPACE_BUDGET_RE.search(part)
+                        ):
                             last_content_match = part[:500]
     except OSError:
         return None
@@ -418,6 +426,7 @@ def classify_failure_reason(
         # that cannot describe an auth failure belong here.
         if (
             _mentions_http_402(error_text)
+            or _OPENROUTER_WORKSPACE_BUDGET_RE.search(error_text)
             or "spending-limit" in lower
             or "spending_limit" in lower
             or "run out of credits" in lower
