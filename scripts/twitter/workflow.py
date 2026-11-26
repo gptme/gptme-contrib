@@ -291,6 +291,7 @@ class TweetDraft:
         quote_tweet_id: str | None = None,
         posted_id: str | None = None,
         posted_at: datetime | None = None,
+        parked_at: datetime | None = None,
     ):
         self.text = text
         self.type = type  # tweet, reply, thread, quote
@@ -307,6 +308,10 @@ class TweetDraft:
         self.quote_tweet_id = quote_tweet_id  # id of the tweet this draft quotes
         self.posted_id = posted_id  # id returned by create_tweet, set on posting
         self.posted_at = posted_at  # when the post succeeded
+        # When the draft entered review/. Stamped by save_draft()/move_draft(),
+        # so the review expiry clock does not depend on file mtime, which any
+        # touch/copy/restore resets.
+        self.parked_at = parked_at
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for storage"""
@@ -339,6 +344,8 @@ class TweetDraft:
             result["posted_id"] = self.posted_id
         if self.posted_at:
             result["posted_at"] = self.posted_at.isoformat()
+        if self.parked_at:
+            result["parked_at"] = self.parked_at.isoformat()
         return result
 
     @classmethod
@@ -391,6 +398,11 @@ class TweetDraft:
                 datetime.fromisoformat(data["posted_at"])
                 if isinstance(data.get("posted_at"), str) and data["posted_at"]
                 else data.get("posted_at") or None
+            ),
+            parked_at=(
+                datetime.fromisoformat(data["parked_at"])
+                if isinstance(data.get("parked_at"), str) and data["parked_at"]
+                else data.get("parked_at") or None
             ),
         )
         created_at = data.get("created_at", data.get("created"))
@@ -502,6 +514,9 @@ def save_draft(draft: TweetDraft, status: str = "new") -> Path:
     if draft.thread:
         draft.thread = [public_safe(t) for t in draft.thread]
 
+    if status == "review":
+        # Stamp the parking time in the draft itself; mtime is only a fallback.
+        draft.parked_at = datetime.now()
     path = status_dirs[status] / generate_draft_name(draft)
     draft.save(path)
     return path
@@ -779,12 +794,115 @@ def move_draft(path: Path, new_status: str) -> Path:
 
     # Load and save to ensure any updates are persisted
     draft = TweetDraft.load(path)
+    if new_status == "review":
+        # Entering review/ restarts the expiry clock, and the stamp lives in the
+        # draft so a later touch/copy of the file cannot reset it.
+        draft.parked_at = datetime.now()
     draft.save(new_path)
 
     # Remove the original file
     path.unlink()
 
     return new_path
+
+
+# Drafts that miss the 3/3 auto-approve bar wait in review/ for a human. Nothing
+# else revisits them, so without an expiry a 2/3 draft (including a reply to a
+# real question) sits there silently forever. Expire them with a reason so they
+# become a visible, countable rejection instead of an unlabelled graveyard.
+DEFAULT_REVIEW_EXPIRY_DAYS = 7
+
+
+def _naive_local(value: datetime) -> datetime:
+    """Drop timezone info after converting to local time, so datetimes compare."""
+    if value.tzinfo is None:
+        return value
+    return value.astimezone().replace(tzinfo=None)
+
+
+def _parked_at(path: Path, draft: TweetDraft) -> datetime:
+    """When the draft was written into review/, as a naive local datetime.
+
+    Age is measured from the parking time, not from ``created_at``: a draft
+    requeued to new/ (e.g. by the writing-style gate) keeps its creation time,
+    so a created_at-based age would expire it the same cycle it re-enters
+    review/, before a human sees it.
+
+    The stamp is recorded in the draft by ``save_draft(..., "review")`` and
+    ``move_draft(..., "review")``. File mtime is only the fallback for drafts
+    written before that field existed: any touch, copy or restore rewrites it,
+    so it cannot be the primary clock.
+    """
+    if draft.parked_at is not None:
+        return _naive_local(draft.parked_at)
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime)
+    except OSError:
+        return _naive_local(draft.created_at)
+
+
+def expire_review_drafts(
+    max_age_days: int = DEFAULT_REVIEW_EXPIRY_DAYS,
+    dry_run: bool = False,
+    now: datetime | None = None,
+) -> tuple[int, int]:
+    """Move review/ drafts older than ``max_age_days`` to rejected/.
+
+    Returns ``(expired, remaining)``. A non-positive ``max_age_days`` disables
+    expiry. Age is measured from when the draft was parked in review/.
+    """
+    now = _naive_local(now or datetime.now())
+    expired = 0
+    remaining = 0
+    for path in list_drafts("review"):
+        # One broken or unwritable draft must not stop auto() from reviewing and
+        # posting everything else, so each draft fails on its own.
+        try:
+            draft = TweetDraft.load(path)
+            age_days = (now - _parked_at(path, draft)).total_seconds() / 86400
+            if max_age_days <= 0 or age_days < max_age_days:
+                remaining += 1
+                continue
+            score = (
+                "unscored"
+                if draft.quality_score is None
+                else f"quality_score {draft.quality_score}/3"
+            )
+            reason = (
+                f"Expired: {score}, parked in review/ {age_days:.0f}d "
+                f"(limit {max_age_days}d) with no human disposition"
+            )
+            if dry_run:
+                console.print(f"[yellow]Would expire {path.name}: {reason}")
+                # Count it as remaining too: nothing moved, so review/ still
+                # holds it and the summary must not under-report the backlog.
+                expired += 1
+                remaining += 1
+                continue
+            # Move first, then stamp the reason on the moved copy: a failed move
+            # must leave the review/ file (and its mtime) untouched so the next
+            # cycle retries instead of restarting the clock.
+            moved = move_draft(path, "rejected")
+            # The draft has left review/ now, so it counts as expired even if
+            # stamping the reason fails. Counting it as still parked would hide
+            # it from the summary forever: nothing revisits rejected/.
+            expired += 1
+            try:
+                moved_draft = TweetDraft.load(moved)
+                moved_draft.reject_reason = reason
+                moved_draft.save(moved)
+                console.print(
+                    f"[yellow]Expired {path.name} -> {moved.parent.name}/: {reason}"
+                )
+            except Exception as e:
+                console.print(
+                    f"[red]Expired {path.name} -> {moved.parent.name}/ but could "
+                    f"not record the reason: {e}"
+                )
+        except Exception as e:
+            console.print(f"[red]Could not expire review draft {path.name}: {e}")
+            remaining += 1
+    return expired, remaining
 
 
 def _mark_posted(draft: TweetDraft, path: Path, tweet_id: str) -> Path:
@@ -2960,6 +3078,28 @@ def auto(
 
     # Step 2: Review drafts
     console.print("\n[bold]Step 2: Reviewing drafts[/bold]")
+    # Read at run time: cli() loads .env after this module is imported. A
+    # non-integer value must not abort the whole cycle (new drafts unreviewed,
+    # approved drafts unposted), so fall back to the default instead.
+    raw_expiry = os.environ.get(
+        "TWITTER_REVIEW_EXPIRY_DAYS", str(DEFAULT_REVIEW_EXPIRY_DAYS)
+    )
+    try:
+        expiry_days = int(raw_expiry)
+    except ValueError:
+        console.print(
+            f"[red]Invalid TWITTER_REVIEW_EXPIRY_DAYS={raw_expiry!r}, "
+            f"using {DEFAULT_REVIEW_EXPIRY_DAYS}d"
+        )
+        expiry_days = DEFAULT_REVIEW_EXPIRY_DAYS
+    expired, parked = expire_review_drafts(expiry_days, dry_run=dry_run)
+    # A dry run moves nothing, so say what would have happened rather than
+    # reporting drafts it did not expire.
+    verb = "would expire" if dry_run else "expired"
+    console.print(
+        f"Parked in review/: {parked} ({verb} this cycle: {expired}, "
+        f"limit {expiry_days}d)"
+    )
     drafts = list_drafts("new")
 
     approved_count = 0

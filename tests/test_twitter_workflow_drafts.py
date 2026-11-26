@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import logging
+import os
 import sys
 import types
 from collections.abc import Generator
@@ -3030,3 +3031,248 @@ def test_saving_or_moving_an_old_review_does_not_launder_its_digest(
     if destination:
         path = workflow_module.move_draft(path, destination)
     assert workflow_module.TweetDraft.load(path).scored_digest == digest
+
+
+def _save_review_draft(module: Any, name: str, created: datetime, **kwargs) -> Path:
+    """Write a review/ draft as if it had been parked at ``created``.
+
+    Age is measured from the file (parking time), so the mtime is stamped to
+    match: ``save_draft(..., "review")`` writes the file when the draft is
+    parked.
+    """
+    path: Path = module.REVIEW_DIR / name
+    draft = module.TweetDraft(text="Parked draft", **kwargs)
+    draft.created_at = created
+    draft.save(path)
+    _stamp_mtime(path, created)
+    return path
+
+
+def _stamp_mtime(path: Path, when: datetime) -> None:
+    stamp = when.timestamp()
+    os.utime(path, (stamp, stamp))
+
+
+def test_expire_review_drafts_rejects_stale_with_reason_and_keeps_fresh(
+    workflow_module: Any, tmp_path: Path
+) -> None:
+    _set_status_dirs(workflow_module, tmp_path)
+    now = datetime(2026, 11, 25, 12, 0)
+    stale = _save_review_draft(
+        workflow_module,
+        "reply_old.yml",
+        datetime(2026, 11, 15, 0, 21),
+        type="reply",
+        in_reply_to="1",
+        quality_score=2,
+    )
+    unscored = _save_review_draft(
+        workflow_module, "tweet_unscored.yml", datetime(2026, 10, 4, 9, 0)
+    )
+    fresh = _save_review_draft(
+        workflow_module, "tweet_fresh.yml", datetime(2026, 11, 23, 3, 0)
+    )
+
+    expired, remaining = workflow_module.expire_review_drafts(7, now=now)
+
+    assert (expired, remaining) == (2, 1)
+    assert fresh.exists()
+    assert not stale.exists() and not unscored.exists()
+    reason = workflow_module.TweetDraft.load(
+        workflow_module.REJECTED_DIR / stale.name
+    ).reject_reason
+    assert "quality_score 2/3" in reason and "limit 7d" in reason
+    assert "unscored" in (
+        workflow_module.TweetDraft.load(
+            workflow_module.REJECTED_DIR / unscored.name
+        ).reject_reason
+    )
+
+
+def test_expire_review_drafts_accepts_timezone_aware_times(
+    workflow_module: Any, tmp_path: Path
+) -> None:
+    _set_status_dirs(workflow_module, tmp_path)
+    _save_review_draft(
+        workflow_module,
+        "tweet_aware.yml",
+        datetime(2026, 10, 1, 0, 0, tzinfo=timezone.utc),
+    )
+    _save_review_draft(workflow_module, "tweet_naive.yml", datetime(2026, 10, 1))
+    now = datetime(2026, 11, 25, 12, 0, tzinfo=timezone.utc)
+
+    assert workflow_module.expire_review_drafts(0, now=now) == (0, 2)
+    assert workflow_module.expire_review_drafts(7, now=now) == (2, 0)
+
+
+def test_expire_review_drafts_ages_from_parking_not_creation(
+    workflow_module: Any, tmp_path: Path
+) -> None:
+    """A requeued draft keeps created_at, so age must come from the file."""
+    _set_status_dirs(workflow_module, tmp_path)
+    now = datetime(2026, 11, 25, 12, 0)
+    requeued = _save_review_draft(
+        workflow_module, "reply_requeued.yml", datetime(2026, 10, 1)
+    )
+    # Parked (written) just now, despite the old creation time.
+    _stamp_mtime(requeued, datetime(2026, 11, 24, 12, 0))
+
+    assert workflow_module.expire_review_drafts(7, now=now) == (0, 1)
+    assert requeued.exists()
+
+
+def test_expire_review_drafts_ignores_a_refreshed_mtime(
+    workflow_module: Any, tmp_path: Path
+) -> None:
+    """The recorded parking stamp, not mtime, decides expiry.
+
+    A touch/copy/restore of the file rewrites mtime; the draft keeps its own
+    parked_at, so the clock is not silently restarted.
+    """
+    _set_status_dirs(workflow_module, tmp_path)
+    now = datetime(2026, 11, 25, 12, 0)
+    stale = _save_review_draft(workflow_module, "tweet_old.yml", datetime(2026, 10, 1))
+    # Parked on 2026-10-01, but the file was touched today.
+    draft = workflow_module.TweetDraft.load(stale)
+    draft.parked_at = datetime(2026, 10, 1)
+    draft.save(stale)
+    _stamp_mtime(stale, now)
+
+    assert workflow_module.expire_review_drafts(7, now=now) == (1, 0)
+    assert not stale.exists()
+    moved = workflow_module.REJECTED_DIR / stale.name
+    reason = workflow_module.TweetDraft.load(moved).reject_reason
+    assert "parked in review/ 5" in reason and "(limit 7d)" in reason
+
+
+def test_parking_a_draft_records_its_parking_time(
+    workflow_module: Any, tmp_path: Path
+) -> None:
+    """save_draft()/move_draft() into review/ stamp parked_at in the draft."""
+    _set_status_dirs(workflow_module, tmp_path)
+    before = datetime.now()
+    parked = workflow_module.save_draft(
+        workflow_module.TweetDraft(text="Parked draft"), "review"
+    )
+    stamp = workflow_module.TweetDraft.load(parked).parked_at
+    assert stamp is not None and stamp >= before
+
+    requeued = workflow_module.move_draft(parked, "new")
+    assert workflow_module.TweetDraft.load(requeued).parked_at is not None
+    back = workflow_module.move_draft(requeued, "review")
+    assert workflow_module.TweetDraft.load(back).parked_at is not None
+
+
+def test_expire_review_drafts_continues_past_a_draft_that_fails(
+    workflow_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _set_status_dirs(workflow_module, tmp_path)
+    stuck = _save_review_draft(workflow_module, "tweet_a.yml", datetime(2026, 10, 1))
+    other = _save_review_draft(workflow_module, "tweet_b.yml", datetime(2026, 10, 1))
+    broken = workflow_module.REVIEW_DIR / "tweet_c.yml"
+    broken.write_text("- not a draft\n")
+    parked_mtime = stuck.stat().st_mtime
+    real_move = workflow_module.move_draft
+
+    def move(path: Path, new_status: str) -> Path:
+        if path == stuck:
+            raise PermissionError("read-only rejected dir")
+        moved: Path = real_move(path, new_status)
+        return moved
+
+    monkeypatch.setattr(workflow_module, "move_draft", move)
+
+    result = workflow_module.expire_review_drafts(7, now=datetime(2026, 11, 25))
+
+    assert result == (1, 2)
+    # A failed move leaves the draft in review/ with its parking time intact,
+    # so the next cycle retries instead of restarting the expiry clock.
+    assert stuck.exists() and broken.exists()
+    assert stuck.stat().st_mtime == parked_mtime
+    assert (workflow_module.REJECTED_DIR / other.name).exists()
+
+
+def test_expire_review_drafts_counts_a_moved_draft_as_expired_when_stamping_fails(
+    workflow_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A post-move failure must not report the draft as still parked.
+
+    Once move_draft() has unlinked the review/ file the draft is out of the
+    queue, so a failed reason stamp cannot leave it counted as remaining: no
+    later cycle revisits rejected/, and the count would hide the loss.
+    """
+    _set_status_dirs(workflow_module, tmp_path)
+    path = _save_review_draft(workflow_module, "tweet_a.yml", datetime(2026, 10, 1))
+    real_load = workflow_module.TweetDraft.load
+
+    def load(target: Path) -> Any:
+        if target.parent == workflow_module.REJECTED_DIR:
+            raise OSError("disk full while stamping the reason")
+        return real_load(target)
+
+    monkeypatch.setattr(workflow_module.TweetDraft, "load", staticmethod(load))
+
+    result = workflow_module.expire_review_drafts(7, now=datetime(2026, 11, 25))
+
+    assert result == (1, 0)
+    assert not path.exists()
+    assert (workflow_module.REJECTED_DIR / path.name).exists()
+
+
+@pytest.mark.parametrize(
+    ("configured", "expired"),
+    [
+        (None, True),
+        ("0", False),
+        # A non-integer value must not abort the cycle; the default applies.
+        ("7 days", True),
+    ],
+)
+def test_auto_reads_review_expiry_from_env_at_run_time(
+    workflow_module: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    configured: str | None,
+    expired: bool,
+) -> None:
+    _set_status_dirs(workflow_module, tmp_path)
+    stale = _save_review_draft(workflow_module, "tweet_old.yml", datetime(2020, 1, 1))
+    # Set after import, as load_dotenv() in cli() does.
+    if configured is None:
+        monkeypatch.delenv("TWITTER_REVIEW_EXPIRY_DAYS", raising=False)
+    else:
+        monkeypatch.setenv("TWITTER_REVIEW_EXPIRY_DAYS", configured)
+    client = SimpleNamespace(get_home_timeline=lambda **kw: SimpleNamespace(data=None))
+    monkeypatch.setattr(workflow_module, "load_twitter_client", lambda **kw: client)
+    monkeypatch.setattr(workflow_module, "cached_get_me", lambda *a, **kw: None)
+
+    workflow_module.auto(
+        list_id=None,
+        auto_approve=False,
+        post_approved=False,
+        dry_run=False,
+        max_tweets=1,
+        max_drafts=1,
+        skip_mentions=True,
+        skip_timeline=False,
+    )
+
+    assert stale.exists() is not expired
+
+
+def test_expire_review_drafts_dry_run_and_disabled_move_nothing(
+    workflow_module: Any, tmp_path: Path
+) -> None:
+    _set_status_dirs(workflow_module, tmp_path)
+    now = datetime(2026, 11, 25, 12, 0)
+    stale = _save_review_draft(
+        workflow_module, "tweet_old.yml", datetime(2026, 10, 1, 0, 0)
+    )
+
+    # A dry run moves nothing, so the draft still counts as parked: the summary
+    # must not under-report the queue it left untouched.
+    assert workflow_module.expire_review_drafts(7, dry_run=True, now=now) == (1, 1)
+    assert stale.exists()
+    assert workflow_module.expire_review_drafts(0, now=now) == (0, 1)
+    assert stale.exists()
+    assert list(workflow_module.REJECTED_DIR.iterdir()) == []
