@@ -689,6 +689,8 @@ def test_cited_sha_lookup_goes_through_the_bound_run(alice_io):
         "gh: API rate limit exceeded (HTTP 403)",
         "gh: Server Error (HTTP 502)",
         "error connecting to api.github.com",
+        # A repo this host cannot read answers 404, not 422.
+        "gh: Not Found (HTTP 404)",
     ],
 )
 def test_cited_sha_lookup_error_is_not_a_missing_commit(alice_io, stderr):
@@ -696,6 +698,46 @@ def test_cited_sha_lookup_error_is_not_a_missing_commit(alice_io, stderr):
     fake_run, _calls = _scripted_run({("gh", "api"): (1, "", stderr)})
     w = _bound_with(alice_io, run=fake_run)
     assert w._check_cited_shas("Fixed in `abc1234`.", "o/r", ["src/a.py"]) == []
+
+
+def test_cited_sha_unreadable_cited_repo_blocks_the_finding(alice_io):
+    """Absent in the parent proves nothing if a cited repo cannot be read."""
+    fake_run, calls = _scripted_run(
+        {
+            ("gh", "api", "repos/o/r/commits/abc1234"): (
+                1,
+                "",
+                "gh: No commit found for SHA: abc1234 (HTTP 422)",
+            ),
+            ("gh", "api", "repos/private/repo/commits/abc1234"): (
+                1,
+                "",
+                "gh: Not Found (HTTP 404)",
+            ),
+        }
+    )
+    w = _bound_with(alice_io, run=fake_run)
+    body = "See private/repo#3, fixed in `abc1234`."
+    assert w._check_cited_shas(body, "o/r", ["src/a.py"]) == []
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://github.com/user-attachments/assets/0a1b2c3d",
+        "https://github.com/orgs/gptme/projects/1",
+    ],
+)
+def test_cited_sha_ignores_github_urls_that_name_no_repo(alice_io, url):
+    """Their 404 would otherwise suppress a real missing-commit finding."""
+    fake_run, calls = _scripted_run(
+        {("gh", "api"): (1, "", "gh: No commit found for SHA: abc1234 (HTTP 422)")}
+    )
+    w = _bound_with(alice_io, run=fake_run)
+    findings = w._check_cited_shas(f"![s]({url}) fixed in abc1234", "o/r", ["a.py"])
+    assert [f["severity"] for f in findings] == ["P1"]
+    assert len(calls) == 1
 
 
 def test_cited_sha_does_not_truncate_a_full_ref(alice_io):
