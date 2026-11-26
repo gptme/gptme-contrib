@@ -47,6 +47,27 @@ _T = TypeVar("_T")
 # Max task-description length to echo back when reporting status
 _MAX_TASK_PREVIEW = 120
 
+# Tools that do real work for the caller, so an attempt deserves the rising
+# activity cue. Observation/status tools stay silent (they are not attempts),
+# and ``subagent`` keeps its own dispatch lifecycle cue. One frozenset so a new
+# direct tool (e.g. another body_* verb) cannot silently stay silent.
+DIRECT_TOOL_NAMES: frozenset[str] = frozenset(
+    {
+        "workspace_search",
+        "look",
+        "handoff_to_agent",
+        "fulfill_planned_call",
+        "body_takeoff",
+        "body_land",
+        "body_move",
+        "body_goto",
+        "body_stop",
+        "body_return_home",
+        "body_turn",
+        "body_interact",
+    }
+)
+
 # Max output to return (avoid overwhelming the realtime API)
 _MAX_OUTPUT_LEN = 2000
 _IGNORABLE_ERROR_LINES = {
@@ -98,6 +119,9 @@ _TIMEOUT_BINARY_AVAILABLE = shutil.which("timeout") is not None
 _MAX_RECENT_COMPLETIONS = 5
 # Audio cues are optional UX. Never let a blocked transport delay the tool lifecycle.
 _CUE_CALLBACK_TIMEOUT_SECONDS = 1.0
+# Result delivery is best-effort too: a stalled provider socket must not keep the
+# asyncio task (and its _pending_tasks entry) alive indefinitely.
+_RESULT_DELIVERY_TIMEOUT_SECONDS = 10.0
 _CANCEL_PIPE_DRAIN_TIMEOUT_SECONDS = 1.0
 _DEFAULT_TRANSCRIPT_TAIL_TURNS = 8
 _DEFAULT_TRANSCRIPT_TAIL_CHARS = 1_600
@@ -247,6 +271,7 @@ class PendingTask:
     )
     completed_at: float | None = None
     returncode: int | None = None
+    cancel_requested: bool = False
 
 
 class GptmeToolBridge:
@@ -277,6 +302,7 @@ class GptmeToolBridge:
         body_adapter: "BodyAdapter | None" = None,
         vision_bridge: "VisionSessionBridge | None" = None,
         rag: "VoiceRag | None" = None,
+        on_cancel: Callable[[], Awaitable[None]] | None = None,
     ):
         self.gptme_path = os.environ.get("GPTME_VOICE_SUBAGENT_PATH") or gptme_path
         self.timeout = timeout
@@ -284,6 +310,7 @@ class GptmeToolBridge:
         self.on_result = on_result
         self.on_dispatch = on_dispatch
         self.on_timeout = on_timeout
+        self.on_cancel = on_cancel
         self.on_hangup = on_hangup
         self.on_handoff = on_handoff
         self.on_fulfill_planned_call = on_fulfill_planned_call
@@ -695,9 +722,26 @@ class GptmeToolBridge:
                     }
                 )
             if self.on_result:
-                await self.on_result(
-                    f"Subagent task {task_id} was cancelled before it finished."
-                )
+                try:
+                    # Bound this delivery too: an unbounded await here would
+                    # keep the task (and every later cancel's ``cancelling``
+                    # reply) alive forever on a stalled provider socket.
+                    await asyncio.wait_for(
+                        self.on_result(
+                            f"Subagent task {task_id} was cancelled before it finished."
+                        ),
+                        _RESULT_DELIVERY_TIMEOUT_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "Timed out reporting cancellation of task %s", task_id
+                    )
+                except Exception:
+                    # A closing provider socket must not replace the
+                    # CancelledError: the cancellation did take effect.
+                    logger.exception(
+                        "Failed to report cancellation of task %s", task_id
+                    )
             self._pending_tasks.pop(task_id, None)
             raise
 
@@ -746,9 +790,23 @@ class GptmeToolBridge:
         if completion_status == "timed_out" and self.on_timeout:
             self._dispatch_cue(self.on_timeout, cue_name="timeout")
 
-        # Inject result into conversation
+        # Inject result into conversation. Bound the delivery so a stalled
+        # provider socket cannot leave this task (and its pending entry) alive
+        # forever: a completed-but-undelivered task is not cancellable, so the
+        # bound is what keeps it from becoming an orphan.
         if self.on_result:
-            await self.on_result(response_text)
+            try:
+                await asyncio.wait_for(
+                    self.on_result(response_text), _RESULT_DELIVERY_TIMEOUT_SECONDS
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Timed out delivering result of task %s; dropping it", task_id
+                )
+            except Exception:
+                # A closing socket must not skip the cleanup below: an entry
+                # left behind by a raising delivery is an unlisted zombie.
+                logger.exception("Failed to deliver result of task %s", task_id)
 
         # Clean up
         self._pending_tasks.pop(task_id, None)
@@ -1047,6 +1105,27 @@ class GptmeToolBridge:
         return result
 
     async def _cancel_task(self, task_id: str, entry: PendingTask) -> dict:
+        # Claim cancellation before yielding: concurrent requests must not
+        # interrupt cleanup twice or announce the same cancellation twice.
+        # Check the claim first: the cancelled task records completed_at while
+        # its first request is still waiting for cleanup.
+        if entry.cancel_requested and not entry.task.done():
+            return {"task_id": task_id, "cancelled": False, "cancelling": True}
+        if entry.task.done():
+            # Nothing left to cancel. Reclaim the entry: a task that ended with
+            # an exception (e.g. delivery raising on the success path) never
+            # reaches _run_subagent's own pop, and would otherwise linger in
+            # _pending_tasks as an uncancellable, unlisted zombie.
+            self._pending_tasks.pop(task_id, None)
+            return {"task_id": task_id, "cancelled": False}
+        if entry.completed_at is not None:
+            # The work finished; only the result delivery is outstanding.
+            # Cancelling now would discard a real result and report a
+            # cancellation that never happened. Keep the entry so the delivery
+            # stays visible to subagent_status; _run_subagent bounds the
+            # delivery and pops the entry itself.
+            return {"task_id": task_id, "cancelled": False, "completed": True}
+        entry.cancel_requested = True
         entry.task.cancel()
         try:
             await entry.task
@@ -1055,13 +1134,18 @@ class GptmeToolBridge:
         except Exception as e:  # noqa: BLE001 - report anything else back
             logger.warning(f"Task {task_id} raised during cancel: {e}")
         self._pending_tasks.pop(task_id, None)
-        return {"task_id": task_id, "cancelled": True}
+        return {"task_id": task_id, "cancelled": entry.task.cancelled()}
 
     async def handle_function_call(self, name: str, arguments: dict) -> dict:
         """Handle an OpenAI function call.
 
         Dispatches subagent tasks asynchronously and returns immediately.
         """
+        # Activity means an attempt, not success. Keep polling and hangup
+        # silent, and leave subagent dispatch to its existing lifecycle cue.
+        if name in DIRECT_TOOL_NAMES and self.on_dispatch:
+            self._dispatch_cue(self.on_dispatch, cue_name="activity")
+
         if name == "subagent":
             task = arguments.get("task", "")
             if not task:
@@ -1118,6 +1202,11 @@ class GptmeToolBridge:
             if task_id_arg:
                 entry = self._pending_tasks.get(task_id_arg)
                 if entry is None or entry.task.done():
+                    if entry is not None:
+                        # A task that ended with an exception never reaches
+                        # _run_subagent's own pop. Reclaim it here so it cannot
+                        # linger as an unlisted zombie.
+                        self._pending_tasks.pop(task_id_arg, None)
                     return {
                         "status": "not_found",
                         "task_id": task_id_arg,
@@ -1127,7 +1216,21 @@ class GptmeToolBridge:
                         ),
                     }
                 result = await self._cancel_task(task_id_arg, entry)
-                return {"status": "cancelled", **result}
+                if result["cancelled"]:
+                    status = "cancelled"
+                    if self.on_cancel:
+                        self._dispatch_cue(self.on_cancel, cue_name="cancel")
+                elif result.get("cancelling"):
+                    status = "cancelling"
+                else:
+                    status = "not_pending"
+                response: dict = {"status": status, **result}
+                if result.get("completed"):
+                    response["message"] = (
+                        f"Subagent task {task_id_arg} already finished; its result "
+                        "is still being delivered."
+                    )
+                return response
 
             # No task_id — cancel all pending
             targets = [
@@ -1140,15 +1243,37 @@ class GptmeToolBridge:
                     "status": "no_pending",
                     "message": "No subagent tasks are currently running.",
                 }
-            cancelled = []
-            for tid, entry in targets:
-                result = await self._cancel_task(tid, entry)
-                cancelled.append(result)
-            return {
+            results = [await self._cancel_task(tid, entry) for tid, entry in targets]
+            cancelled = [result for result in results if result["cancelled"]]
+            cancelling = [r["task_id"] for r in results if r.get("cancelling")]
+            completed = [r["task_id"] for r in results if r.get("completed")]
+            if cancelled and self.on_cancel:
+                self._dispatch_cue(self.on_cancel, cue_name="cancel")
+            all_response: dict = {
                 "status": "cancelled_all",
                 "cancelled_count": len(cancelled),
                 "cancelled": cancelled,
             }
+            if cancelling:
+                all_response["cancelling"] = cancelling
+            if completed:
+                all_response["completed"] = completed
+            if not cancelled:
+                if cancelling:
+                    all_response["status"] = "cancelling"
+                else:
+                    all_response["status"] = "no_pending"
+                    if completed:
+                        all_response["message"] = (
+                            "No running subagent task was cancelled; "
+                            f"{len(completed)} already finished and "
+                            "the result is still being delivered."
+                        )
+                    else:
+                        all_response["message"] = (
+                            "No running subagent task was cancelled."
+                        )
+            return all_response
 
         if name == "hangup":
             reason = arguments.get("reason") or None

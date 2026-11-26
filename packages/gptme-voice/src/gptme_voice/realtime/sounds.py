@@ -69,10 +69,20 @@ DISPATCH_CUE_PCM: bytes = (
 # failure), but still bounded below the speech reference.
 TIMEOUT_CUE_PCM: bytes = _gen_pcm_tone(450, 200, _TIMEOUT_AMPLITUDE)
 
+# Explicit cancellation: short falling pair, distinct from rising dispatch
+# and the single low timeout tone. Uses the quieter dispatch gain.
+CANCEL_CUE_PCM: bytes = (
+    _gen_pcm_tone(700, 70, _DISPATCH_AMPLITUDE)
+    + _gen_pcm_silence(20)
+    + _gen_pcm_tone(500, 70, _DISPATCH_AMPLITUDE)
+)
+CANCEL_CUE_MULAW: bytes = _to_mulaw(CANCEL_CUE_PCM)
+
 DISPATCH_CUE_MULAW: bytes = _to_mulaw(DISPATCH_CUE_PCM)
 TIMEOUT_CUE_MULAW: bytes = _to_mulaw(TIMEOUT_CUE_PCM)
 
 PCM_CUES: dict[str, bytes] = {
     "dispatch": DISPATCH_CUE_PCM,
     "timeout": TIMEOUT_CUE_PCM,
+    "cancel": CANCEL_CUE_PCM,
 }
