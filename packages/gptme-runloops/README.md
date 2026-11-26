@@ -24,7 +24,10 @@ systems:
 - [gptodo](../gptodo/README.md) — task management; the `team` loop's coordinator delegates
   through it
 - [gptmail](../gptmail/README.md) — the `email` loop syncs and answers mail through it
-- [gptme-sessions](../gptme-sessions/README.md) — analyse the sessions these loops produce
+- [gptme-sessions](../gptme-sessions/README.md) — analyse the sessions these loops produce;
+  its shared Thompson-sampling engine also owns PM model-routing posterior updates,
+  locking and persistence. The PM adapter retains existing state and reward policy
+  (no decay enabled), including the legacy wire format for rolling upgrades.
 - [gptme-coordination](../gptme-coordination/README.md) — work claims between concurrent agents
 
 ## Install
@@ -32,9 +35,9 @@ systems:
 Not published on PyPI. Install from the repository:
 
 ```bash
-uv tool install "git+https://github.com/gptme/gptme-contrib#subdirectory=packages/gptme-runloops"
+uv tool install --with "git+https://github.com/gptme/gptme-contrib#subdirectory=packages/gptme-sessions" "git+https://github.com/gptme/gptme-contrib#subdirectory=packages/gptme-runloops"
 # or, from a clone of gptme-contrib:
-uv pip install -e packages/gptme-runloops
+uv pip install -e packages/gptme-sessions -e packages/gptme-runloops
 ```
 
 The backend CLIs (`gptme`, `claude`, `codex`, `grok`) and `gh` are external and must be on
@@ -534,10 +537,10 @@ make typecheck
 
 Running `uv run pytest packages/gptme-runloops/tests/` from the repository root fails
 with `No module named gptme_runloops`, because the package is not installed into the
-root environment. Some tests (`test_worker_records.py`, `test_session_store_isolation.py`)
-also import `gptme_sessions`, which `pyproject.toml` does not declare; install
-`packages/gptme-sessions` alongside when running the full suite outside the
-workspace.
+root environment. `gptme-sessions>=0.2.0` is a declared runtime dependency: PM
+routing requires its shared bandit serialization and lock-path hooks. When
+installing from source outside the workspace, install the matching
+`packages/gptme-sessions` alongside `packages/gptme-runloops` as shown above.
 
 ## License
 

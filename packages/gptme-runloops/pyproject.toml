@@ -5,6 +5,7 @@ description = "Python-based run loop framework for autonomous AI agent operation
 requires-python = ">=3.10"
 dependencies = [
     "click>=8.0.0",
+    "gptme-sessions>=0.2.0",
     "pydantic>=2.0.0",  # pr_review schema (imported by the CLI)
     "pyyaml>=6.0.0",
     "tomli>=2.0.0; python_version < '3.11'",
@@ -21,6 +22,9 @@ dev = [
 gptme-runloops = "gptme_runloops.cli:main"
 gptme-claude-watchdog = "gptme_runloops.claude_watchdog:main"
 run-loops = "gptme_runloops.cli:main"  # deprecated
+
+[tool.uv.sources]
+gptme-sessions = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]

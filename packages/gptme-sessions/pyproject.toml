@@ -1,6 +1,6 @@
 [project]
 name = "gptme-sessions"
-version = "0.1.0"
+version = "0.2.0"
 description = "Session tracking and analytics for gptme agents"
 authors = [
     {name = "gptme contributors", email = "gptme@superuserlabs.org"}

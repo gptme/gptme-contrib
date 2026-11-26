@@ -2548,6 +2548,7 @@ version = "0.1.0"
 source = { editable = "packages/gptme-runloops" }
 dependencies = [
     { name = "click" },
+    { name = "gptme-sessions" },
     { name = "pydantic" },
     { name = "pyyaml" },
 ]
@@ -2562,6 +2563,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "click", specifier = ">=8.0.0" },
+    { name = "gptme-sessions", editable = "packages/gptme-sessions" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.0.0" },
     { name = "pydantic", specifier = ">=2.0.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0.0" },
@@ -2573,7 +2575,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "gptme-sessions"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "packages/gptme-sessions" }
 dependencies = [
     { name = "click" },
