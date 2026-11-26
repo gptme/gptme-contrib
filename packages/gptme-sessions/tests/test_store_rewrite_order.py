@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -481,3 +482,44 @@ def test_append_of_loaded_id_less_row_does_not_fabricate_timestamp(tmp_path: Pat
     assert "timestamp" not in row
     assert row["session_id"].startswith("noid-")
     assert row["model"] == "opus"
+
+
+@pytest.mark.parametrize("persisted", [False, True])
+@pytest.mark.parametrize("chosen", [0, 1, 2])
+def test_subset_upsert_keeps_identical_id_less_rows(
+    tmp_path: Path, persisted: bool, chosen: int
+) -> None:
+    """Identical id-less rows are distinct sessions; none may be dropped (#2338)."""
+    store = SessionStore(sessions_dir=tmp_path)
+    store.path.write_text('{"model":"opus","outcome":"noop"}\n' * 3, encoding="utf-8")
+    if persisted:
+        store.rewrite(store.load_all())
+
+    records = store.load_all()
+    assert len({r.session_id for r in records}) == 3
+    records[chosen].category = "code"
+    store.rewrite([records[chosen]])
+
+    expected: list[str | None] = [None, None, None]
+    expected[chosen] = "code"
+    assert [r.category for r in store.load_all()] == expected
+
+    # A later upsert of a sibling must not overwrite the first update.
+    other = (chosen + 1) % 3
+    records[other].category = "research"
+    store.rewrite([records[other]])
+
+    expected[other] = "research"
+    assert [r.category for r in store.load_all()] == expected
+
+
+def test_unpersisted_derived_id_ignores_record_defaults(tmp_path: Path) -> None:
+    """The id depends on the row's own fields, so new record fields keep it stable."""
+    archive = tmp_path / "session-records-archive-2026-01.jsonl"
+    archive.write_text('{"model":"opus","timestamp":""}\n', encoding="utf-8")
+    store = SessionStore(sessions_dir=tmp_path)
+
+    (record,) = store.load_all(include_archives=True)
+
+    digest = hashlib.sha256(b'{"model": "opus"}').hexdigest()[:12]
+    assert record.session_id == f"noid-{digest}"

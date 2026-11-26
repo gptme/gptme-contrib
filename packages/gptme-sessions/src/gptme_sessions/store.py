@@ -67,7 +67,7 @@ def _ensure_trailing_newline(path: Path) -> None:
 _DERIVED_ID_FIELD = "session_id_derived"
 
 
-def _parse_row(line: str) -> SessionRecord:
+def _parse_row(line: str, taken_ids: set[str]) -> SessionRecord:
     """Parse one stripped JSONL row the same way on every read path.
 
     A row without a ``session_id`` would otherwise get a random id from
@@ -75,17 +75,21 @@ def _parse_row(line: str) -> SessionRecord:
     ``rewrite()`` re-reads would never match and the row would be duplicated
     on every rewrite (#2325). Give such a row a **content-derived** id instead.
 
-    The id is derived from the row's canonical content with invented values
-    (the id itself, and the "now" timestamp when the row had none) omitted, so
-    every read of the same logical row agrees — across formatting/key-order
-    differences and across a rewrite that re-serialises the row (#2338). The id
-    is then **persisted** on the first rewrite: from then on the row carries a
-    real ``session_id``, so it matches by id no matter how its content later
+    The id is derived from the JSON fields on the row (an empty id or timestamp
+    omitted), so reads agree across formatting/key-order differences and across
+    package versions that add record fields (#2338). The id is then
+    **persisted** on the first rewrite: from then on the row carries a real
+    ``session_id``, so it matches by id no matter how its content later
     changes. That is what stops a stale outstanding copy from appending a
     duplicate when another writer has changed the same row in between.
 
     The invented "now" timestamp (when the row had none) is recorded so
     ``_row_json`` keeps it out of the file until a caller sets a real one.
+
+    ``taken_ids`` holds the ids of the rows already read from the same file and
+    is updated here. Identical id-less rows are distinct sessions, so each later
+    copy gets a numbered id (``noid-…-2``); sharing one id would let a subset
+    ``rewrite()`` drop all but one of them as superseded duplicates.
 
     Raises the same exceptions as ``SessionRecord.from_dict(json.loads(line))``.
     """
@@ -110,16 +114,18 @@ def _parse_row(line: str) -> SessionRecord:
         record._store_invented["session_id"] = record.session_id
         record._store_invented[_DERIVED_ID_FIELD] = True
     if isinstance(data, dict) and not session_id:
-        content = record.to_dict()
-        content.pop("session_id", None)
-        if not has_timestamp:
-            content.pop("timestamp", None)
-        digest = _line_digest(json.dumps(content, sort_keys=True, default=str))[:12]
-        record.session_id = f"noid-{digest}"
+        content = {k: v for k, v in data.items() if v or k not in ("session_id", "timestamp")}
+        base = f"noid-{_line_digest(json.dumps(content, sort_keys=True))[:12]}"
+        record.session_id = base
+        copy = 1
+        while record.session_id in taken_ids:
+            copy += 1
+            record.session_id = f"{base}-{copy}"
         record._store_invented["session_id"] = record.session_id
         record._store_invented[_DERIVED_ID_FIELD] = True
         if not has_timestamp:
             record._store_invented["timestamp"] = record.timestamp
+    taken_ids.add(record.session_id)
     return record
 
 
@@ -334,6 +340,7 @@ class SessionStore:
         if not path.exists():
             return []
         records = []
+        taken_ids: set[str] = set()
         with open(path, encoding="utf-8", errors="surrogateescape") as f:
             for line in f:
                 line = line.strip()
@@ -343,7 +350,7 @@ class SessionStore:
                         # lone surrogates; treat the row as malformed rather than
                         # let them crash a later print/encode.
                         line.encode("utf-8")
-                        records.append(_parse_row(line))
+                        records.append(_parse_row(line, taken_ids))
                     except (json.JSONDecodeError, UnicodeEncodeError, TypeError, AttributeError):
                         continue
         return records
@@ -426,6 +433,7 @@ class SessionStore:
                     by_id.setdefault(invented_id, deque()).append(index)
             emitted_indices: set[int] = set()
             out_lines: list[str] = []
+            taken_ids: set[str] = set()
 
             if self.path.exists():
                 with open(
@@ -440,7 +448,7 @@ class SessionStore:
                             continue
                         try:
                             line.encode("utf-8")  # lone surrogates = undecodable bytes
-                            rec = _parse_row(line)
+                            rec = _parse_row(line, taken_ids)
                         except (
                             json.JSONDecodeError,
                             UnicodeEncodeError,
