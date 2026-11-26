@@ -136,7 +136,7 @@ from fnmatch import fnmatchcase
 from functools import cache
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Iterator, cast
+from typing import Any, Iterator, Sequence, cast
 
 _CONTRIB_LIB_SRC = (
     Path(__file__).resolve().parents[2] / "packages" / "gptme-contrib-lib" / "src"
@@ -171,6 +171,14 @@ _HOLD_LABELS = frozenset({"do-not-merge", "hold", "on-hold"})
 MIN_SHA_PREFIX_LEN = 7
 
 DOC_EXTENSIONS = {".md", ".rst", ".txt", ".adoc"}
+# ``.txt``/``.in`` files that are build or dependency inputs, not prose: pip
+# requirement/constraint files (``requirements3.txt``, ``dev-requirements.in``,
+# ``constraints.txt``) and CMake's project file.
+BUILD_INPUT_TXT_RE = re.compile(
+    r"^(?:cmakelists\.txt|(?:.*[-_.])?(?:requirements|constraints).*\.(?:txt|in))$",
+    re.IGNORECASE,
+)
+BUILD_INPUT_TXT_DIRS = frozenset({"requirements", "constraints"})
 SPEC_LIKE_DOCS = {
     "README.md",
     "ABOUT.md",
@@ -389,6 +397,8 @@ class CheckResult:
     reasons: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     files: list[str] = field(default_factory=list)
+    # Source paths of renamed files. Path gates judge these as well as ``files``.
+    previous_files: list[str] = field(default_factory=list)
     # HEAD commit OID at time of check — callers should re-verify before merging
     head_sha: str = ""
     # gptme_contrib_lib/merge_policy.toml verdict; only computed for rollout repos.
@@ -696,7 +706,7 @@ def _fetch_pr_files(repo: str, number: int) -> list[dict[str, Any]]:
                 f"repos/{repo}/pulls/{number}/files",
                 "--paginate",
                 "--jq",
-                ".[] | {path: .filename}",
+                ".[] | {path: .filename, previous_path: .previous_filename}",
             ],
             capture_output=True,
             text=True,
@@ -2326,8 +2336,18 @@ def checks_green(status_checks: list[dict[str, Any]]) -> bool:
     return True
 
 
+def is_build_input_txt(path: str) -> bool:
+    """A ``.txt``/``.in`` file that feeds a build or dependency install."""
+    pure = Path(path)
+    # Directory form covers pip's split layouts (``requirements/base.txt``).
+    return bool(BUILD_INPUT_TXT_RE.match(pure.name)) or (
+        pure.suffix.lower() in {".txt", ".in"}
+        and any(part.lower() in BUILD_INPUT_TXT_DIRS for part in pure.parent.parts)
+    )
+
+
 def is_doc_file(path: str) -> bool:
-    return Path(path).suffix.lower() in DOC_EXTENSIONS
+    return Path(path).suffix.lower() in DOC_EXTENSIONS and not is_build_input_txt(path)
 
 
 def is_spec_like_doc(path: str) -> bool:
@@ -2377,7 +2397,7 @@ def is_test_file(path: str) -> bool:
     normalized = path.replace("\\", "/").removeprefix("./")
     parts = normalized.split("/")
     name = parts[-1]
-    if is_never_test_file(name):
+    if is_never_test_file(name) or is_build_input_txt(normalized):
         return False
     if any(part in TEST_DIR_SEGMENTS for part in parts[:-1]):
         return True
@@ -2792,7 +2812,8 @@ def _fetch_pr_file_shapes(repo: str, number: int) -> list[dict[str, Any]]:
                 f"repos/{repo}/pulls/{number}/files",
                 "--paginate",
                 "--jq",
-                ".[] | {path: .filename, status: .status, patch: .patch}",
+                ".[] | {path: .filename, previous_path: .previous_filename, "
+                "status: .status, patch: .patch}",
             ],
             capture_output=True,
             text=True,
@@ -2938,15 +2959,15 @@ def gptme_core_route_to_erik_reasons(
                 "#2979)"
             )
 
+    touched = {
+        str(entry.get(key) or "").replace("\\", "/").removeprefix("./")
+        for entry in file_shapes
+        for key in ("path", "previous_path")
+    }
     sensitive_surface = sorted(
-        {
-            str(entry.get("path", "")).replace("\\", "/").removeprefix("./")
-            for entry in file_shapes
-            if str(entry.get("path", ""))
-            .replace("\\", "/")
-            .removeprefix("./")
-            .startswith(_GPTME_CORE_SENSITIVE_SURFACE_PREFIXES)
-        }
+        path
+        for path in touched
+        if path.startswith(_GPTME_CORE_SENSITIVE_SURFACE_PREFIXES)
     )
     if sensitive_surface:
         reasons.append(
@@ -3337,7 +3358,7 @@ def contrib_agent_literal_reasons(file_shapes: list[dict[str, Any]]) -> list[str
 
 
 def contrib_classify_category(
-    paths: list[str], repo: str
+    paths: list[str], repo: str, previous_paths: Sequence[str] = ()
 ) -> tuple[str | None, list[str]]:
     """gptme-contrib override: classify_category's hard stops plus placement.
 
@@ -3352,19 +3373,24 @@ def contrib_classify_category(
     diff shape, not by path). The keyword-based sensitive-path fix
     (segment-, not substring-, matched) lives in is_sensitive_path itself, so
     it applies to every repo, not just this one.
+
+    ``previous_paths`` (rename sources) face the hard stops and the category
+    check. The placement rule and the spec-doc waiver look at ``paths`` only:
+    a source places nothing new, and a moved-away spec doc is never waived.
     """
     if not paths:
         return None, ["PR has no changed files"]
 
+    touched = [*paths, *previous_paths]
     repo_path_allowlist = _get_repo_path_allowlist()
     if any(
         is_sensitive_path(p)
         and not is_repo_allowlisted_path(p, repo, repo_path_allowlist)
-        for p in paths
+        for p in touched
     ):
         return None, ["Touches sensitive/security/infra paths"]
 
-    if any(is_bot_config(p) for p in paths):
+    if any(is_bot_config(p) for p in touched):
         return None, ["Bot/CI config changes require human review under current policy"]
 
     placement_reasons = _contrib_placement_route_reasons(paths)
@@ -3378,13 +3404,13 @@ def contrib_classify_category(
     }
     unwaived_spec_docs = [
         p
-        for p in paths
+        for p in touched
         if is_doc_file(p) and is_spec_like_doc(p) and p not in waived_docs
     ]
     if unwaived_spec_docs:
         return None, ["Touches spec-like documentation requiring human review"]
 
-    remaining = [p for p in paths if p not in waived_docs]
+    remaining = [p for p in touched if p not in waived_docs]
     if not remaining:
         return "docs-only", []
     category, reasons = classify_category(remaining, repo=repo)
@@ -4087,7 +4113,12 @@ def path_classifier() -> merge_policy.PathClassifier:
 
 
 def merge_policy_tier_waiver(
-    reasons: list[str], *, repo: str, number: int, files: list[str]
+    reasons: list[str],
+    *,
+    repo: str,
+    number: int,
+    files: list[str],
+    previous_paths: Sequence[str] = (),
 ) -> tuple[list[str], str | None, dict[str, Any] | None]:
     """Drop path/category refusals for a tier-0 PR in a policy rollout repo.
 
@@ -4114,6 +4145,8 @@ def merge_policy_tier_waiver(
     changes = fetch_pr_file_changes(repo, number)
     if changes is None or {c.path for c in changes} != set(files):
         return reasons, None, None
+    # A rename source is a touched path too: never tier on the destination alone.
+    changes = changes + [merge_policy.FileChange(path=p) for p in previous_paths]
     verdict = merge_policy.assign_tier(changes, policy, path_classifier())
     if verdict.tier != 0 or not reasons:
         return reasons, None, verdict.as_dict()
@@ -4133,6 +4166,11 @@ def evaluate_pr(
     title = pr.get("title", "")
     url = pr.get("url", f"https://github.com/{repo}/pull/{number}")
     files = [f.get("path", "") for f in pr.get("files", []) if f.get("path")]
+    previous_files = [
+        f["previous_path"] for f in pr.get("files", []) if f.get("previous_path")
+    ]
+    # Every path the PR touches: a rename changes its source as well.
+    touched = files + previous_files
 
     result = CheckResult(
         eligible=False,
@@ -4142,6 +4180,7 @@ def evaluate_pr(
         title=title,
         author=author,
         files=files,
+        previous_files=previous_files,
         head_sha=pr.get("headRefOid", ""),
     )
 
@@ -4151,7 +4190,7 @@ def evaluate_pr(
         path.lower()
         .replace("\\", "/")
         .startswith("packages/gptme-contrib-lib/src/gptme_contrib_lib/merge_policy")
-        for path in files
+        for path in touched
     ):
         result.reasons.append("Merge policy authority changes require human merge")
 
@@ -4594,15 +4633,15 @@ def evaluate_pr(
         # like-doc hard stops classify_category also enforces still apply
         # here; only the "must fall into an allowed category" requirement is
         # replaced, and only for this repo.
-        if any(is_sensitive_path(path) for path in files):
+        if any(is_sensitive_path(path) for path in touched):
             result.category = None
             category_reasons.append("Touches sensitive/security/infra paths")
-        elif any(is_bot_config(path) for path in files):
+        elif any(is_bot_config(path) for path in touched):
             result.category = None
             category_reasons.append(
                 "Bot/CI config changes require human review under current policy"
             )
-        elif any(is_doc_file(path) and is_spec_like_doc(path) for path in files):
+        elif any(is_doc_file(path) and is_spec_like_doc(path) for path in touched):
             result.category = None
             category_reasons.append(
                 "Touches spec-like documentation requiring human review"
@@ -4623,7 +4662,9 @@ def evaluate_pr(
         # docstring). The agent-literal check needs patch text, so it is
         # fetched lazily and only once the cheaper path-only checks above
         # have already left the PR eligible.
-        category, category_reasons = contrib_classify_category(files, repo=repo)
+        category, category_reasons = contrib_classify_category(
+            files, repo=repo, previous_paths=previous_files
+        )
         result.category = category
         if category is not None:
             file_shapes = _fetch_contrib_pr_file_shapes(repo, number)
@@ -4632,14 +4673,18 @@ def evaluate_pr(
                 result.category = None
                 category_reasons.extend(agent_literal_reasons)
     else:
-        category, category_reasons = classify_category(files, repo=repo)
+        category, category_reasons = classify_category(touched, repo=repo)
         result.category = category
 
     # ErikBjare/bob#1480: a tier-0 PR in a rollout repo of gptme_contrib_lib/merge_policy.toml
     # needs no category. Evaluated before operator approval so the tier is
     # recorded even when Erik also approved the head.
     category_reasons, tier_waiver, result.merge_tier = merge_policy_tier_waiver(
-        category_reasons, repo=repo, number=number, files=files
+        category_reasons,
+        repo=repo,
+        number=number,
+        files=files,
+        previous_paths=previous_files,
     )
     if tier_waiver is not None:
         result.warnings.append(tier_waiver)
