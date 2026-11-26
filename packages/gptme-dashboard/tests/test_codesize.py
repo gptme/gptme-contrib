@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -521,6 +522,16 @@ def test_user_submodule_recurse_does_not_inflate_the_trend(tmp_path: Path, brain
     assert report.history[-1].source_lines == report.total_source_lines
 
 
+def _can_ssh_sign() -> bool:
+    """SSH commit signing needs ssh-keygen and git >= 2.34."""
+    out = subprocess.run(["git", "version"], capture_output=True, text=True, check=True).stdout
+    version = re.search(r"(\d+)\.(\d+)", out)
+    return bool(
+        shutil.which("ssh-keygen") and version and (int(version[1]), int(version[2])) >= (2, 34)
+    )
+
+
+@pytest.mark.skipif(not _can_ssh_sign(), reason="host cannot make SSH-signed commits")
 def test_user_show_signature_does_not_corrupt_commit_dates(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     _init_repo(repo)
@@ -545,3 +556,67 @@ def test_user_show_signature_does_not_corrupt_commit_dates(tmp_path: Path) -> No
     report = build_report(repo, history_weeks=0)
 
     assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", report.groups[0].last_commit)
+
+
+def test_submodule_mounted_under_a_skipped_name_is_still_counted(tmp_path: Path) -> None:
+    meta = _metarepo(tmp_path)
+    _add_submodule(meta, tmp_path / "alpha-src", "build/toolchain")
+    mounted = meta / "build/toolchain"
+    # skipped directories inside the submodule stay skipped
+    _write(mounted, "dist/bundle.js", 500)
+    _commit_all(mounted, "vendored output")
+    _commit_all(meta, "mount toolchain")
+
+    report = build_report(meta, history_weeks=4)
+
+    by_name = {g.name: g.source_lines for g in report.groups}
+    assert by_name["build/toolchain"] == 40
+    assert report.history[-1].source_lines == report.total_source_lines
+
+
+def test_unmerged_files_are_counted_once(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    _write(repo, "src/a.py", 10)
+    _commit_all(repo)
+    _git(repo, "checkout", "-q", "-b", "other")
+    _write(repo, "src/a.py", 20)
+    _commit_all(repo, "theirs")
+    _git(repo, "checkout", "-q", "-")
+    _write(repo, "src/a.py", 30)
+    _commit_all(repo, "ours")
+    with pytest.raises(AssertionError):
+        _git(repo, "merge", "-q", "other")
+
+    report = build_report(repo, history_weeks=0)
+
+    assert [f.path for f in report.largest_files] == ["src/a.py"]
+    assert [g.source_files for g in report.groups] == [1]
+
+
+def test_json_file_entries_carry_the_hotspot_score(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    _write(repo, "src/a.py", 2000)
+    _commit_all(repo)
+
+    data = json.loads(build_report(repo, history_weeks=0).to_json())
+
+    # one commit in the window: 2000 * sqrt(2)
+    for entries in (data["hotspots"], data["largest_files"], data["over_threshold"]["1500"]):
+        assert [e["hotspot_score"] for e in entries] == [2828.4]
+
+
+@pytest.mark.parametrize("manifest", ["package.json", "Cargo.toml", "go.mod"])
+def test_non_python_workspaces_group_by_package(tmp_path: Path, manifest: str) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    for name in ("alpha", "beta"):
+        _write(repo, f"packages/{name}/{manifest}", 1)
+        _write(repo, f"packages/{name}/src/index.ts", 5)
+    _commit_all(repo)
+
+    report = build_report(repo, history_weeks=0)
+
+    assert report.profile == "monorepo"
+    assert {g.name for g in report.groups} == {"alpha", "beta"}

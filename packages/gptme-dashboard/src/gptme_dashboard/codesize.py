@@ -83,6 +83,9 @@ DEFAULT_THRESHOLDS = (1500, 3000)
 # Generated files that carry a source suffix and would otherwise top every list.
 SKIP_FILES = {"pnpm-lock.yaml"}
 
+# Any of these under packages/<name>/ marks a monorepo.
+PACKAGE_MANIFESTS = ("pyproject.toml", "package.json", "Cargo.toml", "go.mod")
+
 # A file counts as a test when a directory or its file name says so. Matching is
 # on whole path components: "latest/" and "contest_rules.py" are not tests.
 TEST_DIRS = {"test", "tests", "__tests__", "androidtest"}
@@ -103,6 +106,9 @@ class FileSize:
         if self.changes <= 0:
             return 0.0
         return self.lines * math.sqrt(1.0 + self.changes)
+
+    def to_dict(self) -> dict:
+        return {**asdict(self), "hotspot_score": round(self.hotspot_score, 1)}
 
 
 @dataclass
@@ -161,6 +167,12 @@ class CodeSizeReport:
             "test_files": sum(g.test_files for g in self.groups),
         }
         data["groups"] = [{**asdict(g), "tests_ratio": g.tests_ratio} for g in self.groups]
+        data["largest_files"] = [f.to_dict() for f in self.largest_files]
+        data["hotspots"] = [f.to_dict() for f in self.hotspots]
+        data["over_threshold"] = {
+            threshold: [f.to_dict() for f in files]
+            for threshold, files in self.over_threshold.items()
+        }
         return data
 
     def to_json(self) -> str:
@@ -279,7 +291,9 @@ def detect_profile(root: Path) -> str:
     if len(_declared_submodules(root)) >= 2:
         return "metarepo"
     if (root / "packages").is_dir() and any(
-        (p / "pyproject.toml").exists() for p in (root / "packages").iterdir() if p.is_dir()
+        (package / manifest).exists()
+        for package in (root / "packages").iterdir()
+        for manifest in PACKAGE_MANIFESTS
     ):
         return "monorepo"
     return "monolith"
@@ -371,6 +385,20 @@ def _is_test_path(rel_path: str) -> bool:
     return path.suffix in JS_SUFFIXES and path.stem.endswith((".test", ".spec"))
 
 
+def _is_source_path(path: str) -> bool:
+    """Whether a path, relative to the repository that tracks it, is reported.
+
+    The current numbers and the trend both filter through this. A submodule's
+    mount path is not part of it: one mounted at ``build/toolchain`` still counts.
+    """
+    *dirs, name = path.split("/")
+    return (
+        Path(name).suffix.lower() in SOURCE_SUFFIXES
+        and name not in SKIP_FILES
+        and not any(d in SKIP_DIRS for d in dirs)
+    )
+
+
 def iter_source_files(root: Path, submodules: list[str] | None = None):
     """Yield (relative path, absolute path) for source files.
 
@@ -380,24 +408,19 @@ def iter_source_files(root: Path, submodules: list[str] | None = None):
     if _is_git_repo(root):
         # Ask each repo in turn: `ls-files --recurse-submodules` silently skips
         # a submodule that is checked out but not active.
+        # dict.fromkeys: an unmerged path is listed once per index stage.
         candidates = [
-            root / base / p
+            (root / base / p, p)
             for base in ("", *(submodules or []))
-            for p in _git(root / base, "ls-files", "-z").split("\0")
-            if p
+            for p in dict.fromkeys(_git(root / base, "ls-files", "-z").split("\0"))
         ]
     else:
-        candidates = list(root.rglob("*"))
-    for path in candidates:
+        candidates = [(p, p.relative_to(root).as_posix()) for p in root.rglob("*")]
+    for path, own_path in candidates:
         # a symlink would count its target a second time
-        if path.is_symlink() or not path.is_file():
+        if not _is_source_path(own_path) or path.is_symlink() or not path.is_file():
             continue
-        rel = path.relative_to(root)
-        if any(part in SKIP_DIRS for part in rel.parts[:-1]):
-            continue
-        if path.suffix.lower() not in SOURCE_SUFFIXES or path.name in SKIP_FILES:
-            continue
-        yield rel.as_posix(), path
+        yield path.relative_to(root).as_posix(), path
 
 
 def build_report(
@@ -551,10 +574,8 @@ def _lines_at_commit(
         path, _, count = rest.rpartition(":")
         if not path or not count.isdigit():
             continue
-        *dirs, name = path.split("/")
-        if name in SKIP_FILES or any(part in SKIP_DIRS for part in dirs):
-            continue
-        rows.append((prefix + path, int(count)))
+        if _is_source_path(path):
+            rows.append((prefix + path, int(count)))
     if not recurse:
         return rows
     for entry in _git(root, "ls-tree", "-r", "-z", commit).split("\0"):
