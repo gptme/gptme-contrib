@@ -27,6 +27,17 @@ uv run python -c "import gptme_review"
 | `sweep_fallback` | Retries selected primary-engine failures on a fallback engine, skipping heads already reviewed and diffs too large to retry |
 | `shard` | Shard planning for diffs larger than one review prompt; see below |
 
+## Finding identity across review passes
+
+Full findings use the content-word matcher for fan-out deduplication. Stored
+thread and suppression markers carry only twelve identifying tokens. Fuzzy
+marker recognition compares those compact tokens on both sides and requires
+half of the smaller token set to agree, plus the existing shared-token and
+location guards. Exact
+fingerprints retain their identity when lines move. Weak marker matches may
+produce an extra thread; a few shared API names must not hide a distinct defect.
+The fingerprint hash and marker format are unchanged.
+
 ## Request billing evidence
 
 The request usage ledger distinguishes `openrouter_generation` (generation
