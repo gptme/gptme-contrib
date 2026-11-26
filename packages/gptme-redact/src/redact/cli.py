@@ -236,6 +236,32 @@ def _stream_fd(path: Path) -> int | None:
     return int(match.group(1)) if match else None
 
 
+def _write_in_place(path: Path, data: bytes) -> None:
+    """Write *data* to *path* without a sibling rename.
+
+    Used when mkstemp or os.replace cannot run (read-only directory, sticky
+    dir holding another user's file). ``open(path, "wb")`` truncates first, so
+    a later write error would destroy the original; keep a copy and restore it.
+    """
+    try:
+        original = path.read_bytes()
+    except FileNotFoundError:
+        original = None
+    try:
+        with open(path, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+    except BaseException:
+        if original is not None:
+            try:
+                with open(path, "wb") as fh:
+                    fh.write(original)
+                    fh.flush()
+            except OSError:
+                pass
+        raise
+
+
 def _write_atomic(path: Path, text: str) -> None:
     """Write *text* to *path* via a sibling temp file and rename.
 
@@ -277,8 +303,7 @@ def _write_atomic(path: Path, text: str) -> None:
         # A writable file inside a non-writable directory: the atomic path
         # needs a temp file beside the target, the in-place write it replaced
         # did not, so keep the in-place write as the fallback.
-        with open(path, "wb") as fh:
-            fh.write(data)
+        _write_in_place(path, data)
         return
     try:
         with os.fdopen(fd, "wb") as fh:
@@ -289,8 +314,7 @@ def _write_atomic(path: Path, text: str) -> None:
         except PermissionError:
             # Sticky world-writable directory (e.g. /tmp) holding another
             # user's file: replacing is EPERM, writing the file itself is not.
-            with open(path, "wb") as fh:
-                fh.write(data)
+            _write_in_place(path, data)
             Path(tmp).unlink(missing_ok=True)
             return
     except BaseException:

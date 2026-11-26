@@ -81,15 +81,24 @@ def test_cli_out_writes_through_a_symlink_and_keeps_the_mode(tmp_path) -> None:
     assert target.stat().st_mode & 0o777 == 0o644
 
 
-def test_cli_out_write_failure_keeps_existing_file(tmp_path, monkeypatch) -> None:
+def test_cli_out_write_failure_keeps_existing_file(tmp_path) -> None:
+    """Encode happens before any truncate, so a surrogate cannot destroy --out.
+
+    The CLI refuses invalid UTF-8 at read time, so this pins `_write_atomic`
+    itself: `text.encode("utf-8")` must run before the target is opened.
+    """
+    from pathlib import Path
+
+    from redact.cli import _write_atomic
+
     out = tmp_path / "doc.md"
     out.write_text("original precious content\n", encoding="utf-8")
-    # A lone surrogate (surrogateescape stdin) cannot be encoded as UTF-8.
-    monkeypatch.setattr("sys.stdin", io.StringIO("plain text \udcff more\n"))
     try:
-        main(["--no-env-secrets", "--out", str(out), "-"])
+        _write_atomic(Path(out), "plain text \udcff more\n")
     except UnicodeEncodeError:
         pass
+    else:
+        raise AssertionError("expected UnicodeEncodeError from encode-before-open")
     assert out.read_text(encoding="utf-8") == "original precious content\n"
     assert [p.name for p in tmp_path.iterdir()] == ["doc.md"]
 
@@ -289,3 +298,61 @@ def test_out_falls_back_to_in_place_write_when_replace_is_denied(
     _write_atomic(out, "new\n")
     assert out.read_text(encoding="utf-8") == "new\n"
     assert [p.name for p in tmp_path.iterdir()] == ["shared.txt"]
+
+
+def test_out_in_place_fallback_restores_original_on_write_failure(
+    tmp_path, monkeypatch
+) -> None:
+    """A disk-full write after truncate must not leave an empty --out file."""
+    import builtins
+    import tempfile
+    from pathlib import Path
+
+    from redact.cli import _write_atomic
+
+    out = tmp_path / "doc.md"
+    original = "original precious content\n"
+    out.write_text(original, encoding="utf-8")
+
+    def _deny(*a, **kw):
+        raise PermissionError(13, "Permission denied", str(tmp_path))
+
+    monkeypatch.setattr(tempfile, "mkstemp", _deny)
+
+    real_open = builtins.open
+    writes = {"n": 0}
+
+    def _open(file, mode="r", *a, **kw):
+        path = str(file)
+        if path == str(out) and "w" in str(mode):
+            writes["n"] += 1
+            if writes["n"] == 1:
+                # Truncate as `"wb"` does, then fail the write.
+                fh = real_open(file, mode, *a, **kw)
+                fh.close()
+
+                class _Boom:
+                    def write(self, data):
+                        raise OSError(28, "No space left on device")
+
+                    def flush(self):
+                        return None
+
+                    def __enter__(self):
+                        return self
+
+                    def __exit__(self, *exc):
+                        return False
+
+                return _Boom()
+        return real_open(file, mode, *a, **kw)
+
+    monkeypatch.setattr(builtins, "open", _open)
+    try:
+        _write_atomic(Path(out), "new content that must not land\n")
+    except OSError:
+        pass
+    else:
+        raise AssertionError("expected the injected write failure")
+    assert out.read_text(encoding="utf-8") == original
+    assert [p.name for p in tmp_path.iterdir()] == ["doc.md"]
