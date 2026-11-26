@@ -270,7 +270,10 @@ def test_send_uses_one_draft_snapshot(
     delivered = message_from_bytes(deliveries[0])
     assert delivered.get("In-Reply-To") == original
     assert delivered["Subject"] == "Re: hi"
-    assert "Edited body" in real_read(draft)  # never delivered, so still a draft
+    # Never delivered, so it survives as a new draft (not at the delivered id).
+    preserved = list(draft.parent.glob("*.md"))
+    assert len(preserved) == 1
+    assert "Edited body" in preserved[0].read_text()
     archived = (agent.email_dir / "sent" / "snapshot.md").read_text()
     assert archived.startswith(snapshot)
     assert "Edited body" not in archived
@@ -308,7 +311,54 @@ def test_draft_replaced_while_sent_copy_is_published(
     assert len(deliveries) == 1
     assert sent.read_text().startswith(snapshot)
     assert "Edited body" not in sent.read_text()
-    assert "Edited body" in draft.read_text()
+    # The edit cannot be sent under the delivered message id, so it is
+    # preserved as a new draft instead of at the original path.
+    assert not draft.exists()
+    preserved = list(draft.parent.glob("*.md"))
+    assert len(preserved) == 1
+    assert "Edited body" in preserved[0].read_text()
+
+
+def test_edited_draft_is_preserved_as_a_sendable_new_draft(
+    agent: AgentEmail, deliveries: list, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An edit that missed delivery must be sendable, not stranded.
+
+    The delivered message id is in sent/, so restoring the edit to
+    drafts/<filename> leaves a file send() refuses forever. It is re-minted as a
+    new draft with its own Message-ID.
+    """
+    msg = _draft(agent, "edited-during-send", None)
+    draft = agent.email_dir / "drafts" / "edited-during-send.md"
+    sent = agent.email_dir / "sent" / "edited-during-send.md"
+    edited = (
+        "To: erik@example.com\nSubject: late edit\n"
+        "Message-ID: <edited-during-send@example.com>\n\nLate body\n"
+    )
+    real_run = subprocess.run
+
+    def run_and_edit(cmd: Any, *args: Any, **kwargs: Any) -> Any:
+        draft.write_text(edited)
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", run_and_edit)
+    agent.send(msg)
+
+    assert sent.exists()
+    assert "Late body" not in sent.read_text()
+    assert not draft.exists()
+    preserved = list(draft.parent.glob("*.md"))
+    assert len(preserved) == 1
+    content = preserved[0].read_text()
+    assert "Late body" in content
+    assert "Message-ID: <edited-during-send@example.com>" not in content
+
+    # The delivered id still refuses a resend, but the preserved edit sends.
+    with pytest.raises(ValueError, match="Already sent"):
+        agent.send(msg)
+    agent.send(preserved[0].stem)
+    assert len(deliveries) == 2
+    assert b"Late body" in deliveries[1]
 
 
 def test_edit_landing_during_cleanup_is_not_deleted(

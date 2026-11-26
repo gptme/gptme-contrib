@@ -911,6 +911,28 @@ class AgentEmail:
         unique_id = str(uuid.uuid4())
         return f"<{unique_id}>"
 
+    def _preserve_edited_draft(self, content: str) -> Path | None:
+        """Save a draft edit that missed delivery as a new, sendable draft.
+
+        The delivered message id is already in ``sent/``, so ``send()`` refuses
+        the edited copy forever. Re-mint the ``Message-ID`` (and the matching
+        filename) so the edit is a real draft the user can send explicitly
+        instead of an unreachable file.
+        """
+        message_id = self._generate_message_id()
+        rewritten, replaced = re.subn(
+            r"(?m)^Message-ID:.*$", f"Message-ID: {message_id}", content, count=1
+        )
+        if not replaced:
+            rewritten = content
+        path = self.email_dir / "drafts" / self._format_filename(message_id)
+        try:
+            path.write_text(rewritten)
+        except OSError as e:
+            logger.warning("Failed to preserve the edited draft as %s: %s", path, e)
+            return None
+        return path
+
     def _format_filename(self, message_id: str) -> str:
         """Convert message ID to filename.
 
@@ -1322,19 +1344,36 @@ class AgentEmail:
             logger.warning("Failed to remove sent draft %s: %s", draft_path, e)
         else:
             try:
-                unchanged = pending_path.read_text(errors="replace") == content
+                pending_content: str | None = pending_path.read_text(errors="replace")
             except OSError as e:
-                unchanged = False
+                pending_content = None
                 logger.warning("Failed to re-read draft %s: %s", draft_path, e)
-            if unchanged:
+            if pending_content == content:
                 try:
                     pending_path.unlink()
                 except OSError as e:
                     # Delivery already succeeded; preserve reply bookkeeping.
                     logger.warning("Failed to remove sent draft %s: %s", draft_path, e)
             else:
-                logger.warning("Draft %s changed during delivery; kept the unsent edit", draft_path)
-                if draft_path.exists():
+                logger.warning(
+                    "Draft %s changed during delivery; the delivered copy is in sent/",
+                    draft_path,
+                )
+                # Restoring the edit to drafts/<filename> would strand it: send()
+                # refuses any message id already in sent/. Publish it as a new
+                # draft with its own Message-ID so it can actually be sent.
+                preserved = (
+                    self._preserve_edited_draft(pending_content)
+                    if pending_content is not None
+                    else None
+                )
+                if preserved is not None:
+                    logger.warning("Unsent edit saved as draft %s", preserved.stem)
+                    try:
+                        pending_path.unlink()
+                    except OSError as e:
+                        logger.warning("Failed to remove moved draft %s: %s", pending_path, e)
+                elif draft_path.exists():
                     # The editor already created a new drafts/ file; restoring
                     # would overwrite that newer save. Keep both.
                     logger.warning("Edited draft also at %s; kept both", pending_path)
