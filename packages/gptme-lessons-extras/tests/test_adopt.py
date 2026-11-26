@@ -4,6 +4,7 @@ import builtins
 import json
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -114,16 +115,22 @@ def test_failed_lesson_write_keeps_existing_lesson(tmp_path, monkeypatch):
             return _FailingWrite(f)
         return f
 
+    real_mkstemp = tempfile.mkstemp
+    lesson_fds: set[int] = set()
+
+    def recording_mkstemp(*args, **kwargs):
+        fd, name = real_mkstemp(*args, **kwargs)
+        if "git.md" in str(name):
+            lesson_fds.add(fd)
+        return fd, name
+
     def failing_fdopen(fd, mode="r", *args, **kwargs):
         f = real_fdopen(fd, mode, *args, **kwargs)
-        try:
-            target = os.readlink(f"/proc/self/fd/{fd}")
-        except OSError:
-            target = ""
-        if "w" in mode and "git.md" in target:
+        if "w" in mode and fd in lesson_fds:
             return _FailingWrite(f)
         return f
 
+    monkeypatch.setattr(adopt.tempfile, "mkstemp", recording_mkstemp)
     monkeypatch.setattr(builtins, "open", failing_open)
     monkeypatch.setattr(os, "fdopen", failing_fdopen)
     ok, msg = adopt.adopt_lesson(meta, net, lessons, force=True)
@@ -133,6 +140,26 @@ def test_failed_lesson_write_keeps_existing_lesson(tmp_path, monkeypatch):
     assert local.read_text() == "ORIGINAL LESSON\n"
     assert not list(local.parent.glob("*.tmp"))
     assert not _ledger(lessons).exists()
+
+
+def test_symlinked_lesson_is_written_through(tmp_path):
+    """A symlinked lesson must stay a symlink, as the in-place write did."""
+    meta, net = _network_lesson(tmp_path)
+    lessons = tmp_path / "ws" / "lessons"
+    (lessons / "tools").mkdir(parents=True)
+    # Target stays inside lessons_dir: adopt_lesson rejects symlinks that
+    # escape it, so only an in-tree link can reach this path.
+    shared = lessons / "shared-git.md"
+    shared.write_text("SHARED LESSON\n")
+    local = lessons / "tools" / "git.md"
+    local.symlink_to(shared)
+
+    ok, msg = adopt.adopt_lesson(meta, net, lessons, force=True)
+
+    assert ok, msg
+    assert local.is_symlink()
+    assert shared.read_text() != "SHARED LESSON\n"
+    assert not list(shared.parent.glob("*.tmp"))
 
 
 def test_ledger_keeps_its_mode(tmp_path):

@@ -44,6 +44,11 @@ def _target_mode(path: Path) -> int:
 @contextlib.contextmanager
 def _atomic_write(path: Path) -> Iterator[TextIO]:
     """Yield a handle that is renamed onto `path` only if the body succeeds."""
+    # os.replace() swaps the directory entry, so a symlinked lesson (or
+    # ledger) would become a regular file. Write through to its target, as
+    # the old in-place open() did.
+    if path.is_symlink():
+        path = path.resolve()
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:
         with os.fdopen(fd, "w") as f:
