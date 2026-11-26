@@ -378,3 +378,18 @@ def test_repeated_rewrite_of_noncanonical_field_value_keeps_one_row(tmp_path: Pa
     rows = [json.loads(line) for line in store.path.read_text(encoding="utf-8").splitlines()]
     assert len(rows) == 1
     assert rows[0]["session_id"].startswith("noid-")
+
+
+def test_append_of_loaded_id_less_row_does_not_fabricate_timestamp(tmp_path: Path) -> None:
+    """Re-appending a loaded id-less row keeps its invented "now" out of the file."""
+    src = SessionStore(sessions_dir=tmp_path / "src")
+    src.path.parent.mkdir(parents=True)
+    src.path.write_text(json.dumps({"model": "opus"}) + "\n", encoding="utf-8")
+
+    dst = SessionStore(sessions_dir=tmp_path / "dst")
+    dst.append(src.load_all()[0])
+
+    row = json.loads(dst.path.read_text(encoding="utf-8").splitlines()[0])
+    assert "timestamp" not in row
+    assert row["session_id"].startswith("noid-")
+    assert row["model"] == "opus"

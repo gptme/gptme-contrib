@@ -277,7 +277,10 @@ class SessionStore:
             _ensure_trailing_newline(self.path)
             created = not self.path.exists()
             with open(self.path, "a", encoding="utf-8") as f:
-                f.write(record.to_json() + "\n")
+                # ``_row_json`` keeps a store-invented "now" timestamp out of
+                # the file, so re-appending a loaded id-less row (e.g. a
+                # migration between stores) does not fabricate a creation time.
+                f.write(_row_json(record) + "\n")
                 f.flush()
                 os.fsync(f.fileno())
             if created:
