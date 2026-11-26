@@ -9,6 +9,7 @@ Provides tools to:
 """
 
 import contextlib
+import errno
 import json
 import os
 import sys
@@ -49,6 +50,10 @@ def _atomic_write(path: Path) -> Iterator[TextIO]:
     # the old in-place open() did.
     if path.is_symlink():
         path = path.resolve()
+    if path.exists() and not os.access(path, os.W_OK):
+        # os.replace() would swap the entry regardless; keep the refusal to
+        # overwrite a read-only file that the in-place write had.
+        raise PermissionError(errno.EACCES, "Permission denied", str(path))
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:
         with os.fdopen(fd, "w") as f:
@@ -199,8 +204,16 @@ def record_adoption(
     if metrics_file.exists():
         try:
             with open(metrics_file) as f:
-                metrics = json.load(f)
-        except json.JSONDecodeError as e:
+                loaded = json.load(f)
+            # Valid JSON of the wrong shape blocks just as hard as invalid
+            # JSON (TypeError/KeyError on every later adoption), so treat it
+            # the same way.
+            if not isinstance(loaded, dict) or not isinstance(
+                loaded.get("adoptions"), list
+            ):
+                raise ValueError(f"unexpected ledger shape: {type(loaded).__name__}")
+            metrics = loaded
+        except (json.JSONDecodeError, ValueError) as e:
             # Left behind by an interrupted write of the old, non-atomic kind.
             # Keep it for manual recovery and start a new ledger, so it does
             # not block every later adoption.

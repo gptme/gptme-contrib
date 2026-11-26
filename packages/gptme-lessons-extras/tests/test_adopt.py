@@ -176,6 +176,39 @@ def test_ledger_keeps_its_mode(tmp_path):
     assert len(json.loads(ledger.read_text())["adoptions"]) == 2
 
 
+def test_wrong_shaped_ledger_is_set_aside_not_blocking(tmp_path, capsys):
+    """Valid JSON of the wrong shape must not block adoptions either."""
+    lessons = tmp_path / "ws" / "lessons"
+    lessons.mkdir(parents=True)
+    ledger = _ledger(lessons)
+    ledger.parent.mkdir(parents=True)
+    ledger.write_text('["not", "a", "ledger"]')
+
+    adopt.record_adoption("a-tools-new", "a", "2026-01-02T00:00:00", lessons)
+
+    data = json.loads(ledger.read_text())
+    assert [a["lesson_id"] for a in data["adoptions"]] == ["a-tools-new"]
+    assert list(ledger.parent.glob(f"{ledger.name}.corrupt-*"))
+    assert "unexpected ledger shape" in capsys.readouterr().err
+
+
+def test_read_only_lesson_is_not_overwritten(tmp_path):
+    """A 0444 lesson keeps refusing --force, as the in-place write did."""
+    meta, net = _network_lesson(tmp_path)
+    lessons = tmp_path / "ws" / "lessons"
+    local = lessons / "tools" / "git.md"
+    local.parent.mkdir(parents=True)
+    local.write_text("PROTECTED\n")
+    local.chmod(0o444)
+    try:
+        ok, msg = adopt.adopt_lesson(meta, net, lessons, force=True)
+    finally:
+        local.chmod(0o644)
+
+    assert not ok, msg
+    assert local.read_text() == "PROTECTED\n"
+
+
 def test_corrupt_ledger_is_set_aside_not_blocking(tmp_path, capsys):
     lessons = tmp_path / "ws" / "lessons"
     lessons.mkdir(parents=True)
