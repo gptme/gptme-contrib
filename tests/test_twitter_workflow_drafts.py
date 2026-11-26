@@ -3129,19 +3129,24 @@ def test_expire_review_drafts_continues_past_a_draft_that_fails(
     other = _save_review_draft(workflow_module, "tweet_b.yml", datetime(2026, 10, 1))
     broken = workflow_module.REVIEW_DIR / "tweet_c.yml"
     broken.write_text("- not a draft\n")
-    real_save = workflow_module.TweetDraft.save
+    parked_mtime = stuck.stat().st_mtime
+    real_move = workflow_module.move_draft
 
-    def save(draft: Any, path: Path) -> None:
+    def move(path: Path, new_status: str) -> Path:
         if path == stuck:
-            raise PermissionError("read-only draft")
-        real_save(draft, path)
+            raise PermissionError("read-only rejected dir")
+        moved: Path = real_move(path, new_status)
+        return moved
 
-    monkeypatch.setattr(workflow_module.TweetDraft, "save", save)
+    monkeypatch.setattr(workflow_module, "move_draft", move)
 
     result = workflow_module.expire_review_drafts(7, now=datetime(2026, 11, 25))
 
     assert result == (1, 2)
+    # A failed move leaves the draft in review/ with its parking time intact,
+    # so the next cycle retries instead of restarting the expiry clock.
     assert stuck.exists() and broken.exists()
+    assert stuck.stat().st_mtime == parked_mtime
     assert (workflow_module.REJECTED_DIR / other.name).exists()
 
 
