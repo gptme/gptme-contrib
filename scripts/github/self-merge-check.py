@@ -403,6 +403,8 @@ class CheckResult:
     head_sha: str = ""
     # gptme_contrib_lib/merge_policy.toml verdict; only computed for rollout repos.
     merge_tier: dict[str, Any] | None = None
+    # Observation at evaluation time, not attribution of an eventual merge.
+    greptile_evidence: dict[str, Any] | None = None
 
 
 def run_gh(args: list[str], timeout: int = 30) -> str:
@@ -3486,7 +3488,9 @@ def _fetch_greptile_summary_signal(repo: str, pr_number: int) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def greptile_summary_score(repo: str, pr_number: int) -> int | None:
+def greptile_summary_score(
+    repo: str, pr_number: int, *, summary_signal: dict[str, Any] | None = None
+) -> int | None:
     """Latest Greptile summary score via the shared greptile-merge-signal evaluator.
 
     Returns the parsed score (0-5), or None if Greptile posted no parseable summary score.
@@ -3497,29 +3501,18 @@ def greptile_summary_score(repo: str, pr_number: int) -> int | None:
     GREPTILE_MERGE_SIGNAL_MIN_SCORE has no effect on the gate — setting it does not
     soften or tighten the floor here.
     """
-    signal = Path(__file__).with_name("greptile-merge-signal.py")
-    if not signal.exists():
-        return None
-    try:
-        env = os.environ.copy()
-        # The self-merge gate owns its own enable/disable policy; don't let the
-        # standalone signal tool's disable flag silently neuter the floor.
-        env.pop("GREPTILE_MERGE_SIGNAL_DISABLED", None)
-        proc = subprocess.run(
-            [sys.executable, str(signal), "--repo", repo, str(pr_number)],
-            capture_output=True,
-            env=env,
-            text=True,
-            timeout=30,
-        )
-        data = json.loads(proc.stdout) if proc.stdout.strip() else {}
-    except (subprocess.TimeoutExpired, json.JSONDecodeError):
-        return None
+    data = (
+        _fetch_greptile_summary_signal(repo, pr_number)
+        if summary_signal is None
+        else summary_signal
+    )
     score = data.get("score")
     return int(score) if isinstance(score, int) else None
 
 
-def greptile_summary_reviewed_commit(repo: str, pr_number: int) -> str | None:
+def greptile_summary_reviewed_commit(
+    repo: str, pr_number: int, *, summary_signal: dict[str, Any] | None = None
+) -> str | None:
     """Head sha named by the latest Greptile summary's "Last reviewed commit" footer.
 
     Greptile edits its summary comment in place, so the "latest summary" score
@@ -3530,24 +3523,63 @@ def greptile_summary_reviewed_commit(repo: str, pr_number: int) -> str | None:
     Returns None when the footer is absent or unparseable — older summary
     formats carry no provenance, and the caller must fail open on None.
     """
-    signal = Path(__file__).with_name("greptile-merge-signal.py")
-    if not signal.exists():
-        return None
-    try:
-        env = os.environ.copy()
-        env.pop("GREPTILE_MERGE_SIGNAL_DISABLED", None)
-        proc = subprocess.run(
-            [sys.executable, str(signal), "--repo", repo, str(pr_number)],
-            capture_output=True,
-            env=env,
-            text=True,
-            timeout=30,
-        )
-        data = json.loads(proc.stdout) if proc.stdout.strip() else {}
-    except (subprocess.TimeoutExpired, json.JSONDecodeError):
-        return None
+    data = (
+        _fetch_greptile_summary_signal(repo, pr_number)
+        if summary_signal is None
+        else summary_signal
+    )
     reviewed = data.get("reviewed_commit")
     return reviewed if isinstance(reviewed, str) and reviewed else None
+
+
+# Preserve the two-argument wrapper seams used by callers/tests. Production
+# supplies a shared packet; patched readers are never combined into evidence.
+_ORIGINAL_GREPTILE_SCORE = greptile_summary_score
+_ORIGINAL_GREPTILE_COMMIT = greptile_summary_reviewed_commit
+
+
+def _greptile_evidence(
+    signal: dict[str, Any], head_sha: str, covered: bool | None
+) -> dict[str, Any]:
+    """Project an already observed summary; never fetch or decide coverage here.
+
+    reviewed_at is the summary comment's update (or creation) timestamp, not a
+    proven review-completion time. Trigger causality is not in this response.
+    Normalization is deliberately independent of the existing gate's parsers.
+    """
+    comment_id = signal.get("comment_id")
+    score = signal.get("score")
+    reviewed = signal.get("reviewed_commit")
+    if not (isinstance(reviewed, str) and re.fullmatch(r"[0-9a-fA-F]{7,40}", reviewed)):
+        reviewed = None
+    valid_head = isinstance(head_sha, str) and bool(
+        re.fullmatch(r"[0-9a-fA-F]{7,40}", head_sha)
+    )
+    match = _sha_matches_head(reviewed, head_sha) if reviewed and valid_head else None
+    timestamp = signal.get("reviewed_at")
+    if isinstance(timestamp, str):
+        try:
+            parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                timestamp = None
+        except ValueError:
+            timestamp = None
+    else:
+        timestamp = None
+    coverage = "unknown"
+    if match is not None and covered is not None:
+        coverage = ("direct" if match else "carried") if covered else "not_covered"
+    return {
+        "comment_id": comment_id
+        if type(comment_id) is int and comment_id > 0
+        else None,
+        "score": score if type(score) is int and 0 <= score <= 5 else None,
+        "reviewed_commit": reviewed,
+        "reviewed_at": timestamp,
+        "head_match": match,
+        "coverage": coverage,
+        "trigger": "unknown",
+    }
 
 
 def _parse_self_merge_min_greptile_score() -> int:
@@ -4341,11 +4373,23 @@ def evaluate_pr(
     # 2. Stale or dark Greptile AND fresh own-AI-review → AI reviewer verdict is the gate.
     # 3. Neither fresh → AI review required reason blocks (fail-closed, not fail-open).
     greptile = fetch_greptile_status(repo, number, review_data=shared_review_data)
-    greptile_reviewed_sha: str | None = (
-        greptile_summary_reviewed_commit(repo, number)
-        if greptile.get("has_review")
-        else None
-    )
+    # Fetch only where a production reader already would. One response supplies
+    # both readers and the audit packet; no cache survives this evaluation.
+    summary_signal: dict[str, Any] | None = None
+    if (
+        greptile.get("has_review")
+        and greptile_summary_reviewed_commit is _ORIGINAL_GREPTILE_COMMIT
+    ):
+        summary_signal = _fetch_greptile_summary_signal(repo, number)
+    greptile_reviewed_sha: str | None = None
+    if greptile.get("has_review"):
+        greptile_reviewed_sha = (
+            greptile_summary_reviewed_commit(
+                repo, number, summary_signal=summary_signal
+            )
+            if greptile_summary_reviewed_commit is _ORIGINAL_GREPTILE_COMMIT
+            else greptile_summary_reviewed_commit(repo, number)
+        )
     greptile_is_fresh: bool = (
         bool(greptile.get("has_review"))
         and greptile_reviewed_sha is not None
@@ -4356,6 +4400,10 @@ def evaluate_pr(
             result.head_sha or "",
         )
     )
+    if summary_signal is not None:
+        result.greptile_evidence = _greptile_evidence(
+            summary_signal, result.head_sha, greptile_is_fresh
+        )
     greptile_score: int | None = None
     greptile_unresolved = int(greptile.get("unresolved") or 0)
     if greptile.get("unknown"):
@@ -4365,7 +4413,11 @@ def evaluate_pr(
         )
     elif greptile_is_fresh:
         # Branch 1: Greptile covers the current head → its 5/5 floor applies
-        greptile_score = greptile_summary_score(repo, number)
+        greptile_score = (
+            greptile_summary_score(repo, number, summary_signal=summary_signal)
+            if greptile_summary_score is _ORIGINAL_GREPTILE_SCORE
+            else greptile_summary_score(repo, number)
+        )
         score_str = f"{greptile_score}/5" if greptile_score is not None else "n/a"
         min_score = _parse_self_merge_min_greptile_score()
         if greptile_unresolved > 0:
@@ -4465,7 +4517,7 @@ def evaluate_pr(
                     # refresh its score as well as the thread snapshot.
                     signal = _fetch_greptile_summary_signal(repo, number)
                     signal_sha = signal.get("reviewed_commit")
-                    if greptile_is_fresh or (
+                    refreshed_covered = greptile_is_fresh or (
                         isinstance(signal_sha, str)
                         and _review_carries_to_head(
                             repo,
@@ -4473,7 +4525,17 @@ def evaluate_pr(
                             signal_sha,
                             result.head_sha or "",
                         )
-                    ):
+                    )
+                    # The short-circuit can refer to an earlier summary. Do
+                    # not attribute its coverage to a different refreshed SHA.
+                    result.greptile_evidence = _greptile_evidence(
+                        signal,
+                        result.head_sha,
+                        refreshed_covered
+                        if not greptile_is_fresh or signal_sha == greptile_reviewed_sha
+                        else None,
+                    )
+                    if refreshed_covered:
                         if refreshed_greptile_unresolved:
                             result.reasons.append(
                                 f"Greptile reviewed (score {signal.get('score')}/5); "
@@ -4518,19 +4580,24 @@ def evaluate_pr(
                 greptile_score=greptile_score,
             )
             if substituted:
-                # Legacy readers above execute independently. They cannot
-                # establish that a score and its provenance belong together.
+                # Revalidate the coherent summary before substitution. Keep
+                # this existing refresh: it can observe a newer review cycle.
                 signal = _fetch_greptile_summary_signal(repo, number)
                 signal_sha = signal.get("reviewed_commit")
                 signal_score = signal.get("score")
+                signal_covered = isinstance(
+                    signal_sha, str
+                ) and _review_carries_to_head(
+                    repo,
+                    pr.get("baseRefName") or "",
+                    signal_sha,
+                    result.head_sha or "",
+                )
+                result.greptile_evidence = _greptile_evidence(
+                    signal, result.head_sha, signal_covered
+                )
                 if (
-                    not isinstance(signal_sha, str)
-                    or not _review_carries_to_head(
-                        repo,
-                        pr.get("baseRefName") or "",
-                        signal_sha,
-                        result.head_sha or "",
-                    )
+                    not signal_covered
                     or type(signal_score) is not int
                     or signal_score < _parse_self_merge_min_greptile_score()
                 ):
