@@ -231,7 +231,43 @@ def test_unfiltered_documents_load_without_a_pinned_root(corpus: Path) -> None:
     rag = VoiceRag(str(corpus), enabled=True)
     paths = rag.collect_recent_files()
     assert paths
-    assert rag._load_documents(paths, None, pinned=False)
+    docs = rag._load_documents(paths, None, pinned=False)
+    today = datetime.now(timezone.utc).date().isoformat()
+    assert [d.metadata["source"] for d in docs] == [f"journal/{today}/recent.md"]
+    assert "Brief standup monitoring work" in docs[0].content
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("lexical")
+async def test_snippet_anchors_on_a_phrase_not_an_earlier_single_word(
+    corpus: Path,
+) -> None:
+    write(
+        corpus,
+        "scripts/voice/brief.py",
+        "# standup\n" + "# filler\n" * 100 + "standup brief delivery plan\n",
+    )
+    result = await VoiceRag(str(corpus), enabled=True).search(
+        "standup brief", include_paths=["scripts/"]
+    )
+    assert "standup brief delivery plan" in result["results"][0]["snippet"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("lexical")
+async def test_broad_configured_glob_cannot_starve_recent_journals(
+    corpus: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    today = datetime.now(timezone.utc).date().isoformat()
+    write(corpus, f"journal/{today}/recap.md", "standup brief mechanism notes")
+    for n in range(90):
+        write(corpus, f"scripts/voice/gen_{n}.py", "unrelated generator code")
+    monkeypatch.setenv("GPTME_VOICE_RAG_SOURCE_PATHS", "scripts/voice/*.py")
+    result = await VoiceRag(str(corpus), enabled=True).search(
+        "standup brief", include_paths=["scripts/", "journal/"]
+    )
+    sources = [r["source"] for r in result["results"]]
+    assert f"journal/{today}/recap.md" in sources
 
 
 @pytest.mark.asyncio

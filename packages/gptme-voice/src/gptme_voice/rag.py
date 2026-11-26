@@ -242,7 +242,11 @@ class VoiceRag:
         recency_hours: float | None = None,
         search_impl: Callable[[str, int], list[dict[str, Any]]] | None = None,
     ):
-        self.workspace = Path(workspace).expanduser() if workspace else None
+        # Anchor the workspace now: a relative path would otherwise be re-read
+        # against the process cwd on every `path.absolute()`, so a cwd change
+        # between source selection and the pinned-fd read could name a different
+        # tree than the one validated.
+        self.workspace = Path(workspace).expanduser().absolute() if workspace else None
         self.enabled = _env_flag("GPTME_VOICE_RAG") if enabled is None else enabled
         # Fail closed at construction time: if gptme-rag is not installed and
         # no override search_impl is supplied, advertising workspace_search would
@@ -395,7 +399,16 @@ class VoiceRag:
                 seen.add(path)
                 paths.append(path)
                 if len(paths) >= _MAX_FILES:
-                    return paths[:_MAX_FILES]
+                    # Stop globbing, but still merge the recent journals below
+                    # instead of returning early and silently dropping them.
+                    break
+            if len(paths) >= _MAX_FILES:
+                break
+        if recent:
+            # Reserve room for the journal corpus so a broad configured glob
+            # cannot starve recent journals out of the filtered corpus.
+            reserved = min(len(recent), _MAX_FILES // 2)
+            paths = paths[: _MAX_FILES - reserved]
         return (paths + [p for p in recent if p not in seen])[:_MAX_FILES]
 
     @contextmanager
@@ -757,7 +770,11 @@ def _format_result(doc: Any, terms: str = "") -> dict[str, Any]:
         # Only filtered lexical hits pass terms, so scikit-learn is installed.
         from sklearn.feature_extraction.text import CountVectorizer
 
-        analyze = CountVectorizer(stop_words=_LEXICAL_STOP_WORDS).build_analyzer()
+        # Match the ranker's analyzer (ngrams up to 2) so a phrase-only match is
+        # anchored on the phrase rather than on an earlier single word.
+        analyze = CountVectorizer(
+            stop_words=_LEXICAL_STOP_WORDS, ngram_range=(1, 2)
+        ).build_analyzer()
         # Whole-file lexical ranking needs a matching passage, not just a header.
         for term in sorted(set(analyze(terms)), key=len, reverse=True):
             match = re.search(r"\b" + re.escape(term) + r"\b", content, re.IGNORECASE)
