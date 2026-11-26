@@ -992,9 +992,19 @@ check_ci_failures() {
             # when that result is itself non-cancelled. A lone cancellation, a
             # later cancellation, or a same-name result from a different
             # workflow stays actionable (see tests/test_activity_gate_stuck_ci.py).
+            # Workflow identity is the GraphQL workflow id. The `gh pr list`
+            # fallback of fetch_pr_data_search carries no checkSuite, only a
+            # top-level `workflowName`, so for entries without a checkSuite the
+            # name is the best identity available (namespaced so it can never
+            # equal an id). Where a checkSuite is present the display name is
+            # still NOT identity: two workflows may share a name.
             | ([ .[]
                  | { e: ., n: (.name // .context // ""),
-                     w: (.checkSuite.workflowRun.workflow.id // ""),
+                     w: (if .checkSuite != null
+                         then (.checkSuite.workflowRun.workflow.id // "")
+                         else ((.workflowName // "")
+                               | if . != "" then "name:" + . else "" end)
+                         end),
                      t: completed_epoch,
                      c: ((.conclusion // .state // "") | ascii_upcase) } ]) as $tagged
             | [ $tagged[]
