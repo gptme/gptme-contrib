@@ -306,6 +306,12 @@ class GptmeToolBridge:
         on_cancel: Callable[[], Awaitable[None]] | None = None,
     ):
         self.gptme_path = os.environ.get("GPTME_VOICE_SUBAGENT_PATH") or gptme_path
+        # Only a wrapper script (e.g. Bob's voice-subagent.sh) understands the
+        # --transcript-tail-* flags; plain gptme exits 2 on them, so for gptme
+        # itself the tail goes into the prompt instead.
+        self._subagent_takes_transcript_flags = Path(
+            self.gptme_path
+        ).name.lower() not in ("gptme", "gptme.exe")
         self.timeout = timeout
         self.workspace = workspace
         self.on_result = on_result
@@ -863,7 +869,13 @@ class GptmeToolBridge:
         if model:
             cmd += ["--model", model, "--tool-format", "tool"]
         transcript_tail = self._build_transcript_tail()
-        if transcript_tail is not None:
+        if transcript_tail is not None and not self._subagent_takes_transcript_flags:
+            transcript_tail_text, transcript_tail_turns = transcript_tail
+            augmented_task = (
+                f"Recent call transcript tail (last {transcript_tail_turns} turns):\n"
+                f"{transcript_tail_text}\n\nOriginal request:\n{augmented_task}"
+            )
+        elif transcript_tail is not None:
             transcript_tail_text, transcript_tail_turns = transcript_tail
             with tempfile.NamedTemporaryFile(
                 prefix="gptme-voice-transcript-", suffix=".txt", delete=False

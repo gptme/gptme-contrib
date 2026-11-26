@@ -436,6 +436,7 @@ def test_execute_passes_bounded_transcript_tail_to_wrapper() -> None:
 
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr(tool_bridge, "_spawn_subagent", _fake_create_subprocess_exec)
+            mp.setenv("GPTME_VOICE_SUBAGENT_PATH", "/fake/voice-subagent.sh")
             bridge = GptmeToolBridge(
                 workspace="/fake/workspace",
                 transcript_provider=lambda: transcript,
@@ -452,6 +453,44 @@ def test_execute_passes_bounded_transcript_tail_to_wrapper() -> None:
         assert captured["tail_text"] == (
             "Assistant: first answer\nUser: second question\nAssistant: second answer"
         )
+
+    asyncio.run(_exercise())
+
+
+def test_execute_inlines_transcript_tail_for_plain_gptme() -> None:
+    """Plain gptme has no --transcript-tail-* options; it would exit 2.
+
+    Without a wrapper script the tail goes into the prompt instead.
+    """
+
+    async def _exercise() -> None:
+        captured: dict[str, object] = {}
+
+        async def _fake_create_subprocess_exec(*args, **kwargs):
+            captured["args"] = args
+            return _FakeProcess(returncode=0)
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(tool_bridge, "_spawn_subagent", _fake_create_subprocess_exec)
+            mp.delenv("GPTME_VOICE_SUBAGENT_PATH", raising=False)
+            bridge = GptmeToolBridge(
+                workspace="/fake/workspace",
+                transcript_provider=lambda: [
+                    {"role": "user", "text": "look up the star count"},
+                ],
+            )
+            # Explicit limits: the host may disable tail forwarding via env.
+            bridge.transcript_tail_turns = 8
+            bridge.transcript_tail_chars = 1_600
+            result = await bridge._execute("star count of gptme", mode="fast")
+
+        assert result.success is True
+        args = tuple(captured["args"])
+        assert not any(str(a).startswith("--transcript-tail") for a in args)
+        prompt = args[-1]
+        assert "Recent call transcript tail (last 1 turns):" in prompt
+        assert "User: look up the star count" in prompt
+        assert "Original request:\nstar count of gptme" in prompt
 
     asyncio.run(_exercise())
 
