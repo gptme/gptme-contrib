@@ -8,7 +8,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import vm from 'node:vm';
-import { gptmeLogsDir, runWithReply } from './gptme-log.js';
+import { gptmeLogsDir, runWithReply, settleAbandonedRun } from './gptme-log.js';
 import { createKeyedQueue } from './serial-queue.js';
 
 // Exercise the actual bridge functions without installing Chromium or contacting
@@ -44,6 +44,7 @@ function bridge(env = {}, overrides = {}) {
         createKeyedQueue,
         gptmeLogsDir: (env, cwd) => gptmeLogsDir(env, cwd),
         runWithReply: (name, generate, dir = gptmeLogsDir(environment)) => runWithReply(name, generate, dir),
+        settleAbandonedRun: (name, dir) => settleAbandonedRun(name, dir),
         setTimeout: (callback) => { timers.add(callback); return callback; },
         clearTimeout: (timer) => timers.delete(timer),
         spawn: (cmd, args, options) => {
@@ -60,8 +61,8 @@ function bridge(env = {}, overrides = {}) {
             const dir = resolve(options.cwd, environment.GPTME_LOGS_HOME
                 || join(environment.XDG_DATA_HOME, 'gptme', 'logs'));
             mkdirSync(join(dir, name), { recursive: true });
-            child.answer = (content) => appendFileSync(join(dir, name, 'conversation.jsonl'),
-                JSON.stringify({ role: 'assistant', content }) + '\n');
+            child.answer = (content, timestamp = new Date().toISOString()) => appendFileSync(join(dir, name, 'conversation.jsonl'),
+                JSON.stringify({ role: 'assistant', content, timestamp }) + '\n');
             children.push(child);
             return child;
         },
@@ -212,4 +213,28 @@ test('spawn failure clears the timer and releases the conversation', async () =>
     children[1].emit('close', 0);
     await second;
     assert.deepEqual(sent, ['recovered']);
+});
+
+test('an abandoned run\'s late row cannot become the next run\'s reply', async () => {
+    const { children, timers, sent, receive } = bridge();
+    const first = receive('first');
+    const second = receive('second');
+    await tick();
+    children[0].answer('partial answer');
+    const [timeout] = timers;
+    timeout();
+    const [, escalation, grace] = [...timers];
+    escalation();
+    await grace();
+    await first;
+    await tick();
+    assert.equal(children.length, 2);
+    // The survivor of the abandoned run appends its final text after the next
+    // run has already taken its offset.
+    children[1].answer('stale orphan answer', new Date(Date.now() - 60_000).toISOString());
+    children[1].answer('next answer');
+    children[1].emit('close', 0);
+    await second;
+    assert.deepEqual(sent, ['next answer']);
+    assert.equal(timers.size, 0);
 });

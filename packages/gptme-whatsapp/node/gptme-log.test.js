@@ -4,9 +4,13 @@ import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 
-import { gptmeLogsDir, logLineCount, replySince, runWithReply } from './gptme-log.js';
+import {
+    gptmeLogsDir, logLineCount, replySince, runWithReply, settleAbandonedRun, waitForLogQuiet,
+} from './gptme-log.js';
 
-const row = (role, content) => JSON.stringify({ role, content, timestamp: '2026-11-24T13:00:00' }) + '\n';
+// Runs only accept rows timestamped at or after they started, so rows written
+// for a run must be current unless a test deliberately backdates them.
+const row = (role, content, timestamp = new Date().toISOString()) => JSON.stringify({ role, content, timestamp }) + '\n';
 
 function setup() {
     const logs = mkdtempSync(join(tmpdir(), 'gptme-logs-'));
@@ -97,4 +101,45 @@ test('a missing log (first message, wrong dir) yields no reply', () => {
     const logs = mkdtempSync(join(tmpdir(), 'gptme-logs-'));
     assert.equal(logLineCount('nope', logs), 0);
     assert.equal(replySince('nope', 0, logs), null);
+});
+
+test('a reply from an earlier run appended late is not this run\'s reply', async () => {
+    const { logs, conv, file } = setup();
+    writeFileSync(file, row('user', 'hi') + row('assistant', 'old reply'));
+    const stale = new Date(Date.now() - 60_000).toISOString();
+    assert.equal(await runWithReply(conv, async () => {
+        // An abandoned run's survivor can append its final text after the next
+        // run took its row offset. It was generated before this run started.
+        appendFileSync(file, row('assistant', 'stale answer', stale));
+        appendFileSync(file, row('assistant', 'fresh answer'));
+    }, logs), 'fresh answer');
+    // Only stale rows: send nothing rather than the previous run's answer.
+    assert.equal(await runWithReply(conv, async () => {
+        appendFileSync(file, row('assistant', 'another stale answer', stale));
+    }, logs), null);
+});
+
+test('an abandoned run settles once its log stops changing', async () => {
+    const { logs, conv, file } = setup();
+    writeFileSync(file, row('assistant', 'partial answer'));
+    assert.equal(await waitForLogQuiet(file, 20, 500), true);
+    assert.equal(await settleAbandonedRun(conv, logs, 20, 500), true);
+});
+
+test('a log that never stops changing is reported unsettled', async () => {
+    const { logs, conv, file } = setup();
+    writeFileSync(file, row('assistant', 'partial answer'));
+    let writing = true;
+    const writer = (async () => {
+        while (writing) {
+            appendFileSync(file, row('assistant', 'orphan row'));
+            await new Promise((done) => setTimeout(done, 20));
+        }
+    })();
+    try {
+        assert.equal(await settleAbandonedRun(conv, logs, 20, 200), false);
+    } finally {
+        writing = false;
+        await writer;
+    }
 });
