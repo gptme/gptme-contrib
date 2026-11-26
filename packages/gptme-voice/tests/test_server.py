@@ -1558,7 +1558,12 @@ def test_make_transcript_callbacks_schedule_hangup_fallback_once(
         calls: list[dict[str, object]] = []
 
         async def _fake_schedule_hangup(
-            websocket_arg, *, source: str, reason: str | None, call_sid: str | None
+            websocket_arg,
+            *,
+            source: str,
+            reason: str | None,
+            call_sid: str | None,
+            playback=None,
         ) -> None:
             calls.append(
                 {
