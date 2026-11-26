@@ -174,9 +174,11 @@ def adopt_lesson(
                 backup = None
                 previous = write_path.read_text()
 
+        lesson_written = False
         try:
             with _atomic_write(local_path) as f:
                 f.write(content)
+            lesson_written = True
 
             # Record adoption in metrics (for future tracking).
             record_adoption(
@@ -188,7 +190,14 @@ def adopt_lesson(
         except Exception:
             # An adoption reported as failed must leave nothing behind, or the
             # retry is refused with "Local lesson exists".
-            if backup is not None:
+            if not lesson_written:
+                # The target was never replaced, so `backup` is a second link
+                # to the untouched inode. Renaming between two links of one
+                # file is a POSIX no-op, which would leave `.previous` behind;
+                # drop the link instead.
+                if backup is not None:
+                    backup.unlink(missing_ok=True)
+            elif backup is not None:
                 os.replace(backup, write_path)
             elif previous is not None:
                 with _atomic_write(local_path) as f:

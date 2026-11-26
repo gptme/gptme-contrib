@@ -139,6 +139,7 @@ def test_failed_lesson_write_keeps_existing_lesson(tmp_path, monkeypatch):
     assert not ok, msg
     assert local.read_text() == "ORIGINAL LESSON\n"
     assert not list(local.parent.glob("*.tmp"))
+    assert not list(local.parent.glob(".*.previous"))
     assert not _ledger(lessons).exists()
 
 
@@ -255,6 +256,8 @@ def test_wrong_shaped_ledger_is_set_aside_not_blocking(tmp_path, capsys):
 
 def test_read_only_lesson_is_not_overwritten(tmp_path):
     """A 0444 lesson keeps refusing --force, as the in-place write did."""
+    if os.geteuid() == 0:
+        pytest.skip("root can write a 0444 file; the refusal is uid-dependent")
     meta, net = _network_lesson(tmp_path)
     lessons = tmp_path / "ws" / "lessons"
     local = lessons / "tools" / "git.md"
@@ -268,6 +271,7 @@ def test_read_only_lesson_is_not_overwritten(tmp_path):
 
     assert not ok, msg
     assert local.read_text() == "PROTECTED\n"
+    assert not list(local.parent.glob(".*.previous"))
 
 
 def test_corrupt_ledger_is_set_aside_not_blocking(tmp_path, capsys):
