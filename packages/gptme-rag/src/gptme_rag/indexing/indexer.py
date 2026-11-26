@@ -1079,10 +1079,26 @@ class Indexer:
         return specs
 
     @staticmethod
-    def _spec_decision(spec: GitIgnoreSpec, rel_path: str) -> bool | None:
-        """Return True (ignored), False (re-included) or None (no rule matches)."""
+    def _spec_decision(spec: GitIgnoreSpec, rel_path: str, root_len: int) -> bool | None:
+        """Return True (ignored), False (re-included) or None (no rule matches).
+
+        ``root_len`` is the length of the scan-root prefix in ``rel_path``.
+        pathspec also matches a directory rule against everything below that
+        directory. Below the scan root ``_is_ignored`` decides each directory
+        itself, so such a match must not decide a descendant: ``!*/`` un-ignores
+        directories, not the files inside them.
+        """
         for pattern in reversed(spec.patterns):
-            if pattern.match_file(rel_path):
+            if pattern.regex and pattern.match_file(rel_path):
+                # Where the matched directory ends, for directory matches only.
+                # ``*/`` matches at every slash, so look at all of them.
+                dir_ends = [
+                    m.end("ps_d")
+                    for m in pattern.regex.finditer(rel_path)
+                    if m.groupdict().get("ps_d")
+                ]
+                if dir_ends and len(rel_path) not in dir_ends and max(dir_ends) > root_len:
+                    continue
                 # pathspec marks a plain pattern as include=True (it ignores) and a
                 # ``!`` pattern as include=False (it re-includes).
                 return pattern.include
@@ -1103,7 +1119,8 @@ class Indexer:
             # ``root_rel`` is the scan root relative to this rule set's directory
             # (``.`` for the root itself), so ancestor rules see the full path.
             spec_rel = rel_path if root_rel == "." else f"{root_rel}/{rel_path}"
-            decision = self._spec_decision(spec, spec_rel)
+            root_len = len(spec_rel) - len(rel_path)
+            decision = self._spec_decision(spec, spec_rel, root_len)
             if decision is not None:
                 return decision
         return None

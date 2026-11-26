@@ -1687,3 +1687,27 @@ def test_non_git_gitignore_matches_symlink_directory_by_lexical_path(
     specs = indexer._load_gitignore(root)
     assert indexer._is_ignored(root / "private" / "cache.db", specs)
     assert not indexer._is_ignored(root / "private" / "secret.md", specs)
+
+
+@pytest.mark.parametrize(
+    ("rules", "rel", "ignored"),
+    [
+        ("*\n!*/\n!*.md\n", "sub/notes.txt", True),
+        ("*\n!*/\n!*.md\n", "sub/deep/x.md", False),
+        ("*\n!sub/\n", "sub/notes.txt", True),
+        ("*.txt\n!sub/\n", "sub/deep/x.txt", True),
+    ],
+)
+def test_non_git_gitignore_negated_dir_does_not_reinclude_files(
+    tmp_path, isolated_gitignore_files, rules, rel, ignored
+):
+    indexer = object.__new__(Indexer)  # Ignore matching needs no database or embeddings.
+    root = tmp_path / "root"
+    file_path = root / rel
+    file_path.parent.mkdir(parents=True)
+    file_path.write_text("x")
+    (root / ".gitignore").write_text(rules)
+
+    specs = indexer._load_gitignore(root)
+
+    assert indexer._is_ignored(file_path, specs) is ignored
