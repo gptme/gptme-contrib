@@ -439,13 +439,52 @@ def recall_boost_passes(marker: Mapping[str, object], max_passes: int) -> int:
     return cap
 
 
+def _single_pass_is_complete_evidence(marker: Mapping[str, object]) -> bool:
+    """Whether a marker's single-pass review is already merge evidence.
+
+    Mirrors the merge gate's ``_consensus_shortfall`` for one pass: the pass and
+    every one of its jobs answered, at the requested agreement threshold, is
+    evidence (gptme/gptme-contrib#2457), so a second pass would only be spent to
+    satisfy a count. A record that is missing the job or agreement fields cannot
+    be read as complete. Outage coverage is published as "not merge evidence" and
+    is excluded even though its counts are complete.
+    """
+    consensus = marker.get("consensus")
+    if marker.get("outage_single_pass") or not isinstance(consensus, dict):
+        return False
+
+    def _int(key: str) -> int | None:
+        value = consensus.get(key)
+        return value if type(value) is int else None
+
+    requested, answered = _int("requested"), _int("answered")
+    jobs_requested, jobs_answered = _int("jobs_requested"), _int("jobs_answered")
+    applied, asked = _int("min_agreement"), _int("min_agreement_requested")
+    if requested is None or answered is None:
+        return False
+    if jobs_requested is None or jobs_answered is None:
+        return False
+    if applied is None or asked is None:
+        return False
+    return (
+        requested == answered == 1
+        and 0 < jobs_requested == jobs_answered
+        and applied == asked == 1
+    )
+
+
 def needs_consensus_upgrade(
     marker: Mapping[str, object],
     head_sha: str,
     *,
     allow_non_blocking_findings: bool = False,
 ) -> bool:
-    """Whether a current first pass needs merge-gate evidence."""
+    """Whether a current first pass needs merge-gate evidence.
+
+    A complete single pass is already the evidence the merge gate accepts, so it
+    is not upgraded. A record that is missing, malformed or degraded still is —
+    a second pass there is the cheapest way to get the missing evidence.
+    """
     marker_sha = str(marker.get("sha") or "")
     if not marker_sha or not head_sha.startswith(marker_sha):
         return False
@@ -463,6 +502,8 @@ def needs_consensus_upgrade(
     history = marker.get("history")
     history_rows = history if isinstance(history, list) else []
     if requested < 2:
+        if _single_pass_is_complete_evidence(marker):
+            return False
         rounds_on_head = sum(
             1
             for entry in history_rows
@@ -492,6 +533,8 @@ def self_merge_eligible_from_marker(marker: Mapping[str, object]) -> bool:
     consensus = marker.get("consensus")
     if not isinstance(consensus, dict):
         return False
+    if _single_pass_is_complete_evidence(marker):
+        return True
     requested = consensus.get("requested")
     answered = consensus.get("answered")
     min_agreement = consensus.get("min_agreement")
