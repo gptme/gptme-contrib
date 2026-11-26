@@ -371,7 +371,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command in {"threads", "sessions", "tasks", "vitals"}:
             try:
                 payload = json.loads(args.input.read_text(encoding="utf-8"))
-            except ValueError as exc:
+            except (ValueError, RecursionError) as exc:
                 raise UsageError(str(exc)) from exc
             paths: tuple[Path, ...]
             if args.command == "threads":
