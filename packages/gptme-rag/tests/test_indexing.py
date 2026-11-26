@@ -1763,6 +1763,28 @@ def test_non_git_gitignore_content_only_rule_keeps_parent_traversable(
             assert indexer._is_ignored(path, specs) is (path.name == "drop.md"), rel
 
 
+@pytest.mark.parametrize("scan_prefix", ["", "abc", "abc/sub"])
+@pytest.mark.parametrize("negation", ["", "!abc/\n!abc/keep.md\n"])
+def test_non_git_gitignore_directory_contents_rule_does_not_exclude_parent(
+    tmp_path, isolated_gitignore_files, scan_prefix, negation
+):
+    """abc/**/ excludes subdirectories, not abc itself or its direct files."""
+    indexer = object.__new__(Indexer)
+    (tmp_path / ".gitignore").write_text(f"abc/**/\n{negation}")
+    files = ["abc/keep.md", "abc/sub/keep.md"]
+    for rel in files:
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x")
+    root = tmp_path / scan_prefix
+    specs = indexer._load_gitignore(root)
+
+    for rel in files:
+        path = tmp_path / rel
+        if path.is_relative_to(root):
+            assert indexer._is_ignored(path, specs) is ("sub" in path.parts), rel
+
+
 @pytest.mark.parametrize("scan_prefix", [".git", ".git/objects", "cache.db/nested"])
 def test_non_git_gitignore_builtins_cover_scan_root_and_ancestors(
     tmp_path, isolated_gitignore_files, scan_prefix

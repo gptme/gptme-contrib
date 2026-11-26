@@ -242,6 +242,10 @@ def _compile_ignore_lines(lines: list[str], source: Path) -> GitIgnoreSpec:
     """Compile ignore rules, skipping lines pathspec rejects, as git does."""
     valid: list[str] = []
     for line in lines:
+        # pathspec collapses ``abc/**/`` to ``abc/``, excluding abc itself.
+        # Git means directories *below* abc; require one descendant component.
+        if line.endswith("/**/"):
+            line = line[:-1] + "/*/"
         try:
             GitIgnoreSpec.from_lines([line])
         except (ValueError, re.error) as e:
