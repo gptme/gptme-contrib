@@ -211,6 +211,32 @@ def test_force_rollback_restores_without_rewriting(tmp_path, monkeypatch):
     assert not list(local.parent.glob(".*.previous"))
 
 
+def test_backup_cleanup_failure_is_not_a_failed_adoption(tmp_path, monkeypatch):
+    """Dropping the backup is cleanup; it must not report a landed adoption as failed."""
+    meta, net = _network_lesson(tmp_path)
+    lessons = tmp_path / "ws" / "lessons"
+    local = lessons / "tools" / "git.md"
+    local.parent.mkdir(parents=True)
+    local.write_text("ORIGINAL LESSON\n")
+
+    real_unlink = os.unlink
+
+    def failing_unlink(path, *args, **kwargs):
+        # Only the post-success cleanup sees an existing backup: the
+        # stale-backup sweep at the start targets a path that is not there yet.
+        if str(path).endswith(".previous") and os.path.exists(path):
+            raise OSError(13, "Permission denied", str(path))
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "unlink", failing_unlink)
+    ok, msg = adopt.adopt_lesson(meta, net, lessons, force=True)
+    monkeypatch.undo()
+
+    assert ok, msg
+    assert local.read_text() != "ORIGINAL LESSON\n"
+    assert len(json.loads(_ledger(lessons).read_text())["adoptions"]) == 1
+
+
 def test_wrong_shaped_ledger_is_set_aside_not_blocking(tmp_path, capsys):
     """Valid JSON of the wrong shape must not block adoptions either."""
     lessons = tmp_path / "ws" / "lessons"

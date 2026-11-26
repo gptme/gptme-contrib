@@ -198,7 +198,12 @@ def adopt_lesson(
             raise
         else:
             if backup is not None:
-                backup.unlink(missing_ok=True)
+                # The lesson and the ledger agree from here on; removing the
+                # backup is cleanup, so a failure must not be reported as a
+                # failed adoption. A leftover .previous is removed by the next
+                # adoption's stale-backup sweep.
+                with contextlib.suppress(OSError):
+                    backup.unlink(missing_ok=True)
 
         return True, f"Adopted to {local_path}"
 
