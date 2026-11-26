@@ -1713,6 +1713,33 @@ def test_non_git_gitignore_negated_dir_does_not_reinclude_files(
     assert indexer._is_ignored(file_path, specs) is ignored
 
 
+@pytest.mark.parametrize("scan_prefix", ["docs", "outer/docs"])
+@pytest.mark.parametrize(
+    ("rules", "ignored"),
+    [
+        ("*\n!*/\n!*.md\n", {"notes.txt", "sub/notes.txt"}),
+        ("*\n!docs/\n", {"notes.txt", "keep.md", "sub/notes.txt", "sub/keep.md"}),
+        ("docs/\n", {"notes.txt", "keep.md", "sub/notes.txt", "sub/keep.md"}),
+    ],
+)
+def test_non_git_gitignore_ancestor_directory_negation_does_not_reinclude_files(
+    tmp_path, isolated_gitignore_files, scan_prefix, rules, ignored
+):
+    """Re-including the scan root does not re-include files below that boundary."""
+    indexer = object.__new__(Indexer)
+    (tmp_path / ".gitignore").write_text(rules)
+    root = tmp_path / scan_prefix
+    files = ["notes.txt", "keep.md", "sub/notes.txt", "sub/keep.md"]
+    for rel in files:
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x")
+
+    specs = indexer._load_gitignore(root)
+
+    assert {rel for rel in files if indexer._is_ignored(root / rel, specs)} == ignored
+
+
 @pytest.mark.parametrize("bad_line", ["trailing\\", "!", "[z-a]"])
 def test_non_git_gitignore_skips_only_the_invalid_line(
     tmp_path, isolated_gitignore_files, bad_line

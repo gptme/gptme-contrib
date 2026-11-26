@@ -1112,7 +1112,13 @@ class Indexer:
                     for m in pattern.regex.finditer(rel_path)
                     if m.groupdict().get("ps_d")
                 ]
-                if dir_ends and len(rel_path) not in dir_ends and max(dir_ends) > root_len:
+                # An ignored scan root excludes its contents, but re-including
+                # that root never re-includes its descendants.
+                if (
+                    dir_ends
+                    and len(rel_path) not in dir_ends
+                    and (max(dir_ends) > root_len or not pattern.include)
+                ):
                     continue
                 # pathspec marks a plain pattern as include=True (it ignores) and a
                 # ``!`` pattern as include=False (it re-includes).
