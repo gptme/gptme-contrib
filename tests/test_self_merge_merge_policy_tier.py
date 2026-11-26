@@ -179,6 +179,23 @@ def test_scanner_stdin_fetches_missing_title_for_rollout_repo(capsys) -> None:
     assert [(r["number"], r["tier"], r["rollout"]) for r in rows] == [(8, 1, True)]
 
 
+def test_scanner_rollout_flag_is_case_insensitive(capsys) -> None:
+    """A lowercase repo must not read as "not in rollout" while it tiers at 1."""
+    payload = [
+        {
+            "repo": REPO.lower(),
+            "number": 8,
+            "changedFiles": 1,
+            "files": [{"path": "src/a.ts", "additions": 3}],
+        }
+    ]
+    with patch.object(cli, "_pr_title", return_value="fix: a"):
+        with patch.object(sys, "stdin", io.StringIO(json.dumps(payload))):
+            assert cli.main(["tier", "--stdin", "--json"]) == 0
+    rows = json.loads(capsys.readouterr().out)
+    assert [(r["number"], r["tier"], r["rollout"]) for r in rows] == [(8, 1, True)]
+
+
 def test_scanner_stdin_errors_when_title_fetch_fails(capsys) -> None:
     """A failed title fetch is an error, not a silent tier-2 verdict."""
     payload = [

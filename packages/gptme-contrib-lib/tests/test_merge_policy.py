@@ -306,6 +306,30 @@ def test_aw_small_fix_holds_scripts_lockfile_migration_gitlink(policy) -> None:
     assert gitlink.classes["aw-server"] == "gitlink"
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        "mobile/build.gradle",
+        "mobile/build.gradle.kts",
+        "settings.gradle",
+        "gradle.properties",
+        "gradle/wrapper/gradle-wrapper.properties",
+        "src-tauri/tauri.conf.json",
+        "VERSION",
+    ],
+)
+def test_aw_small_fix_holds_build_and_version_files(policy, path: str) -> None:
+    v = merge_policy.assign_tier(
+        [FileChange(path, 4)],
+        policy,
+        C,
+        repo="ActivityWatch/aw-android",
+        title="fix: a",
+    )
+    assert v.tier == 2
+    assert "hold glob:" in v.misses[1]
+
+
 def test_aw_small_fix_ignores_repo_outside_tier_list(policy) -> None:
     v = merge_policy.assign_tier(
         [FileChange("src/app.py", 10)],

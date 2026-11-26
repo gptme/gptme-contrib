@@ -177,7 +177,7 @@ def main(argv: list[str] | None = None) -> int:
                     changes, policy, classifier, repo=repo, title=title
                 ).as_dict()
             )
-            row["rollout"] = repo in rollout
+            row["rollout"] = repo.lower() in rollout_lower
         out.append(row)
 
     if args.json:
