@@ -1,6 +1,7 @@
 """Regression coverage for terminating a call only after farewell playback."""
 
 import asyncio
+import threading
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -236,6 +237,33 @@ def test_rest_failure_still_closes_websocket_after_playback(monkeypatch):
         rest.return_value.calls.return_value.update.assert_called_once_with(
             status="completed"
         )
+
+    asyncio.run(run())
+
+
+def test_stalled_rest_termination_is_bounded(monkeypatch, caplog):
+    """The terminal task ignores cancellation, so REST must not hang it."""
+
+    async def run():
+        server = VoiceServer(openai_api_key="test")
+        release = threading.Event()
+        rest = Mock()
+        rest.return_value.calls.return_value.update.side_effect = (
+            lambda **_: release.wait(5)
+        )
+        monkeypatch.setattr("twilio.rest.Client", rest)
+        monkeypatch.setattr(server_module, "_get_config_env", lambda key: "test")
+        monkeypatch.setattr(server_module, "_TWILIO_REST_TIMEOUT_SECONDS", 0.01)
+        ws = PlaybackSocket()
+        try:
+            await asyncio.wait_for(
+                server._terminate_call(ws, source="twilio:tool", call_sid="CA-test"),
+                timeout=1,
+            )
+            assert ws.closed
+            assert "Failed to terminate Twilio call" in caplog.text
+        finally:
+            release.set()
 
     asyncio.run(run())
 

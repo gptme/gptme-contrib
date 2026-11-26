@@ -196,6 +196,9 @@ def _http_post_sync(url: str, payload: bytes, api_key: str) -> None:
 
 # Legacy local/browser transports have no playback acknowledgement.
 _HANGUP_FAREWELL_DELAY_SECONDS = 0.5
+# Termination ignores cancellation, so the REST kill needs its own bound or a
+# stalled request would block call-end teardown.
+_TWILIO_REST_TIMEOUT_SECONDS = 10.0
 _CALL_END_DRAIN_TIMEOUT_SECONDS = 1.5
 _CALL_END_IDLE_TIMEOUT_SECONDS = 0.25
 _USER_HANGUP_INTENT_RE = re.compile(
@@ -3676,13 +3679,16 @@ class VoiceServer:
 
                 client = TwilioClient(twilio_account_sid, twilio_auth_token)
                 loop = asyncio.get_event_loop()
-                await loop.run_in_executor(
-                    None, lambda: client.calls(call_sid).update(status="completed")
+                await asyncio.wait_for(
+                    loop.run_in_executor(
+                        None, lambda: client.calls(call_sid).update(status="completed")
+                    ),
+                    timeout=_TWILIO_REST_TIMEOUT_SECONDS,
                 )
                 logger.info("Twilio call %s terminated via REST API", call_sid)
             except Exception as exc:
                 logger.warning(
-                    "Failed to terminate Twilio call %s via REST API: %s",
+                    "Failed to terminate Twilio call %s via REST API: %r",
                     call_sid,
                     exc,
                 )
