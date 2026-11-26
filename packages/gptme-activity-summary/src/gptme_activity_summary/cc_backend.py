@@ -690,10 +690,13 @@ def summarize_journal_with_cc(
     """
     context_section = ""
     if extra_context:
+        bounded_context = _bound_text(
+            extra_context, DAILY_CONTEXT_CHAR_BUDGET, "journal extra context"
+        )
         context_section = f"""
 The following real data is available for reference. DO NOT count or estimate metrics — those are provided separately.
 
-{extra_context}
+{bounded_context}
 """
 
     prompt = f"""Analyze this journal entry from {entry_date} and extract structured information.
@@ -925,10 +928,13 @@ def summarize_weekly_with_cc(
 
     context_section = ""
     if extra_context:
+        bounded_context = _bound_text(
+            extra_context, DAILY_CONTEXT_CHAR_BUDGET, "weekly extra context"
+        )
         context_section = f"""
 The following real data is available for reference. DO NOT count or estimate metrics — those are provided separately.
 
-{extra_context}
+{bounded_context}
 """
 
     prompt = f"""Synthesize these daily summaries into a weekly summary for {week_id}.
@@ -1164,10 +1170,13 @@ def summarize_monthly_with_cc(
 
     context_section = ""
     if extra_context:
+        bounded_context = _bound_text(
+            extra_context, DAILY_CONTEXT_CHAR_BUDGET, "monthly extra context"
+        )
         context_section = f"""
 The following real data is available for reference. DO NOT count or estimate metrics — those are provided separately.
 
-{extra_context}
+{bounded_context}
 """
 
     prompt = f"""Synthesize these weekly summaries into a monthly summary for {month}.
