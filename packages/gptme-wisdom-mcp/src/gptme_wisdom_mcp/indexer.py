@@ -90,6 +90,9 @@ class SessionIndex:
         still being written picks up later turns on the next run. An unchanged
         document returns False.
 
+        A transaction already open on the connection is joined, not owned: this
+        commits only when it started the transaction itself.
+
         Skips documents from /tmp/worktrees/ paths to avoid indexing duplicates.
         """
         # Safety net: skip worktree copies

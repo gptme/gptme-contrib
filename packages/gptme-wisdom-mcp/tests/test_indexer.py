@@ -218,6 +218,36 @@ def test_overlapping_updates_do_not_delete_stale_fts_values(tmp_path: Path):
         _assert_fts_matches_rows(first)
 
 
+def test_a_grown_session_is_reindexed_inside_a_joined_transaction(tmp_path: Path):
+    """The normal re-index path works when the caller already has a transaction."""
+    from gptme_wisdom_mcp.indexer import SessionIndex
+    from gptme_wisdom_mcp.parsers import SessionDocument
+
+    def doc(content: str) -> SessionDocument:
+        return SessionDocument(
+            source="journal",
+            path="/journal/session.md",
+            date=datetime(2026, 1, 1),
+            title="Session",
+            content=content,
+            summary="summary",
+        )
+
+    with SessionIndex(tmp_path / "s.db") as idx:
+        assert idx.add(doc("draft mentions walrus")) is True
+        idx.conn.execute("INSERT INTO index_state (key, value) VALUES ('k', 'v')")
+        assert idx.conn.in_transaction
+        # A session that grew since it was indexed, added while the caller's
+        # transaction is open: the savepoint path must still swap the FTS row.
+        assert idx.add(doc("final mentions narwhal")) is True
+        idx.conn.commit()
+
+        assert idx.search("walrus") == []
+        assert len(idx.search("narwhal")) == 1
+        assert idx.count() == 1
+        _assert_fts_matches_rows(idx)
+
+
 def test_a_joined_transaction_cannot_write_from_a_stale_snapshot(tmp_path: Path):
     """The savepoint path fails loudly when another connection committed first.
 
