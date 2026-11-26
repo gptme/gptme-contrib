@@ -288,13 +288,21 @@ def _find_same_element(
     Returns None when it cannot be identified, so a retry never acts on a
     lookalike or on whichever element merely ranks first.
     """
+    # A positional ordinal is not an identity. Duplicate role/name pairs are
+    # indistinguishable (same description, same role, same accessible name),
+    # so ``>> nth=i`` carries no information beyond DOM order — and that order
+    # can change between the original observation and the retry re-observation.
+    # Matching on an equal ``>> nth=i`` selector would therefore let the retry
+    # act on a lookalike, the exact failure this guard exists to prevent.
+    # Never retry a duplicate; return the first failure instead.
+    if " >> nth=" in chosen.selector:
+        return None
     same = [r for r in fresh if r.description == chosen.description]
     for result in same:
         if result.selector == chosen.selector:
             return result
-    # A changed selector is only unambiguous for a single match. A lost
-    # ordinal does not say which of the duplicates survived.
-    if len(same) == 1 and " >> nth=" not in chosen.selector:
+    # A changed selector is only unambiguous for a single match.
+    if len(same) == 1:
         return same[0]
     return None
 
@@ -402,9 +410,11 @@ def browser_act(
     dispatch fails and, with `retry_on_stale=True` (default), the page is
     re-observed once with the same query and the same element is retried: same
     role and name, and either the same selector or the only such match. If it
-    cannot be identified, the first failure is returned. The re-observe makes no
-    model call on the token-scoring path. `retry_on_stale=False` returns the
-    first failure immediately.
+    cannot be identified, the first failure is returned. A duplicate role/name
+    pair (``>> nth=i``) is never retried: its ordinal is positional and the
+    duplicates are indistinguishable, so a reordered page would make the retry
+    act on a lookalike. The re-observe makes no model call on the token-scoring
+    path. `retry_on_stale=False` returns the first failure immediately.
 
     Returns ActResult with `success`, the selector used, and elapsed time.
     """

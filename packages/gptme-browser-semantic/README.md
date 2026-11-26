@@ -108,7 +108,9 @@ state = browser_extract()                       # ExtractResult; .data is the AR
   query and the action retried on the same element: same role and name, and
   either the same selector or the only such match. If it cannot be identified
   (for example, one of two duplicates disappeared), the first failure is
-  returned. `>> nth=i` selectors are positional. Errors that suggest
+  returned. `>> nth=i` selectors are positional: duplicate role/name pairs are
+  indistinguishable and can reorder, so a duplicate is never retried — the
+  first failure is returned instead of risking a lookalike. Errors that suggest
   the action already ran (navigation, detached target) are not retried, to
   avoid double-acting. `retry_on_stale=False` returns the first failure
   immediately.

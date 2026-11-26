@@ -275,14 +275,38 @@ def test_hunt_b7_advertised_email_fill_example_succeeds(
 TWO_REPLIES = HEADER + '- main:\n  - button "Reply"\n  - button "Reply"\n'
 
 
-def test_retry_keeps_chosen_duplicate_ordinal(
+def test_retry_is_skipped_for_duplicate_ordinal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A ``>> nth=i`` ordinal is positional, not an identity.
+
+    Duplicate role/name pairs are indistinguishable and can reorder between the
+    observation and the retry re-observation, so retrying the same ordinal can
+    act on a different element. Refuse the retry and return the first failure.
+    """
     rec = _wire(Recorder(TWO_REPLIES), monkeypatch)
     second = browser_observe("reply")[1]
     rec.click_error = TimeoutError("Timeout 30000ms exceeded.")
-    browser_act(second)
-    assert rec.clicks == [second.selector, second.selector]
+    result = browser_act(second)
+    assert not result.success
+    assert rec.clicks == [second.selector]
+
+
+def test_retry_does_not_follow_a_reordered_duplicate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A prepended post shifts every ``nth`` — the retry must not click it."""
+    rec = _wire(Recorder(TWO_REPLIES), monkeypatch)
+    second = browser_observe("reply")[1]
+    # A new post is prepended: the fresh nth=1 is now the element that was
+    # originally nth=0.
+    rec.snapshot = HEADER + (
+        '- main:\n  - button "Reply"\n  - button "Reply"\n  - button "Reply"\n'
+    )
+    rec.click_error = TimeoutError("Timeout 30000ms exceeded.")
+    result = browser_act(second)
+    assert not result.success
+    assert rec.clicks == [second.selector]
 
 
 def test_retry_follows_chosen_element_that_is_not_the_top_match(
