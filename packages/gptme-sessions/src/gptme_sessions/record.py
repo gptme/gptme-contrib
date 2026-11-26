@@ -609,6 +609,12 @@ class SessionRecord:
     # written on that decision's log row. Lets a replay join selector decisions
     # to the sessions they produced without timestamp proximity.
     selector_decision_id: str | None = None
+    # Values ``SessionStore`` invented while loading a row that lacked them
+    # (field name -> invented value). ``SessionStore.rewrite`` omits a field
+    # whose value is still the invented one, so a legacy id-less row is not
+    # written back with a made-up id and a "now" timestamp. In-memory only:
+    # never serialized, never read from input.
+    _store_invented: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not self.session_id:
@@ -1018,6 +1024,7 @@ class SessionRecord:
         load→rewrite cycles preserve them.
         """
         d = asdict(self)
+        d.pop("_store_invented", None)
         legacy = d.pop("_legacy_fields", {}) or {}
         for k, v in legacy.items():
             # Known fields always win — we only add legacy keys that aren't
@@ -1045,7 +1052,7 @@ class SessionRecord:
         ``to_dict`` / ``rewrite`` calls preserve it.
         """
         known_fields = {f.name for f in cls.__dataclass_fields__.values()}
-        filtered = {k: v for k, v in data.items() if k in known_fields}
+        filtered = {k: v for k, v in data.items() if k in known_fields and k != "_store_invented"}
         legacy = {k: v for k, v in data.items() if k not in known_fields and not k.startswith("_")}
         # Migrate legacy records: journal_path that is not a .md file is
         # actually a trajectory path (JSONL or session directory) set by the

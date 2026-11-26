@@ -59,6 +59,104 @@ def _ensure_trailing_newline(path: Path) -> None:
         os.fsync(f.fileno())
 
 
+#: Row field this store writes next to a ``session_id`` it derived itself, so
+#: that a reloaded row can be told apart from one whose id a caller assigned.
+#: It is a *marker*, not part of the record model: ``_parse_row`` strips it
+#: before constructing the record, so it never reaches ``_legacy_fields`` or
+#: ``to_dict()`` (#2338).
+_DERIVED_ID_FIELD = "session_id_derived"
+
+
+def _parse_row(line: str, taken_ids: set[str]) -> SessionRecord:
+    """Parse one stripped JSONL row the same way on every read path.
+
+    A row without a ``session_id`` would otherwise get a random id from
+    ``SessionRecord.__post_init__``, so a caller's loaded copy and the row
+    ``rewrite()`` re-reads would never match and the row would be duplicated
+    on every rewrite (#2325). Give such a row a **content-derived** id instead.
+
+    The id is derived from the JSON fields on the row (an empty id or timestamp
+    omitted), so reads agree across formatting/key-order differences and across
+    package versions that add record fields (#2338). The id is then
+    **persisted** on the first rewrite: from then on the row carries a real
+    ``session_id``, so it matches by id no matter how its content later
+    changes. That is what stops a stale outstanding copy from appending a
+    duplicate when another writer has changed the same row in between.
+
+    The invented "now" timestamp (when the row had none) is recorded so
+    ``_row_json`` keeps it out of the file until a caller sets a real one.
+
+    ``taken_ids`` holds the ids of the rows already read from the same file and
+    is updated here. Identical id-less rows are distinct sessions, so a derived
+    id (new or already persisted) that is taken gets a number (``noid-…-2``);
+    sharing one id would let a subset ``rewrite()`` drop all but one of those
+    rows as superseded duplicates.
+
+    Raises the same exceptions as ``SessionRecord.from_dict(json.loads(line))``.
+    """
+    data = json.loads(line)
+    session_id = data.get("session_id") if isinstance(data, dict) else None
+    has_timestamp = isinstance(data, dict) and bool(data.get("timestamp"))
+    # Strip the store's own marker before the record is built: it is not a
+    # record field, and leaving it in would park it in ``_legacy_fields`` and
+    # re-emit it from ``to_dict()``.
+    id_is_derived = bool(isinstance(data, dict) and data.pop(_DERIVED_ID_FIELD, False))
+    record = SessionRecord.from_dict(data)
+    if isinstance(data, dict) and not has_timestamp:
+        # The "now" timestamp was invented at parse time. Never write it back as
+        # if it were recorded data — whatever the row's id shape, and whether or
+        # not the derived id has since been persisted (#2338).
+        record._store_invented["timestamp"] = record.timestamp
+    if id_is_derived and session_id:
+        # A persisted id this store derived. Unambiguous: only ``_row_json``
+        # writes the marker, so no caller-assigned id can be mistaken for one.
+        # Remember it so a later caller-assigned id is treated as a rename of
+        # this row rather than a second, duplicate row (#2338).
+        record._store_invented[_DERIVED_ID_FIELD] = True
+    if isinstance(data, dict) and not session_id:
+        content = {k: v for k, v in data.items() if v or k not in ("session_id", "timestamp")}
+        record.session_id = f"noid-{_line_digest(json.dumps(content, sort_keys=True))[:12]}"
+        record._store_invented[_DERIVED_ID_FIELD] = True
+    if record._store_invented.get(_DERIVED_ID_FIELD):
+        base, copy = record.session_id, 1
+        while record.session_id in taken_ids:
+            copy += 1
+            record.session_id = f"{base}-{copy}"
+        record._store_invented["session_id"] = record.session_id
+    taken_ids.add(record.session_id)
+    return record
+
+
+def _line_digest(line: str) -> str:
+    """Digest of one stored row, used to recognise a row across rewrites."""
+    return hashlib.sha256(line.encode("utf-8", "surrogateescape")).hexdigest()
+
+
+def _row_json(record: SessionRecord) -> str:
+    """Serialize a record for the store, omitting a store-invented timestamp.
+
+    The derived ``session_id`` is *kept*, together with a
+    ``session_id_derived`` marker: persisting both gives an id-less legacy row a
+    stable identity so later rewrites match it by id, while the marker lets a
+    later read tell a store-derived id apart from one a caller assigned (#2338).
+    """
+    if not record._store_invented:
+        return record.to_json()
+    d = record.to_dict()
+    invented_ts = record._store_invented.get("timestamp")
+    if invented_ts is not None and d.get("timestamp") == invented_ts:
+        d.pop("timestamp", None)
+    # The marker describes *this* id. Once a caller renames the row the id is
+    # theirs, so the marker must not follow it onto disk.
+    if record._store_invented.get(_DERIVED_ID_FIELD) and (
+        d.get("session_id") == record._store_invented.get("session_id")
+    ):
+        d[_DERIVED_ID_FIELD] = True
+    else:
+        d.pop(_DERIVED_ID_FIELD, None)
+    return json.dumps(d, default=str)
+
+
 def _default_sessions_dir() -> Path:
     """Return the default sessions directory (XDG-compliant).
 
@@ -209,7 +307,10 @@ class SessionStore:
             _ensure_trailing_newline(self.path)
             created = not self.path.exists()
             with open(self.path, "a", encoding="utf-8") as f:
-                f.write(record.to_json() + "\n")
+                # ``_row_json`` keeps a store-invented "now" timestamp out of
+                # the file, so re-appending a loaded id-less row (e.g. a
+                # migration between stores) does not fabricate a creation time.
+                f.write(_row_json(record) + "\n")
                 f.flush()
                 os.fsync(f.fileno())
             if created:
@@ -237,6 +338,7 @@ class SessionStore:
         if not path.exists():
             return []
         records = []
+        taken_ids: set[str] = set()
         with open(path, encoding="utf-8", errors="surrogateescape") as f:
             for line in f:
                 line = line.strip()
@@ -246,7 +348,7 @@ class SessionStore:
                         # lone surrogates; treat the row as malformed rather than
                         # let them crash a later print/encode.
                         line.encode("utf-8")
-                        records.append(SessionRecord.from_dict(json.loads(line)))
+                        records.append(_parse_row(line, taken_ids))
                     except (json.JSONDecodeError, UnicodeEncodeError, TypeError, AttributeError):
                         continue
         return records
@@ -314,11 +416,22 @@ class SessionStore:
         rows instead.
         """
         with self.lock():
+            # A row parsed from an id-less row carries a content-derived
+            # ``noid-…`` id that ``_row_json`` persists on write, so it matches
+            # by id like any other row from the first rewrite onwards (#2338).
             by_id: dict[str, deque[int]] = {}
             for index, record in enumerate(records):
                 by_id.setdefault(record.session_id, deque()).append(index)
+                # A caller that assigns a real id to a loaded id-less row is
+                # renaming it. Index the derived id too, so the on-disk row is
+                # replaced in place instead of being kept *and* duplicated by
+                # the appended record (#2338).
+                invented_id = record._store_invented.get("session_id")
+                if invented_id and invented_id != record.session_id:
+                    by_id.setdefault(invented_id, deque()).append(index)
             emitted_indices: set[int] = set()
             out_lines: list[str] = []
+            taken_ids: set[str] = set()
 
             if self.path.exists():
                 with open(
@@ -333,7 +446,7 @@ class SessionStore:
                             continue
                         try:
                             line.encode("utf-8")  # lone surrogates = undecodable bytes
-                            rec = SessionRecord.from_dict(json.loads(line))
+                            rec = _parse_row(line, taken_ids)
                         except (
                             json.JSONDecodeError,
                             UnicodeEncodeError,
@@ -346,18 +459,20 @@ class SessionStore:
                             continue
                         replacements = by_id.get(rec.session_id)
                         if replacements is None:
-                            out_lines.append(rec.to_json() + "\n")
+                            out_lines.append(_row_json(rec) + "\n")
                         elif replacements:
                             index = replacements.popleft()
+                            if index in emitted_indices:
+                                # The same record is indexed under its current
+                                # and its derived id; emit it only once.
+                                continue
                             emitted_indices.add(index)
-                            out_lines.append(records[index].to_json() + "\n")
+                            out_lines.append(_row_json(records[index]) + "\n")
                         # Excess on-disk copies of an upserted id are superseded.
 
-            out_lines.extend(
-                record.to_json() + "\n"
-                for index, record in enumerate(records)
-                if index not in emitted_indices
-            )
+            for index, record in enumerate(records):
+                if index not in emitted_indices:
+                    out_lines.append(_row_json(record) + "\n")
 
             tmp_path = self.path.with_name(
                 f"{self.path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}"
@@ -381,6 +496,12 @@ class SessionStore:
                     tmp_path.unlink()
                     _fsync_directory(self.sessions_dir)
                 raise
+            # A rename has now landed, so retire its alias: the old derived id is
+            # free again and a later row that derives it is a different session.
+            for record in records:
+                if record._store_invented.get("session_id") not in (None, record.session_id):
+                    del record._store_invented["session_id"]
+                    record._store_invented.pop(_DERIVED_ID_FIELD, None)
         return self.path
 
     def rotate(self, keep_days: int = 30, now: datetime | None = None) -> dict[str, int]:
