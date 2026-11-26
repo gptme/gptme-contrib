@@ -1577,22 +1577,28 @@ class Indexer:
         Returns:
             List of document chunks, ordered by chunk index
         """
-        ids = self._document_ids(base_doc_id)
+        # Hold the lock across the paged id scan and the page reads. The scan is
+        # offset-based, so a concurrent write that inserts or deletes an id
+        # between pages would skip a chunk; a chunk deleted between the scan and
+        # its get() would go missing too. Either way reconstruct_document would
+        # silently return truncated content.
         chunks = []
-        for start in range(0, len(ids), _PAGE_SIZE):
-            page = self.collection.get(ids=ids[start : start + _PAGE_SIZE])
-            contents = page["documents"] or []
-            metas = page["metadatas"] or []
-            for i, doc_id in enumerate(page["ids"]):
-                metadata = dict(metas[i] or {})
-                raw_index = metadata.get("chunk_index")
-                chunk = Document(
-                    content=contents[i],
-                    metadata=metadata,
-                    doc_id=doc_id,
-                    chunk_index=raw_index if isinstance(raw_index, int) else None,
-                )
-                chunks.append(chunk)
+        with self._index_writer_lock():
+            ids = self._document_ids(base_doc_id)
+            for start in range(0, len(ids), _PAGE_SIZE):
+                page = self.collection.get(ids=ids[start : start + _PAGE_SIZE])
+                contents = page["documents"] or []
+                metas = page["metadatas"] or []
+                for i, doc_id in enumerate(page["ids"]):
+                    metadata = dict(metas[i] or {})
+                    raw_index = metadata.get("chunk_index")
+                    chunk = Document(
+                        content=contents[i],
+                        metadata=metadata,
+                        doc_id=doc_id,
+                        chunk_index=raw_index if isinstance(raw_index, int) else None,
+                    )
+                    chunks.append(chunk)
 
         # Sort chunks by index (stored in metadata; the collection does not
         # round-trip the Document.chunk_index attribute).
@@ -1968,12 +1974,18 @@ class Indexer:
         """
         documents = self.collect_documents(path)
         stored = [doc for doc in documents if not _is_tombstone(doc)]
-        for doc in documents:
-            if _is_tombstone(doc):
-                # The file was emptied: drop whatever was indexed for it.
-                self.delete_documents({"source": doc.metadata["source"]})
         if stored:
             self.add_documents(stored)
+        else:
+            # The file was emptied: drop whatever was indexed for it. Delete
+            # only after the add path is ruled out, so a failed add can never
+            # leave the file with neither its old chunks nor new ones.
+            for source in {
+                doc.metadata["source"]
+                for doc in documents
+                if _is_tombstone(doc) and doc.metadata.get("source")
+            }:
+                self.delete_documents({"source": source})
         return len(stored)
 
     def get_all_documents(self) -> list[Document]:

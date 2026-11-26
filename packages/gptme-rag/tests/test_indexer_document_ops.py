@@ -195,3 +195,61 @@ def test_reconstruct_document_keeps_content_when_overlap_check_fails(indexer, tm
 )
 def test_overlap_near_is_bounded_by_recorded_overlap(left, right, expected, overlap):
     assert indexer_module._overlap_near(left, right, expected) == overlap
+
+
+def test_get_document_chunks_holds_the_writer_lock(indexer, tmp_path):
+    """R2: the paged id scan is under the writer lock, so offsets cannot shift."""
+    from gptme_rag.indexing.gc import index_writer_lock
+
+    f = tmp_path / "big.txt"
+    f.write_text(_words(200))
+    indexer.index_file(f)
+    base_id = _base_id(indexer)
+
+    real_get = indexer.collection.get
+    seen_locked = []
+
+    def get_while_probing_lock(*args, **kwargs):
+        if not seen_locked:
+            try:
+                with index_writer_lock(indexer.persist_directory, blocking=False):
+                    seen_locked.append(False)
+            except RuntimeError:
+                seen_locked.append(True)
+        return real_get(*args, **kwargs)
+
+    indexer.collection.get = get_while_probing_lock  # type: ignore[method-assign]
+    try:
+        assert indexer.get_document_chunks(base_id)
+    finally:
+        indexer.collection.get = real_get  # type: ignore[method-assign]
+
+    assert seen_locked == [True], "get_document_chunks read ids without the writer lock"
+
+
+def test_index_file_keeps_old_chunks_when_add_fails(indexer, tmp_path):
+    """R1: a failed add must not leave the file with its old chunks deleted.
+
+    A tombstone alongside real chunks for one source cannot come from a plain
+    empty file, but a collector that trims trailing bytes can produce it. The
+    delete must therefore never run before a successful add.
+    """
+    f = tmp_path / "note.md"
+    f.write_text(_words(200))
+    indexer.index_file(f)
+    source = str(f.resolve())
+    before = indexer.collection.get(where={"source": source})["ids"]
+    assert before
+
+    tombstone = Document(content="", metadata={"source": source})
+    replacement = Document(content=_words(200) + " changed", metadata={"source": source})
+    indexer.collect_documents = lambda path: [tombstone, replacement]  # type: ignore[method-assign]
+
+    def failing_add(documents):
+        raise RuntimeError("embedding backend unavailable")
+
+    indexer.add_documents = failing_add  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError):
+        indexer.index_file(f)
+
+    assert indexer.collection.get(where={"source": source})["ids"] == before
