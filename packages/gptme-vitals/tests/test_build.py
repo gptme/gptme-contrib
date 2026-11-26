@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from runpy import run_path
 
 import pytest
 from gptme_vitals.build import (
@@ -15,6 +14,7 @@ from gptme_vitals.build import (
     write_core_files,
 )
 from gptme_vitals.envelope import PageEnvelope, Status
+from gptme_vitals.fleet import make_headline
 from gptme_vitals.routes import (
     DashboardRoute,
     RefreshCadence,
@@ -203,9 +203,6 @@ def test_headline_comes_from_the_headline_route() -> None:
 
 
 def test_headline_matches_fleet_contract_without_copying_private_detail() -> None:
-    make_headline = run_path(
-        str(Path(__file__).resolve().parents[3] / "scripts" / "fleet_vitals.py")
-    )["make_headline"]
     env = PageEnvelope(
         slug="services",
         status=Status.DEGRADED,
