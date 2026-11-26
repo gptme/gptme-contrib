@@ -3,7 +3,7 @@ import json
 import logging
 import subprocess
 import time
-from collections.abc import Generator, Sequence
+from collections.abc import Generator, Iterable, Sequence
 from contextlib import nullcontext
 from datetime import datetime
 from fnmatch import fnmatch as fnmatch_path
@@ -915,9 +915,13 @@ class Indexer:
                 metadatas.append(doc.metadata)
                 ids.append(doc.doc_id)
 
-            # Add batch to collection
+            # Upsert, not add: a re-index of a file whose content did not change
+            # keeps its ids (they are derived from the content hash), and
+            # collection.add skips an existing id instead of refreshing it. The
+            # stored metadata — last_modified above all, which feeds the
+            # recency boost — would stay at the values from the first index.
             with self._index_writer_lock():
-                self.collection.add(documents=contents, metadatas=metadatas, ids=ids)  # type: ignore[arg-type]
+                self.collection.upsert(documents=contents, metadatas=metadatas, ids=ids)  # type: ignore[arg-type]
         except Exception as e:
             logger.error(f"Failed to process batch: {e}")
             raise
@@ -1030,10 +1034,7 @@ class Indexer:
         # Add first, sweep stale ids after: deleting before the add means one
         # failed add (embedding backend, quota, transient Chroma error) leaves
         # every source in the directory with neither its old nor its new chunks.
-        if stored:
-            self.add_documents(stored)
-        for source in sources:
-            self._delete_stale_source_ids(source, new_ids)
+        self._add_then_sweep(stored, sources, new_ids)
 
         logger.info(f"Indexed {n_files} files from {directory}")
         return n_files
@@ -1565,18 +1566,45 @@ class Indexer:
                 return
             offset += len(page)
 
-    def _delete_stale_source_ids(self, source: str, keep_ids: set[str]) -> int:
-        """Delete the ids stored for ``source`` that are not in ``keep_ids``.
+    def _snapshot_source_ids(self, sources: Iterable[str]) -> dict[str, set[str]]:
+        """Ids stored for each source *before* this run adds anything.
 
-        Runs after the new chunks are added, so a failed add cannot leave a
-        source with neither its old chunks nor new ones. A re-index whose chunk
-        layout changed would otherwise keep the old ids beside the new ones.
+        Read under the writer lock: the scan is offset-based, so a concurrent
+        write that inserts or deletes an id between pages would skip or repeat
+        ids and leave stale ones behind.
         """
-        stale = [i for i in self._iter_ids(where={"source": source}) if i not in keep_ids]
-        for start in range(0, len(stale), _PAGE_SIZE):
+        snapshot: dict[str, set[str]] = {}
+        for source in sources:
             with self._index_writer_lock():
-                self.collection.delete(ids=stale[start : start + _PAGE_SIZE])
-        return len(stale)
+                snapshot[source] = set(self._iter_ids(where={"source": source}))
+        return snapshot
+
+    def _delete_ids(self, ids: list[str]) -> int:
+        """Delete ids in bounded pages, each under the writer lock."""
+        for start in range(0, len(ids), _PAGE_SIZE):
+            with self._index_writer_lock():
+                self.collection.delete(ids=ids[start : start + _PAGE_SIZE])
+        return len(ids)
+
+    def _add_then_sweep(
+        self, documents: list[Document], sources: Iterable[str], new_ids: set[str]
+    ) -> None:
+        """Add ``documents``, then delete only the ids this run made stale.
+
+        The sweep is limited to ids snapshotted *before* the add: an id another
+        writer adds in the meantime is never in our snapshot, so we cannot
+        delete it. Deleting everything for the source that is absent from
+        ``new_ids`` would let two writers of the same file delete each other's
+        chunks and leave the source empty — the data loss the add-before-delete
+        order exists to prevent. A failed add also leaves the old ids in place.
+        """
+        prior_ids = self._snapshot_source_ids(sources)
+        if documents:
+            self.add_documents(documents)
+        for prior in prior_ids.values():
+            stale = sorted(prior - new_ids)
+            if stale:
+                self._delete_ids(stale)
 
     def _document_ids(self, base_doc_id: str) -> list[str]:
         """Ids of a document and its chunks.
@@ -2001,10 +2029,8 @@ class Indexer:
         # fails, and skipping the sweep leaves stale chunks behind when the
         # chunk layout changed. An emptied file has no new ids, so the sweep
         # removes everything for it.
-        if stored:
-            self.add_documents(stored)
-        for source in sorted({str(s) for doc in documents if (s := doc.metadata.get("source"))}):
-            self._delete_stale_source_ids(source, new_ids)
+        sources = sorted({str(s) for doc in documents if (s := doc.metadata.get("source"))})
+        self._add_then_sweep(stored, sources, new_ids)
         return len(stored)
 
     def get_all_documents(self) -> list[Document]:

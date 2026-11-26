@@ -170,16 +170,109 @@ def test_reconstruct_document_keeps_content_when_overlap_check_fails(indexer, tm
 
     Tiny chunks split the emoji across token boundaries, so re-encoding cannot
     locate the overlap and the suffix/prefix fallback runs on every chunk.
+    Exact recovery is impossible on this input: tiktoken decodes a chunk that
+    ends mid-code-point to U+FFFD, so neither neighbour's text matches (see
+    #2462 for the chunk-boundary fix). The bound below still catches the
+    failure this test exists for — a fallback that swallows a whole chunk and
+    drops its content — and keeps the duplication to at most one chunk's worth.
     """
     indexer.processor.chunk_size = 7
     indexer.processor.chunk_overlap = 3
     f = tmp_path / "emoji.txt"
     f.write_text("\U0001f600" * 100, encoding="utf-8")
-    indexer.index_file(f)
+    n_chunks = indexer.index_file(f)
 
     doc = indexer.reconstruct_document(_base_id(indexer))
 
-    assert doc.content.count("\U0001f600") >= 100
+    kept = doc.content.count("\U0001f600")
+    assert kept >= 100, "content was dropped"
+    assert kept <= 100 + n_chunks, f"overlap duplicated per chunk: {kept} for {n_chunks} chunks"
+    assert doc.content.count("\ufffd") <= n_chunks
+
+
+def test_reconstruct_document_dedups_overlap_on_repetitive_content(indexer, tmp_path):
+    """R3: the suffix/prefix fallback removes the overlap instead of joining.
+
+    Every line is identical, so an unbounded fallback would match the whole
+    next chunk and drop real content; a fallback that returns "" would keep
+    every overlap. Only exact reconstruction passes both ways.
+    """
+    text = "----\n" * 400
+    f = tmp_path / "repetitive.txt"
+    f.write_text(text, encoding="utf-8")
+    n_chunks = indexer.index_file(f)
+    assert n_chunks > 1
+
+    doc = indexer.reconstruct_document(_base_id(indexer))
+
+    assert doc.content == text
+
+
+def test_stale_sweep_scan_holds_the_writer_lock(indexer, tmp_path):
+    """P1: the pre-add id snapshot must be read under the writer lock.
+
+    The scan is offset-based, so a concurrent write between pages would skip an
+    id and leave that chunk behind as a stale duplicate.
+    """
+    from gptme_rag.indexing.gc import index_writer_lock
+
+    f = tmp_path / "note.md"
+    f.write_text(_words(200))
+    indexer.index_file(f)
+    f.write_text(_words(200) + " changed")
+
+    real_get = indexer.collection.get
+    probes: list[bool] = []
+
+    def get_while_probing_lock(*args, **kwargs):
+        if kwargs.get("where") and not kwargs.get("ids"):
+            try:
+                with index_writer_lock(indexer.persist_directory, blocking=False):
+                    probes.append(False)
+            except RuntimeError:
+                probes.append(True)
+        return real_get(*args, **kwargs)
+
+    indexer.collection.get = get_while_probing_lock  # type: ignore[method-assign]
+    try:
+        indexer.index_file(f)
+    finally:
+        indexer.collection.get = real_get  # type: ignore[method-assign]
+
+    assert probes and all(probes), "the stale-id scan read ids without the writer lock"
+
+
+def test_sweep_keeps_chunks_added_by_a_concurrent_writer(indexer, tmp_path, monkeypatch):
+    """P1: the sweep deletes only ids that existed before this run's add.
+
+    Another writer can add its own chunks for the same source after our
+    snapshot. Deleting everything absent from our ``new_ids`` would delete that
+    writer's chunks; with two writers each doing so the source ends up with no
+    chunks at all.
+    """
+    f = tmp_path / "note.md"
+    f.write_text(_words(200))
+    indexer.index_file(f)
+    source = str(f.resolve())
+
+    f.write_text(_words(200) + " changed")
+    real_add = indexer.add_documents
+    foreign_id = f"{source}@other-writer#chunk0-0"
+
+    def add_then_concurrent_write(docs):
+        real_add(docs)
+        indexer.collection.add(
+            documents=["chunk from another writer"],
+            metadatas=[{"source": source}],
+            ids=[foreign_id],
+        )
+
+    monkeypatch.setattr(indexer, "add_documents", add_then_concurrent_write)
+    indexer.index_file(f)
+
+    ids = indexer.collection.get()["ids"]
+    assert foreign_id in ids, f"the sweep deleted a concurrent writer's chunk: {ids}"
+    assert len([i for i in ids if i.startswith(f"{source}@")]) > 1
 
 
 @pytest.mark.parametrize(
