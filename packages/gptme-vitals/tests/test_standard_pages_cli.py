@@ -89,3 +89,37 @@ def test_bad_native_export_is_usage_error_before_writes(
     )
     assert not private.exists()
     assert not public.exists()
+
+
+@pytest.mark.parametrize("command", ["threads", "sessions", "tasks", "vitals"])
+def test_oversized_json_integer_is_usage_error_before_writes(
+    tmp_path: Path, command: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import sys
+
+    limit = sys.get_int_max_str_digits()
+    if limit == 0:
+        pytest.skip("Python integer conversion limit is disabled")
+    source = tmp_path / "export.json"
+    private, public = tmp_path / "private", tmp_path / "public"
+    source.write_text('{"sessions": [], "ignored": ' + "1" * (limit + 1) + "}")
+    assert (
+        main(
+            [
+                command,
+                "--input",
+                str(source),
+                "--private-root",
+                str(private),
+                "--public-root",
+                str(public),
+            ]
+        )
+        == 2
+    )
+    captured = capsys.readouterr()
+    assert "gptme-vitals:" in captured.err
+    assert "Traceback" not in captured.err
+    assert not captured.out
+    assert not private.exists()
+    assert not public.exists()

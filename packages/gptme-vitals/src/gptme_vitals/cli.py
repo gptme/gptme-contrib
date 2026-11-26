@@ -369,7 +369,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         if args.command in {"threads", "sessions", "tasks", "vitals"}:
-            payload = json.loads(args.input.read_text(encoding="utf-8"))
+            try:
+                payload = json.loads(args.input.read_text(encoding="utf-8"))
+            except ValueError as exc:
+                raise UsageError(str(exc)) from exc
             paths: tuple[Path, ...]
             if args.command == "threads":
                 paths = write_threads(
