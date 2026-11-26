@@ -2492,6 +2492,72 @@ def test_linked_worktrees_share_one_prompt_window(
     assert receipts[3]["bytes"] > 0
 
 
+def test_linked_worktree_subdirectories_share_one_prompt_window(
+    hook, tmp_path, monkeypatch
+):
+    """A hook cwd inside a worktree subdirectory still shares the window (#2346)."""
+    import subprocess
+
+    repo = tmp_path / "repo"
+    (repo / "sub").mkdir(parents=True)
+    (repo / "sub" / "f.txt").write_text("x\n")
+    git = [
+        "git",
+        "-C",
+        str(repo),
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@t",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "commit.gpgsign=false",
+    ]
+    subprocess.run([*git, "init", "-q"], check=True)
+    subprocess.run([*git, "add", "sub/f.txt"], check=True)
+    subprocess.run([*git, "commit", "-q", "-m", "init"], check=True)
+    wt_a, wt_b = tmp_path / "wt-a", tmp_path / "wt-b"
+    subprocess.run([*git, "worktree", "add", "-q", "-b", "a", str(wt_a)], check=True)
+    subprocess.run([*git, "worktree", "add", "-q", "-b", "b", str(wt_b)], check=True)
+    assert hook._window_workspace(wt_a / "sub") == (repo / "sub").resolve()
+    state = tmp_path / "state"
+    state.mkdir()
+    main_sub = hook._prompt_window_file(repo / "sub", state)
+    assert hook._prompt_window_file(wt_a / "sub", state) == main_sub
+    assert hook._prompt_window_file(wt_b / "sub", state) == main_sub
+    # A different subdirectory keeps its own window, as it does in one checkout.
+    assert hook._prompt_window_file(wt_a, state) != main_sub
+
+    _patch_main_for_prompt_repeat(hook, tmp_path, monkeypatch)
+    receipts = []
+    for index, cwd in enumerate((wt_a / "sub", wt_b / "sub")):
+        monkeypatch.setattr(hook, "get_workspace", lambda: cwd)
+        session = f"worktree-sub-{index}"
+        monkeypatch.setattr(
+            hook,
+            "_STDIN_CACHE",
+            json.dumps(
+                {
+                    "hook_event_name": "UserPromptSubmit",
+                    "session_id": session,
+                    "cwd": str(cwd),
+                    "prompt": "identical launcher prompt",
+                }
+            ),
+        )
+        with pytest.raises(SystemExit) as exc_info:
+            hook.main()
+        assert exc_info.value.code == 0
+        receipts.append(
+            json.loads(
+                (tmp_path / f"cc-session-{session}-lessons-receipts.jsonl").read_text()
+            )
+        )
+    assert [row["outcome"] for row in receipts] == ["emitted", "empty"]
+    assert receipts[1]["reason"] == "fixed_prompt_repeat"
+
+
 def test_window_workspace_ignores_malformed_git_file(hook, tmp_path):
     (tmp_path / ".git").write_text("not a gitdir pointer\n")
     assert hook._window_workspace(tmp_path) == tmp_path
