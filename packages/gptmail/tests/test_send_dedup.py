@@ -361,6 +361,74 @@ def test_edited_draft_is_preserved_as_a_sendable_new_draft(
     assert b"Late body" in deliveries[1]
 
 
+def test_preserved_reply_edit_is_sendable_without_force(
+    agent: AgentEmail, deliveries: list, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A reply edit that missed delivery must send without ``force``.
+
+    The delivered reply marks the original completed, so a preserved copy that
+    keeps ``In-Reply-To`` is refused as a duplicate reply forever. Dropping the
+    threading headers makes the preserved edit a standalone, sendable message.
+    """
+    msg = _draft(agent, "reply-edited", "<orig@example.com>")
+    draft = agent.email_dir / "drafts" / "reply-edited.md"
+    edited = (
+        "To: erik@example.com\nSubject: Re: hi\n"
+        "In-Reply-To: <orig@example.com>\nReferences: <orig@example.com>\n\n"
+        "Edited reply body\n"
+    )
+    real_run = subprocess.run
+
+    def run_and_edit(cmd: Any, *args: Any, **kwargs: Any) -> Any:
+        draft.write_text(edited)
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", run_and_edit)
+    agent.send(msg)
+
+    assert agent._is_completed("<orig@example.com>")
+    preserved = list(draft.parent.glob("*.md"))
+    assert len(preserved) == 1
+    content = preserved[0].read_text()
+    assert "Edited reply body" in content
+    assert "In-Reply-To:" not in content
+    assert "References:" not in content
+
+    # Sends without force even though the original is already completed.
+    agent.send(preserved[0].stem)
+    assert len(deliveries) == 2
+    assert b"Edited reply body" in deliveries[1]
+
+
+def test_preserved_edit_rewrites_only_header_message_id(
+    agent: AgentEmail, deliveries: list, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A quoted ``Message-ID:`` line in the body must not be rewritten."""
+    msg = _draft(agent, "quoted-body", None)
+    draft = agent.email_dir / "drafts" / "quoted-body.md"
+    edited = (
+        "To: erik@example.com\nSubject: fwd\n\n"
+        "> Message-ID: <quoted@example.com>\n> original text\n"
+    )
+    real_run = subprocess.run
+
+    def run_and_edit(cmd: Any, *args: Any, **kwargs: Any) -> Any:
+        draft.write_text(edited)
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", run_and_edit)
+    agent.send(msg)
+
+    preserved = list(draft.parent.glob("*.md"))
+    assert len(preserved) == 1
+    content = preserved[0].read_text()
+    # The body's quoted id is untouched; the headers carry a fresh one.
+    assert "> Message-ID: <quoted@example.com>" in content
+    header_block = content.split("\n\n", 1)[0]
+    assert "Message-ID: <quoted@example.com>" not in header_block
+    assert "Message-ID: <" in header_block
+
+
 def test_edit_landing_during_cleanup_is_not_deleted(
     agent: AgentEmail, deliveries: list, monkeypatch: pytest.MonkeyPatch
 ) -> None:

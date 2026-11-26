@@ -918,13 +918,23 @@ class AgentEmail:
         the edited copy forever. Re-mint the ``Message-ID`` (and the matching
         filename) so the edit is a real draft the user can send explicitly
         instead of an unreachable file.
+
+        ``send()`` also refuses a reply whose original is already completed, and
+        the reply this edit belonged to has just been delivered. Drop its
+        ``In-Reply-To``/``References`` headers so the preserved edit is a
+        standalone message that sends without ``force``. Only the header block
+        is rewritten: a quoted ``Message-ID:`` line in the body is left alone.
         """
         message_id = self._generate_message_id()
-        rewritten, replaced = re.subn(
-            r"(?m)^Message-ID:.*$", f"Message-ID: {message_id}", content, count=1
+        header, separator, body = content.partition("\n\n")
+        header = re.sub(r"(?mi)^In-Reply-To:.*\n?", "", header)
+        header = re.sub(r"(?mi)^References:.*\n?", "", header)
+        header, replaced = re.subn(
+            r"(?mi)^Message-ID:.*$", f"Message-ID: {message_id}", header, count=1
         )
         if not replaced:
-            rewritten = content
+            header = f"Message-ID: {message_id}\n{header}"
+        rewritten = header + separator + body
         path = self.email_dir / "drafts" / self._format_filename(message_id)
         try:
             path.write_text(rewritten)
