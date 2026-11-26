@@ -723,8 +723,18 @@ class GptmeToolBridge:
                 )
             if self.on_result:
                 try:
-                    await self.on_result(
-                        f"Subagent task {task_id} was cancelled before it finished."
+                    # Bound this delivery too: an unbounded await here would
+                    # keep the task (and every later cancel's ``cancelling``
+                    # reply) alive forever on a stalled provider socket.
+                    await asyncio.wait_for(
+                        self.on_result(
+                            f"Subagent task {task_id} was cancelled before it finished."
+                        ),
+                        _RESULT_DELIVERY_TIMEOUT_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "Timed out reporting cancellation of task %s", task_id
                     )
                 except Exception:
                     # A closing provider socket must not replace the

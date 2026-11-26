@@ -207,6 +207,31 @@ async def _dispatch_blocked_subagent(bridge, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_hung_cancellation_report_is_bounded(monkeypatch):
+    """A stalled cancellation report cannot keep the cancel request alive."""
+    from gptme_voice.realtime import tool_bridge as tb
+
+    monkeypatch.setattr(tb, "_RESULT_DELIVERY_TIMEOUT_SECONDS", 0.05)
+    never = asyncio.Event()
+
+    async def hung_report(_text):
+        await never.wait()
+
+    cue = AsyncMock()
+    bridge = GptmeToolBridge(on_cancel=cue, on_result=hung_report)
+    task_id, task = await _dispatch_blocked_subagent(bridge, monkeypatch)
+    result = await asyncio.wait_for(
+        bridge.handle_function_call("subagent_cancel", {"task_id": task_id}),
+        timeout=5,
+    )
+    await _flush_cues(bridge)
+    assert result["status"] == "cancelled"
+    assert task.cancelled()
+    assert task_id not in bridge._pending_tasks
+    cue.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
 async def test_cleanup_cancellation_outside_the_tool_call_is_silent(monkeypatch):
     cue = AsyncMock()
     bridge = GptmeToolBridge(on_cancel=cue)
