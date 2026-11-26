@@ -1498,6 +1498,20 @@ def test_url_credential_scan_handles_colon_rich_input() -> None:
     assert time.process_time() - start < 2.0
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        'https://bob:hunter2pw;password="beta@proxy.internal',
+        'https://bob:hunter2pw;password="beta@proxy.internal gamma"',
+        'bob:hunter2pw;password="beta@proxy.internal gamma"',
+    ],
+)
+def test_embedded_quoted_assignment_cannot_hide_url_credential(text: str) -> None:
+    redacted = soc._redact(text)
+    for secret in ("hunter2pw", "beta", "gamma"):
+        assert secret not in redacted
+
+
 @pytest.mark.parametrize("quote", ['"', "'"])
 def test_url_redaction_preserves_quoted_secret_boundaries(quote: str) -> None:
     text = f"password:{quote}alpha@host beta{quote}"
