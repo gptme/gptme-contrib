@@ -92,11 +92,19 @@ class Goldfish:
                 connection.execute("PRAGMA query_only=ON")
                 connection.row_factory = sqlite3.Row
                 # Bound individual returned text columns inside SQLite, before
-                # Python materializes them. Mark source truncation explicitly.
-                columns = """s.snapshot_id, CASE WHEN length(s.content)>12000
+                # Python materializes them. SQLite text length()/substr() stop
+                # at NUL. Allow up to 48000 bytes for NUL-bearing rows so every
+                # <=12000-character UTF-8 value survives intact. Larger rows
+                # return just the bounded visible prefix; Python applies the
+                # final character limit to all returned rows.
+                columns = """s.snapshot_id, CASE
+                    WHEN instr(s.content, char(0))>0 AND length(CAST(s.content AS BLOB))>48000
+                    THEN substr(s.content,1,12000)
+                    WHEN length(s.content)>12000
                     THEN substr(s.content,1,4000) || char(10) || '[... middle omitted ...]' || char(10) || substr(s.content,-7900)
                     ELSE s.content END AS content,
-                    length(s.content)>12000 AS source_truncated,
+                    (length(s.content)>12000 OR
+                        (instr(s.content, char(0))>0 AND length(CAST(s.content AS BLOB))>48000)) AS source_truncated,
                     substr(s.app,1,1000) AS app,
                     substr(s.window_title,1,2000) AS window_title,
                     substr(s.url,1,2000) AS url, substr(s.domain,1,1000) AS domain,

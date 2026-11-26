@@ -149,6 +149,42 @@ def test_sqlite_source_truncation(database):
 
 
 @pytest.mark.parametrize(
+    "content",
+    [
+        "abc\0def",
+        "\0" + "x" * 11999,
+        "é\0fin",
+        "é" * 6000 + "\0fin",
+        "😀" * 11996 + "\0fin",
+    ],
+    ids=["embedded", "ascii-boundary", "unicode", "two-byte", "four-byte-boundary"],
+)
+def test_small_nul_snapshot_preserved(database, content):
+    with sqlite3.connect(database) as db:
+        db.execute("UPDATE snapshots SET content=?", (content,))
+    row = module.Goldfish(database).snapshots(None, 1)[0]
+    assert row["content"] == content
+    assert row["content_truncated"] is False
+
+
+def test_sqlite_source_truncation_not_bypassed_by_nul(database, monkeypatch):
+    """SQLite text length() stops at a NUL; the bound must still hold (#2346)."""
+    with sqlite3.connect(database) as db:
+        db.execute("UPDATE snapshots SET content=?", ("\0" + "x" * 5_000_000,))
+    materialized: list[int] = []
+    original = module.normalize_snapshot
+
+    def spy(row):
+        materialized.append(len(row["content"]))
+        return original(row)
+
+    monkeypatch.setattr(module, "normalize_snapshot", spy)
+    row = module.Goldfish(database).snapshots(None, 1)[0]
+    assert materialized and max(materialized) <= 48000
+    assert row["content_truncated"] and len(row["content"]) <= 12000
+
+
+@pytest.mark.parametrize(
     "update",
     [
         {"secure": True},
