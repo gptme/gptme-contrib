@@ -8,11 +8,17 @@ Provides tools to:
 - Track adoption metrics
 """
 
+import contextlib
+import errno
 import json
+import os
 import sys
+import tempfile
+from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
+from uuid import uuid4
 
 # Import from existing modules
 try:
@@ -20,6 +26,46 @@ try:
 except ImportError:
     # Allow running from package directory
     import review as review_module  # type: ignore[import-not-found, no-redef]
+
+
+def _target_mode(path: Path) -> int:
+    """Mode an atomically replaced file should end up with.
+
+    Keep the existing file's mode when there is one (a rewrite must not
+    silently drop group/world readability); otherwise use the usual
+    umask-respecting default instead of mkstemp's 0600.
+    """
+    try:
+        return path.stat().st_mode & 0o777
+    except FileNotFoundError:
+        umask = os.umask(0)
+        os.umask(umask)
+        return 0o666 & ~umask
+
+
+@contextlib.contextmanager
+def _atomic_write(path: Path) -> Iterator[TextIO]:
+    """Yield a handle that is renamed onto `path` only if the body succeeds."""
+    # os.replace() swaps the directory entry, so a symlinked lesson (or
+    # ledger) would become a regular file. Write through to its target, as
+    # the old in-place open() did.
+    if path.is_symlink():
+        path = path.resolve()
+    if path.exists() and not os.access(path, os.W_OK):
+        # os.replace() would swap the entry regardless; keep the refusal to
+        # overwrite a read-only file that the in-place write had.
+        raise PermissionError(errno.EACCES, "Permission denied", str(path))
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            os.chmod(tmp, _target_mode(path))
+            yield f
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 def adopt_lesson(
@@ -107,17 +153,69 @@ def adopt_lesson(
 
                     content = f"---\n{new_frontmatter}---\n{content[end_idx + 5 :]}"
 
-        # Write to local path
-        with open(local_path, "w") as f:
-            f.write(content)
+        # Write to local path, remembering what was there (--force). Atomic,
+        # so a failed write leaves the previous lesson intact rather than
+        # truncated (a truncated file would be refused on retry, or would
+        # discard the user's lesson under --force).
+        #
+        # The undo below must not need free space: the failure it handles is
+        # usually ENOSPC, so rewriting the old content could fail too and
+        # leave the network version in place, losing the user's lesson. Keep
+        # the old inode as a hard link, so restoring is a rename.
+        write_path = local_path.resolve() if local_path.is_symlink() else local_path
+        backup: Path | None = None
+        previous: str | None = None
+        if write_path.exists():
+            # Unique per run, and never delete another run's backup: after a
+            # crash it can be the only copy of the overwritten lesson.
+            backup = write_path.with_name(
+                f".{write_path.name}.{uuid4().hex[:12]}.previous"
+            )
+            try:
+                os.link(write_path, backup)
+            except OSError:
+                # Filesystem without hard links: fall back to the content.
+                backup = None
+                previous = write_path.read_text()
 
-        # Record adoption in metrics (for future tracking)
-        record_adoption(
-            lesson_id=lesson_id,
-            agent_origin=network_meta.get("agent_origin", "unknown"),
-            adopted_at=datetime.now(timezone.utc).isoformat(),
-            lessons_dir=lessons_dir,
-        )
+        lesson_written = False
+        try:
+            with _atomic_write(local_path) as f:
+                f.write(content)
+            lesson_written = True
+
+            # Record adoption in metrics (for future tracking).
+            record_adoption(
+                lesson_id=lesson_id,
+                agent_origin=network_meta.get("agent_origin", "unknown"),
+                adopted_at=datetime.now(timezone.utc).isoformat(),
+                lessons_dir=lessons_dir,
+            )
+        except Exception:
+            # An adoption reported as failed must leave nothing behind, or the
+            # retry is refused with "Local lesson exists".
+            if not lesson_written:
+                # The target was never replaced, so `backup` is a second link
+                # to the untouched inode. Renaming between two links of one
+                # file is a POSIX no-op, which would leave `.previous` behind;
+                # drop the link instead.
+                if backup is not None:
+                    backup.unlink(missing_ok=True)
+            elif backup is not None:
+                os.replace(backup, write_path)
+            elif previous is not None:
+                with _atomic_write(local_path) as f:
+                    f.write(previous)
+            else:
+                write_path.unlink(missing_ok=True)
+            raise
+        else:
+            if backup is not None:
+                # The lesson and the ledger agree from here on; removing the
+                # backup is cleanup, so a failure must not be reported as a
+                # failed adoption. A leftover .previous is kept.
+                with contextlib.suppress(OSError):
+                    backup.unlink(missing_ok=True)
 
         return True, f"Adopted to {local_path}"
 
@@ -141,19 +239,40 @@ def record_adoption(
     metrics_file.parent.mkdir(parents=True, exist_ok=True)
 
     # Load existing metrics
+    metrics: dict[str, Any] = {"adoptions": []}
     if metrics_file.exists():
-        with open(metrics_file) as f:
-            metrics = json.load(f)
-    else:
-        metrics = {"adoptions": []}
+        try:
+            with open(metrics_file) as f:
+                loaded = json.load(f)
+            # Valid JSON of the wrong shape blocks just as hard as invalid
+            # JSON (TypeError/KeyError on every later adoption), so treat it
+            # the same way.
+            if not isinstance(loaded, dict) or not isinstance(
+                loaded.get("adoptions"), list
+            ):
+                raise ValueError(f"unexpected ledger shape: {type(loaded).__name__}")
+            metrics = loaded
+        except (json.JSONDecodeError, ValueError) as e:
+            # Left behind by an interrupted write of the old, non-atomic kind.
+            # Keep it for manual recovery and start a new ledger, so it does
+            # not block every later adoption.
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+            backup = metrics_file.with_name(f"{metrics_file.name}.corrupt-{stamp}")
+            os.replace(metrics_file, backup)
+            print(
+                f"Warning: unreadable adoption ledger ({e}); moved to {backup}",
+                file=sys.stderr,
+            )
 
     # Add new adoption
     metrics["adoptions"].append(
         {"lesson_id": lesson_id, "agent_origin": agent_origin, "adopted_at": adopted_at}
     )
 
-    # Save metrics
-    with open(metrics_file, "w") as f:
+    # Save metrics via temp file + rename, so a failed write keeps the
+    # previous ledger instead of truncating it. _atomic_write also preserves
+    # the ledger's existing mode, so a shared-workspace reader keeps access.
+    with _atomic_write(metrics_file) as f:
         json.dump(metrics, f, indent=2)
 
 
