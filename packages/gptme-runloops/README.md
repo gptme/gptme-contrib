@@ -188,6 +188,15 @@ warning. `--format shell` prints quoted `ROUTE_BACKEND`, `ROUTE_MODEL`, `ROUTE_E
 only for errors. Record the decision id with the session (for example in its `dispatch_cause`) to
 link sessions to decisions.
 
+Claude usage caches expose `_pacing.pace_gap_used_minus_target` with the same
+sign as the selector and `gptme_subscription.routing`: positive means overusing,
+negative means underusing. The selector reads that field directly, including
+when `gptme-subscription` is not installed. The parser's older
+`_pacing.pace_gap` is deprecated and retains its opposite sign for existing
+callers (including the legacy utilization-bypass gate and quota-gate log).
+Old caches remain readable through the selector's sign-converting fallback;
+an unknown reset still yields unknown pacing.
+
 Treat any exit other than 0, 76 and 69 as "run your default": click-level failures (an older
 installed version without `--lane`, or `--config` pointing at a directory) exit 2 with empty stdout
 and bypass both `--default-arm` and `--shadow`. Capture the exit code without tripping `set -e`,

@@ -239,3 +239,9 @@ def test_low_usage_fallback_does_not_claim_observed_windows() -> None:
     assert "five_hour window absent" in proc.stderr
     assert "synthetic" in proc.stderr
     assert "reporting weekly windows only" not in proc.stderr
+
+
+def test_pacing_canonical_field_is_unknown_without_a_reset() -> None:
+    proc = run_parser("Current week (all models)\n45% used\n")
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout)["_pacing"]["pace_gap_used_minus_target"] is None

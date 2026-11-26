@@ -86,13 +86,16 @@ def _pace_gap(
     """Canonical pace gap for the weekly window, or None when the reset is unknown."""
     if resets_in_seconds is None or resets_in_seconds <= 0:
         return None
+    if isinstance(pacing, dict):
+        canonical = _number(pacing.get("pace_gap_used_minus_target"))
+        if canonical is not None:
+            return round(canonical, 3)
     try:
         from gptme_subscription.routing import compute_window_pacing_snapshot
     except Exception:  # optional package missing or broken: use the script's value
         legacy = _number(pacing.get("pace_gap")) if isinstance(pacing, dict) else None
-        # scripts/check-claude-usage-parser.py computes ``target = elapsed * 0.9;
-        # pace_gap = target - actual`` (negative = overusing); flip it to the
-        # canonical ``used - target`` sign (positive = ahead of even pace).
+        # Older parser caches only have target - actual (negative = overusing).
+        # Keep the sign conversion until those producers/caches are retired.
         return None if legacy is None else round(-legacy, 3)
     snapshot = compute_window_pacing_snapshot(
         used,

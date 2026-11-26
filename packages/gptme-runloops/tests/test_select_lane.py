@@ -524,6 +524,21 @@ def test_parse_claude_usage_pace_sign():
     assert used == 0.67 and gap == pytest.approx(0.22, abs=1e-3)
 
 
+@pytest.mark.parametrize("canonical", [0.22, -0.15])
+def test_canonical_pace_field_without_subscription(monkeypatch, canonical):
+    monkeypatch.setitem(sys.modules, "gptme_subscription", None)
+    monkeypatch.setitem(sys.modules, "gptme_subscription.routing", None)
+    data = {
+        "seven_day": {"utilization": 0.67, "resets_in_seconds": 302400},
+        "_pacing": {
+            "pace_gap_used_minus_target": canonical,
+            # An inconsistent legacy value must not override the explicit field.
+            "pace_gap": 0.99,
+        },
+    }
+    assert parse_claude_usage(data) == (0.67, canonical)
+
+
 def _script_pace_gap(used: float, resets_in_seconds: int) -> float:
     """``_pacing.pace_gap`` exactly as scripts/check-claude-usage-parser.py computes it."""
     elapsed_frac = max(0.0, 1.0 - resets_in_seconds / (7 * 24 * 3600))
