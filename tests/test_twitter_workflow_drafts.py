@@ -3121,6 +3121,48 @@ def test_expire_review_drafts_ages_from_parking_not_creation(
     assert requeued.exists()
 
 
+def test_expire_review_drafts_ignores_a_refreshed_mtime(
+    workflow_module: Any, tmp_path: Path
+) -> None:
+    """The recorded parking stamp, not mtime, decides expiry.
+
+    A touch/copy/restore of the file rewrites mtime; the draft keeps its own
+    parked_at, so the clock is not silently restarted.
+    """
+    _set_status_dirs(workflow_module, tmp_path)
+    now = datetime(2026, 11, 25, 12, 0)
+    stale = _save_review_draft(workflow_module, "tweet_old.yml", datetime(2026, 10, 1))
+    # Parked on 2026-10-01, but the file was touched today.
+    draft = workflow_module.TweetDraft.load(stale)
+    draft.parked_at = datetime(2026, 10, 1)
+    draft.save(stale)
+    _stamp_mtime(stale, now)
+
+    assert workflow_module.expire_review_drafts(7, now=now) == (1, 0)
+    assert not stale.exists()
+    moved = workflow_module.REJECTED_DIR / stale.name
+    reason = workflow_module.TweetDraft.load(moved).reject_reason
+    assert "parked in review/ 5" in reason and "(limit 7d)" in reason
+
+
+def test_parking_a_draft_records_its_parking_time(
+    workflow_module: Any, tmp_path: Path
+) -> None:
+    """save_draft()/move_draft() into review/ stamp parked_at in the draft."""
+    _set_status_dirs(workflow_module, tmp_path)
+    before = datetime.now()
+    parked = workflow_module.save_draft(
+        workflow_module.TweetDraft(text="Parked draft"), "review"
+    )
+    stamp = workflow_module.TweetDraft.load(parked).parked_at
+    assert stamp is not None and stamp >= before
+
+    requeued = workflow_module.move_draft(parked, "new")
+    assert workflow_module.TweetDraft.load(requeued).parked_at is not None
+    back = workflow_module.move_draft(requeued, "review")
+    assert workflow_module.TweetDraft.load(back).parked_at is not None
+
+
 def test_expire_review_drafts_continues_past_a_draft_that_fails(
     workflow_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

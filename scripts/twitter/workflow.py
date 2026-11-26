@@ -291,6 +291,7 @@ class TweetDraft:
         quote_tweet_id: str | None = None,
         posted_id: str | None = None,
         posted_at: datetime | None = None,
+        parked_at: datetime | None = None,
     ):
         self.text = text
         self.type = type  # tweet, reply, thread, quote
@@ -307,6 +308,10 @@ class TweetDraft:
         self.quote_tweet_id = quote_tweet_id  # id of the tweet this draft quotes
         self.posted_id = posted_id  # id returned by create_tweet, set on posting
         self.posted_at = posted_at  # when the post succeeded
+        # When the draft entered review/. Stamped by save_draft()/move_draft(),
+        # so the review expiry clock does not depend on file mtime, which any
+        # touch/copy/restore resets.
+        self.parked_at = parked_at
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for storage"""
@@ -339,6 +344,8 @@ class TweetDraft:
             result["posted_id"] = self.posted_id
         if self.posted_at:
             result["posted_at"] = self.posted_at.isoformat()
+        if self.parked_at:
+            result["parked_at"] = self.parked_at.isoformat()
         return result
 
     @classmethod
@@ -391,6 +398,11 @@ class TweetDraft:
                 datetime.fromisoformat(data["posted_at"])
                 if isinstance(data.get("posted_at"), str) and data["posted_at"]
                 else data.get("posted_at") or None
+            ),
+            parked_at=(
+                datetime.fromisoformat(data["parked_at"])
+                if isinstance(data.get("parked_at"), str) and data["parked_at"]
+                else data.get("parked_at") or None
             ),
         )
         created_at = data.get("created_at", data.get("created"))
@@ -502,6 +514,9 @@ def save_draft(draft: TweetDraft, status: str = "new") -> Path:
     if draft.thread:
         draft.thread = [public_safe(t) for t in draft.thread]
 
+    if status == "review":
+        # Stamp the parking time in the draft itself; mtime is only a fallback.
+        draft.parked_at = datetime.now()
     path = status_dirs[status] / generate_draft_name(draft)
     draft.save(path)
     return path
@@ -779,6 +794,10 @@ def move_draft(path: Path, new_status: str) -> Path:
 
     # Load and save to ensure any updates are persisted
     draft = TweetDraft.load(path)
+    if new_status == "review":
+        # Entering review/ restarts the expiry clock, and the stamp lives in the
+        # draft so a later touch/copy of the file cannot reset it.
+        draft.parked_at = datetime.now()
     draft.save(new_path)
 
     # Remove the original file
@@ -804,12 +823,18 @@ def _naive_local(value: datetime) -> datetime:
 def _parked_at(path: Path, draft: TweetDraft) -> datetime:
     """When the draft was written into review/, as a naive local datetime.
 
-    Age is measured from the file, not from ``created_at``: a draft requeued to
-    new/ (e.g. by the writing-style gate) keeps its creation time, so a
-    created_at-based age would expire it the same cycle it re-enters review/,
-    before a human sees it. ``save_draft(..., "review")`` writes the file when
-    the draft is parked, so mtime is the parking time.
+    Age is measured from the parking time, not from ``created_at``: a draft
+    requeued to new/ (e.g. by the writing-style gate) keeps its creation time,
+    so a created_at-based age would expire it the same cycle it re-enters
+    review/, before a human sees it.
+
+    The stamp is recorded in the draft by ``save_draft(..., "review")`` and
+    ``move_draft(..., "review")``. File mtime is only the fallback for drafts
+    written before that field existed: any touch, copy or restore rewrites it,
+    so it cannot be the primary clock.
     """
+    if draft.parked_at is not None:
+        return _naive_local(draft.parked_at)
     try:
         return datetime.fromtimestamp(path.stat().st_mtime)
     except OSError:
