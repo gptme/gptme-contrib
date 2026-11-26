@@ -11,7 +11,8 @@ from pathlib import Path
 
 import click
 
-NODE_DIR = Path(__file__).parent.parent.parent.parent / "node"
+# src/gptme_whatsapp/setup.py -> package root -> node/
+NODE_DIR = Path(__file__).resolve().parents[2] / "node"
 
 
 def check_node():
@@ -48,6 +49,26 @@ def install_npm_deps():
     return result.returncode == 0
 
 
+def _systemd_quote(value: str | Path) -> str:
+    """Quote an ``ExecStart=`` argument so whitespace is not a field split.
+
+    systemd expands ``%``-specifiers here too, so a literal ``%`` must be
+    escaped to ``%%`` just as it is in ``Environment=``.
+    """
+    escaped = str(value).replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%")
+    return f'"{escaped}"'
+
+
+def _env_line(key: str, value: str) -> str:
+    """Render a quoted systemd ``Environment=`` line.
+
+    Unquoted, systemd splits the assignment on whitespace, so a workspace path
+    with a space was truncated.
+    """
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%")
+    return f'Environment="{key}={escaped}"'
+
+
 def generate_systemd_service(
     agent_name: str,
     workspace: str,
@@ -59,10 +80,10 @@ def generate_systemd_service(
     """Generate a systemd service file for the WhatsApp bridge."""
     allowed = ",".join(allowed_contacts)
     env_lines = [
-        f"Environment=GPTME_AGENT={agent_name}",
-        f"Environment=AGENT_WORKSPACE={workspace}",
-        f"Environment=ALLOWED_CONTACTS={allowed}",
-        f"Environment=BACKEND={backend}",
+        _env_line("GPTME_AGENT", agent_name),
+        _env_line("AGENT_WORKSPACE", workspace),
+        _env_line("ALLOWED_CONTACTS", allowed),
+        _env_line("BACKEND", backend),
     ]
     path_parts = [node_path]
     if claude_path:
@@ -70,7 +91,11 @@ def generate_systemd_service(
     path_parts.extend(
         ["/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin"]
     )
-    env_lines.append(f"Environment=PATH={':'.join(path_parts)}")
+    env_lines.append(_env_line("PATH", ":".join(path_parts)))
+
+    # WorkingDirectory= takes the whole value as one path and does not unquote:
+    # a quoted value is "not absolute" and systemd refuses to start the unit.
+    working_directory = str(NODE_DIR).replace("%", "%%")
 
     service = f"""[Unit]
 Description=gptme WhatsApp bridge for {agent_name}
@@ -78,9 +103,9 @@ After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory={NODE_DIR}
+WorkingDirectory={working_directory}
 {chr(10).join(env_lines)}
-ExecStart=/usr/bin/node {NODE_DIR}/index.js
+ExecStart=/usr/bin/node {_systemd_quote(NODE_DIR / "index.js")}
 Restart=on-failure
 RestartSec=10
 

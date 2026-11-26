@@ -34,7 +34,7 @@ import { createKeyedQueue } from './serial-queue.js';
 // Config from env
 const AGENT_NAME = process.env.GPTME_AGENT || 'sven';
 const BACKEND = process.env.BACKEND || 'gptme'; // 'gptme' or 'claude-code'
-const ALLOWED_CONTACTS = (process.env.ALLOWED_CONTACTS || '').split(',').filter(Boolean);
+const ALLOWED_CONTACTS = (process.env.ALLOWED_CONTACTS || '').split(',').map((s) => s.trim()).filter(Boolean);
 const GPTME_CMD = process.env.GPTME_CMD || 'gptme';
 const CLAUDE_CMD = process.env.CLAUDE_CMD || 'claude';
 const WORKSPACE = process.env.AGENT_WORKSPACE || process.env.HOME + '/' + AGENT_NAME;
@@ -60,7 +60,7 @@ if (jsonOutput === 'unknown') {
 
 if (BACKEND === 'claude-code' && !existsSync(SYSTEM_PROMPT_FILE)) {
     console.log(`Warning: SYSTEM_PROMPT_FILE not found at ${SYSTEM_PROMPT_FILE}`);
-    console.log('Run: cd ${WORKSPACE} && ./scripts/build-system-prompt.sh > ${SYSTEM_PROMPT_FILE}');
+    console.log(`Run: cd ${WORKSPACE} && ./scripts/build-system-prompt.sh > ${SYSTEM_PROMPT_FILE}`);
 }
 
 // Serializes messages per sender so two rapid messages cannot race for the
@@ -98,6 +98,15 @@ client.on('auth_failure', (msg) => {
 });
 
 client.on('message', async (msg) => {
+    try {
+        await handleMessage(msg);
+    } catch (err) {
+        // An unhandled rejection here would exit the whole bridge.
+        console.error('Failed to handle message:', err);
+    }
+});
+
+async function handleMessage(msg) {
     // Skip group messages, status updates, etc.
     if (msg.from.endsWith('@g.us') || msg.from === 'status@broadcast') {
         return;
@@ -109,7 +118,11 @@ client.on('message', async (msg) => {
     }
 
     const sender = msg.from.replace('@c.us', '');
-    const body = msg.body.trim();
+    // NUL bytes make spawn() throw ERR_INVALID_ARG_VALUE.
+    const body = msg.body.replace(/\0/g, '').trim();
+    if (!body) {
+        return;
+    }
 
     // Check allowlist if configured
     if (ALLOWED_CONTACTS.length > 0 && !ALLOWED_CONTACTS.includes(sender)) {
@@ -128,7 +141,7 @@ client.on('message', async (msg) => {
             console.log(`[${new Date().toISOString()}] Replied to ${sender}`);
         }
     });
-});
+}
 
 /**
  * Whether the configured gptme understands `--output-format json`.
@@ -193,7 +206,7 @@ async function callGptme(sender, message) {
  * (--session-id on the first message, --resume after) for history.
  */
 async function callClaudeCode(sender, message) {
-    const args = ['-p', message, '--output-format', 'text'];
+    const args = ['-p', '--output-format', 'text'];
 
     // Inject agent identity via system prompt file
     if (existsSync(SYSTEM_PROMPT_FILE)) {
@@ -204,6 +217,8 @@ async function callClaudeCode(sender, message) {
     // session, so the first message creates it under a deterministic UUID.
     const convId = sessionName(AGENT_NAME, WORKSPACE, sender);
     args.push(...sessionArgs(convId));
+    // Stop messages starting with a dash from being parsed as options.
+    args.push('--', message);
 
     return spawnAndCapture(CLAUDE_CMD, args, (output) => {
         // Claude Code --output-format text returns just the response

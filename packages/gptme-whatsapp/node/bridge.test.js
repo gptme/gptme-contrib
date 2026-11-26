@@ -10,6 +10,7 @@ import { join } from 'node:path';
 import vm from 'node:vm';
 import { extractReply } from './gptme-reply.js';
 import { createKeyedQueue } from './serial-queue.js';
+import { sessionArgs, sessionName } from './claude-session.js';
 
 // Exercise the actual bridge functions without installing Chromium or contacting
 // WhatsApp. Only imports and `process` are replaced; the message handler,
@@ -257,4 +258,30 @@ test('a gptme that supports JSON output starts normally', () => {
 test('an unreadable gptme --help does not stop the bridge', () => {
     const { exits } = bridge({}, { spawnSync: () => ({ error: new Error('ETIMEDOUT') }) });
     assert.deepEqual(exits, []);
+});
+
+test('a spawn that throws does not reject the message handler', async () => {
+    const { receive } = bridge({}, { spawn: () => { throw new Error('spawn failed'); } });
+    await assert.doesNotReject(receive('hi'));
+});
+
+test('NUL bytes are stripped and allowlist entries are trimmed', async () => {
+    const { children, receive } = bridge({ ALLOWED_CONTACTS: '999, 123' });
+    const run = receive('a\0b');
+    await tick();
+    assert.equal(children.length, 1);
+    assert.equal(children[0].args.at(-1), 'ab');
+    children[0].emit('close', 0);
+    await run;
+});
+
+test('a claude message starting with a dash is not parsed as an option', async () => {
+    const { children, receive } = bridge(
+        { BACKEND: 'claude-code' }, { sessionArgs, sessionName },
+    );
+    const run = receive('--version');
+    await tick();
+    assert.deepEqual([...children[0].args.slice(-2)], ['--', '--version']);
+    children[0].emit('close', 0);
+    await run;
 });
