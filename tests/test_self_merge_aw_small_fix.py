@@ -43,9 +43,10 @@ def trusted_deployment():
         yield
 
 
-def test_activitywatch_bundle_is_not_a_self_merge_repo() -> None:
+def test_activitywatch_repo_conversion_scope() -> None:
     assert smc.activitywatch_self_merge_repo("ActivityWatch/aw-webui")
-    assert not smc.activitywatch_self_merge_repo("ActivityWatch/activitywatch")
+    # The bundle is converted too: no tier can waive it, so it is always held.
+    assert smc.activitywatch_self_merge_repo("ActivityWatch/activitywatch")
     assert not smc.activitywatch_self_merge_repo("gptme/gptme")
     # An ActivityWatch repo outside [rollout].repos must keep the generic
     # category: the tier waiver cannot apply there, so converting would block
@@ -170,3 +171,18 @@ def test_aw_requirements_bump_is_not_waived_as_docs() -> None:
         )
     assert remaining == [REASON] and warning is None
     assert verdict and verdict["tier"] == 2
+
+
+def test_fetch_pr_file_changes_keeps_the_rename_source() -> None:
+    import json
+    import subprocess
+
+    doc = {"path": "src/a.py", "previous_filename": "migrations/a.py"}
+
+    def run(argv, **kwargs):
+        out = "1" if argv[:3] == ["gh", "pr", "view"] else json.dumps(doc)
+        return subprocess.CompletedProcess(argv, 0, out, "")
+
+    with patch.object(smc.subprocess, "run", side_effect=run):
+        changes = smc.fetch_pr_file_changes(REPO, 1)
+    assert changes and changes[0].previous_path == "migrations/a.py"

@@ -84,6 +84,7 @@ def _changes(files: list[dict[str, Any]]) -> list[merge_policy.FileChange]:
             additions=int(f.get("additions") or 0),
             deletions=int(f.get("deletions") or 0),
             patch=f.get("patch") if isinstance(f.get("patch"), str) else None,
+            previous_path=f.get("previous_filename") or None,
         )
         for f in files
     ]

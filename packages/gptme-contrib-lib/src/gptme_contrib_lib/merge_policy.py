@@ -43,6 +43,8 @@ class FileChange:
     # Unified-diff text from the GitHub files API; None when GitHub omits it
     # (binary or very large diffs). Only ci files need it.
     patch: str | None = None
+    # Source path of a rename, None otherwise.
+    previous_path: str | None = None
 
 
 @dataclass
@@ -239,6 +241,10 @@ def assign_tier(
                 miss = f"{lines} counted lines > {tier['max_lines']}"
             elif len(counted) > tier.get("max_files", 10**9):
                 miss = f"{len(counted)} counted files > {tier['max_files']}"
+            elif renamed := [c.previous_path for c in changes if c.previous_path]:
+                # Classes and holds only see the new path, so a move out of a
+                # held directory or out of ``code`` would otherwise qualify.
+                miss = f"renamed file: {renamed[0]}"
             elif (scoped := tier.get("repos")) is not None and (
                 repo is None or repo.lower() not in {r.lower() for r in scoped}
             ):

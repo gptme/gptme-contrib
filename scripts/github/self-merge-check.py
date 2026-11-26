@@ -2616,17 +2616,19 @@ _AW_BUNDLE_REPO = "activitywatch/activitywatch"
 
 
 def activitywatch_self_merge_repo(repo: str) -> bool:
-    """True for ActivityWatch component repos that may use the small-fix tier.
+    """True for ActivityWatch repos whose generic category becomes a hold.
 
-    Only the repos in ``[rollout].repos`` are in scope. The caller converts a
-    successful generic category into a hold, which only a ``self_merge`` tier
-    can waive; a repo outside the rollout list would therefore be blocked
-    outright instead of merely re-gated. The bundle/release repo stays out:
-    most of its diffs are release work.
+    Component repos in ``[rollout].repos`` are re-gated: only a ``self_merge``
+    tier can waive the hold. The bundle/release repo is always held and never
+    in the rollout (most of its diffs are release work). Other ActivityWatch
+    repos outside the rollout keep the generic category, since the waiver
+    cannot reach them.
     """
     lowered = repo.lower()
-    if not lowered.startswith("activitywatch/") or lowered == _AW_BUNDLE_REPO:
+    if not lowered.startswith("activitywatch/"):
         return False
+    if lowered == _AW_BUNDLE_REPO:
+        return True
     try:
         policy = merge_policy.load_policy()
     except (OSError, ValueError):
@@ -4045,7 +4047,7 @@ def fetch_pr_file_changes(
                 f"repos/{repo}/pulls/{number}/files",
                 "--paginate",
                 "--jq",
-                ".[] | {path: .filename, additions, deletions, patch}",
+                ".[] | {path: .filename, previous_filename, additions, deletions, patch}",
             ],
             capture_output=True,
             text=True,
@@ -4061,6 +4063,7 @@ def fetch_pr_file_changes(
             additions=int(doc.get("additions") or 0),
             deletions=int(doc.get("deletions") or 0),
             patch=doc.get("patch") if isinstance(doc.get("patch"), str) else None,
+            previous_path=doc.get("previous_filename") or None,
         )
         for doc in _iter_json_documents(result.stdout)
         if isinstance(doc, dict)

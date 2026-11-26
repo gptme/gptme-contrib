@@ -109,6 +109,7 @@ hold_globs = [
   "**/gradle/**",
   "**/tauri.conf.json",
   "**/fastlane/**",
+  "**/.gitmodules",
   "scripts/**",
 ]
 

@@ -317,6 +317,7 @@ def test_aw_small_fix_holds_scripts_lockfile_migration_gitlink(policy) -> None:
         "src-tauri/tauri.conf.json",
         "VERSION",
         "fastlane/Fastfile",
+        ".gitmodules",
     ],
 )
 def test_aw_small_fix_holds_build_and_version_files(policy, path: str) -> None:
@@ -359,6 +360,20 @@ def test_txt_inputs_never_reach_a_self_merge_tier(
     )
     assert v.tier == 2
     assert v.classes[path] == "plain-text"
+
+
+@pytest.mark.parametrize("path", ["src/0004.sql", "docs/0004.md"])
+def test_rename_never_reaches_a_self_merge_tier(policy, path: str) -> None:
+    v = merge_policy.assign_tier(
+        [FileChange(path, previous_path="aw-server/migrations/0004.sql")],
+        policy,
+        C,
+        repo="ActivityWatch/aw-server",
+        title="fix: tidy layout",
+    )
+    assert v.tier == 2
+    assert v.misses[0].startswith(("renamed file:", "classes outside tier:"))
+    assert v.misses[1] == "renamed file: aw-server/migrations/0004.sql"
 
 
 def test_aw_small_fix_ignores_repo_outside_tier_list(policy) -> None:
