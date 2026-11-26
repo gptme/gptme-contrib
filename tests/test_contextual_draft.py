@@ -148,6 +148,15 @@ def test_sqlite_source_truncation(database):
     assert "middle omitted" in row["content"]
 
 
+@pytest.mark.parametrize("content", ["abc\0def", "\0" + "x" * 11999, "é\0fin"])
+def test_small_nul_snapshot_preserved(database, content):
+    with sqlite3.connect(database) as db:
+        db.execute("UPDATE snapshots SET content=?", (content,))
+    row = module.Goldfish(database).snapshots(None, 1)[0]
+    assert row["content"] == content
+    assert row["content_truncated"] is False
+
+
 def test_sqlite_source_truncation_not_bypassed_by_nul(database, monkeypatch):
     """SQLite text length() stops at a NUL; the bound must still hold (#2346)."""
     with sqlite3.connect(database) as db:
