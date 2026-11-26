@@ -654,8 +654,7 @@ def test_cli_parse_cascade_intent_empty_json():
         text=True,
     )
     assert result.returncode == 0
-    # 4 empty tokens → 3 spaces; bash `read -r` will assign all as empty strings
-    assert result.stdout.rstrip("\n") == "   "
+    assert result.stdout.split() == [CASCADE_EMPTY_FIELD] * 4
 
 
 def test_cli_parse_cascade_intent_invalid_json():
@@ -666,4 +665,31 @@ def test_cli_parse_cascade_intent_invalid_json():
         text=True,
     )
     assert result.returncode == 0  # graceful: no crash on bad input
-    assert result.stdout.rstrip("\n") == "   "  # empty fields
+    assert result.stdout.split() == [CASCADE_EMPTY_FIELD] * 4
+
+
+def test_cli_parse_cascade_intent_partial_through_bash():
+    """Absent task and upstream IDs must not turn into category and state."""
+    result = subprocess.run(
+        [sys.executable, "-m", "gptme_runloops.autonomous", "parse-cascade-intent"],
+        input='{"execution_category":"infrastructure","task_state":"todo"}',
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    fields = subprocess.check_output(
+        [
+            "bash",
+            "-c",
+            "read -r id category upstream state; "
+            'printf "%s\\n" "$id" "$category" "$upstream" "$state"',
+        ],
+        input=result.stdout,
+        text=True,
+    ).splitlines()
+    assert fields == [
+        CASCADE_EMPTY_FIELD,
+        "infrastructure",
+        CASCADE_EMPTY_FIELD,
+        "todo",
+    ]

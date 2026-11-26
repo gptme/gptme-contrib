@@ -180,6 +180,9 @@ def parse_cascade_intent(data: dict) -> dict[str, str]:
     - ``task_state`` — current task state for context / claim-gate injection
 
     Every value is a plain string; missing or falsy values are normalised to ``""``.
+    The ``parse-cascade-intent`` CLI emits these four fields in the order above,
+    space-separated, with ``-`` in each empty position. After ``read -r``, shell
+    callers must decode that sentinel to an empty string before using a field.
     """
     return {
         "task_id": str(data.get("task_id", "") or ""),
@@ -296,11 +299,8 @@ if __name__ == "__main__":
                 data = {}
         except Exception:
             data = {}
-        result = parse_cascade_intent(data)
-        print(
-            f"{result['task_id']} {result['execution_category']}"
-            f" {result['upstream_coordination_id']} {result['task_state']}"
-        )
+        fields = parse_cascade_intent(data)
+        print(" ".join(value or CASCADE_EMPTY_FIELD for value in fields.values()))
     else:
         cmds = [
             "is-capable-backend BACKEND [MODEL]",
