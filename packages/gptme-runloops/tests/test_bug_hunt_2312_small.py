@@ -2,6 +2,7 @@
 
 import errno
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -11,8 +12,14 @@ from gptme_runloops.utils.lock import RunLoopLock
 
 
 def test_reversed_line_range_still_yields_lines() -> None:
-    """No lines meant `raise None`, which aborted publication of the review."""
-    assert list(_iter_range_lines("49-47")) == [47, 48, 49]
+    """No lines meant `raise None`, which aborted publication of the review.
+
+    The declared start stays first: post_inline_finding anchors on it and only
+    falls back to the rest of the range.
+    """
+    assert list(_iter_range_lines("49-47")) == [49, 48, 47]
+    assert list(_iter_range_lines("47-49")) == [47, 48, 49]
+    assert list(_iter_range_lines("42")) == [42]
 
 
 def test_failed_pid_write_does_not_leak_the_lock(
@@ -37,4 +44,4 @@ def test_failed_pid_write_does_not_leak_the_lock(
 def test_team_prompt_fills_in_the_time(tmp_path: Path) -> None:
     prompt = TeamRun(tmp_path).generate_prompt()
     assert "{timestamp}" not in prompt
-    assert "**Current Time**: 20" in prompt
+    assert re.search(r"\*\*Current Time\*\*: \d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC", prompt)
