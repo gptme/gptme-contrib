@@ -21,7 +21,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from pathlib import Path, PurePosixPath
 
 from gptme_vitals.envelope import ENVELOPE_SCHEMA, PageEnvelope
@@ -218,6 +218,26 @@ def _atomic_write(path: Path, content: str | bytes, *, mode: int) -> None:
 def write_text(path: Path, content: str, *, mode: int = 0o644) -> None:
     """Atomically write ``content`` to ``path`` (parents created)."""
     _atomic_write(path, content, mode=mode)
+
+
+def write_private_html(
+    pages: Mapping[str, str], *, private_root: Path, public_root: Path
+) -> tuple[Path, ...]:
+    """Write offline views outside the served root, atomically per file at 0600.
+
+    Check every output before writing any file. As with core/headline output,
+    callers must serialize concurrent writers; the set is not one transaction.
+    """
+    check_roots(private_root, public_root)
+    targets = tuple(
+        _relative_inside("private", name, private_root, "page path") for name in pages
+    )
+    for target in targets:
+        if target.is_symlink() or target.is_dir():
+            raise PublishError("private page output contains a symlink or directory")
+    for target, content in zip(targets, pages.values()):
+        write_text(target, content, mode=0o600)
+    return targets
 
 
 def publish_page(

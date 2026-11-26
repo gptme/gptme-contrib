@@ -13,10 +13,9 @@ The skeleton is shipped: typed page envelopes, route registry, shared light/dark
 theme, derived fleet envelopes, portal, static envelope pages, build CLI and
 generated timers. Agents register their own collectors and specialized pages.
 
-`gptme-vitals threads` adds opt-in private thread map/log pages from the existing
-`gptme-sessions threads --json` export. Dedicated sessions/tasks/vitals pages and
-the optional fleet card grid/multi-agent join remain outside this implementation;
-the parent issue stays open.
+Opt-in private views consume the existing sessions, task-list, fleet-core and
+thread exports. The optional fleet card grid/multi-agent join and adopter
+verification remain open on the parent issue.
 
 ## The page envelope
 
@@ -174,6 +173,43 @@ blocks (manual and media-query) are identical, and that text, status colours
 and badges meet WCAG AA (4.5:1) on every surface in both schemes. The light
 accent is `#9c5204`, darker than a straight inversion would give, because the
 first draft measured 4.46:1 on the tile surface.
+
+## Standard private pages
+
+Use the source tools' native JSON exports; the viewer does not collect or reparse
+workspace files. For example, from an agent workspace:
+
+```sh
+gptme-sessions query --since 7d --json > /private/sessions.json
+gptodo list --json --pool all > /private/tasks.json
+gptme-vitals sessions --input /private/sessions.json \
+  --private-root /private/vitals --public-root /served/vitals
+gptme-vitals tasks --input /private/tasks.json \
+  --private-root /private/vitals --public-root /served/vitals
+gptme-vitals vitals --input /served/vitals/core.json \
+  --private-root /private/vitals --public-root /served/vitals
+```
+
+These write `sessions/index.html`, `tasks/index.html`, and `vitals/index.html`
+under the private root, using the same theme and private publication boundary as
+the thread views. Each renderer displays an explicit field set, not arbitrary
+export fields. Empty data and absent values stay visible as empty/unknown.
+
+- Sessions consume the **bare array** from `query --json`, showing identity,
+  session start, model/harness, outcome, duration and trajectory grade. Record
+  creation time is not substituted for a missing session start. Costs are omitted;
+  nominal API-equivalent subscription cost is not necessarily billed spend.
+- Tasks consume the `{tasks: [...]}` envelope from `list --json --pool all` or
+  `status --json`. IDs are exported filename slugs, not parsed Markdown titles.
+  State, priority, owner, pool, next action and blocker are shown without inferring
+  readiness from state. `--pool all` keeps other task pools from disappearing.
+- Vitals consume `fleet-vitals/core@1`: agent, status, source timestamp and each
+  named dimension's status/finite numeric metrics. Nested detail and arbitrary
+  text fields are excluded; extra named dimensions such as delivery remain visible.
+
+There are no new collectors, source dependencies, public routes or timers. The
+normal envelope build/portal remains the public dashboard surface. All offline
+views use mode-0600 files outside its served root and the same 0/1/2 exit codes.
 
 ## Private thread map and log
 

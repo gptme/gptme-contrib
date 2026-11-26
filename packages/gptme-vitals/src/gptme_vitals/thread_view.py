@@ -14,7 +14,7 @@ from html import escape
 from pathlib import Path
 from typing import Any
 
-from gptme_vitals.publish import PublishError, check_roots, write_text
+from gptme_vitals.publish import write_private_html
 from gptme_vitals.theme import render_head_assets, render_theme_toggle
 
 
@@ -273,13 +273,9 @@ def write_threads(
     running concurrent exports must serialize the pair, like core/headline writes.
     """
     map_html, log_html = render_threads(payload)
-    check_roots(private_root, public_root)
-    directory = private_root / "threads"
-    targets = directory / "index.html", directory / "log.html"
-    if directory.is_symlink() or any(
-        path.is_symlink() or path.is_dir() for path in targets
-    ):
-        raise PublishError("private thread output contains a symlink")
-    for path, html in zip(targets, (map_html, log_html)):
-        write_text(path, html, mode=0o600)
-    return targets
+    targets = write_private_html(
+        {"threads/index.html": map_html, "threads/log.html": log_html},
+        private_root=private_root,
+        public_root=public_root,
+    )
+    return targets[0], targets[1]
