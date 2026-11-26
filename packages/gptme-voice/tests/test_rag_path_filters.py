@@ -529,3 +529,28 @@ async def test_validation_uses_the_pinned_root_not_the_retargeted_one(
     assert link.resolve() == other.resolve()
     assert result["status"] == "ok"
     assert "standup-brief.json" in result["results"][0]["snippet"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("lexical")
+async def test_journal_glob_does_not_spend_the_reservation_twice(
+    corpus: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A glob that already collects the journals must not trim other sources.
+
+    The reservation counted ``len(recent)`` before deduplication, so a
+    configured glob covering ``journal/**/*.md`` reserved room for files it had
+    already collected, dropping configured source files that still fit.
+    """
+    today = datetime.now(timezone.utc).date().isoformat()
+    for n in range(45):
+        write(corpus, f"journal/{today}/entry_{n}.md", f"standup brief note {n}")
+    monkeypatch.setenv(
+        "GPTME_VOICE_RAG_SOURCE_PATHS",
+        "journal/**/*.md:scripts/voice/*.py",
+    )
+    result = await VoiceRag(str(corpus), enabled=True).search(
+        "generate_standup_brief", include_paths=["scripts/", "journal/"]
+    )
+    sources = [r["source"] for r in result["results"]]
+    assert "scripts/voice/brief.py" in sources

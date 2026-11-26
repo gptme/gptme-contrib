@@ -410,12 +410,17 @@ class VoiceRag:
                     break
             if len(paths) >= _MAX_FILES:
                 break
-        if recent:
+        # Only journals that the configured globs did not already collect need
+        # reserved room. Counting a file twice spent the reservation budget on
+        # paths that were going to be deduplicated anyway, trimming configured
+        # source files that would otherwise have fit.
+        pending_recent = [p for p in recent if p not in seen]
+        if pending_recent:
             # Reserve room for the journal corpus so a broad configured glob
             # cannot starve recent journals out of the filtered corpus.
-            reserved = min(len(recent), _MAX_FILES // 2)
+            reserved = min(len(pending_recent), _MAX_FILES // 2)
             paths = paths[: _MAX_FILES - reserved]
-        return (paths + [p for p in recent if p not in seen])[:_MAX_FILES]
+        return (paths + pending_recent)[:_MAX_FILES]
 
     @contextmanager
     def _pinned_corpus(self) -> Iterator[tuple[int | None, Path | None]]:
