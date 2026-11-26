@@ -1510,3 +1510,21 @@ def test_carry_callback_exception_does_not_accept_unproven_evidence() -> None:
     with pytest.raises(RuntimeError, match="diff proof unavailable"):
         select_candidates("o/r", _config(), host, NOW, dry_run=False)
     assert host.reactions == []
+
+
+@pytest.mark.parametrize("with_carry_host", [False, True])
+def test_current_provisional_does_not_upgrade_older_finished_marker(
+    with_carry_host: bool,
+) -> None:
+    host = _carried_review_host({"consensus": {}})
+    provisional = _marker_comment(
+        "new-head",
+        prefix="agent-ai-review-publishing",
+        extra={"publishing_sha": "new-head"},
+        comment_id=2,
+    )
+    provisional["updated_at"] = "2026-08-07T21:30:00+00:00"
+    assert host.comments[1] is not None
+    host.comments[1].append(provisional)
+    actual = host if with_carry_host else FakeHost(host.prs, host.comments)
+    assert select_candidates("o/r", _config(), actual, NOW, dry_run=True) == []

@@ -788,7 +788,7 @@ def select_candidates(
             and review_can_upgrade
         )
         consensus_upgrade = upgrade_allowed and needs_consensus_upgrade(
-            marker, head, current_diff_matches=same_diff
+            marker, head, current_diff_matches=review_carried
         )
         if (
             upgrade_allowed
@@ -797,7 +797,7 @@ def select_candidates(
                 marker,
                 head,
                 allow_non_blocking_findings=True,
-                current_diff_matches=same_diff,
+                current_diff_matches=review_carried,
             )
         ):
             consensus_upgrade = host.is_review_only_blocker(
@@ -811,7 +811,7 @@ def select_candidates(
                 marker,
                 head,
                 allow_non_blocking_findings=True,
-                current_diff_matches=same_diff,
+                current_diff_matches=review_carried,
             )
         )
         if (
