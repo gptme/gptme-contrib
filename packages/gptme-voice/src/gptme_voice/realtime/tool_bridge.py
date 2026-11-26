@@ -1291,7 +1291,13 @@ class GptmeToolBridge:
             await self.on_hangup(reason)
             return {
                 "status": "hanging_up",
-                "message": "Ending the call shortly.",
+                # Caller speech can cancel the pending hangup after this
+                # receipt, so tell the model how to recover.
+                "message": (
+                    "Ending the call shortly. If the caller speaks before it "
+                    "ends, the hangup is cancelled: call hangup again once "
+                    "they are done."
+                ),
             }
 
         if name == "handoff_to_agent":
