@@ -216,8 +216,8 @@ def test_overlapping_updates_do_not_delete_stale_fts_values(tmp_path: Path):
         _assert_fts_matches_rows(first)
 
 
-def test_add_joins_a_transaction_already_open_on_the_connection(tmp_path: Path):
-    """DML on idx.conn leaves a transaction open; add() must work and commit it."""
+def test_add_joins_an_open_transaction_without_owning_it(tmp_path: Path):
+    """DML on idx.conn leaves a transaction open; add() joins it and leaves it open."""
     from gptme_wisdom_mcp.indexer import SessionIndex
     from gptme_wisdom_mcp.parsers import SessionDocument
 
@@ -234,11 +234,51 @@ def test_add_joins_a_transaction_already_open_on_the_connection(tmp_path: Path):
         idx.conn.execute("INSERT INTO index_state (key, value) VALUES ('k', 'v')")
         assert idx.conn.in_transaction
         assert idx.add(doc) is True
-        assert not idx.conn.in_transaction
+        # add() started no transaction of its own, so it must not commit the
+        # caller's pending writes either.
+        assert idx.conn.in_transaction
+        idx.conn.commit()
 
     with SessionIndex(tmp_path / "s.db") as reopened:
         assert len(reopened.search("walrus")) == 1
         assert reopened.conn.execute("SELECT value FROM index_state").fetchone()[0] == "v"
+
+
+def test_a_failed_add_does_not_roll_back_the_callers_transaction(tmp_path: Path):
+    """A NOT NULL failure inside add() rolls back only add()'s own writes."""
+    from gptme_wisdom_mcp.indexer import SessionIndex
+    from gptme_wisdom_mcp.parsers import SessionDocument
+
+    good = SessionDocument(
+        source="journal",
+        path="/journal/session.md",
+        date=datetime(2026, 1, 1),
+        title="Session",
+        content="walrus",
+        summary="summary",
+    )
+    broken = SessionDocument(
+        source="journal",
+        path="/journal/broken.md",
+        date=datetime(2026, 1, 1),
+        title=None,  # type: ignore[arg-type]  # NOT NULL violation
+        content="narwhal",
+        summary="summary",
+    )
+
+    with SessionIndex(tmp_path / "s.db") as idx:
+        idx.conn.execute("INSERT INTO index_state (key, value) VALUES ('k', 'v')")
+        assert idx.add(good) is True
+        assert idx.add(broken) is False
+        # The caller's row and the successful add() are both still pending.
+        assert idx.conn.in_transaction
+        idx.conn.commit()
+
+    with SessionIndex(tmp_path / "s.db") as reopened:
+        assert reopened.conn.execute("SELECT value FROM index_state").fetchone()[0] == "v"
+        assert len(reopened.search("walrus")) == 1
+        assert reopened.conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 1
+        _assert_fts_matches_rows(reopened)
 
 
 def test_purge_rebuild_preserves_content_search():

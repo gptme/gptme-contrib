@@ -111,55 +111,69 @@ class SessionIndex:
             return False
 
     def _upsert(self, doc: SessionDocument, values: tuple) -> bool:
+        # Lock before reading: a contentless FTS delete must use values that no
+        # other writer can replace between this read and our write.
+        if self.conn.in_transaction:
+            # SQLite rejects a nested BEGIN, so join the caller's transaction
+            # through a SAVEPOINT: a failure rolls back only our own writes and
+            # leaves the caller's transaction and its pending writes intact.
+            # add() never commits a transaction it did not start.
+            self.conn.execute("SAVEPOINT add_session")
+            try:
+                changed = self._write(doc, values)
+            except BaseException:
+                self.conn.execute("ROLLBACK TO add_session")
+                self.conn.execute("RELEASE add_session")
+                raise
+            self.conn.execute("RELEASE add_session")
+            return changed
         with self.conn:
-            # Lock before reading: a contentless FTS delete must use values
-            # that no other writer can replace between this read and our write.
-            # A transaction already open on the connection is joined and
-            # committed here, since SQLite rejects a nested BEGIN.
-            if not self.conn.in_transaction:
-                self.conn.execute("BEGIN IMMEDIATE")
-            existing = self.conn.execute(
-                "SELECT id, source, date, title, content, summary, metadata "
-                "FROM sessions WHERE path = ?",
-                (doc.path,),
-            ).fetchone()
-            if existing is None:
-                cursor = self.conn.execute(
-                    """
-                    INSERT INTO sessions (source, date, title, content, summary, metadata, path)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (*values, doc.path),
-                )
-                row_id = cursor.lastrowid
-            else:
-                row_id = existing["id"]
-                if tuple(existing)[1:] == values:
-                    return False
-                # A contentless FTS5 table can only drop a row when given the
-                # exact values that were indexed; the sessions row holds them.
-                self.conn.execute(
-                    """
-                    INSERT INTO sessions_fts (sessions_fts, rowid, title, content, summary)
-                    VALUES ('delete', ?, ?, ?, ?)
-                    """,
-                    (row_id, existing["title"], existing["content"], existing["summary"]),
-                )
-                self.conn.execute(
-                    """
-                    UPDATE sessions
-                    SET source = ?, date = ?, title = ?, content = ?, summary = ?, metadata = ?
-                    WHERE id = ?
-                    """,
-                    (*values, row_id),
-                )
+            self.conn.execute("BEGIN IMMEDIATE")
+            return self._write(doc, values)
+
+    def _write(self, doc: SessionDocument, values: tuple) -> bool:
+        existing = self.conn.execute(
+            "SELECT id, source, date, title, content, summary, metadata "
+            "FROM sessions WHERE path = ?",
+            (doc.path,),
+        ).fetchone()
+        if existing is None:
+            cursor = self.conn.execute(
+                """
+                INSERT INTO sessions (source, date, title, content, summary, metadata, path)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (*values, doc.path),
+            )
+            row_id = cursor.lastrowid
+        else:
+            row_id = existing["id"]
+            if tuple(existing)[1:] == values:
+                return False
+            # A contentless FTS5 table can only drop a row when given the
+            # exact values that were indexed; the sessions row holds them.
             self.conn.execute(
                 """
-                INSERT INTO sessions_fts (rowid, title, content, summary)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO sessions_fts (sessions_fts, rowid, title, content, summary)
+                VALUES ('delete', ?, ?, ?, ?)
                 """,
-                (row_id, doc.title, doc.content, doc.summary),
+                (row_id, existing["title"], existing["content"], existing["summary"]),
             )
+            self.conn.execute(
+                """
+                UPDATE sessions
+                SET source = ?, date = ?, title = ?, content = ?, summary = ?, metadata = ?
+                WHERE id = ?
+                """,
+                (*values, row_id),
+            )
+        self.conn.execute(
+            """
+            INSERT INTO sessions_fts (rowid, title, content, summary)
+            VALUES (?, ?, ?, ?)
+            """,
+            (row_id, doc.title, doc.content, doc.summary),
+        )
         return True
 
     def search(
