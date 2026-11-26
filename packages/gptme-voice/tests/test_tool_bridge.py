@@ -576,14 +576,18 @@ def test_extract_error_text_falls_back_to_output_when_no_error_patterns() -> Non
     assert error == output
 
 
-def test_execute_falls_back_to_stdout_when_response_file_empty(tmp_path) -> None:
+@pytest.mark.parametrize("response_file_state", ["empty", "missing"])
+def test_execute_falls_back_to_stdout_without_response_content(
+    response_file_state,
+) -> None:
     async def _exercise() -> None:
         bridge = GptmeToolBridge(workspace="/fake/workspace")
 
-        async def _fake_create_subprocess_exec(*_args, **_kwargs):
-            # Subagent wrote nothing to the response file — mimic by letting
-            # the bridge create an empty tempfile (default behaviour of
-            # NamedTemporaryFile with delete=False) and returning stdout.
+        async def _fake_create_subprocess_exec(*args, **_kwargs):
+            # The bridge does not pre-create the response file: the subagent
+            # either leaves it empty or never writes it. Both use stdout.
+            if response_file_state == "empty":
+                Path(args[-1].rsplit("to the file: ", 1)[1]).touch()
             return _FakeProcess(
                 returncode=0, stdout="voice-friendly summary from stdout"
             )
@@ -2279,3 +2283,94 @@ def test_on_timeout_not_called_on_successful_completion() -> None:
         assert len(timeout_calls) == 0
 
     asyncio.run(_exercise())
+
+
+@pytest.mark.skipif(
+    os.name != "posix", reason="POSIX ownership and permission contract"
+)
+def test_execute_response_can_be_saved_atomically_in_private_directory(
+    monkeypatch, tmp_path
+) -> None:
+    """The result parent must permit secure sibling staging by the save tool."""
+    shared_tmp = tmp_path / "shared-tmp"
+    shared_tmp.mkdir(mode=0o777)
+    shared_tmp.chmod(0o777)
+    monkeypatch.setattr(tool_bridge.tempfile, "tempdir", str(shared_tmp))
+    response_paths = []
+    answer = "The call ends before the queued farewell finishes playing."
+
+    async def exercise():
+        async def fake_spawn(*args, **kwargs):
+            response = Path(args[-1].rsplit("to the file: ", 1)[1])
+            response_paths.append(response)
+            parent_stat = response.parent.stat()
+            assert parent_stat.st_uid == os.getuid()
+            assert (
+                parent_stat.st_mode & 0o022 == 0
+            ), "Secure save rejects staging in a directory writable by other users"
+            staging = response.with_name(".response-staging")
+            staging.write_text(answer)
+            staging.replace(response)
+            return _FakeProcess(returncode=0)
+
+        monkeypatch.setattr(tool_bridge, "_spawn_subagent", fake_spawn)
+        bridge = GptmeToolBridge(workspace=str(tmp_path))
+        result = await bridge._execute("Explain farewell timing", mode="fast")
+        assert result.success, result.error
+        assert result.output == answer
+
+    asyncio.run(exercise())
+    assert len(response_paths) == 1
+    assert not response_paths[0].exists()
+    assert not response_paths[0].parent.exists()
+    assert shared_tmp.is_dir()
+
+
+@pytest.mark.parametrize("outcome", ["failure", "spawn_failure", "cancel"])
+def test_execute_cleans_response_directory_on_unsuccessful_exit(
+    monkeypatch, tmp_path, outcome
+) -> None:
+    response_paths = []
+    # Keep cleanup assertions independent of the host's temporary directory.
+    shared_tmp = tmp_path / "shared-tmp"
+    shared_tmp.mkdir()
+    monkeypatch.setattr(tool_bridge.tempfile, "tempdir", str(shared_tmp))
+
+    async def exercise():
+        waiting = asyncio.Event()
+
+        class WaitingProcess(_FakeProcess):
+            async def wait(self):
+                waiting.set()
+                await asyncio.Event().wait()
+
+        async def fake_spawn(*args, **kwargs):
+            response = Path(args[-1].rsplit("to the file: ", 1)[1])
+            response_paths.append(response)
+            # A failed/canceled save can leave a sibling staging artifact.
+            response.with_name(".incomplete-result").write_text("partial answer")
+            if outcome == "spawn_failure":
+                raise FileNotFoundError("missing test executable")
+            if outcome == "cancel":
+                return WaitingProcess(returncode=-1)
+            return _FakeProcess(returncode=1, stderr="Error: deliberate test failure")
+
+        monkeypatch.setattr(tool_bridge, "_spawn_subagent", fake_spawn)
+        bridge = GptmeToolBridge(workspace=str(tmp_path))
+        task = asyncio.create_task(
+            bridge._execute("Explain farewell timing", mode="fast")
+        )
+        if outcome == "cancel":
+            await asyncio.wait_for(waiting.wait(), 1)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        else:
+            result = await task
+            assert not result.success
+        assert len(response_paths) == 1
+        assert not response_paths[0].exists()
+        assert not response_paths[0].parent.exists()
+        assert shared_tmp.is_dir()
+
+    asyncio.run(exercise())
