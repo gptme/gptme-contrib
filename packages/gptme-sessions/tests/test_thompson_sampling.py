@@ -1485,3 +1485,45 @@ def test_state_file_with_invalid_utf8_is_kept_aside_not_fatal(tmp_path, capsys):
     assert bandit.backup_file.read_text() == backup_before
     assert json.loads(bandit.state_file.read_text())["arms"]["a"]["total_selections"] == 13
     assert "kept unreadable bandit state" in capsys.readouterr().err
+
+
+def test_torn_backup_is_kept_aside_before_rotation(tmp_path, capsys):
+    """Rotating over a torn ``.bak`` must preserve its bytes (#2449).
+
+    A truncated backup is not valid JSON, so the mature-arm check cannot read
+    it. It still may hold observations a richer writer could load, so it is
+    moved aside before the good state is rotated over it.
+    """
+    bandit = Bandit(state_dir=tmp_path)
+    for _ in range(13):
+        bandit.update(["a"], outcome=1.0)
+    torn = '{"arms": {"a": {"arm_id": "a", "alpha": 14'
+    bandit.backup_file.write_text(torn)
+
+    bandit.update(["a"], outcome=1.0)
+
+    kept = sorted(tmp_path.glob("bandit-state.json.bak.undecodable-*"))
+    assert len(kept) == 1
+    assert kept[0].read_text() == torn
+    assert json.loads(bandit.backup_file.read_text())["total_sessions"] == 13
+    assert "kept unparseable bandit backup" in capsys.readouterr().err
+
+
+def test_both_torn_copies_are_preserved(tmp_path, capsys):
+    """Neither torn copy may be erased when both are unparseable (#2449)."""
+    bandit = Bandit(state_dir=tmp_path)
+    for _ in range(13):
+        bandit.update(["a"], outcome=1.0)
+    garbage_state = b"\xff\xfe not utf-8 \x80\x00"
+    torn_backup = '{"arms": {"a": {"arm_id": "a"'
+    bandit.state_file.write_bytes(garbage_state)
+    bandit.backup_file.write_text(torn_backup)
+
+    reader = Bandit(state_dir=tmp_path)
+    reader.update(["a"], outcome=1.0)
+
+    kept_state = sorted(tmp_path.glob("bandit-state.json.undecodable-*"))
+    assert len(kept_state) == 1 and kept_state[0].read_bytes() == garbage_state
+    # The primary is unloadable, so ``_backup_current`` skips rotation and the
+    # torn backup is left untouched at its own path.
+    assert bandit.backup_file.read_text() == torn_backup

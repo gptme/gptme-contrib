@@ -786,17 +786,23 @@ class Bandit:
         try:
             self.state_file.replace(target)
         except OSError as e:
-            if text is not None and _document_holds_mature_history(text):
-                raise ValueError(
-                    f"refusing to overwrite bandit state that cannot be decoded: "
-                    f"{self.state_file} holds mature arms and could not be kept "
-                    f"aside at {target} ({e})"
-                ) from e
-            print(
-                f"Warning: could not keep unreadable bandit state aside ({e}); overwriting it",
-                file=sys.stderr,
-            )
-            return
+            # A rename can fail where a plain copy succeeds (e.g. the target is
+            # on another filesystem). Preserving the bytes is what matters, not
+            # the rename itself, so try a copy before giving up.
+            try:
+                target.write_bytes(raw)
+            except OSError:
+                if text is not None and _document_holds_mature_history(text):
+                    raise ValueError(
+                        f"refusing to overwrite bandit state that cannot be decoded: "
+                        f"{self.state_file} holds mature arms and could not be kept "
+                        f"aside at {target} ({e})"
+                    ) from e
+                print(
+                    f"Warning: could not keep unreadable bandit state aside ({e}); overwriting it",
+                    file=sys.stderr,
+                )
+                return
         print(
             f"Warning: kept unreadable bandit state as {target.name} "
             "(it may hold observations this reader cannot load)",
@@ -804,9 +810,19 @@ class Bandit:
         )
 
     def _undecodable_state_archive(self) -> Path:
-        """Destination for a state file this writer cannot load."""
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        """Destination for a state file this writer cannot load.
+
+        The stamp carries microseconds: a second-resolution name let a second
+        archival within the same second silently overwrite the first archive,
+        destroying the very observations this path exists to keep.
+        """
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
         return self.state_file.with_name(f"{self.state_file.name}.undecodable-{stamp}")
+
+    def _undecodable_backup_archive(self) -> Path:
+        """Destination for a ``.bak`` this writer cannot parse."""
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        return self.backup_file.with_name(f"{self.backup_file.name}.undecodable-{stamp}")
 
     def _persisted_document(self) -> dict:
         """Return the first loadable persisted state document, or ``{}``.
@@ -890,7 +906,40 @@ class Bandit:
                 file=sys.stderr,
             )
             return
+        self._set_aside_unparseable_backup()
         _atomic_write_text(self.backup_file, current)
+
+    def _set_aside_unparseable_backup(self) -> None:
+        """Keep a torn ``.bak`` before a good state is rotated over it.
+
+        ``_backup_holds_undecodable_history()`` handles a backup that is valid
+        JSON but not decodable by this arm class. Bytes that are not even JSON
+        (a torn write) can still hold observations a richer writer could load,
+        so they are moved aside rather than silently replaced.
+        """
+        try:
+            raw = self.backup_file.read_bytes()
+        except OSError:
+            return
+        try:
+            text = raw.decode()
+        except UnicodeDecodeError:
+            text = None
+        if text is not None:
+            try:
+                json.loads(text)
+                return
+            except ValueError:
+                pass
+        target = self._undecodable_backup_archive()
+        try:
+            self.backup_file.replace(target)
+        except OSError:
+            return
+        print(
+            f"Warning: kept unparseable bandit backup as {target.name} before rotating it",
+            file=sys.stderr,
+        )
 
     def _backup_holds_undecodable_history(self) -> bool:
         """Whether ``.bak`` is the only copy of mature history we cannot load.
