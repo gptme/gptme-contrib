@@ -61,3 +61,33 @@ def test_workspace_matrix_is_explicit_and_bound_to_setup_python():
         if step.get("name", "").startswith("Run tests for")
     )
     assert tests["env"]["UV_PYTHON"] == "${{ steps.python.outputs.python-path }}"
+
+
+def test_plugin_prs_run_one_python_version():
+    workflow = yaml.safe_load((ROOT / ".github/workflows/test-plugins.yml").read_text())
+    assert workflow["jobs"]["test"]["strategy"]["matrix"]["python-version"] == (
+        "${{ github.event_name == 'pull_request' && fromJSON('[\"3.10\"]')"
+        ' || fromJSON(\'["3.10", "3.13"]\') }}'
+    )
+
+
+@pytest.mark.parametrize(
+    "path",
+    sorted((ROOT / ".github/workflows").glob("*.y*ml")),
+    ids=lambda path: path.name,
+)
+def test_every_job_has_a_bounded_timeout(path):
+    # Without a limit a hung job holds a shared runner for GitHub's 6h default.
+    jobs = yaml.safe_load(path.read_text())["jobs"]
+    unbounded = []
+    for name, job in jobs.items():
+        # a job that calls a reusable workflow cannot set its own limit
+        if "uses" in job:
+            continue
+        limit = job.get("timeout-minutes")
+        # a limit may be computed from the matrix, e.g. per test shard
+        if isinstance(limit, str) and limit.startswith("${{ matrix."):
+            continue
+        if not (isinstance(limit, int) and 0 < limit <= 60):
+            unbounded.append(name)
+    assert not unbounded, f"{path.name}: set timeout-minutes (<= 60) on {unbounded}"
