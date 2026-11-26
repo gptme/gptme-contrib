@@ -19,15 +19,36 @@ REASONING_TAGS = frozenset({b"<think>", b"</think>"})
 # Any indentation: a fence nested in a list is still an example, and a
 # misread fence can only let a commit through, never reject one.
 _FENCE = re.compile(rb"[ \t]*(`{3,}|~{3,})(.*)")
+_SCISSORS = re.compile(rb"(\S) -{24} >8 -{24}")
+
+
+def _verbose_diff_follows(lines: list[bytes], scissors: int) -> bool:
+    """True when the scissors line at ``scissors`` opens `git commit -v` output.
+
+    Git writes the scissors line, its own comment lines, then ``diff --git``.
+    That suffix is always cut before the commit is made, and its unchanged
+    context lines (`` <think>``) would otherwise strip to a bare tag.
+    """
+    marker = _SCISSORS.fullmatch(lines[scissors])
+    if marker is None:
+        return False
+    for line in lines[scissors + 1 :]:
+        if line.startswith(marker[1]):
+            continue
+        return line.startswith(b"diff --git ")
+    return False
 
 
 def stray_tag_lines(content: bytes) -> list[int]:
     """1-based line numbers of bare reasoning tags outside fenced blocks."""
     found: list[int] = []
     fence: bytes | None = None
-    # Scan past scissors-shaped lines too: commit-msg is not told whether
-    # Git will discard that suffix. Real diff lines carry a diff prefix.
-    for number, line in enumerate(content.splitlines(), start=1):
+    lines = content.splitlines()
+    # Scan past other scissors-shaped lines: commit-msg is not told whether
+    # Git will discard that suffix. Only a verbose diff block ends the scan.
+    for number, line in enumerate(lines, start=1):
+        if fence is None and _verbose_diff_follows(lines, number - 1):
+            break
         marker = _FENCE.fullmatch(line)
         if fence is not None:
             if (

@@ -121,18 +121,32 @@ _COMMENT_CANDIDATES = "#;@!$%^&|:"
 _SCISSORS = b"------------------------ >8 ------------------------"
 
 
-def comment_char_override(content: bytes, source: str) -> list[str]:
+def editor_will_run(env: dict[str, str]) -> bool:
+    """Whether git will open an editor after this hook.
+
+    git exports ``GIT_EDITOR=:`` to prepare-commit-msg exactly when it will
+    not run the editor (builtin/commit.c ``run_commit_hook``); with ``-e`` the
+    caller's own value (or none) is passed through.
+    """
+    return env.get("GIT_EDITOR") != ":"
+
+
+def comment_char_override(
+    content: bytes, source: str, editor: bool = False
+) -> list[str]:
     """Git -c args so '#' body lines from -m/-F are not read as comments.
 
     interpret-trailers inserts the trailer *above* trailing comment lines.
-    For -m/-F messages (source "message") git adds no comment block, so a
-    body ending in e.g. "#2077 follow-up" would get the trailer spliced into
-    the body. Pick a comment char that starts no line, as commit's "auto"
-    does. Editor templates (-m -e) still work: their '#' lines then precede
-    the trailer and cleanup=strip removes them. Skip when a scissors line is
-    present (-v), since the trailer must stay above the diff.
+    For -m/-F messages (source "message") without an editor git adds no
+    comment block, so a body ending in e.g. "#2077 follow-up" would get the
+    trailer spliced into the body. Pick a comment char that starts no line, as
+    commit's "auto" does. With an editor (-m -e) git appends its '#' block and
+    cleanup=strip later drops every '#' line, so the default char is right:
+    overriding it would make the '#' block the last paragraph and split the
+    new trailer from an existing ``-s``/``Co-Authored-By`` block. Skip when a
+    scissors line is present (-v), since the trailer must stay above the diff.
     """
-    if source != "message" or _SCISSORS in content:
+    if source != "message" or editor or _SCISSORS in content:
         return []
     starts = {line[:1] for line in content.splitlines()}
     for char in _COMMENT_CANDIDATES:
@@ -148,7 +162,12 @@ def main() -> int:
         return 0
     message = sys.argv[1]
     source = sys.argv[2] if len(sys.argv) > 2 else ""
-    git = ["git", *comment_char_override(Path(message).read_bytes(), source)]
+    git = [
+        "git",
+        *comment_char_override(
+            Path(message).read_bytes(), source, editor_will_run(dict(os.environ))
+        ),
+    ]
     # Check under both comment chars: with -m ... -e an existing trailer sits
     # above git's '#' editor block, which only the default char sees through.
     trailers = b"".join(
