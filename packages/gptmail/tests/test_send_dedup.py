@@ -305,6 +305,36 @@ def test_draft_replaced_while_sent_copy_is_published(
     assert "Edited body" in draft.read_text()
 
 
+def test_edit_landing_during_cleanup_is_not_deleted(
+    agent: AgentEmail, deliveries: list, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An editor that saves the draft while the sender cleans up keeps its file.
+
+    The cleanup must not be read-then-unlink: a save landing between those two
+    calls would be deleted without ever being delivered.
+    """
+    msg = _draft(agent, "cleanup-race", None)
+    draft = agent.email_dir / "drafts" / "cleanup-race.md"
+    edited = "To: erik@example.com\nSubject: late edit\n\nLate body\n"
+    real_unlink = Path.unlink
+    wrote = False
+
+    def unlink(path: Path, *args: Any, **kwargs: Any) -> None:
+        nonlocal wrote
+        if not wrote and path.parent == draft.parent:
+            wrote = True
+            draft.write_text(edited)  # editor saves a new version mid-cleanup
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+    agent.send(msg)
+
+    assert len(deliveries) == 1
+    assert wrote
+    assert draft.exists()
+    assert draft.read_text() == edited
+
+
 def test_draft_archived_during_delivery_still_completes_the_send(
     agent: AgentEmail, monkeypatch: pytest.MonkeyPatch
 ) -> None:

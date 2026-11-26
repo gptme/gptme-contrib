@@ -1302,16 +1302,44 @@ class AgentEmail:
         # The sent/ copy is published, so drop the draft, unless it was edited
         # while sending: that edit was never delivered. archive() takes no send
         # lock and may already have moved the draft.
+        #
+        # Move the file out of the way before comparing it. Reading the draft
+        # and then unlinking it leaves a window in which an editor's save is
+        # deleted unseen; a rename is atomic, so a concurrent write either lands
+        # before the move (the moved copy then differs and is put back) or after
+        # it (the editor creates a fresh drafts/ file). Only a write through a
+        # descriptor opened before the move can still slip past the comparison.
+        pending_path = draft_path.with_name(f".{uuid.uuid4().hex}.draft.tmp")
         try:
-            if draft_path.read_text(errors="replace") == content:
-                draft_path.unlink()
-            else:
-                logger.warning("Draft %s changed during delivery; kept the unsent edit", draft_path)
+            draft_path.replace(pending_path)
         except FileNotFoundError:
-            pass
+            pass  # archive() or another sender already moved it
         except OSError as e:
             # Delivery already succeeded; preserve reply bookkeeping.
             logger.warning("Failed to remove sent draft %s: %s", draft_path, e)
+        else:
+            try:
+                unchanged = pending_path.read_text(errors="replace") == content
+            except OSError as e:
+                unchanged = False
+                logger.warning("Failed to re-read draft %s: %s", draft_path, e)
+            if unchanged:
+                try:
+                    pending_path.unlink()
+                except OSError as e:
+                    # Delivery already succeeded; preserve reply bookkeeping.
+                    logger.warning("Failed to remove sent draft %s: %s", draft_path, e)
+            else:
+                logger.warning("Draft %s changed during delivery; kept the unsent edit", draft_path)
+                try:
+                    pending_path.replace(draft_path)
+                except OSError as e:
+                    logger.warning(
+                        "Failed to restore edited draft %s; it is at %s: %s",
+                        draft_path,
+                        pending_path,
+                        e,
+                    )
         self._record_local_send(sent_path)
 
         # Append send audit metadata so allowlist bypasses leave a forensic trace.
