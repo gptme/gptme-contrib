@@ -68,6 +68,8 @@ def compare_groups(
 ) -> GroupComparison | None:
     """Compare measured rewards, preserving the original analysis' rounding.
 
+    Callers supply finite normalized scores in [0, 1]; analyze() validates
+    this boundary for session records before invoking the comparison helpers.
     Confidence is sample support, min(n_with, n_without)/30 capped at one.
     It is neither an effect probability nor a statistical coverage guarantee.
     """
@@ -130,6 +132,8 @@ def validate_sessions(records: Iterable[Any]) -> list[dict[str, Any]]:
             )
         seen.add(sid)
         outcome = _number(row.get("outcome"), f"{label} outcome")
+        if not 0 <= outcome <= 1:
+            raise ValueError(f"{label} outcome must be normalized between 0 and 1")
         category = row.get("category", "unknown")
         category = _identifier(category, f"{label} category")
         if not isinstance(row.get("lessons"), list):

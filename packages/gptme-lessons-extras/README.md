@@ -146,7 +146,7 @@ python3 -m gptme_lessons_extras.loo sessions.jsonl --category-controlled
 ```
 
 The input is one JSON object per session, with a stable unique `session_id`, a
-finite numeric `outcome` (higher is better), and a `lessons` array:
+finite numeric `outcome` in `[0, 1]` (higher is better), and a `lessons` array:
 
 ```json
 {"session_id":"run-1","outcome":0.8,"category":"code","lessons":[{"id":"verify-before-claiming","trigger_accuracy":0.9,"keyword":"claiming fixed without testing","event":"user_prompt"}]}
@@ -159,7 +159,10 @@ be excluded before export, rather than represented as an empty array. Repeated
 lesson IDs within a session count once, retaining the first entry. Duplicate
 session IDs are rejected: join and deduplicate source events before analysis.
 
-Outcomes must use one comparable scale and rubric across the cohort; booleans,
+Normalize outcomes to `[0, 1]` using one comparable scale and rubric across the
+cohort (for example, divide a 0–5 grade by 5). Raw durations or unbounded numeric
+measurements are not outcome scores; convert them using a fixed rubric first.
+Booleans,
 missing values and non-finite numbers are invalid. For example, encode an
 independently assessed success as numeric `1` and failure as `0`.
 `trigger_accuracy`, when available, is a separate relevance judgment in `[0, 1]`.
@@ -180,6 +183,7 @@ The JSON report on stdout includes per-lesson counts, means, `delta` (with minus
 without), sample-support `confidence`, trigger accuracy and warnings. Here the
 raw delta is `0.2`; with one session per arm this says little. Confidence is
 `min(1, min(n_with, n_without) / 30)`, **not a probability that the lesson works**.
+Means and deltas use four decimal places, so tiny differences can round to zero.
 Rows below `--min-sessions` per arm have null comparison statistics. The Welch
 statistic uses an unadjusted normal-approximation p-value, which is unreliable for
 small samples and does not correct for testing many lessons.

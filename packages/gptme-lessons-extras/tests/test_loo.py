@@ -157,7 +157,7 @@ def test_category_weighting_excludes_categories_without_comparison():
     rows = [session("a", 1.0, ["a"], "small"), session("b", 0.0, [], "small")]
     rows += [session(f"large-with-{i}", 0.6, ["a"], "large") for i in range(3)]
     rows += [session(f"large-without-{i}", 0.4, [], "large") for i in range(3)]
-    rows += [session("only-exposed", -100.0, ["a"], "unmatched")]
+    rows += [session("only-exposed", 0.0, ["a"], "unmatched")]
     result = analyze(rows, min_sessions=1, category_controlled=True)["results"][0]
     assert result["delta"] == 0.4  # (2 * 1.0 + 6 * .2) / 8
     assert result["categories_used"] == 2
@@ -251,3 +251,16 @@ def test_welch_statistic_is_invariant_to_small_outcome_units():
         welch_z(a, b)
     )
     assert welch_z([1e-11] * 5, [0.0] * 5) == (100.0, 0.0)
+
+
+@pytest.mark.parametrize("outcome", [-0.1, 1.1, 1e155])
+def test_outcome_contract_requires_normalized_scores(outcome, tmp_path):
+    with pytest.raises(ValueError, match="normalized between 0 and 1"):
+        analyze([session("s", outcome)])
+    path = tmp_path / "sessions.jsonl"
+    path.write_text(json.dumps(session("s", outcome)) + "\n")
+    result = cli(path)
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert "normalized between 0 and 1" in result.stderr
+    assert "Traceback" not in result.stderr
