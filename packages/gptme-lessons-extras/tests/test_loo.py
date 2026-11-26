@@ -92,7 +92,7 @@ def test_duplicate_session_ids_require_caller_reconciliation():
         analyze([session("same", 1.0, ["a"]), session("same", 0.0)])
 
 
-def test_duplicate_exposure_counts_once_and_keeps_first_rating():
+def test_duplicate_exposure_counts_once_and_preserves_ratings():
     a = session("a", 0.8)
     a["lessons"] = [
         {"id": "verify", "trigger_accuracy": 0.25},
@@ -102,8 +102,25 @@ def test_duplicate_exposure_counts_once_and_keeps_first_rating():
     result = report["results"][0]
     assert result["sessions_with"] == 1
     assert result["delta"] == 0.6
-    assert result["avg_trigger_accuracy"] == 0.25
+    assert result["avg_trigger_accuracy"] == 0.5
+    assert result["trigger_accuracy_samples"] == 2
+
+
+@pytest.mark.parametrize("recovery_first", [False, True])
+def test_duplicate_exposure_preserves_recovery_and_later_rating(recovery_first):
+    row = session("a", 0.8)
+    emissions = [
+        {"id": "verify", "event": "user_prompt"},
+        {"id": "verify", "event": "error_recovery", "trigger_accuracy": 0.75},
+    ]
+    row["lessons"] = emissions[::-1] if recovery_first else emissions
+    original = copy.deepcopy(row)
+    result = analyze([row, session("b", 0.2)], min_sessions=1)["results"][0]
+    assert result["sessions_with"] == 1
+    assert result["avg_trigger_accuracy"] == 0.75
     assert result["trigger_accuracy_samples"] == 1
+    assert any("error_recovery_confound" in w for w in result["warnings"])
+    assert row == original
 
 
 def test_opaque_ids_with_same_basename_remain_distinct():

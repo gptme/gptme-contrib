@@ -164,7 +164,8 @@ def validate_sessions(records: Iterable[Any]) -> list[dict[str, Any]]:
             for key in ("keyword", "event"):
                 if key in item:
                     exposure[key] = _identifier(item[key], f"{label} {key}")
-            lessons.setdefault(lid, exposure)
+            lesson = lessons.setdefault(lid, {"id": lid, "emissions": []})
+            lesson["emissions"].append(exposure)
         sessions.append(
             {
                 "session_id": sid,
@@ -237,9 +238,10 @@ def analyze(
             with_values.extend(a)
             without_values.extend(b)
             triggers.extend(
-                s["lessons"][lid]["trigger_accuracy"]
+                emission["trigger_accuracy"]
                 for s in with_rows
-                if "trigger_accuracy" in s["lessons"][lid]
+                for emission in s["lessons"][lid]["emissions"]
+                if "trigger_accuracy" in emission
             )
         comparison = compare_groups(
             with_values, without_values, min_sessions=min_sessions
@@ -250,7 +252,11 @@ def analyze(
             row_warnings.append(
                 "ghost_lesson: absent from current catalog; historical value does not establish a current gap"
             )
-        if any(s["lessons"][lid].get("event") == "error_recovery" for s in exposed):
+        if any(
+            emission.get("event") == "error_recovery"
+            for s in exposed
+            for emission in s["lessons"][lid]["emissions"]
+        ):
             row_warnings.append("error_recovery_confound: exposure follows failure")
         result = (
             asdict(comparison)

@@ -156,8 +156,11 @@ Lesson IDs are opaque strings; the command never opens them as file paths.
 `category`, `keyword`, `event` and `trigger_accuracy` are optional. An empty
 `lessons` array means **confirmed no injections**; missing exposure evidence must
 be excluded before export, rather than represented as an empty array. Repeated
-lesson IDs within a session count once, retaining the first entry. Duplicate
-session IDs are rejected: join and deduplicate source events before analysis.
+lesson IDs within a session count once for outcome comparisons, while every
+emission's metadata is retained. Relevance averages include all rated emissions,
+and any `error_recovery` emission flags the session regardless of emission order.
+Duplicate session IDs are rejected: join and deduplicate source events before
+analysis.
 
 Normalize outcomes to `[0, 1]` using one comparable scale and rubric across the
 cohort (for example, divide a 0–5 grade by 5). Raw durations or unbounded numeric
@@ -215,9 +218,9 @@ Warnings keep three recurring failure modes visible:
 
 Instrument the hook that emits lesson hints through `additionalContext` to record
 **the IDs actually emitted**, keyed to the same stable session ID as the outcome.
-Union those emitted IDs per session, then join the independent outcome signal and
-export the JSONL contract above. Preserve optional matched keyword and hook-event
-metadata when recorded. Hook output records establish emission; they do not prove
+Group those emissions per session, then join the independent outcome signal and
+export the JSONL contract above. Repeated IDs may remain in the array to preserve
+per-emission relevance ratings, matched keywords and hook-event metadata. Hook output records establish emission; they do not prove
 that the model read or followed the hint. Transcript prose, candidate-selection
 receipts and keyword-match logs alone do not establish actual lesson injection.
 
