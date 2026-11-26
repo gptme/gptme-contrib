@@ -1230,6 +1230,14 @@ MISSING_USER_AUTH = (
 )
 
 
+SECRET_GATE_REFUSAL = "Outbound secret gate blocked publication\n"
+SECRET_SCAN_UNAVAILABLE = "Outbound secret scan unavailable; refusing to post\n"
+DEAD_URL_REFUSAL = (
+    "✗ URL returns 404: https://example.invalid/gone\n"
+    "Aborting post — fix dead URLs before tweeting.\n"
+)
+
+
 def test_is_post_never_created_predicate():
     """A 4xx means the tweet was never created; a timeout stays ambiguous."""
     assert ra._is_post_never_created(SPEND_CAP_403)
@@ -1243,6 +1251,11 @@ def test_is_post_never_created_predicate():
     # ...or when the headless OAuth 2.0 attempt found no saved token and the
     # OAuth 1.0a fallback has no user token (gptme v0.36.0 quote, 2026-11-14).
     assert ra._is_post_never_created(MISSING_USER_AUTH)
+    # ...or when its outbound secret gate / dead-URL check refuses the text
+    # before any client is built (gptme/gptme-contrib#2346 item 6).
+    assert ra._is_post_never_created(SECRET_GATE_REFUSAL)
+    assert ra._is_post_never_created(SECRET_SCAN_UNAVAILABLE)
+    assert ra._is_post_never_created(DEAD_URL_REFUSAL)
     assert not ra._is_post_never_created("tweepy.errors.TwitterServerError: 503 x")
     assert not ra._is_post_never_created("ReadTimeout: HTTPSConnectionPool")
 
@@ -1291,8 +1304,22 @@ def test_main_retries_after_definite_org_tweet_rejection(monkeypatch, tmp_path):
 )
 @pytest.mark.parametrize(
     "error",
-    ["Missing TWITTER_BEARER_TOKEN in .env", MISSING_USER_AUTH, SPEND_CAP_403],
-    ids=["missing-credentials", "missing-user-auth", "api-rejection"],
+    [
+        "Missing TWITTER_BEARER_TOKEN in .env",
+        MISSING_USER_AUTH,
+        SPEND_CAP_403,
+        SECRET_GATE_REFUSAL,
+        SECRET_SCAN_UNAVAILABLE,
+        DEAD_URL_REFUSAL,
+    ],
+    ids=[
+        "missing-credentials",
+        "missing-user-auth",
+        "api-rejection",
+        "secret-gate",
+        "secret-scan-unavailable",
+        "dead-url",
+    ],
 )
 def test_main_retries_known_unsent_step_without_reposting_completed_steps(
     monkeypatch, tmp_path, failed_step, error
