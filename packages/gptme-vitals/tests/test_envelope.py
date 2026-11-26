@@ -7,11 +7,8 @@ statuses that exposed them.
 
 from __future__ import annotations
 
-import importlib.util
-import sys
-from pathlib import Path
-
 import pytest
+from gptme_vitals import fleet as fv
 from gptme_vitals.envelope import (
     ENVELOPE_SCHEMA,
     MAX_LINES,
@@ -41,20 +38,6 @@ LIVE_PAGE_STATUSES: dict[str, str | None] = {
 LEGAL_TODAY = {"revenue", "sessions", "subs", "services"}
 RAISES_TODAY = {"bottlenecks", "actuation", "cost", "machinery", "tasks"}
 ABSENT_TODAY = {"actionable-health", "capacity", "release"}
-
-
-def _load_fleet_vitals():
-    """Import ``scripts/fleet_vitals.py`` from the repo, or skip."""
-    root = Path(__file__).resolve().parents[3]
-    path = root / "scripts" / "fleet_vitals.py"
-    if not path.exists():  # pragma: no cover - layout guard
-        pytest.skip(f"fleet_vitals.py not found at {path}")
-    spec = importlib.util.spec_from_file_location("_fleet_vitals_under_test", path)
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
 
 
 def _env(slug: str, status: str | Status) -> PageEnvelope:
@@ -150,13 +133,11 @@ def test_live_pages_with_no_status_have_no_value_to_validate(slug):
 
 def test_critical_would_otherwise_be_dropped_by_the_upstream_rollup():
     """The reason the enum is validated at the page, not at ``make_core``."""
-    fv = _load_fleet_vitals()
     assert fv.roll_up_status("healthy", "healthy", "critical", "attention") == "healthy"
 
 
 def test_make_core_does_not_validate_per_dimension_status():
     """Characterization: the upstream raise exists, but not where it protects us."""
-    fv = _load_fleet_vitals()
     with pytest.raises(ValueError):
         fv.make_core("bob", status="critical")
     core = fv.make_core(
@@ -171,7 +152,6 @@ def test_make_core_does_not_validate_per_dimension_status():
 
 
 def test_all_unknown_pages_roll_up_to_unknown_not_healthy():
-    fv = _load_fleet_vitals()
     assert fv.roll_up_status("unknown", "no-data") == "healthy"  # upstream default
     rollup = roll_up_envelopes([_env("a", Status.UNKNOWN), _env("b", Status.NO_DATA)])
     assert rollup.status is Status.UNKNOWN
@@ -230,6 +210,5 @@ def test_as_dimension_preserves_computed_fields_on_collision(status_override):
 
 
 def test_status_vocabulary_matches_fleet_vitals():
-    fv = _load_fleet_vitals()
     assert [str(s) for s in RANKABLE_STATUSES] == fv.STATUS_ORDER
     assert {str(s) for s in Status} == set(fv._VALID_STATUS)

@@ -6,10 +6,9 @@ and the dimension is the rollup of its pages' statuses plus their allowlisted
 ``core`` projections. ``detail`` never takes part, so the derived file is safe to
 pull across agents by construction rather than by a filter someone must remember.
 
-The output matches ``fleet-vitals/core@1`` and ``fleet-vitals/headline@1`` but
-this module does not import ``fleet_vitals``: the package has no dependencies,
-and the only shared surface is the two schema strings and the status vocabulary
-(parity-tested for the latter in ``test_envelope.py``).
+The output uses the package's ``fleet`` helpers for the two fleet envelopes.
+Page status validation and blind-page accounting remain stricter than the legacy
+hand-built envelope API.
 """
 
 from __future__ import annotations
@@ -27,10 +26,10 @@ from gptme_vitals.envelope import (
     roll_up_envelopes,
     utcnow_rfc3339,
 )
+from gptme_vitals.fleet import CORE_SCHEMA as CORE_SCHEMA
+from gptme_vitals.fleet import HEADLINE_SCHEMA as HEADLINE_SCHEMA
+from gptme_vitals.fleet import make_core, make_headline
 from gptme_vitals.routes import DashboardRoute, RouteRegistry
-
-CORE_SCHEMA = "fleet-vitals/core@1"
-HEADLINE_SCHEMA = "fleet-vitals/headline@1"
 
 #: Keys the rollup computes. A page's ``core`` projection may not set them, or a
 #: page could overwrite the derived status the whole design exists to compute.
@@ -162,13 +161,9 @@ def derive_core(
     # Status of the whole: worst rankable dimension; all-blind (or no dimensions)
     # is unknown, never healthy.
     overall = roll_up_envelopes(statuses).status
-    core: dict[str, object] = {
-        "schema": CORE_SCHEMA,
-        "agent": agent,
-        "generated_at": generated_at,
-        "status": str(overall),
-        **dimensions,
-    }
+    core = make_core(
+        agent, status=str(overall), generated_at=generated_at, **dimensions
+    )
 
     route = registry.headline_route()
     if not route.is_public:
@@ -182,18 +177,15 @@ def derive_core(
             "headline.json would be undefined"
         )
     link = headline_link(route, base_url, portal_href=registry.portal_href)
-    headline: dict[str, object] = {
-        "schema": HEADLINE_SCHEMA,
-        "agent": agent,
-        "title": route.label,
-        "value": headline_page.headline,
-        "status": str(headline_page.status),
-        "generated_at": generated_at,
-        "link": link,
-        "trend": "flat",
-    }
-    if headline_page.lines and headline_page.lines[0]:
-        headline["detail"] = headline_page.lines[0]
+    headline = make_headline(
+        agent,
+        route.label,
+        headline_page.headline,
+        status=str(headline_page.status),
+        generated_at=generated_at,
+        link=link,
+        detail=(headline_page.lines[0] or None) if headline_page.lines else None,
+    )
     return core, headline
 
 

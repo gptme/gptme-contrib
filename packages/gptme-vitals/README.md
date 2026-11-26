@@ -215,8 +215,18 @@ write_core_files("state/vitals", core, headline)
   existing fleet-contract default; no trend is inferred from a single envelope.
 - An envelope for a slug no route owns, or two for one slug, raises.
 
-It does not import `fleet_vitals`; the two share only the schema strings and the
-status vocabulary.
+The fleet envelope helpers live in `gptme_vitals.fleet`: `make_core`,
+`make_headline`, `emit`, `roll_up_status`, the schema constants and `STATUS_ORDER`.
+`derive_core` uses these constructors after computing the page rollup; it passes
+the overall status explicitly, so all-blind pages still produce `unknown`.
+Hand-built envelopes retain the legacy rollup's `healthy` default when no
+rankable status is present.
+
+Existing consumers may keep importing the helpers from `scripts/fleet_vitals.py`.
+That script re-exports the package API, resolves it from a contrib checkout
+without installation, and retains the inference detector and CLI. Copying just
+the script outside a checkout requires installing `gptme-vitals` (Python 3.11+).
+New consumers should import `gptme_vitals.fleet` directly.
 
 ## Private and public roots
 
