@@ -47,6 +47,27 @@ _T = TypeVar("_T")
 # Max task-description length to echo back when reporting status
 _MAX_TASK_PREVIEW = 120
 
+# Tools that do real work for the caller, so an attempt deserves the rising
+# activity cue. Observation/status tools stay silent (they are not attempts),
+# and ``subagent`` keeps its own dispatch lifecycle cue. One frozenset so a new
+# direct tool (e.g. another body_* verb) cannot silently stay silent.
+DIRECT_TOOL_NAMES: frozenset[str] = frozenset(
+    {
+        "workspace_search",
+        "look",
+        "handoff_to_agent",
+        "fulfill_planned_call",
+        "body_takeoff",
+        "body_land",
+        "body_move",
+        "body_goto",
+        "body_stop",
+        "body_return_home",
+        "body_turn",
+        "body_interact",
+    }
+)
+
 # Max output to return (avoid overwhelming the realtime API)
 _MAX_OUTPUT_LEN = 2000
 _IGNORABLE_ERROR_LINES = {
@@ -1083,24 +1104,7 @@ class GptmeToolBridge:
         """
         # Activity means an attempt, not success. Keep polling and hangup
         # silent, and leave subagent dispatch to its existing lifecycle cue.
-        if (
-            name
-            in {
-                "workspace_search",
-                "look",
-                "handoff_to_agent",
-                "fulfill_planned_call",
-                "body_takeoff",
-                "body_land",
-                "body_move",
-                "body_goto",
-                "body_stop",
-                "body_return_home",
-                "body_turn",
-                "body_interact",
-            }
-            and self.on_dispatch
-        ):
+        if name in DIRECT_TOOL_NAMES and self.on_dispatch:
             self._dispatch_cue(self.on_dispatch, cue_name="activity")
 
         if name == "subagent":

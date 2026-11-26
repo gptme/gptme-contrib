@@ -5,7 +5,11 @@ import time
 from unittest.mock import AsyncMock
 
 import pytest
-from gptme_voice.realtime.tool_bridge import GptmeToolBridge, PendingTask
+from gptme_voice.realtime.tool_bridge import (
+    DIRECT_TOOL_NAMES,
+    GptmeToolBridge,
+    PendingTask,
+)
 
 
 async def _flush_cues(bridge):
@@ -13,23 +17,7 @@ async def _flush_cues(bridge):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "name",
-    [
-        "workspace_search",
-        "look",
-        "handoff_to_agent",
-        "fulfill_planned_call",
-        "body_stop",
-        "body_return_home",
-        "body_takeoff",
-        "body_land",
-        "body_move",
-        "body_goto",
-        "body_turn",
-        "body_interact",
-    ],
-)
+@pytest.mark.parametrize("name", sorted(DIRECT_TOOL_NAMES))
 async def test_direct_tool_attempt_cues_even_when_unavailable(name):
     cue = AsyncMock()
     bridge = GptmeToolBridge(on_dispatch=cue)
@@ -37,6 +25,21 @@ async def test_direct_tool_attempt_cues_even_when_unavailable(name):
     await _flush_cues(bridge)
     assert result.get("error") or result.get("status") == "not_supported"
     cue.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_direct_tool_activity_cue_is_optional():
+    """A bridge with no dispatch callback still runs the tool, silently."""
+    rag = AsyncMock()
+    rag.enabled = True
+    rag.search.return_value = {"results": [{"text": "The matching source"}]}
+    bridge = GptmeToolBridge(rag=rag)
+    result = await bridge.handle_function_call(
+        "workspace_search", {"query": "farewell"}
+    )
+    await _flush_cues(bridge)
+    assert result == rag.search.return_value
+    assert not bridge._cue_tasks
 
 
 @pytest.mark.asyncio
@@ -225,7 +228,10 @@ async def test_failed_activity_cue_does_not_hide_workspace_search_result():
 
 
 @pytest.mark.asyncio
-async def test_task_that_finishes_normally_during_cancel_has_no_cancel_cue():
+@pytest.mark.parametrize("cancel_all", [False, True])
+async def test_task_that_finishes_normally_during_cancel_has_no_cancel_cue(
+    cancel_all,
+):
     cue = AsyncMock()
     bridge = GptmeToolBridge(on_cancel=cue)
     started = asyncio.Event()
@@ -242,10 +248,55 @@ async def test_task_that_finishes_normally_during_cancel_has_no_cancel_cue():
         task=task, description="Finishing", mode="fast", started_at=time.monotonic()
     )
     await started.wait()
-    await bridge.handle_function_call("subagent_cancel", {"task_id": "one"})
+    arguments = {} if cancel_all else {"task_id": "one"}
+    result = await bridge.handle_function_call("subagent_cancel", arguments)
     assert task.done() and not task.cancelled()
+    if cancel_all:
+        # Nothing was cancelled, so the response must say so and explain itself
+        # instead of reporting an empty cancelled_all.
+        assert result["status"] == "no_pending"
+        assert result["cancelled_count"] == 0
+        assert result["message"]
+    else:
+        assert result["status"] == "not_pending"
     await _flush_cues(bridge)
     cue.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_mixed_cancel_all_reports_cancelled_and_cancelling(monkeypatch):
+    """Cancel-all over a task already mid-cancel reports both outcomes."""
+    cue = AsyncMock()
+    reporting = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_report(_text):
+        reporting.set()
+        await release.wait()
+
+    bridge = GptmeToolBridge(on_cancel=cue, on_result=slow_report)
+    first_id, first_task = await _dispatch_blocked_subagent(bridge, monkeypatch)
+    second_task = await _pending(bridge, "second")
+
+    # Start a single-task cancel that blocks in its cancellation report.
+    single = asyncio.create_task(
+        bridge.handle_function_call("subagent_cancel", {"task_id": first_id})
+    )
+    await reporting.wait()
+
+    result = await bridge.handle_function_call("subagent_cancel", {})
+    assert result["status"] == "cancelled_all"
+    assert result["cancelled_count"] == 1
+    assert result["cancelling"] == [first_id]
+    assert [entry["task_id"] for entry in result["cancelled"]] == ["second"]
+
+    release.set()
+    assert (await single)["status"] == "cancelled"
+    assert first_task.cancelled() and second_task.cancelled()
+    await _flush_cues(bridge)
+    # Two requests each confirmed exactly one cancellation (cancel-all -> second,
+    # single -> first), so two cues — never two for the same task.
+    assert cue.await_count == 2
 
 
 @pytest.mark.asyncio
