@@ -373,7 +373,13 @@ def main():
             "elapsed_fraction": round(elapsed_frac, 3),
             "target_utilization": round(target, 3),
             "actual_utilization": round(actual, 3),
+            # Deprecated compatibility field: positive means UNDERusing. Keep
+            # it for older gates/caches; new readers use the explicit name,
+            # matching gptme_subscription.routing (positive = overusing).
             "pace_gap": round(gap, 3),
+            "pace_gap_used_minus_target": (
+                round(-gap, 3) if remaining_secs > 0 else None
+            ),
             "status": (
                 "underusing"
                 if gap > 0.05
