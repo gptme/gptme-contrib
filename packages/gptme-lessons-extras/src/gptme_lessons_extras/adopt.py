@@ -8,13 +8,15 @@ Provides tools to:
 - Track adoption metrics
 """
 
+import contextlib
 import json
 import os
 import sys
 import tempfile
+from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 # Import from existing modules
 try:
@@ -22,6 +24,37 @@ try:
 except ImportError:
     # Allow running from package directory
     import review as review_module  # type: ignore[import-not-found, no-redef]
+
+
+def _target_mode(path: Path) -> int:
+    """Mode an atomically replaced file should end up with.
+
+    Keep the existing file's mode when there is one (a rewrite must not
+    silently drop group/world readability); otherwise use the usual
+    umask-respecting default instead of mkstemp's 0600.
+    """
+    try:
+        return path.stat().st_mode & 0o777
+    except FileNotFoundError:
+        umask = os.umask(0)
+        os.umask(umask)
+        return 0o666 & ~umask
+
+
+@contextlib.contextmanager
+def _atomic_write(path: Path) -> Iterator[TextIO]:
+    """Yield a handle that is renamed onto `path` only if the body succeeds."""
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            os.chmod(tmp, _target_mode(path))
+            yield f
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 def adopt_lesson(
@@ -109,9 +142,12 @@ def adopt_lesson(
 
                     content = f"---\n{new_frontmatter}---\n{content[end_idx + 5 :]}"
 
-        # Write to local path, remembering what was there (--force)
+        # Write to local path, remembering what was there (--force). Atomic,
+        # so a failed write leaves the previous lesson intact rather than
+        # truncated (a truncated file would be refused on retry, or would
+        # discard the user's lesson under --force).
         previous = local_path.read_text() if local_path.exists() else None
-        with open(local_path, "w") as f:
+        with _atomic_write(local_path) as f:
             f.write(content)
 
         # Record adoption in metrics (for future tracking). If that fails,
@@ -128,7 +164,8 @@ def adopt_lesson(
             if previous is None:
                 local_path.unlink(missing_ok=True)
             else:
-                local_path.write_text(previous)
+                with _atomic_write(local_path) as f:
+                    f.write(previous)
             raise
 
         return True, f"Adopted to {local_path}"
@@ -176,19 +213,10 @@ def record_adoption(
     )
 
     # Save metrics via temp file + rename, so a failed write keeps the
-    # previous ledger instead of truncating it.
-    fd, tmp = tempfile.mkstemp(
-        dir=metrics_file.parent, prefix=f".{metrics_file.name}.", suffix=".tmp"
-    )
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(metrics, f, indent=2)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, metrics_file)
-    except BaseException:
-        Path(tmp).unlink(missing_ok=True)
-        raise
+    # previous ledger instead of truncating it. _atomic_write also preserves
+    # the ledger's existing mode, so a shared-workspace reader keeps access.
+    with _atomic_write(metrics_file) as f:
+        json.dump(metrics, f, indent=2)
 
 
 def batch_adopt(

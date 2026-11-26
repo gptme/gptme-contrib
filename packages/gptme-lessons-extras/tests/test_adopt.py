@@ -1,6 +1,8 @@
 """Regression tests for lesson adoption ledger safety (#2362 E5)."""
 
+import builtins
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -61,6 +63,90 @@ def test_adoption_failing_on_ledger_is_retryable(tmp_path, monkeypatch):
     assert ok, msg
     assert (lessons / "tools" / "git.md").exists()
     assert len(json.loads(_ledger(lessons).read_text())["adoptions"]) == 1
+
+
+def _network_lesson(tmp_path: Path) -> tuple[dict, Path]:
+    net = tmp_path / "network"
+    (net / "alice" / "tools").mkdir(parents=True)
+    (net / "alice" / "tools" / "git.md").write_text(
+        "---\nnetwork:\n  lesson_id: alice-tools-git\n  agent_origin: alice\n"
+        "  adoption_count: 0\nmatch:\n  keywords: [git]\n---\n# Git\nbody\n"
+    )
+    meta = {
+        "network": {"lesson_id": "alice-tools-git", "agent_origin": "alice"},
+        "_file": "alice/tools/git.md",
+    }
+    return meta, net
+
+
+def test_failed_lesson_write_keeps_existing_lesson(tmp_path, monkeypatch):
+    """A failed lesson write must not truncate the lesson under --force."""
+    meta, net = _network_lesson(tmp_path)
+    lessons = tmp_path / "ws" / "lessons"
+    local = lessons / "tools" / "git.md"
+    local.parent.mkdir(parents=True)
+    local.write_text("ORIGINAL LESSON\n")
+
+    real_open, real_fdopen = builtins.open, os.fdopen
+
+    class _FailingWrite:
+        """Handle whose body write raises ENOSPC (after any truncation)."""
+
+        def __init__(self, f):
+            self._f = f
+
+        def write(self, _s):
+            raise OSError(28, "No space left on device")
+
+        def __getattr__(self, name):
+            return getattr(self._f, name)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            self._f.close()
+            return False
+
+    def failing_open(file, mode="r", *args, **kwargs):
+        f = real_open(file, mode, *args, **kwargs)
+        if "w" in mode and "git.md" in str(file):
+            return _FailingWrite(f)
+        return f
+
+    def failing_fdopen(fd, mode="r", *args, **kwargs):
+        f = real_fdopen(fd, mode, *args, **kwargs)
+        try:
+            target = os.readlink(f"/proc/self/fd/{fd}")
+        except OSError:
+            target = ""
+        if "w" in mode and "git.md" in target:
+            return _FailingWrite(f)
+        return f
+
+    monkeypatch.setattr(builtins, "open", failing_open)
+    monkeypatch.setattr(os, "fdopen", failing_fdopen)
+    ok, msg = adopt.adopt_lesson(meta, net, lessons, force=True)
+    monkeypatch.undo()
+
+    assert not ok, msg
+    assert local.read_text() == "ORIGINAL LESSON\n"
+    assert not list(local.parent.glob("*.tmp"))
+    assert not _ledger(lessons).exists()
+
+
+def test_ledger_keeps_its_mode(tmp_path):
+    """Rewriting the ledger must not narrow a shared ledger to owner-only."""
+    lessons = tmp_path / "ws" / "lessons"
+    lessons.mkdir(parents=True)
+    adopt.record_adoption("a-tools-l0", "a", "2026-01-01T00:00:00", lessons)
+    ledger = _ledger(lessons)
+    ledger.chmod(0o644)
+
+    adopt.record_adoption("a-tools-l1", "a", "2026-01-02T00:00:00", lessons)
+
+    assert ledger.stat().st_mode & 0o777 == 0o644
+    assert len(json.loads(ledger.read_text())["adoptions"]) == 2
 
 
 def test_corrupt_ledger_is_set_aside_not_blocking(tmp_path, capsys):
