@@ -1741,6 +1741,43 @@ def test_non_git_gitignore_ancestor_directory_negation_does_not_reinclude_files(
     assert {rel for rel in files if indexer._is_ignored(root / rel, specs)} == ignored
 
 
+@pytest.mark.parametrize("scan_prefix", ["", "abc", "abc/sub"])
+@pytest.mark.parametrize("pattern", ["abc/**", "abc/**/*"])
+def test_non_git_gitignore_content_only_rule_keeps_parent_traversable(
+    tmp_path, isolated_gitignore_files, scan_prefix, pattern
+):
+    """Ignoring contents does not exclude the directory needed by a file negation."""
+    indexer = object.__new__(Indexer)
+    (tmp_path / ".gitignore").write_text(f"{pattern}\n!abc/sub/\n!abc/keep.md\n!abc/sub/keep.md\n")
+    files = ["abc/keep.md", "abc/drop.md", "abc/sub/keep.md", "abc/sub/drop.md"]
+    for rel in files:
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x")
+    root = tmp_path / scan_prefix
+    specs = indexer._load_gitignore(root)
+
+    for rel in files:
+        path = tmp_path / rel
+        if path.is_relative_to(root):
+            assert indexer._is_ignored(path, specs) is (path.name == "drop.md"), rel
+
+
+@pytest.mark.parametrize("scan_prefix", [".git", ".git/objects", "cache.db/nested"])
+def test_non_git_gitignore_builtins_cover_scan_root_and_ancestors(
+    tmp_path, isolated_gitignore_files, scan_prefix
+):
+    """An explicitly selected scan root cannot bypass unconditional exclusions."""
+    indexer = object.__new__(Indexer)
+    root = tmp_path / "project" / scan_prefix
+    root.mkdir(parents=True)
+    (root / ".gitignore").write_text("!*\n")
+    file_path = root / "config"
+    file_path.write_text("private configuration")
+
+    assert indexer._is_ignored(file_path, indexer._load_gitignore(root))
+
+
 @pytest.mark.parametrize("bad_line", ["trailing\\", "!", "[z-a]"])
 def test_non_git_gitignore_skips_only_the_invalid_line(
     tmp_path, isolated_gitignore_files, bad_line

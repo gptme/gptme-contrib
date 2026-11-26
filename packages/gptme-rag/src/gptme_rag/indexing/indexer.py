@@ -1113,6 +1113,15 @@ class Indexer:
                 ]
                 if dir_ends and len(rel_path) not in dir_ends:
                     continue
+                # A content-only rule such as ``abc/**`` matches ``abc/``
+                # through an empty suffix, but does not exclude abc itself.
+                # Non-directory matches must also match the directory's name.
+                if (
+                    rel_path.endswith("/")
+                    and not dir_ends
+                    and not pattern.match_file(rel_path.rstrip("/"))
+                ):
+                    continue
                 # pathspec marks a plain pattern as include=True (it ignores) and a
                 # ``!`` pattern as include=False (it re-includes).
                 return pattern.include
@@ -1151,8 +1160,10 @@ class Indexer:
         except ValueError:
             return False
 
-        # Built-in patterns are unconditional: a negation cannot re-include them.
-        if _ALWAYS_IGNORED.match_file(rel_root):
+        # Built-in patterns are unconditional, including when the scan root or
+        # one of its ancestors is itself excluded (e.g. scanning .git/objects).
+        # Keep the lexical path so directory symlinks cannot bypass these rules.
+        if _ALWAYS_IGNORED.match_file(path.as_posix()):
             return True
 
         # Decide the scan root and its loaded ancestors as directories too.
