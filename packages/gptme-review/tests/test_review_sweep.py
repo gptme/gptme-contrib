@@ -5,7 +5,7 @@ from __future__ import annotations
 import ast
 import json
 import subprocess
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -1254,3 +1254,259 @@ def test_marker_json_does_not_swallow_adjacent_markers() -> None:
     first["body"] += "\n" + second["body"]
     assert marker_state([first], IDENTITY)[0] == "first"
     assert marker_payload([first], IDENTITY)[0]["sha"] == "first"
+
+
+class CarryHost(FakeHost):
+    carry: Callable[..., bool] = staticmethod(lambda *args: True)
+
+    def review_carries_to_head(
+        self, repo: str, base_ref: str, marker_sha: str, head_sha: str
+    ) -> bool:
+        return self.carry(repo, base_ref, marker_sha, head_sha)
+
+
+def _carried_review_host(extra: dict | None = None) -> CarryHost:
+    pr = {**_pr(1, "new-head"), "baseRefName": "release"}
+    evidence = {
+        "engine": "llm",
+        "score": 5,
+        "findings": [],
+        "consensus": dict(COMPLETE_SINGLE_PASS),
+        **(extra or {}),
+    }
+    return CarryHost([pr], {1: [_marker_comment("old-head", extra=evidence)]})
+
+
+def test_complete_single_pass_carries_without_mandatory_second_review() -> None:
+    host = _carried_review_host()
+    calls: list[tuple[str, str, str, str]] = []
+
+    def carries(repo: str, base_ref: str, marker_sha: str, head_sha: str) -> bool:
+        calls.append((repo, base_ref, marker_sha, head_sha))
+        return True
+
+    host.carry = carries
+    assert select_candidates("o/r", _config(), host, NOW, dry_run=True) == []
+    assert calls == [("o/r", "release", "old-head", "new-head")]
+    # Hosts which do not opt in retain exact-head selection.
+    exact_host = FakeHost(host.prs, host.comments)
+    assert _numbers(
+        select_candidates("o/r", _config(), exact_host, NOW, dry_run=True)
+    ) == [1]
+
+
+def test_changed_diff_still_selects_with_carry_callback() -> None:
+    host = _carried_review_host()
+    host.carry = lambda *args: False
+    found = select_candidates("o/r", _config(), host, NOW, dry_run=True)
+    assert _numbers(found) == [1]
+
+
+def test_degraded_carried_evidence_still_gets_upgrade() -> None:
+    host = _carried_review_host(
+        {"consensus": {**COMPLETE_SINGLE_PASS, "jobs_requested": 2}}
+    )
+    found = select_candidates(
+        "o/r",
+        _config(),
+        host,
+        NOW,
+        dry_run=True,
+    )
+    assert _numbers(found) == [1]
+    assert found is not None and found[0]["consensus_upgrade"] is True
+    assert found[0]["headRefOid"] == "new-head"
+    assert found[0]["reviewed_sha"] == "old-head"
+
+
+def test_explicit_request_selects_carried_review() -> None:
+    host = _carried_review_host()
+    assert host.comments[1] is not None
+    host.comments[1].append(
+        {
+            "id": 9,
+            "body": "@reviewer-bot review",
+            "created_at": "2026-08-07T21:30:00+00:00",
+            "user": {"login": "maintainer"},
+            "author_association": "MEMBER",
+        }
+    )
+    found = select_candidates(
+        "o/r",
+        _config(),
+        host,
+        NOW,
+        dry_run=True,
+    )
+    assert _numbers(found) == [1]
+    assert found is not None and found[0]["requested_by"] == "maintainer"
+
+
+def test_carried_findings_upgrade_is_not_a_fix_iteration() -> None:
+    host = _carried_review_host(
+        {
+            "score": 4,
+            "findings": [{"fp": "x", "severity": "P2"}],
+            "consensus": {},
+        }
+    )
+    config = SweepConfig(
+        identity=IDENTITY, authors=None, consensus_upgrade_repos=frozenset()
+    )
+    found = select_candidates(
+        "o/r",
+        config,
+        host,
+        NOW,
+        dry_run=False,
+    )
+    assert _numbers(found) == [1]
+    assert found is not None and found[0]["same_head_upgrade"] is True
+    assert found[0]["is_fix_iteration"] is False
+    assert "recall_boost" not in found[0]
+    assert host.reactions == []
+
+
+@pytest.mark.parametrize(
+    "unfinished", ["provisional", "publishing", "newer-provisional"]
+)
+def test_unfinished_marker_never_uses_carry(unfinished: str) -> None:
+    host = _carried_review_host()
+    if unfinished == "publishing":
+        host.comments[1] = [
+            _marker_comment("old-head", extra={"publishing_sha": "old-head"})
+        ]
+    else:
+        provisional = _marker_comment(
+            "old-head",
+            prefix="agent-ai-review-publishing",
+            extra={"publishing_sha": "old-head"},
+            comment_id=2,
+        )
+        provisional["updated_at"] = "2026-08-07T21:30:00+00:00"
+        host.comments[1] = (
+            [*(host.comments[1] or []), provisional]
+            if unfinished == "newer-provisional"
+            else [provisional]
+        )
+
+    def carries(*args: str) -> bool:
+        pytest.fail("unfinished evidence must not invoke carry")
+
+    host.carry = carries
+    assert _numbers(
+        select_candidates(
+            "o/r",
+            _config(),
+            host,
+            NOW,
+            dry_run=True,
+        )
+    ) == [1]
+
+
+def test_needs_consensus_upgrade_accepts_current_diff_match() -> None:
+    marker = {"sha": "old-head", "score": 5, "findings": []}
+    assert not needs_consensus_upgrade(marker, "new-head")
+    assert needs_consensus_upgrade(marker, "new-head", current_diff_matches=True)
+
+
+def test_gh_listing_includes_base_ref_for_carry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def query(args: list[str]) -> list[dict]:
+        assert "baseRefName" in " ".join(args)
+        return [{"data": {"repository": {"pullRequests": {"nodes": []}}}}]
+
+    monkeypatch.setattr("gptme_review.sweep._gh_json", query)
+    assert GhCliHost().list_open_prs("o/r") == []
+
+
+@pytest.mark.parametrize(
+    "unreviewable_sha, expected", [("old-head", True), ("other-head", False)]
+)
+def test_carried_unreviewable_must_belong_to_carried_marker(
+    unreviewable_sha: str, expected: bool
+) -> None:
+    host = _carried_review_host(
+        {
+            "consensus": {},
+            "unreviewable": {"sha": unreviewable_sha, "reason": "too large"},
+        }
+    )
+    found = select_candidates("o/r", _config(), host, NOW, dry_run=True)
+    assert _numbers(found) == [1]
+    assert found is not None and ("unreviewable" in found[0]) is expected
+
+
+@pytest.mark.parametrize(
+    "deferred_head, expected", [("old-head", [1]), ("new-head", [])]
+)
+def test_subscription_deferrals_remain_exact_head_bound(
+    deferred_head: str, expected: list[int]
+) -> None:
+    host = _carried_review_host({"consensus": {}})
+    found = select_candidates(
+        "o/r",
+        _config(),
+        host,
+        NOW,
+        dry_run=True,
+        subscription_defers={"o/r#1": {"head": deferred_head, "count": 100}},
+    )
+    assert _numbers(found) == expected
+
+
+def test_carried_upgrade_history_budget_stays_marker_sha_scoped() -> None:
+    host = _carried_review_host(
+        {
+            "consensus": {"requested": 2, "answered": 1, "failures": ["failed"]},
+            "history": [{"sha": "old-head", "passes": 2}] * 2,
+        }
+    )
+    assert select_candidates("o/r", _config(), host, NOW, dry_run=True) == []
+
+
+def test_missing_base_ref_does_not_attempt_carry() -> None:
+    host = _carried_review_host()
+    assert host.prs is not None
+    host.prs[0].pop("baseRefName")
+
+    def carries(*args: str) -> bool:
+        pytest.fail("cannot prove a carry without the PR base")
+
+    host.carry = carries
+    assert _numbers(select_candidates("o/r", _config(), host, NOW, dry_run=True)) == [1]
+
+
+@pytest.mark.parametrize("explicit_request", [False, True])
+def test_outage_carried_evidence_waits_unless_explicitly_requested(
+    explicit_request: bool,
+) -> None:
+    host = _carried_review_host({"outage_single_pass": True})
+    host.outage = True
+    if explicit_request:
+        assert host.comments[1] is not None
+        host.comments[1].append(
+            {
+                "id": 9,
+                "body": "@reviewer-bot review",
+                "created_at": "2026-08-07T21:30:00+00:00",
+                "user": {"login": "maintainer"},
+                "author_association": "MEMBER",
+            }
+        )
+    found = select_candidates("o/r", _config(), host, NOW, dry_run=True)
+    assert _numbers(found) == ([1] if explicit_request else [])
+
+
+def test_carry_callback_exception_does_not_accept_unproven_evidence() -> None:
+    host = _carried_review_host()
+
+    def carries(*args: str) -> bool:
+        raise RuntimeError("diff proof unavailable")
+
+    host.carry = carries
+    with pytest.raises(RuntimeError, match="diff proof unavailable"):
+        select_candidates("o/r", _config(), host, NOW, dry_run=False)
+    assert host.reactions == []

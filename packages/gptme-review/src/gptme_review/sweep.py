@@ -245,7 +245,13 @@ class SweepConfig:
 
 
 class SweepHost(Protocol):
-    """GitHub and policy inputs the candidate loop does not own."""
+    """GitHub and policy inputs the candidate loop does not own.
+
+    Optional (discovered via getattr, not required by this protocol):
+    ``review_carries_to_head(repo, base_ref, marker_sha, head_sha) -> bool``
+    proves a finished review still covers the current diff. Probe failures may
+    return False; exceptions propagate without accepting unproven evidence.
+    """
 
     def list_open_prs(self, repo: str) -> list[dict] | None:
         """Open PRs, or None when listing failed (distinct from empty)."""
@@ -478,15 +484,18 @@ def needs_consensus_upgrade(
     head_sha: str,
     *,
     allow_non_blocking_findings: bool = False,
+    current_diff_matches: bool = False,
 ) -> bool:
     """Whether a current first pass needs merge-gate evidence.
 
     A complete single pass is already the evidence the merge gate accepts, so it
     is not upgraded. A record that is missing, malformed or degraded still is —
     a second pass there is the cheapest way to get the missing evidence.
+    ``current_diff_matches`` lets a host-proven carry satisfy freshness without
+    another API call. It does not alter the marker-SHA-scoped history budget.
     """
     marker_sha = str(marker.get("sha") or "")
-    if not marker_sha or not head_sha.startswith(marker_sha):
+    if not marker_sha or not (head_sha.startswith(marker_sha) or current_diff_matches):
         return False
     if marker.get("score") != 5 or marker.get("findings"):
         if not allow_non_blocking_findings:
@@ -675,7 +684,13 @@ def select_candidates(
     dry_run: bool = False,
     subscription_defers: Mapping[str, Mapping[str, object]] | None = None,
 ) -> list[dict] | None:
-    """Open PRs in ``repo`` that still need a review, or None if listing failed."""
+    """Open PRs in ``repo`` that still need a review, or None if listing failed.
+
+    Hosts may supply ``review_carries_to_head(repo, base_ref, marker_sha,
+    head_sha)`` to recognize unchanged diffs after rebases. Only finished marker
+    evidence is eligible; hosts without this optional method stay exact-head.
+    Execution freshness and subscription/history budgets remain head-bound.
+    """
     prs = host.list_open_prs(repo)
     if not isinstance(prs, list):
         return None
@@ -706,6 +721,39 @@ def select_candidates(
             continue
         seen, marker_served_through = marker_state(comments, identity)
         marker, marker_comment = marker_payload(comments, identity)
+        same_diff = bool(seen and head.startswith(seen))
+        review_carried = False
+        carries = getattr(host, "review_carries_to_head", None)
+        marker_sha = str(marker.get("sha") or "")
+        base_ref = str(pr.get("baseRefName") or "")
+        if (
+            not same_diff
+            and callable(carries)
+            and base_ref
+            and marker_sha
+            and seen == marker_sha
+            and "publishing_sha" not in marker
+        ):
+            # marker_payload skips provisional markers. Do not carry an older
+            # finished result while a newer publication is still in progress,
+            # even when both markers name the same SHA.
+            latest_marker_comment = next(
+                (
+                    comment
+                    for comment in _newest_comments(comments)
+                    if _is_reviewer_comment(comment, identity)
+                    and (
+                        identity.marker_re().search(str(comment.get("body") or ""))
+                        or identity.provisional_marker_re().search(
+                            str(comment.get("body") or "")
+                        )
+                    )
+                ),
+                None,
+            )
+            if latest_marker_comment == marker_comment:
+                review_carried = bool(carries(repo, base_ref, marker_sha, head))
+                same_diff = review_carried
         requested = pending_review_request(
             comments,
             marker_served_through,
@@ -715,8 +763,7 @@ def select_candidates(
 
         if (
             marker.get("outage_single_pass")
-            and seen
-            and head.startswith(seen)
+            and same_diff
             and requested is None
             and host.openrouter_unavailable()
         ):
@@ -740,11 +787,18 @@ def select_candidates(
             and requested is None
             and review_can_upgrade
         )
-        consensus_upgrade = upgrade_allowed and needs_consensus_upgrade(marker, head)
+        consensus_upgrade = upgrade_allowed and needs_consensus_upgrade(
+            marker, head, current_diff_matches=same_diff
+        )
         if (
             upgrade_allowed
             and not consensus_upgrade
-            and needs_consensus_upgrade(marker, head, allow_non_blocking_findings=True)
+            and needs_consensus_upgrade(
+                marker,
+                head,
+                allow_non_blocking_findings=True,
+                current_diff_matches=same_diff,
+            )
         ):
             consensus_upgrade = host.is_review_only_blocker(
                 host.pr_mergeability(repo, int(pr["number"]))
@@ -753,27 +807,27 @@ def select_candidates(
             not upgrade_allowed
             and review_can_upgrade
             and bool(marker.get("findings"))
-            and needs_consensus_upgrade(marker, head, allow_non_blocking_findings=True)
+            and needs_consensus_upgrade(
+                marker,
+                head,
+                allow_non_blocking_findings=True,
+                current_diff_matches=same_diff,
+            )
         )
         if (
-            seen
-            and head.startswith(seen)
+            same_diff
             and requested is None
             and not consensus_upgrade
             and not needs_non_blocking_upgrade
         ):
             continue
         item = {"repo": repo, **pr}
-        item["same_head_upgrade"] = bool(
-            needs_non_blocking_upgrade and seen and head.startswith(seen)
-        )
+        item["same_head_upgrade"] = bool(needs_non_blocking_upgrade and same_diff)
         if requested is not None:
             item["requested_by"] = ((requested.get("user") or {}).get("login")) or "?"
         if consensus_upgrade:
             item["consensus_upgrade"] = True
-        item["is_fix_iteration"] = bool(
-            seen and not head.startswith(seen) and had_findings(marker)
-        )
+        item["is_fix_iteration"] = bool(seen and not same_diff and had_findings(marker))
         if (
             config.recall_boost_enabled
             and item["is_fix_iteration"]
@@ -794,7 +848,10 @@ def select_candidates(
             isinstance(unreviewable, dict)
             and requested is None
             and (u_sha := str(unreviewable.get("sha") or ""))
-            and head.startswith(u_sha)
+            and (
+                head.startswith(u_sha)
+                or (review_carried and marker_sha.startswith(u_sha))
+            )
         ):
             item["unreviewable"] = unreviewable
         item["marker_comment_id"] = (marker_comment or {}).get("id")
@@ -858,7 +915,7 @@ class GhCliHost:
                 "query=query($owner: String!, $name: String!, $endCursor: String) {"
                 " repository(owner: $owner, name: $name) {"
                 " pullRequests(states: OPEN, first: 100, after: $endCursor) {"
-                " nodes { number headRefOid isDraft updatedAt title author { login }"
+                " nodes { number headRefOid baseRefName isDraft updatedAt title author { login }"
                 " additions deletions changedFiles }"
                 " pageInfo { hasNextPage endCursor } } } }",
                 "-f",

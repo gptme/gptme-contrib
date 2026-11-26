@@ -107,6 +107,20 @@ is skipped for that pass, not admitted as never reviewed. Marker parsing and
 do not consume each other's markers. Duplicate-PR tagging, consensus-upgrade
 eligibility, and trusted-request opt-in live here.
 
+Hosts may optionally implement
+`review_carries_to_head(repo, base_ref, marker_sha, head_sha) -> bool`. Selection
+uses this predicate only for finished review markers and a nonempty PR
+`baseRefName`; provisional/publishing evidence never carries. Return true only
+when the reviewed diff is unchanged (for example, after a base-only rebase).
+Unchanged evidence skips redundant review, but degraded evidence can still need
+an upgrade under the existing policy; a complete single pass needs no second
+review. Trusted explicit requests still select. Carried findings are not fix
+iterations, and unreviewable metadata carries only from the reviewed marker SHA.
+Subscription deferrals, history budgets, and execution-time head checks remain
+SHA-bound. Callback errors propagate rather than accepting unproven evidence;
+hosts can catch probe failures and return false to fall back to fresh review.
+Hosts without the method, including `GhCliHost`, retain exact-head behavior.
+
 ### Bounded dispatch
 
 `dispatch_reviews(selected, host, workers=1, started=None, clock=...)` schedules
