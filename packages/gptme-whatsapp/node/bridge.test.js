@@ -3,12 +3,12 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { spawn } from 'node:child_process';
 import {
-    readFileSync, mkdtempSync, mkdirSync, appendFileSync, writeFileSync, existsSync,
+    readFileSync, mkdtempSync, writeFileSync, existsSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import vm from 'node:vm';
-import { gptmeLogsDir, runWithReply, settleAbandonedRun } from './gptme-log.js';
+import { extractReply } from './gptme-reply.js';
 import { createKeyedQueue } from './serial-queue.js';
 
 // Exercise the actual bridge functions without installing Chromium or contacting
@@ -42,9 +42,7 @@ function bridge(env = {}, overrides = {}) {
         },
         existsSync: () => true,
         createKeyedQueue,
-        gptmeLogsDir: (env, cwd) => gptmeLogsDir(env, cwd),
-        runWithReply: (name, generate, dir = gptmeLogsDir(environment)) => runWithReply(name, generate, dir),
-        settleAbandonedRun: (name, dir) => settleAbandonedRun(name, dir),
+        extractReply,
         setTimeout: (callback) => { timers.add(callback); return callback; },
         clearTimeout: (timer) => timers.delete(timer),
         spawn: (cmd, args, options) => {
@@ -56,13 +54,10 @@ function bridge(env = {}, overrides = {}) {
             child.stderr = new EventEmitter();
             child.stdout.destroy = () => { child.stdout.destroyed = true; };
             child.stderr.destroy = () => { child.stderr.destroyed = true; };
-            const name = args[args.indexOf('--name') + 1];
-            // Model the child's cwd, independently of the extraction helper.
-            const dir = resolve(options.cwd, environment.GPTME_LOGS_HOME
-                || join(environment.XDG_DATA_HOME, 'gptme', 'logs'));
-            mkdirSync(join(dir, name), { recursive: true });
-            child.answer = (content, timestamp = new Date().toISOString()) => appendFileSync(join(dir, name, 'conversation.jsonl'),
-                JSON.stringify({ role: 'assistant', content, timestamp }) + '\n');
+            child.args = args;
+            // The reply arrives on this run's own stdout, as JSONL.
+            child.answer = (content) => child.stdout.emit('data',
+                JSON.stringify({ type: 'message', role: 'assistant', content }) + '\n');
             children.push(child);
             return child;
         },
@@ -190,11 +185,13 @@ test('shutdown signals are forwarded to running agent process groups', async () 
     await run;
 });
 
-test('relative logs home is read from the subprocess workspace', async () => {
+test('gptme runs with structured JSON stdout', async () => {
     const workspace = mkdtempSync(join(tmpdir(), 'whatsapp-agent-'));
-    const { context, children } = bridge({ AGENT_WORKSPACE: workspace, GPTME_LOGS_HOME: 'logs' });
+    const { context, children } = bridge({ AGENT_WORKSPACE: workspace });
     const reply = context.callGptme('123', 'hi');
     await tick();
+    const args = children[0].args;
+    assert.equal(args[args.indexOf('--output-format') + 1], 'json');
     children[0].answer('workspace reply');
     children[0].emit('close', 0);
     assert.equal(await reply, 'workspace reply');
@@ -215,7 +212,7 @@ test('spawn failure clears the timer and releases the conversation', async () =>
     assert.deepEqual(sent, ['recovered']);
 });
 
-test('an abandoned run\'s late row cannot become the next run\'s reply', async () => {
+test('an abandoned run cannot leak text into the next run\'s reply', async () => {
     const { children, timers, sent, receive } = bridge();
     const first = receive('first');
     const second = receive('second');
@@ -225,13 +222,13 @@ test('an abandoned run\'s late row cannot become the next run\'s reply', async (
     timeout();
     const [, escalation, grace] = [...timers];
     escalation();
-    await grace();
+    grace();
     await first;
     await tick();
     assert.equal(children.length, 2);
-    // The survivor of the abandoned run appends its final text after the next
-    // run has already taken its offset.
-    children[1].answer('stale orphan answer', new Date(Date.now() - 60_000).toISOString());
+    // The abandoned run's stdout is its own: a survivor writing there cannot
+    // reach the next run, whose reply comes from its own pipe.
+    children[0].answer('stale orphan answer');
     children[1].answer('next answer');
     children[1].emit('close', 0);
     await second;

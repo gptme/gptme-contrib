@@ -24,7 +24,8 @@ alone or alongside others, or bring your own messaging system entirely:
 WhatsApp (phone) ⇄ whatsapp-web.js bridge (Node.js)
                        │ spawns per message
                        ▼
-     gptme --name whatsapp-<agent>-<sender> --non-interactive -y -- "<msg>"
+     gptme --name whatsapp-<agent>-<sender> --non-interactive -y \
+           --output-format json -- "<msg>"
   or claude -p "<msg>" --output-format text --resume whatsapp-<agent>-<sender>
                        │
                        ▼
@@ -32,7 +33,8 @@ WhatsApp (phone) ⇄ whatsapp-web.js bridge (Node.js)
 ```
 
 With the gptme backend, history persists per sender through the named gptme
-conversation. The Claude Code backend passes the same name to `--resume`;
+conversation, and the reply is read from the run's `--output-format json`
+stdout (requires a gptme with that flag, added May 2026). The Claude Code backend passes the same name to `--resume`;
 Claude Code normally expects a session ID there, so check that per-sender
 history (and replies at all) work with your Claude Code version before relying
 on it. Group chats, status broadcasts and non-text messages

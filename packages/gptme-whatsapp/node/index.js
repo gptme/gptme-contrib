@@ -25,7 +25,7 @@
 import pkg from 'whatsapp-web.js';
 const { Client, LocalAuth } = pkg;
 import qrcode from 'qrcode-terminal';
-import { gptmeLogsDir, runWithReply, settleAbandonedRun } from './gptme-log.js';
+import { extractReply } from './gptme-reply.js';
 import { spawn } from 'child_process';
 import { existsSync } from 'fs';
 import { sessionArgs, sessionName } from './claude-session.js';
@@ -142,20 +142,17 @@ async function callGptme(sender, message) {
         '--name', convName,
         '--non-interactive',
         '-y',
+        // One JSON message per line on stdout, which this run's process owns.
+        // Plain text output also carries the echoed prompt, tool calls and exit
+        // chrome; the shared conversation log can be appended by a leftover
+        // process from an earlier run.
+        '--output-format', 'json',
         '--workspace', WORKSPACE,
         '--',
         message,
     ];
 
-    // Read the reply from the conversation log, not stdout (which also carries
-    // the echoed prompt, tool calls and exit chrome). Only rows this run wrote.
-    const logsDir = gptmeLogsDir(process.env, WORKSPACE);
-    return truncate(await runWithReply(convName,
-        () => spawnAndCapture(GPTME_CMD, args, () => true,
-            // An abandoned run may still be writing its log; do not release the
-            // sender's queue until that writer has gone quiet.
-            () => settleAbandonedRun(convName, logsDir)),
-        logsDir));
+    return truncate(await spawnAndCapture(GPTME_CMD, args, extractReply));
 }
 
 /**
@@ -203,11 +200,8 @@ function signalTree(proc, signal) {
 
 /**
  * Spawn a subprocess and capture its output.
- *
- * `onAbandon` runs when a killed run still holds its pipes open; it must settle
- * anything the run may still be writing before the sender's queue is released.
  */
-function spawnAndCapture(cmd, args, responseExtractor, onAbandon = null) {
+function spawnAndCapture(cmd, args, responseExtractor) {
     return new Promise((resolve) => {
         const proc = spawn(cmd, args, {
             cwd: WORKSPACE,
@@ -272,12 +266,9 @@ function spawnAndCapture(cmd, args, responseExtractor, onAbandon = null) {
             killTimer = setTimeout(() => signalTree(proc, 'SIGKILL'), KILL_TERM_MS);
             // A process that left the group can hold the pipes open, so `close`
             // may never fire. Stop waiting, or this sender stays blocked.
-            graceTimer = setTimeout(async () => {
+            graceTimer = setTimeout(() => {
                 proc.stdout.destroy();
                 proc.stderr.destroy();
-                // Such a process can also keep writing the conversation log.
-                // Settle that before the next run takes its row offset.
-                if (onAbandon) await onAbandon();
                 finish(false);
             }, KILL_GRACE_MS);
         }, RUN_TIMEOUT_MS);
