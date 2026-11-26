@@ -764,9 +764,10 @@ class Bandit:
         If that move fails while the file still holds a mature arm, the save
         aborts: overwriting it would erase the history this path exists to keep.
 
-        Bytes that are not valid UTF-8 are kept aside too, but never abort the
-        save: nothing here can read them, so refusing would wedge every future
-        ``update()``/``decay()``/``prune()`` on a file the next write repairs.
+        Bytes that are not valid UTF-8 are kept aside too. They never *block* a
+        save on their content (nothing here can read them), but they do block
+        it if they cannot be kept aside: a file we cannot preserve must not be
+        overwritten.
         """
         try:
             raw = self.state_file.read_bytes()
@@ -792,17 +793,14 @@ class Bandit:
             try:
                 target.write_bytes(raw)
             except OSError:
-                if text is not None and _document_holds_mature_history(text):
-                    raise ValueError(
-                        f"refusing to overwrite bandit state that cannot be decoded: "
-                        f"{self.state_file} holds mature arms and could not be kept "
-                        f"aside at {target} ({e})"
-                    ) from e
-                print(
-                    f"Warning: could not keep unreadable bandit state aside ({e}); overwriting it",
-                    file=sys.stderr,
-                )
-                return
+                # Never overwrite bytes we could not preserve. If both the
+                # rename and the copy fail, the atomic write to this same
+                # directory would almost certainly fail too, so refusing does
+                # not turn a transient repair into a permanent wedge.
+                raise ValueError(
+                    f"refusing to overwrite bandit state that cannot be decoded: "
+                    f"{self.state_file} could not be kept aside at {target} ({e})"
+                ) from e
         print(
             f"Warning: kept unreadable bandit state as {target.name} "
             "(it may hold observations this reader cannot load)",
@@ -934,8 +932,13 @@ class Bandit:
         target = self._undecodable_backup_archive()
         try:
             self.backup_file.replace(target)
-        except OSError:
-            return
+        except OSError as e:
+            # Do not rotate over a backup we could not preserve; the save must
+            # abort instead of destroying bytes a richer writer could load.
+            raise ValueError(
+                f"refusing to rotate over bandit backup that cannot be decoded: "
+                f"{self.backup_file} could not be kept aside at {target} ({e})"
+            ) from e
         print(
             f"Warning: kept unparseable bandit backup as {target.name} before rotating it",
             file=sys.stderr,

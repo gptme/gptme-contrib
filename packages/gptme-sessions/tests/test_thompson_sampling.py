@@ -1527,3 +1527,20 @@ def test_both_torn_copies_are_preserved(tmp_path, capsys):
     # The primary is unloadable, so ``_backup_current`` skips rotation and the
     # torn backup is left untouched at its own path.
     assert bandit.backup_file.read_text() == torn_backup
+
+
+def test_torn_backup_that_cannot_be_kept_aside_aborts_the_save(tmp_path, monkeypatch):
+    """A backup we cannot preserve must not be rotated over (#2449)."""
+    bandit = Bandit(state_dir=tmp_path)
+    for _ in range(13):
+        bandit.update(["a"], outcome=1.0)
+    torn = '{"arms": {"a": {"arm_id": "a"'
+    bandit.backup_file.write_text(torn)
+    blocked = tmp_path / "bandit-state.json.bak.undecodable-blocked"
+    blocked.mkdir()
+    monkeypatch.setattr(Bandit, "_undecodable_backup_archive", lambda self: blocked)
+
+    with pytest.raises(ValueError, match="cannot be decoded"):
+        bandit.update(["a"], outcome=1.0)
+
+    assert bandit.backup_file.read_text() == torn
