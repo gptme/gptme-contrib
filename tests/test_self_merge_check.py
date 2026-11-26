@@ -2777,13 +2777,19 @@ def test_gptme_core_modified_existing_module_is_not_new() -> None:
     assert reasons == []
 
 
+_UNSET_CHANGED_FILES = object()
+
+
 def _evaluate_gptme_core(
     files: list[dict[str, Any]],
     file_shapes: list[dict[str, Any]],
     *,
     title: str = "fix(reduce): cache result",
     body: str = "",
+    changed_files: int | None | object = _UNSET_CHANGED_FILES,
 ) -> Any:
+    if changed_files is _UNSET_CHANGED_FILES:
+        changed_files = len(files)
     pr_data = _make_clean_pr_data(
         title=title,
         body=body,
@@ -2814,6 +2820,11 @@ def _evaluate_gptme_core(
         ),
         patch.object(
             self_merge_check, "_fetch_pr_file_shapes", return_value=file_shapes
+        ),
+        patch.object(
+            self_merge_check,
+            "_fetch_pr_changed_files_count",
+            return_value=changed_files,
         ),
     ):
         return self_merge_check.evaluate_pr(
@@ -2893,6 +2904,51 @@ def test_evaluate_pr_gptme_core_truncated_shapes_refuse_eligibility() -> None:
         },
     ]
     result = _evaluate_gptme_core(files, file_shapes)
+    assert not result.eligible
+    assert result.category is None
+    assert any("diff shape" in reason for reason in result.reasons), result.reasons
+
+
+def test_evaluate_pr_gptme_core_capped_listing_refuses_eligibility() -> None:
+    """GitHub caps `pulls/files` at 3000 entries, truncating `files` and the
+    shape read at the same point. Comparing them alone proves nothing, so the
+    independent changedFiles count must catch a capped listing."""
+    files = [
+        {"path": "gptme/util/reduce.py"},
+        {"path": "tests/test_reduce.py"},
+    ]
+    file_shapes = [
+        {
+            "path": "gptme/util/reduce.py",
+            "status": "modified",
+            "patch": "@@ -1,1 +1,2 @@\n+x = 1\n",
+            "additions": 1,
+        },
+        {
+            "path": "tests/test_reduce.py",
+            "status": "modified",
+            "patch": "@@ -1,1 +1,2 @@\n+y = 1\n",
+            "additions": 1,
+        },
+    ]
+    result = _evaluate_gptme_core(files, file_shapes, changed_files=3001)
+    assert not result.eligible
+    assert result.category is None
+    assert any("diff shape" in reason for reason in result.reasons), result.reasons
+
+
+def test_evaluate_pr_gptme_core_unknown_changed_files_refuses_eligibility() -> None:
+    """An unavailable changedFiles count is an incomplete read, not a pass."""
+    files = [{"path": "gptme/util/reduce.py"}]
+    file_shapes = [
+        {
+            "path": "gptme/util/reduce.py",
+            "status": "modified",
+            "patch": "@@ -1,1 +1,2 @@\n+x = 1\n",
+            "additions": 1,
+        }
+    ]
+    result = _evaluate_gptme_core(files, file_shapes, changed_files=None)
     assert not result.eligible
     assert result.category is None
     assert any("diff shape" in reason for reason in result.reasons), result.reasons

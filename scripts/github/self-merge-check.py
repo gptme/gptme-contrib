@@ -2830,8 +2830,46 @@ def _fetch_pr_file_shapes(repo: str, number: int) -> list[dict[str, Any]]:
     return [doc for doc in _iter_json_documents(result.stdout) if isinstance(doc, dict)]
 
 
+def _fetch_pr_changed_files_count(repo: str, number: int) -> int | None:
+    """Independent changed-file total for the diff-shape completeness check.
+
+    The `pulls/{number}/files` listing is capped at 3000 entries, so comparing
+    the shape read to `files` (same capped endpoint) cannot prove completeness.
+    `gh pr view --json changedFiles` reports the true total. Returns None when
+    the count is unavailable; callers must treat that as an incomplete read.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "gh",
+                "pr",
+                "view",
+                str(number),
+                "--repo",
+                repo,
+                "--json",
+                "changedFiles",
+                "--jq",
+                ".changedFiles",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        return int(result.stdout.strip())
+    except ValueError:
+        return None
+
+
 def _gptme_core_shapes_cover_files(
-    file_shapes: list[dict[str, Any]], files: list[str]
+    file_shapes: list[dict[str, Any]],
+    files: list[str],
+    changed_files: int | None,
 ) -> bool:
     """True when the shape read provably covers exactly the changed files.
 
@@ -2840,13 +2878,20 @@ def _gptme_core_shapes_cover_files(
     per-file diff-shape detectors can only see the shapes they were given, so
     an empty or short read would otherwise leave the sensitive-surface checks
     with nothing to inspect and the PR eligible on diff shape (fail open).
+
+    `files` and `file_shapes` come from the same capped `pulls/files` listing,
+    so matching them proves nothing on its own: a PR over GitHub's 3000-file
+    cap truncates both at the same point. `changed_files` is the independent
+    total from `gh pr view --json changedFiles`; unknown or mismatched refuses.
     """
+    if changed_files is None:
+        return False
     shape_paths = {
         str(shape.get("path", "")).replace("\\", "/").removeprefix("./")
         for shape in file_shapes
     }
     changed = {path.replace("\\", "/").removeprefix("./") for path in files}
-    return len(file_shapes) == len(files) and shape_paths == changed
+    return changed_files == len(files) == len(file_shapes) and shape_paths == changed
 
 
 def _gptme_core_unread_patches(file_shapes: list[dict[str, Any]]) -> list[str]:
@@ -4808,12 +4853,14 @@ def evaluate_pr(
             )
         else:
             file_shapes = _fetch_pr_file_shapes(repo, number)
-            if not _gptme_core_shapes_cover_files(file_shapes, files):
+            changed_files = _fetch_pr_changed_files_count(repo, number)
+            if not _gptme_core_shapes_cover_files(file_shapes, files, changed_files):
                 result.category = None
                 category_reasons.append(
                     "Could not read the complete PR diff shape "
                     f"({len(file_shapes)} shape(s) for {len(files)} changed "
-                    "file(s)); gptme/gptme eligibility requires a complete read"
+                    f"file(s); GitHub reports {changed_files}); gptme/gptme "
+                    "eligibility requires a complete read"
                 )
             elif unread := _gptme_core_unread_patches(file_shapes):
                 result.category = None
