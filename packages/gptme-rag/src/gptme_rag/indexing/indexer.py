@@ -7,7 +7,6 @@ import time
 from collections.abc import Generator, Sequence
 from contextlib import nullcontext
 from datetime import datetime
-from fnmatch import fnmatch as fnmatch_path
 from functools import lru_cache
 from logging import Filter
 from pathlib import Path
@@ -18,6 +17,7 @@ from chromadb import Collection
 from chromadb.api import ClientAPI
 from chromadb.config import Settings
 from chromadb.errors import NotFoundError
+from pathspec import GitIgnoreSpec
 from pathspec.patterns.gitignore.spec import GitIgnoreSpecPattern
 
 from ..cache import SmartRAGCache, CacheKey, CacheEntry
@@ -232,6 +232,28 @@ for logger_name in [
 
 
 logger = logging.getLogger(__name__)
+
+# Patterns always ignored when falling back to .gitignore in a non-git directory.
+# Kept separate from the global/ancestor rules so no negation can re-include them.
+_ALWAYS_IGNORED = GitIgnoreSpec.from_lines([".git", "*.sqlite3", "*.db"])
+
+
+def _compile_ignore_lines(lines: list[str], source: Path) -> GitIgnoreSpec:
+    """Compile ignore rules, skipping lines pathspec rejects, as git does."""
+    valid: list[str] = []
+    for line in lines:
+        # pathspec collapses ``abc/**/`` to ``abc/``, excluding abc itself.
+        # Git means directories *below* abc; require one descendant component.
+        if line.endswith("/**/"):
+            line = line[:-1] + "/*/"
+        try:
+            GitIgnoreSpec.from_lines([line])
+        except (ValueError, re.error) as e:
+            logger.warning(f"Skipping invalid ignore pattern {line!r} in {source}: {e}")
+        else:
+            valid.append(line)
+    return GitIgnoreSpec.from_lines(valid)
+
 
 QueryEmbeddings = list[Sequence[float]]
 
@@ -1029,66 +1051,145 @@ class Indexer:
             logger.error(f"Failed to process batch: {e}")
             raise
 
-    def _load_gitignore(self, directory: Path) -> list[str]:
-        """Load gitignore patterns from all .gitignore files up to root."""
-        patterns: list[str] = []
+    def _load_gitignore(self, directory: Path) -> list[tuple[Path, GitIgnoreSpec]]:
+        """Load gitignore rules for a non-git directory.
+
+        Each ``.gitignore`` applies relative to the directory that holds it, as in
+        git, so anchored (``/x``) and directory (``dir/``) patterns match the right
+        paths. Global patterns apply relative to ``directory``.
+
+        Returns the rule sets in **ascending precedence** order: global patterns
+        first, then ``.gitignore`` files from the outermost ancestor down to
+        ``directory``. ``_is_ignored`` walks the list in reverse so the nearest
+        ``.gitignore`` decides first, matching git's most-specific-wins rule.
+        """
+        root = directory.resolve()
+        base_lines: list[str] = []
 
         # Load global gitignore
         global_gitignore = Path.home() / ".config/git/ignore"
         if global_gitignore.exists():
             try:
-                with open(global_gitignore) as f:
-                    for line in f:
-                        line = line.strip()
-                        if line and not line.startswith("#"):
-                            patterns.append(line)
+                base_lines.extend(global_gitignore.read_text().splitlines())
             except Exception as e:
                 logger.warning(f"Error reading global gitignore: {e}")
 
-        # Essential patterns for non-git directories
-        patterns.extend(
-            [
-                ".git",
-                ".git/**",  # Ensure .git dirs are always ignored
-                "*.sqlite3",
-                "*.db",
-            ]
-        )
-        current_dir = directory.resolve()
-        max_depth = 10  # Limit traversal to avoid infinite loops
+        specs = [(root, _compile_ignore_lines(base_lines, global_gitignore))]
 
-        # Collect all .gitignore files up to root or max depth
+        # Collect .gitignore files from the ancestors, outermost first so the
+        # nearest one ends up last (highest precedence).
+        ancestors: list[tuple[Path, GitIgnoreSpec]] = []
+        current_dir = root
+        max_depth = 10  # Limit traversal to avoid infinite loops
         depth = 0
         while current_dir.parent != current_dir and depth < max_depth:
             gitignore_path = current_dir / ".gitignore"
             if gitignore_path.exists():
                 try:
-                    patterns.extend(
-                        line.strip()
-                        for line in gitignore_path.read_text().splitlines()
-                        if line.strip() and not line.startswith("#")
-                    )
+                    lines = gitignore_path.read_text().splitlines()
+                    spec = _compile_ignore_lines(lines, gitignore_path)
+                    ancestors.append((current_dir, spec))
                 except Exception as e:
                     logger.warning(f"Error reading {gitignore_path}: {e}")
             current_dir = current_dir.parent
             depth += 1
 
-        return patterns
+        specs.extend(reversed(ancestors))
+        return specs
 
-    def _is_ignored(self, file_path: Path, gitignore_patterns: list[str]) -> bool:
-        """Check if a file matches any gitignore pattern."""
+    @staticmethod
+    def _spec_decision(spec: GitIgnoreSpec, rel_path: str) -> bool | None:
+        """Return True (ignored), False (re-included) or None (no rule matches).
 
-        # Convert path to relative for pattern matching
-        rel_path = str(file_path)
+        pathspec also matches a directory rule against everything below that
+        directory. ``_is_ignored`` decides each directory itself, including the
+        scan root and its ancestors, so such a match must not decide a descendant:
+        ``!*/`` un-ignores directories, not the files inside them.
+        """
+        for pattern in reversed(spec.patterns):
+            if pattern.regex and pattern.match_file(rel_path):
+                # Where the matched directory ends, for directory matches only.
+                # ``*/`` matches at every slash, so look at all of them.
+                dir_ends = [
+                    m.end("ps_d")
+                    for m in pattern.regex.finditer(rel_path)
+                    if m.groupdict().get("ps_d")
+                ]
+                if dir_ends and len(rel_path) not in dir_ends:
+                    continue
+                # A content-only rule such as ``abc/**`` matches ``abc/``
+                # through an empty suffix, but does not exclude abc itself.
+                # Non-directory matches must also match the directory's name.
+                if (
+                    rel_path.endswith("/")
+                    and not dir_ends
+                    and not pattern.match_file(rel_path.rstrip("/"))
+                ):
+                    continue
+                # pathspec marks a plain pattern as include=True (it ignores) and a
+                # ``!`` pattern as include=False (it re-includes).
+                return pattern.include
+        return None
 
-        for pattern in gitignore_patterns:
-            if (
-                fnmatch_path(rel_path, pattern)
-                or fnmatch_path(rel_path, f"**/{pattern}")
-                or fnmatch_path(rel_path, f"**/{pattern}/**")
-            ):
+    def _decide_rel_path(
+        self,
+        rel_path: str,
+        root: Path,
+        gitignore_specs: list[tuple[Path, GitIgnoreSpec]],
+    ) -> bool | None:
+        """Decide one path against every rule set, nearest ``.gitignore`` first."""
+        for base, spec in reversed(gitignore_specs):
+            try:
+                root_rel = root.relative_to(base).as_posix()
+            except ValueError:
+                continue
+            # ``root_rel`` is the scan root relative to this rule set's directory
+            # (``.`` for the root itself), so ancestor rules see the full path.
+            spec_rel = rel_path if root_rel == "." else f"{root_rel}/{rel_path}"
+            decision = self._spec_decision(spec, spec_rel)
+            if decision is not None:
+                return decision
+        return None
+
+    def _is_ignored(
+        self, file_path: Path, gitignore_specs: list[tuple[Path, GitIgnoreSpec]]
+    ) -> bool:
+        """Check whether the loaded gitignore rule sets ignore a file."""
+        # Judge symlinks by their lexical path inside the already-resolved scan root.
+        # Resolving a parent link could move the candidate outside every rule's base.
+        path = file_path.absolute()
+        root = gitignore_specs[0][0]
+        try:
+            rel_root = path.relative_to(root).as_posix()
+        except ValueError:
+            return False
+
+        # Built-in patterns are unconditional, including when the scan root or
+        # one of its ancestors is itself excluded (e.g. scanning .git/objects).
+        # Keep the lexical path so directory symlinks cannot bypass these rules.
+        if _ALWAYS_IGNORED.match_file(path.as_posix()):
+            return True
+
+        # Decide the scan root and its loaded ancestors as directories too.
+        # This preserves exclusions above the root without letting a directory
+        # negation decide descendants (or ignoring the positive rule it cancels).
+        outermost = gitignore_specs[1][0] if len(gitignore_specs) > 1 else root
+        for directory in [root, *root.parents]:
+            if not directory.is_relative_to(outermost):
+                break
+            if self._decide_rel_path("", directory, gitignore_specs) is True:
                 return True
-        return False
+
+        # Git cannot re-include a file while its parent directory stays excluded.
+        # We enumerate files without pruning directories, so decide each prefix
+        # through the same precedence walk (a nearer `!dir/` can re-include it).
+        parts = rel_root.split("/")
+        for depth in range(1, len(parts)):
+            parent_rel = "/".join(parts[:depth]) + "/"
+            if self._decide_rel_path(parent_rel, root, gitignore_specs) is True:
+                return True
+
+        return self._decide_rel_path(rel_root, root, gitignore_specs) is True
 
     def index_directory(
         self,

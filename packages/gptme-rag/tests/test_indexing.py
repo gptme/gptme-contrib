@@ -1535,3 +1535,286 @@ def test_search_path_prefilter_pages_metadata(tmp_path, monkeypatch, count, filt
 
     assert [doc.metadata["source"] for doc in results] == ([wanted_source] if count else [])
     assert offsets == ([0] if count < 1000 else [0, 1000])
+
+
+@pytest.fixture
+def isolated_gitignore_files(tmp_path, monkeypatch):
+    """Use real test-owned ignore files, but never read host ignore rules."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    read_text = Path.read_text
+
+    def read_test_ignore(path, *args, **kwargs):
+        if path.name == ".gitignore" and not path.is_relative_to(tmp_path):
+            raise FileNotFoundError(path)
+        return read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_test_ignore)
+
+
+def test_non_git_gitignore_fallback_honours_dir_and_anchored_patterns(
+    indexer, tmp_path, isolated_gitignore_files
+):
+    """#2356 R6: `dir/` and `/x` patterns apply relative to the .gitignore's directory."""
+    root = tmp_path / "docs"
+    (root / "build").mkdir(parents=True)
+    (root / "sub" / "build").mkdir(parents=True)
+    (root / ".gitignore").write_text("build/\n/top.md\n# comment\n")
+    for rel in ["keep.md", "top.md", "sub/top.md", "build/a.md", "sub/build/b.md"]:
+        (root / rel).write_text(f"content of {rel}")
+
+    specs = indexer._load_gitignore(root)
+    ignored = {
+        rel
+        for rel in ["keep.md", "top.md", "sub/top.md", "build/a.md", "sub/build/b.md"]
+        if indexer._is_ignored(root / rel, specs)
+    }
+    # Unanchored `build/` ignores a build dir at any depth; `/top.md` only the root file.
+    assert ignored == {"top.md", "build/a.md", "sub/build/b.md"}
+
+
+def test_non_git_gitignore_plain_directory_patterns_and_builtins(
+    indexer, tmp_path, isolated_gitignore_files
+):
+    """A slash-less pattern excludes a directory's contents; `.git` is always excluded."""
+    root = tmp_path / "docs"
+    root.mkdir()
+    (root / ".gitignore").write_text("node_modules\ncache\n")
+    expected = {
+        "node_modules/foo.js": True,
+        "cache/foo.txt": True,
+        ".git/config": True,
+        "src/app.js": False,
+    }
+    for rel in expected:
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x")
+
+    specs = indexer._load_gitignore(root)
+    for rel, ignored in expected.items():
+        assert indexer._is_ignored(root / rel, specs) is ignored, rel
+
+
+def test_non_git_gitignore_from_a_parent_applies_relative_to_that_parent(
+    indexer, tmp_path, isolated_gitignore_files
+):
+    (tmp_path / ".gitignore").write_text("/docs/private/\n")
+    root = tmp_path / "docs"
+    (root / "private").mkdir(parents=True)
+    (root / "private" / "x.md").write_text("secret")
+    (root / "public.md").write_text("public")
+
+    specs = indexer._load_gitignore(root)
+    assert indexer._is_ignored(root / "private" / "x.md", specs)
+    assert not indexer._is_ignored(root / "public.md", specs)
+
+
+def test_non_git_gitignore_closer_negation_overrides_ancestor_rule(
+    tmp_path, isolated_gitignore_files
+):
+    """Git's most-specific-wins: a nearer `!x` beats an outer ignore, not vice versa."""
+    indexer = object.__new__(Indexer)
+    (tmp_path / ".gitignore").write_text("*.md\n")
+    root = tmp_path / "docs"
+    root.mkdir()
+    (root / ".gitignore").write_text("!keep.md\n")
+    (root / "keep.md").write_text("keep")
+    (root / "drop.md").write_text("drop")
+
+    specs = indexer._load_gitignore(root)
+    assert not indexer._is_ignored(root / "keep.md", specs)
+    assert indexer._is_ignored(root / "drop.md", specs)
+
+
+def test_non_git_gitignore_global_negation_does_not_override_local_ignore(
+    tmp_path, isolated_gitignore_files
+):
+    """The global ignore file has the lowest precedence, as in git."""
+    indexer = object.__new__(Indexer)
+    home = Path.home()
+    (home / ".config" / "git").mkdir(parents=True, exist_ok=True)
+    (home / ".config" / "git" / "ignore").write_text("!*.md\n")
+    root = tmp_path / "docs"
+    root.mkdir()
+    (root / ".gitignore").write_text("*.md\n")
+    (root / "notes.md").write_text("notes")
+
+    specs = indexer._load_gitignore(root)
+    assert indexer._is_ignored(root / "notes.md", specs)
+
+
+@pytest.mark.parametrize(
+    ("rules", "ignored"),
+    [
+        pytest.param("*\n!sub/keep.md\n", True, id="excluded-parent"),
+        pytest.param("*\n!sub/\n!sub/keep.md\n", False, id="reincluded-parent"),
+    ],
+)
+def test_non_git_gitignore_negation_cannot_reinclude_under_excluded_directory(
+    tmp_path, isolated_gitignore_files, rules, ignored
+):
+    indexer = object.__new__(Indexer)  # Ignore matching needs no database or embeddings.
+    root = tmp_path / "docs"
+    (root / "sub").mkdir(parents=True)
+    (root / ".gitignore").write_text(rules)
+    file_path = root / "sub" / "keep.md"
+    file_path.write_text("content")
+
+    specs = indexer._load_gitignore(root)
+    assert indexer._is_ignored(file_path, specs) is ignored
+
+
+def test_non_git_gitignore_matches_symlink_directory_by_lexical_path(
+    tmp_path, isolated_gitignore_files
+):
+    indexer = object.__new__(Indexer)
+    root = tmp_path / "docs"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.md").write_text("secret")
+    (outside / "cache.db").write_text("database")
+    (root / "private").symlink_to(outside, target_is_directory=True)
+    (root / ".gitignore").write_text("private/\n")
+
+    specs = indexer._load_gitignore(root)
+    assert indexer._is_ignored(root / "private" / "secret.md", specs)
+    assert indexer._is_ignored(root / "private" / "cache.db", specs)
+    # Built-in rules must still apply without the explicit private/ rule.
+    (root / ".gitignore").write_text("")
+    specs = indexer._load_gitignore(root)
+    assert indexer._is_ignored(root / "private" / "cache.db", specs)
+    assert not indexer._is_ignored(root / "private" / "secret.md", specs)
+
+
+@pytest.mark.parametrize(
+    ("rules", "rel", "ignored"),
+    [
+        ("*\n!*/\n!*.md\n", "sub/notes.txt", True),
+        ("*\n!*/\n!*.md\n", "sub/deep/x.md", False),
+        ("*\n!sub/\n", "sub/notes.txt", True),
+        ("*.txt\n!sub/\n", "sub/deep/x.txt", True),
+    ],
+)
+def test_non_git_gitignore_negated_dir_does_not_reinclude_files(
+    tmp_path, isolated_gitignore_files, rules, rel, ignored
+):
+    indexer = object.__new__(Indexer)  # Ignore matching needs no database or embeddings.
+    root = tmp_path / "root"
+    file_path = root / rel
+    file_path.parent.mkdir(parents=True)
+    file_path.write_text("x")
+    (root / ".gitignore").write_text(rules)
+
+    specs = indexer._load_gitignore(root)
+
+    assert indexer._is_ignored(file_path, specs) is ignored
+
+
+@pytest.mark.parametrize("scan_prefix", ["docs", "outer/docs"])
+@pytest.mark.parametrize(
+    ("rules", "ignored"),
+    [
+        ("*\n!*/\n!*.md\n", {"notes.txt", "sub/notes.txt"}),
+        ("*\n!docs/\n", {"notes.txt", "keep.md", "sub/notes.txt", "sub/keep.md"}),
+        ("docs/\n", {"notes.txt", "keep.md", "sub/notes.txt", "sub/keep.md"}),
+        ("docs/\n!docs/\n", set()),
+    ],
+)
+def test_non_git_gitignore_ancestor_directory_negation_does_not_reinclude_files(
+    tmp_path, isolated_gitignore_files, scan_prefix, rules, ignored
+):
+    """Re-including the scan root does not re-include files below that boundary."""
+    indexer = object.__new__(Indexer)
+    (tmp_path / ".gitignore").write_text(rules)
+    root = tmp_path / scan_prefix
+    files = ["notes.txt", "keep.md", "sub/notes.txt", "sub/keep.md"]
+    for rel in files:
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x")
+
+    specs = indexer._load_gitignore(root)
+
+    assert {rel for rel in files if indexer._is_ignored(root / rel, specs)} == ignored
+
+
+@pytest.mark.parametrize("scan_prefix", ["", "abc", "abc/sub"])
+@pytest.mark.parametrize("pattern", ["abc/**", "abc/**/*"])
+def test_non_git_gitignore_content_only_rule_keeps_parent_traversable(
+    tmp_path, isolated_gitignore_files, scan_prefix, pattern
+):
+    """Ignoring contents does not exclude the directory needed by a file negation."""
+    indexer = object.__new__(Indexer)
+    (tmp_path / ".gitignore").write_text(f"{pattern}\n!abc/sub/\n!abc/keep.md\n!abc/sub/keep.md\n")
+    files = ["abc/keep.md", "abc/drop.md", "abc/sub/keep.md", "abc/sub/drop.md"]
+    for rel in files:
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x")
+    root = tmp_path / scan_prefix
+    specs = indexer._load_gitignore(root)
+
+    for rel in files:
+        path = tmp_path / rel
+        if path.is_relative_to(root):
+            assert indexer._is_ignored(path, specs) is (path.name == "drop.md"), rel
+
+
+@pytest.mark.parametrize("scan_prefix", ["", "abc", "abc/sub"])
+@pytest.mark.parametrize("negation", ["", "!abc/\n!abc/keep.md\n"])
+def test_non_git_gitignore_directory_contents_rule_does_not_exclude_parent(
+    tmp_path, isolated_gitignore_files, scan_prefix, negation
+):
+    """abc/**/ excludes subdirectories, not abc itself or its direct files."""
+    indexer = object.__new__(Indexer)
+    (tmp_path / ".gitignore").write_text(f"abc/**/\n{negation}")
+    files = ["abc/keep.md", "abc/sub/keep.md"]
+    for rel in files:
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x")
+    root = tmp_path / scan_prefix
+    specs = indexer._load_gitignore(root)
+
+    for rel in files:
+        path = tmp_path / rel
+        if path.is_relative_to(root):
+            assert indexer._is_ignored(path, specs) is ("sub" in path.parts), rel
+
+
+@pytest.mark.parametrize("scan_prefix", [".git", ".git/objects", "cache.db/nested"])
+def test_non_git_gitignore_builtins_cover_scan_root_and_ancestors(
+    tmp_path, isolated_gitignore_files, scan_prefix
+):
+    """An explicitly selected scan root cannot bypass unconditional exclusions."""
+    indexer = object.__new__(Indexer)
+    root = tmp_path / "project" / scan_prefix
+    root.mkdir(parents=True)
+    (root / ".gitignore").write_text("!*\n")
+    file_path = root / "config"
+    file_path.write_text("private configuration")
+
+    assert indexer._is_ignored(file_path, indexer._load_gitignore(root))
+
+
+@pytest.mark.parametrize("bad_line", ["trailing\\", "!", "[z-a]"])
+def test_non_git_gitignore_skips_only_the_invalid_line(
+    tmp_path, isolated_gitignore_files, bad_line
+):
+    """One untranslatable line must not abort loading or drop the file's other rules."""
+    indexer = object.__new__(Indexer)  # Ignore matching needs no database or embeddings.
+    global_ignore = tmp_path / "home" / ".config" / "git" / "ignore"
+    global_ignore.parent.mkdir(parents=True)
+    global_ignore.write_text(f"{bad_line}\n*.log\n")
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / ".gitignore").write_text(f"secrets/\n{bad_line}\n*.key\n")
+
+    specs = indexer._load_gitignore(root)
+
+    for rel in ["secrets/token.md", "id.key", "debug.log"]:
+        assert indexer._is_ignored(root / rel, specs), rel
+    assert not indexer._is_ignored(root / "public.md", specs)
