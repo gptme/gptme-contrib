@@ -231,17 +231,23 @@ def _redact_url_credential_token(token: str) -> str:
     if at <= 0:
         return token
     colon = token.find(":", 0, at)
-    # Skip a scheme delimiter when another colon separates user/password.
-    # Otherwise the token is ambiguous (bob://password@host versus ssh://git@host):
-    # redact conservatively rather than publish a schemeless password.
-    if colon != -1 and token.startswith("//", colon + 1):
-        user_colon = token.find(":", colon + 3, at)
+    # Only recognized schemes disambiguate username://password from a URL.
+    # For unknown schemes, retain the first colon as the password boundary.
+    scheme = token[:colon].lower()
+    if (
+        colon != -1
+        and token.startswith("//", colon + 1)
+        and scheme in {"http", "https", "ssh", "git", "ftp", "ftps"}
+    ):
+        first_at = token.find("@", colon + 3)
+        user_colon = token.find(":", colon + 3, first_at)
         if user_colon != -1:
             colon = user_colon
-        elif token[:colon].lower() in {"http", "https", "ssh", "git", "ftp", "ftps"}:
-            # A path @ (e.g. npm scopes) is not userinfo. SSH/git usernames
-            # are public identifiers; HTTP/FTP userinfo may instead be a token.
-            if "/" in token[colon + 3 : at] or token[:colon].lower() in {"ssh", "git"}:
+        else:
+            # Check the FIRST @ for path scopes, not a later @ in the path.
+            # Still redact through the last marker: raw @ and / in passwords
+            # are ambiguous, so sacrificing path detail is safer than leaking.
+            if "/" in token[colon + 3 : first_at] or scheme in {"ssh", "git"}:
                 return token
             return token[: colon + 3] + "[REDACTED]" + token[at:]
     if colon == -1 or colon + 1 == at:
