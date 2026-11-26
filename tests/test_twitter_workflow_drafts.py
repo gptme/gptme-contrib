@@ -3150,6 +3150,33 @@ def test_expire_review_drafts_continues_past_a_draft_that_fails(
     assert (workflow_module.REJECTED_DIR / other.name).exists()
 
 
+def test_expire_review_drafts_counts_a_moved_draft_as_expired_when_stamping_fails(
+    workflow_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A post-move failure must not report the draft as still parked.
+
+    Once move_draft() has unlinked the review/ file the draft is out of the
+    queue, so a failed reason stamp cannot leave it counted as remaining: no
+    later cycle revisits rejected/, and the count would hide the loss.
+    """
+    _set_status_dirs(workflow_module, tmp_path)
+    path = _save_review_draft(workflow_module, "tweet_a.yml", datetime(2026, 10, 1))
+    real_load = workflow_module.TweetDraft.load
+
+    def load(target: Path) -> Any:
+        if target.parent == workflow_module.REJECTED_DIR:
+            raise OSError("disk full while stamping the reason")
+        return real_load(target)
+
+    monkeypatch.setattr(workflow_module.TweetDraft, "load", staticmethod(load))
+
+    result = workflow_module.expire_review_drafts(7, now=datetime(2026, 11, 25))
+
+    assert result == (1, 0)
+    assert not path.exists()
+    assert (workflow_module.REJECTED_DIR / path.name).exists()
+
+
 @pytest.mark.parametrize(
     ("configured", "expired"),
     [

@@ -849,18 +849,28 @@ def expire_review_drafts(
             )
             if dry_run:
                 console.print(f"[yellow]Would expire {path.name}: {reason}")
-            else:
-                # Move first, then stamp the reason on the moved copy: a failed
-                # move must leave the review/ file (and its mtime) untouched so
-                # the next cycle retries instead of restarting the clock.
-                moved = move_draft(path, "rejected")
+                expired += 1
+                continue
+            # Move first, then stamp the reason on the moved copy: a failed move
+            # must leave the review/ file (and its mtime) untouched so the next
+            # cycle retries instead of restarting the clock.
+            moved = move_draft(path, "rejected")
+            # The draft has left review/ now, so it counts as expired even if
+            # stamping the reason fails. Counting it as still parked would hide
+            # it from the summary forever: nothing revisits rejected/.
+            expired += 1
+            try:
                 moved_draft = TweetDraft.load(moved)
                 moved_draft.reject_reason = reason
                 moved_draft.save(moved)
                 console.print(
                     f"[yellow]Expired {path.name} -> {moved.parent.name}/: {reason}"
                 )
-            expired += 1
+            except Exception as e:
+                console.print(
+                    f"[red]Expired {path.name} -> {moved.parent.name}/ but could "
+                    f"not record the reason: {e}"
+                )
         except Exception as e:
             console.print(f"[red]Could not expire review draft {path.name}: {e}")
             remaining += 1
