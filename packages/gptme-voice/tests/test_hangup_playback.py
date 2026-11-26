@@ -1,7 +1,7 @@
 """Regression coverage for terminating a call only after farewell playback."""
 
 import asyncio
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from gptme_voice.realtime import server as server_module
@@ -334,24 +334,61 @@ def test_response_callbacks_preserve_legacy_positional_transcript_arguments():
     assert client.on_response_end is None
 
 
-def test_late_transcript_after_interruption_does_not_rearm_hangup():
-    """``response_started`` must not clear ``interrupted`` without a new turn."""
+@pytest.mark.parametrize("trigger", ["tool", "transcript"])
+def test_interrupted_response_cannot_rearm_hangup(trigger):
+    from gptme_voice.realtime.playback import TwilioPlayback
+    from gptme_voice.realtime.server import TranscriptTurn
+
+    async def run():
+        playback = TwilioPlayback(PlaybackSocket(), "MZ-test")
+        on_ai, on_user, on_hangup = VoiceServer(
+            openai_api_key="test"
+        )._make_transcript_callbacks(
+            transcript=[TranscriptTurn(role="user", text="Goodbye")],
+            websocket=playback.websocket,
+            source="twilio",
+            call_sid="CA-test",
+            playback=playback,
+        )
+
+        async def fire():
+            if trigger == "tool":
+                await on_hangup("goodbye")
+            else:
+                await on_ai("I'll hang up now.")
+
+        playback.response_started()
+        playback.cancel_hangup()
+        # A late transcription of the caller's speech does not make the
+        # interrupted response's own events eligible again.
+        on_user("bye", "item-1")
+        await fire()
+        assert playback.hangup_task is None
+
+    asyncio.run(run())
+
+
+def test_transcription_after_next_response_start_keeps_fallback(monkeypatch):
+    """Input transcription is asynchronous and often follows response.created."""
 
     from gptme_voice.realtime.playback import TwilioPlayback
 
     async def run():
         playback = TwilioPlayback(PlaybackSocket(), "MZ-test")
-        playback.cancel_hangup()
-        assert playback.interrupted is True
-
-        # A new provider response alone (late transcript of the interrupted
-        # response) must not clear the interruption.
+        server = VoiceServer(openai_api_key="test")
+        monkeypatch.setattr(server, "_schedule_hangup", AsyncMock())
+        on_ai, on_user, _ = server._make_transcript_callbacks(
+            transcript=[],
+            websocket=playback.websocket,
+            source="twilio",
+            call_sid="CA-test",
+            playback=playback,
+        )
+        playback.cancel_hangup()  # speech_started for the caller's "bye"
         playback.response_started()
-        assert playback.interrupted is True
-
-        # Only an actual new caller turn re-arms hangup.
-        playback.user_turn_started()
-        playback.response_started()
-        assert playback.interrupted is False
+        on_user("bye", "item-1")
+        await on_ai("I'll hang up now.")
+        assert playback.hangup_task is not None
+        await playback.hangup_task
 
     asyncio.run(run())

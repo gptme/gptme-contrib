@@ -629,8 +629,8 @@ class OpenAIRealtimeClient:
                     "Do not ask for confirmation; the caller's goodbye is the "
                     "confirmation. Do not announce 'I'll end the call now' without "
                     "calling the tool in the same turn. Say a brief farewell first if "
-                    "you like — the call drops a few seconds after the tool fires so "
-                    "your goodbye still reaches the caller. Do not use this tool to "
+                    "you like, in the same response — the server lets your goodbye "
+                    "finish before ending the call. Do not use this tool to "
                     "interrupt ongoing work or avoid a question."
                 ),
                 "parameters": {

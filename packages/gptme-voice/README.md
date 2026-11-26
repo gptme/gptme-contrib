@@ -143,8 +143,12 @@ termination path. The server lets the current response finish, then waits for
 Twilio to echo a playback `mark` before completing the call through REST and
 closing the WebSocket. There is no fixed pause after a successful acknowledgement.
 Caller speech cancels a pending farewell hangup before clearing queued audio;
-marks returned by `clear` do not prove playback. Stop/disconnect cancels pending
-teardown, including late provider events during transcript draining.
+marks returned by `clear` do not prove playback. Until the provider starts its
+next response, tool and transcript hangup triggers are ignored, because they
+belong to the response the caller spoke over. A Twilio `stop` cancels pending
+teardown, including late provider events during transcript draining. A stream
+that drops without `stop` while a hangup is pending still completes the call
+through REST.
 
 A missing response-completion event or mark is bounded by a 30-second total
 wait. The server then logs playback as **unconfirmed** and terminates anyway,

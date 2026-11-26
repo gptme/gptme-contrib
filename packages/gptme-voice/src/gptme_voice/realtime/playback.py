@@ -22,10 +22,9 @@ class TwilioPlayback:
         self.websocket = websocket
         self.stream_sid = stream_sid
         self.hangup_task: asyncio.Task[None] | None = None
+        # Set by caller speech, cleared when the provider starts its next
+        # response. Until then, hangup triggers belong to the interrupted one.
         self.interrupted = False
-        # True once a new caller turn arrives after an interruption, so a
-        # subsequent provider response may legitimately re-arm hangup.
-        self._user_turn_after_interrupt = False
         self.terminating = False
         self.stopped = False
         # The media stream dropped without Twilio's ``stop``: playback can no
@@ -40,18 +39,12 @@ class TwilioPlayback:
         self._played = asyncio.Event()
 
     def response_started(self) -> None:
-        # Only clear ``interrupted`` for a genuinely new turn. Clearing it on
-        # every response start would let a late transcript from the response
-        # the caller interrupted re-arm a hangup and end the call.
-        if self._user_turn_after_interrupt:
-            self.interrupted = False
-            self._user_turn_after_interrupt = False
+        # The provider runs one response at a time, so every late event of an
+        # interrupted response precedes this one. Do not wait for the caller's
+        # transcript here: it is asynchronous and often arrives afterwards.
+        self.interrupted = False
         self._revision += 1
         self._response_done.clear()
-
-    def user_turn_started(self) -> None:
-        """Record that the caller has taken a new turn after an interruption."""
-        self._user_turn_after_interrupt = True
 
     def response_finished(self) -> None:
         self._response_done.set()
@@ -65,7 +58,6 @@ class TwilioPlayback:
 
     def cancel_hangup(self) -> None:
         self.interrupted = True
-        self._user_turn_after_interrupt = False
         if self.hangup_task is not None and not self.terminating:
             self.hangup_task.cancel()
         # A clear echo must not satisfy a later farewell's mark.

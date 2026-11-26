@@ -237,7 +237,11 @@ def test_speech_invalidates_clear_echo_and_late_farewell_then_stop_cleans_up(
             assert (await websocket.next_event("clear"))["streamSid"] == "MZtest"
             await _farewell(client)  # Late transcript from the interrupted response.
             await _hangup(client)  # Late tool completion must not re-arm termination.
+            await _provider(client, "response.done", response={"status": "cancelled"})
             await websocket.receive_event({"event": "mark", "mark": old_mark["mark"]})
+            # A re-armed hangup would send its own mark straight away.
+            await asyncio.sleep(0)
+            assert sum(m["event"] == "mark" for m in websocket.messages) == 1
             assert not any(kind == "rest" for kind, _ in timeline)
             assert not websocket.closed
             await _provider(client, "response.created")
