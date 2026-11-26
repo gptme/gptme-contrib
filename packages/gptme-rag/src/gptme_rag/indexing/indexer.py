@@ -7,7 +7,6 @@ import time
 from collections.abc import Generator, Sequence
 from contextlib import nullcontext
 from datetime import datetime
-from fnmatch import fnmatch as fnmatch_path
 from functools import lru_cache
 from logging import Filter
 from pathlib import Path
