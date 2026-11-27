@@ -1464,7 +1464,8 @@ def read(message_id: str, thread: bool, mailbox: str | None) -> None:
     try:
         # Pass the resolved filename: the caller's id may be a stem or a prefix
         # that the transport's exact lookup would reject.
-        click.echo(transport.read(msg_path.name, include_thread=thread))
+        local_id = msg_path.relative_to(transport.inbox.resolve()).as_posix()
+        click.echo(transport.read(local_id, include_thread=thread))
     except FileNotFoundError as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
@@ -1514,9 +1515,10 @@ def reply(message_id: str, content: str | None, mailbox: str | None) -> None:
         deliver=_ssh_deliver(agents, mailbox=mailbox_name),
         mailbox=mailbox_name,
     )
+    local_id = msg_path.relative_to(transport.inbox.resolve()).as_posix()
     # Hold the lock from the replied re-check until replied:true is stamped, so
     # a concurrent session replying to the same message sees the stamp.
-    with _send_lock(transport, f"reply:{msg_path.name}"):
+    with _send_lock(transport, f"reply:{local_id}"):
         original = meta_of(msg_path)
         if original is None:
             click.echo(f"Error: message not found: {message_id}", err=True)
@@ -1538,7 +1540,7 @@ def reply(message_id: str, content: str | None, mailbox: str | None) -> None:
             subject = f"Re: {subject}"
         # The inbox filename is local; receive-only peers retain the sender's
         # original ID in frontmatter for reply links across the wire.
-        parent_id = str(original.get("message_id") or msg_path.name)
+        parent_id = str(original.get("message_id") or local_id)
         reply_id = transport.send(recipient, subject, body, reply_to=parent_id)
         if _delivery_failed(reply_id, mailbox=mailbox_name):
             click.echo(
@@ -1547,7 +1549,7 @@ def reply(message_id: str, content: str | None, mailbox: str | None) -> None:
                 err=True,
             )
             sys.exit(1)
-        _track_sent(transport, reply_id, reply_to=parent_id, local_reply_to=msg_path.name)
+        _track_sent(transport, reply_id, reply_to=parent_id, local_reply_to=local_id)
         _mark_replied(msg_path)
     click.echo(f"Replied to {recipient}: {subject}")
 

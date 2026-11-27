@@ -3070,3 +3070,33 @@ def test_prefix_reports_unreadable_mailbox(
     result = CliRunner().invoke(agent, ["ack", "missing"])
     assert result.exit_code == 1
     assert "Cannot read" in result.output and "Permission denied" in result.output
+
+
+@pytest.mark.parametrize("use_symlink", [False, True])
+def test_nested_message_keeps_relative_id(workspace: Path, use_symlink: bool) -> None:
+    inbox = workspace / "messages" / "inbox"
+    name = _seed_inbox(workspace, subject="nested")
+    nested = inbox / "sub" / name
+    nested.parent.mkdir()
+    (inbox / name).rename(nested)
+    reference = f"sub/{name}"
+    if use_symlink:
+        (inbox / "alias.md").symlink_to(nested)
+        reference = "alias.md"
+    result = CliRunner().invoke(agent, ["read", reference])
+    assert result.exit_code == 0, result.output
+    assert "nested" in result.output
+    tracker = ConversationTracker(workspace / "messages" / ".tracking")
+    tracker.track_message("agent:alice|bob", f"sub/{name}", channel="agent")
+    result = CliRunner().invoke(agent, ["reply", reference, "thanks"])
+    assert result.exit_code == 0, result.output
+    assert _frontmatter(_only_outbox_msg(workspace))["in_reply_to"] == f"sub/{name}"
+    state = tracker.get_message_state("agent:alice|bob", f"sub/{name}")
+    assert state is not None and state.state == MessageState.COMPLETED
+
+
+def test_exact_filename_precedes_stem_expansion(workspace: Path) -> None:
+    inbox = workspace / "messages" / "inbox"
+    _write_local(inbox, "target", {"subject": "exact"})
+    _write_local(agent_cli._mailbox_root("ops") / "inbox", "target.md", {"subject": "stem"})
+    assert agent_cli._resolve_message("target") == ("default", inbox / "target")
