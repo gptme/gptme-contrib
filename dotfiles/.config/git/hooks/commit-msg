@@ -19,15 +19,61 @@ REASONING_TAGS = frozenset({b"<think>", b"</think>"})
 # Any indentation: a fence nested in a list is still an example, and a
 # misread fence can only let a commit through, never reject one.
 _FENCE = re.compile(rb"[ \t]*(`{3,}|~{3,})(.*)")
+_SCISSORS = re.compile(rb"(\S) -{24} >8 -{24}")
+_HUNK = re.compile(rb"@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@.*")
+
+
+def _verbose_diff_follows(lines: list[bytes], scissors: int) -> bool:
+    """True when a scissors line is followed by a verbose-shaped diff block.
+
+    Git writes the scissors line, its own comment lines, then ``diff --git``.
+    Its unchanged context lines (`` <think>``) would otherwise strip to a bare
+    tag. This shape alone does not prove Git will discard the suffix.
+    """
+    marker = _SCISSORS.fullmatch(lines[scissors])
+    if marker is None:
+        return False
+
+    for line in lines[scissors + 1 :]:
+        if line.startswith(b"diff --git "):
+            return True
+        if line.startswith(marker[1]):
+            continue
+        return False
+    return False
 
 
 def stray_tag_lines(content: bytes) -> list[int]:
     """1-based line numbers of bare reasoning tags outside fenced blocks."""
     found: list[int] = []
     fence: bytes | None = None
-    # Scan past scissors-shaped lines too: commit-msg is not told whether
-    # Git will discard that suffix. Real diff lines carry a diff prefix.
-    for number, line in enumerate(content.splitlines(), start=1):
+    lines = content.splitlines()
+    # Diff context has a single-space prefix. Ignore that prefix only inside
+    # a scissors/diff block, but keep checking unprefixed tags: -m can retain
+    # diff-shaped text, and GIT_EDITOR=: is also a valid explicit editor.
+    in_diff = False
+    old_left = new_left = 0
+    for number, line in enumerate(lines, start=1):
+        if fence is None and _verbose_diff_follows(lines, number - 1):
+            in_diff = True
+        hunk = _HUNK.fullmatch(line) if in_diff else None
+        if hunk:
+            old_left = int(hunk[1]) if hunk[1] is not None else 1
+            new_left = int(hunk[2]) if hunk[2] is not None else 1
+        elif old_left or new_left:
+            if line.startswith(b" ") and old_left and new_left:
+                old_left -= 1
+                new_left -= 1
+                continue
+            if line.startswith(b"-") and old_left:
+                old_left -= 1
+            elif line.startswith(b"+") and new_left:
+                new_left -= 1
+            elif not line.startswith(b"\\"):
+                old_left = new_left = 0
+        if not line:
+            in_diff = False
+            old_left = new_left = 0
         marker = _FENCE.fullmatch(line)
         if fence is not None:
             if (
