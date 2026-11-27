@@ -43,4 +43,6 @@
   entry: file-size-ratchet
   language: python
   types: [text]
+  require_serial: true
+  always_run: true
   additional_dependencies: []

@@ -190,10 +190,15 @@ def check(paths: list[str], baseline_path: Path, default_threshold: int) -> int:
             files[rel] = lines
             changed = True
 
-    # Entries whose file is gone (deleted or renamed) are dropped.
-    for rel in [p for p in files if not Path(p).exists()]:
-        del files[rel]
-        changed = True
+    # A missing working-tree file may merely be outside a sparse checkout.
+    # Drop only paths also absent from the index (deleted or renamed).
+    missing = [p for p in files if not Path(p).exists()]
+    if missing:
+        tracked = set(tracked_files())
+        for rel in missing:
+            if rel not in tracked:
+                del files[rel]
+                changed = True
 
     if changed and baseline_path.exists():
         save_baseline(baseline_path, data)

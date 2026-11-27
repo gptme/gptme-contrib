@@ -84,6 +84,29 @@ def test_deleted_file_entry_is_dropped(repo):
     assert read_baseline()["files"] == {"big.py": 15}
 
 
+def test_sparse_checkout_missing_tracked_file_keeps_ceiling(repo):
+    baseline({"big.py": 15})
+    write("big.py", 15)
+    subprocess.run(["git", "add", "big.py"], check=True)
+    subprocess.run(["git", "update-index", "--skip-worktree", "big.py"], check=True)
+    Path("big.py").unlink()
+    assert ratchet.main([]) == 0
+    assert read_baseline()["files"] == {"big.py": 15}
+
+
+def test_hook_registrations_serialize_and_run_deletion_cleanup():
+    import yaml
+
+    shared = yaml.safe_load((REPO_ROOT / ".pre-commit-hooks.yaml").read_text())
+    local = yaml.safe_load((REPO_ROOT / ".pre-commit-config.yaml").read_text())
+    hooks = [*shared, *(h for repo in local["repos"] for h in repo["hooks"])]
+    ratchets = [h for h in hooks if h["id"] == "file-size-ratchet"]
+    assert len(ratchets) == 2
+    for hook in ratchets:
+        assert hook.get("require_serial") is True
+        assert hook.get("always_run") is True
+
+
 def test_non_code_and_excluded_files_are_ignored(repo):
     baseline({}, exclude=["gen/*.py"])
     paths = [
