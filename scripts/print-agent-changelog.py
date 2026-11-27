@@ -25,7 +25,7 @@ CHANGELOG = "CHANGELOG.md"
 ACTIONS = ("none", "optional", "recommended", "required")
 RANK = {name: i for i, name in enumerate(ACTIONS)}
 HEADING = re.compile(r"^## (\d{4}-\d{2}-\d{2})\s+[—–-]\s+(.+)$")
-ACTION = re.compile(r"^\s*-\s+\*\*Action:\*\*\s+(\w+)\s*$", re.IGNORECASE)
+ACTION = re.compile(r"^\s*-\s+\*\*Action:\*\*\s+(.+?)\s*$", re.IGNORECASE)
 DO = re.compile(r"^\s*-\s+\*\*Do:\*\*\s+(.+)$", re.IGNORECASE)
 
 
@@ -41,8 +41,21 @@ class Entry:
         return (self.date, self.title)
 
 
+def normalize_action(raw: str) -> str:
+    """First token of an Action line, with wrapping backticks stripped."""
+    token = raw.strip().strip("`")
+    if not token:
+        return ""
+    return token.split()[0].strip("`").lower()
+
+
 def parse_entries(text: str) -> list[Entry]:
-    """Parse dated changelog entries; ignore prose and the format example."""
+    """Parse dated changelog entries; ignore prose and the format example.
+
+    A dated heading with a missing Do, a missing Action, or an Action that is
+    not optional/recommended/required raises RuntimeError. Silent drops look
+    like a code-only bump to callers.
+    """
     entries: list[Entry] = list()
     current: dict[str, str] | None = None
 
@@ -50,10 +63,16 @@ def parse_entries(text: str) -> list[Entry]:
         nonlocal current
         if current is None:
             return
-        action = current.get("action", "")
+        label = f"{current['date']} - {current['title']}"
+        action = current.get("action")
         body = current.get("do", "").strip()
-        if action in RANK and action != "none" and body:
-            entries.append(Entry(current["date"], current["title"], action, body))
+        if action is None:
+            raise RuntimeError(f"{label}: missing Action")
+        if action not in RANK or action == "none":
+            raise RuntimeError(f"{label}: unparseable Action {action!r}")
+        if not body:
+            raise RuntimeError(f"{label}: missing Do")
+        entries.append(Entry(current["date"], current["title"], action, body))
         current = None
 
     for line in text.splitlines():
@@ -66,7 +85,7 @@ def parse_entries(text: str) -> list[Entry]:
             continue
         action_match = ACTION.match(line)
         if action_match:
-            current["action"] = action_match.group(1).lower()
+            current["action"] = normalize_action(action_match.group(1))
             continue
         do_match = DO.match(line)
         if do_match:

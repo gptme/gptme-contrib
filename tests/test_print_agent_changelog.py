@@ -68,7 +68,16 @@ def commit(repo: Path, path: str, content: str, message: str = "test") -> str:
     file.parent.mkdir(parents=True, exist_ok=True)
     file.write_text(content)
     git(repo, "add", "--", path)
-    git(repo, "-c", "core.hooksPath=/dev/null", "commit", "-qm", message)
+    git(
+        repo,
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "-qm",
+        message,
+    )
     return git(repo, "rev-parse", "HEAD")
 
 
@@ -106,6 +115,43 @@ def test_filter_defaults_to_recommended():
     assert [e.action for e in kept] == ["required", "recommended"]
 
 
+def test_normalize_action_strips_backticks_and_trailing_notes():
+    assert mod.normalize_action("`required`") == "required"
+    assert mod.normalize_action("recommended (breaking)") == "recommended"
+
+
+def test_backticked_action_parses():
+    text = (
+        "## 2026-11-27 - hook\n\n"
+        "- **Action:** `required`\n"
+        "- **Do:** Install the guard.\n"
+    )
+    entries = mod.parse_entries(text)
+    assert entries[0].action == "required"
+
+
+def test_unparseable_action_is_an_error():
+    text = (
+        "## 2026-11-27 - hook\n\n"
+        "- **Action:** requried\n"
+        "- **Do:** Install the guard.\n"
+    )
+    with pytest.raises(RuntimeError, match="unparseable Action"):
+        mod.parse_entries(text)
+
+
+def test_missing_do_is_an_error():
+    text = "## 2026-11-27 - hook\n\n- **Action:** required\n"
+    with pytest.raises(RuntimeError, match="missing Do"):
+        mod.parse_entries(text)
+
+
+def test_missing_action_is_an_error():
+    text = "## 2026-11-27 - hook\n\n- **Do:** Install the guard.\n"
+    with pytest.raises(RuntimeError, match="missing Action"):
+        mod.parse_entries(text)
+
+
 def test_entries_between_old_and_new(repo: Path):
     old = commit(repo, "CHANGELOG.md", SAMPLE)
     updated = SAMPLE.replace(
@@ -139,6 +185,15 @@ def test_failed_lookup_is_an_error_not_an_empty_result(
 ):
     commit(repo, "CHANGELOG.md", SAMPLE)
     assert mod.main([old, new, "--repo", str(repo), "--path", path]) == 2
+
+
+def test_malformed_new_changelog_is_an_error_not_an_empty_result(repo: Path):
+    old = commit(repo, "CHANGELOG.md", SAMPLE)
+    bad = SAMPLE + (
+        "\n## 2026-11-30 - broken\n\n- **Action:** requried\n- **Do:** x.\n"
+    )
+    new = commit(repo, "CHANGELOG.md", bad)
+    assert mod.main([old, new, "--repo", str(repo)]) == 2
 
 
 def test_cli_json_and_text(repo: Path):
