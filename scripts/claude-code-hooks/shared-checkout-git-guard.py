@@ -105,7 +105,7 @@ _RESTORE_ALL_RE = re.compile(
 # Broad staging sweeps other sessions' changes into your commit.
 _ADD_ALL_RE = re.compile(
     _GIT
-    + r"add(?:\s+-[a-zA-Z]+)*\s+(?:"
+    + r"add(?:\s+(?:-[a-zA-Z]+|--[a-z][a-z-]*(?:=\S+)?))*(?:\s+--)?\s+(?:"
     + r"(?:-A|--all|\.|:/)(?:\s|$|[;&|)])"
     # -u/--update without a pathspec stages every tracked modification
     + r"|(?:-u|--update)(?:\s+-[a-zA-Z-]+)*\s*(?:$|[;&|)\n]))"
@@ -161,12 +161,17 @@ def effective_cwds(command: str, cwd: Path) -> list[Path]:
         return [cwd]
     match = _LEADING_CD_RE.match(command)
     if len(targets) == 1 and match is not None and match.group("sep") == "&&":
+        if _unresolvable(match.group("path")):
+            return [UNKNOWN_DIR]
         only = _resolve_cd_target(match.group("path"), cwd)
         if only is not None:
             return [only]
     dirs = [cwd]
     for target in targets:
-        resolved = _resolve_cd_target(target, cwd)
+        if _unresolvable(target):
+            resolved: Path | None = UNKNOWN_DIR
+        else:
+            resolved = _resolve_cd_target(target, cwd)
         if resolved is not None and resolved not in dirs:
             dirs.append(resolved)
     return dirs
@@ -216,6 +221,15 @@ def is_shared_checkout(cwd: Path) -> bool:
     return result.stdout.strip() == "true"
 
 
+# Stands for a directory the guard cannot determine from the command text
+# (``cd "$DIR"``, ``git -C "$(...)"``). Destructive commands there are denied.
+UNKNOWN_DIR = Path("<unresolvable>")
+
+
+def _unresolvable(text: str) -> bool:
+    return "$" in text or "`" in text
+
+
 def _target_dirs(command: str, pattern: re.Pattern[str], cwd: Path) -> list[Path]:
     """Directories each matching git invocation acts on.
 
@@ -225,7 +239,11 @@ def _target_dirs(command: str, pattern: re.Pattern[str], cwd: Path) -> list[Path
     for match in pattern.finditer(command):
         target = cwd
         for opt in _TARGET_OPT_RE.finditer(match.group("opts") or ""):
-            path = Path(os.path.expanduser(opt.group("path").strip("'\"")))
+            raw = opt.group("path").strip("'\"")
+            if _unresolvable(raw) or target == UNKNOWN_DIR:
+                target = UNKNOWN_DIR
+                continue
+            path = Path(os.path.expanduser(raw))
             target = path if path.is_absolute() else target / path
         dirs.append(target)
     return dirs
@@ -244,8 +262,23 @@ def detect(
     """
     run_dirs = effective_cwds(command, cwd)
     for name, pattern in SHARED_CHECKOUT_RULES.items():
-        targets = [t for d in run_dirs for t in _target_dirs(command, pattern, d)]
+        targets = [
+            t
+            for d in run_dirs
+            for t in (
+                _target_dirs(command, pattern, d)
+                if d != UNKNOWN_DIR
+                else [UNKNOWN_DIR] * len(pattern.findall(command))
+            )
+        ]
         for target in targets:
+            if target == UNKNOWN_DIR:
+                return (
+                    f"Blocked `{name}`: it runs in a directory given by a shell "
+                    "variable or substitution, so the guard cannot tell whether "
+                    "that is a shared checkout (fail closed). Use a literal path "
+                    "(`cd /path/to/repo && ...` or `git -C /path/to/repo ...`)."
+                )
             if shared_checkout(target):
                 return (
                     f"Blocked `{name}` in a shared checkout ({target}): other "
@@ -257,10 +290,16 @@ def detect(
                     "experiments that need reset/clean in a separate worktree."
                 )
     stash_targets = [
-        t for d in run_dirs for t in _target_dirs(command, _STASH_STACK_RE, d)
+        t
+        for d in run_dirs
+        for t in (
+            _target_dirs(command, _STASH_STACK_RE, d)
+            if d != UNKNOWN_DIR
+            else [UNKNOWN_DIR] * len(_STASH_STACK_RE.findall(command))
+        )
     ]
     for target in stash_targets:
-        if stash_stack_shared(target):
+        if target == UNKNOWN_DIR or stash_stack_shared(target):
             return (
                 f"Blocked `git stash` in a repo with linked worktrees ({target}): "
                 "all worktrees share one stash stack, so a sibling's stash between "

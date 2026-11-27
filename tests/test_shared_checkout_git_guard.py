@@ -60,6 +60,9 @@ def detect(command: str, cwd: Path = SHARED, *, worktrees: bool = False):
         "git clean --force",
         "git add -u",
         "git add --update",
+        "git add -- .",
+        "git add --chmod=+x -A",
+        "git add -v --ignore-errors .",
         "git checkout -- .",
         "git checkout .",
         "git checkout HEAD -- .",
@@ -119,6 +122,8 @@ def test_shared_checkout_denies_tree_wide_operations(command):
         "git clean -n",
         "git clean -nd",
         "git add -u path/to/file.py",
+        "git add --chmod=+x script.sh",
+        "git add -- path/to/file.py",
         "git log --oneline -5",
         "git --no-pager log -1",
         "git -c core.pager=cat diff",
@@ -152,6 +157,20 @@ def test_several_cds_check_every_target():
     assert detect(f"cd /tmp && cd {SHARED} && git reset --hard", cwd=OTHER) is not None
     assert detect(f"cd {OTHER} && cd {SHARED}; git add -A", cwd=OTHER) is not None
     assert detect(f"cd /tmp && cd {OTHER} && git reset --hard", cwd=OTHER) is None
+
+
+def test_unresolvable_directories_fail_closed():
+    for command in (
+        'cd "$WORKTREE" && git reset --hard',
+        'cd /tmp && cd "$SHARED" && git reset --hard',
+        'git -C "$REPO" clean -fd',
+        "cd `pwd` && git add -A",
+    ):
+        reason = detect(command, cwd=OTHER)
+        assert reason is not None and "literal path" in reason, command
+    # Harmless commands in an unknown directory stay allowed.
+    assert detect('cd "$WORKTREE" && git status', cwd=OTHER) is None
+    assert detect('git -C "$REPO" log -1', cwd=OTHER) is None
 
 
 def test_cd_with_semicolon_checks_both_directories():
