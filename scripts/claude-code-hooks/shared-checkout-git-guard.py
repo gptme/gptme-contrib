@@ -78,9 +78,9 @@ _RESET_HARD_RE = re.compile(_GIT + r"reset(?:\s+[^;&|\n]*)?\s+--hard" + _END)
 # ``reset -- path`` and ``reset <commit> <path>...`` stay allowed.
 _RESET_INDEX_RE = re.compile(
     _GIT
-    + r"reset(?:\s+(?:-q|--quiet|--mixed|--no-refresh))*"
+    + r"reset(?:\s+(?:-q|--quiet|--mixed|--no-refresh|--keep|--merge))*"
     + r"(?:\s+[^\s;&|)\-][^\s;&|)]*)?"
-    + r"(?:\s+(?:-q|--quiet|--mixed|--no-refresh))*\s*(?:$|[;&|)\n])"
+    + r"(?:\s+(?:-q|--quiet|--mixed|--no-refresh|--keep|--merge))*\s*(?:$|[;&|)\n])"
 )
 _RESET_ALL_RE = re.compile(
     _GIT + r"reset(?:\s+(?:-q|--quiet|--mixed|HEAD(?:[~^]\d*)*))*\s+--\s+\." + _END
@@ -89,10 +89,12 @@ _AUTOSTASH_RE = re.compile(_GIT + r"(?:pull|rebase)\b[^;&|\n]*\s--autostash" + _
 # Any forced clean deletes other sessions' untracked files (-d adds dirs).
 _CLEAN_RE = re.compile(_GIT + r"clean(?=[^;&|\n]*\s(?:-[A-Za-z]*f|--force))")
 # `checkout [-f|-q] [HEAD|@[~^n]] [--] .` reverts every tracked file.
+# `checkout [opts] [<tree-ish>] [--] .` overwrites every tracked file (and,
+# with a tree-ish, the index) from that tree.
 _CHECKOUT_ALL_RE = re.compile(
     _GIT
-    + r"checkout(?:\s+(?:-f|--force|-q|--quiet))*"
-    + r"(?:\s+(?:HEAD|@)(?:[~^]\d*)*)?(?:\s+--)?\s+\."
+    + r"checkout(?:\s+(?:-f|--force|-q|--quiet|--no-overlay|--overlay))*"
+    + r"(?:\s+[^\s;&|)\-][^\s;&|)]*)?(?:\s+--)?\s+\."
     + _END
 )
 # A forced switch throws away local modifications to every tracked file.
@@ -139,7 +141,9 @@ _LEADING_CD_RE = re.compile(
 )
 
 
-_CD_RE = re.compile(r"(?:^|[;&|()\s])cd\s+(?P<path>'[^']*'|\"[^\"]*\"|[^\s;&|)]+)")
+_CD_RE = re.compile(
+    r"(?:^|[;&|()\s])(?:cd|pushd)\s+(?P<path>'[^']*'|\"[^\"]*\"|[^\s;&|)]+)"
+)
 
 
 def _resolve_cd_target(target: str, cwd: Path) -> Path | None:
@@ -178,13 +182,24 @@ def effective_cwds(command: str, cwd: Path) -> list[Path]:
         only = _resolve_cd_target(match.group("path"), cwd)
         if only is not None:
             return [only]
+    # Each relative cd resolves against the directory the previous one
+    # reached (`cd /srv && cd shared` lands in /srv/shared); every directory
+    # along the way, and cwd, is checked.
     dirs = [cwd]
+    current: Path = cwd
     for target in targets:
-        if _unresolvable(target):
-            resolved: Path | None = UNKNOWN_DIR
+        if _unresolvable(target) or current == UNKNOWN_DIR:
+            stripped = target.strip("'\"")
+            if not _unresolvable(target) and stripped.startswith(("/", "~")):
+                resolved = _resolve_cd_target(target, cwd)  # absolute: known again
+            else:
+                resolved = UNKNOWN_DIR
         else:
-            resolved = _resolve_cd_target(target, cwd)
-        if resolved is not None and resolved not in dirs:
+            resolved = _resolve_cd_target(target, current)
+        if resolved is None:
+            continue
+        current = resolved
+        if resolved not in dirs:
             dirs.append(resolved)
     return dirs
 

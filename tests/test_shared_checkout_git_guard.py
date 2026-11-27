@@ -66,6 +66,10 @@ def detect(command: str, cwd: Path = SHARED, *, worktrees: bool = False):
         "git checkout -- .",
         "git checkout .",
         "git checkout HEAD -- .",
+        "git checkout origin/master -- .",
+        "git checkout main .",
+        "git reset --keep origin/master",
+        "git reset --merge HEAD~1",
         "git checkout -f",
         "git checkout -f main",
         "git checkout --force other-branch",
@@ -171,6 +175,26 @@ def test_work_tree_option_targets_that_tree():
     assert detect(f"git --work-tree={SHARED} clean -fd", cwd=OTHER) is not None
     assert detect(f"git --work-tree {SHARED} reset --hard", cwd=OTHER) is not None
     assert detect(f"git --work-tree={OTHER} reset --hard", cwd=SHARED) is None
+
+
+def test_chained_relative_cds_resolve_in_order(tmp_path):
+    srv = tmp_path / "srv"
+    (srv / "shared").mkdir(parents=True)
+    unmarked = tmp_path / "unmarked"
+    unmarked.mkdir()
+    marked = (srv / "shared").resolve()
+
+    def check(command: str):
+        return guard.detect(
+            command,
+            unmarked,
+            shared_checkout=lambda p: marked in (p, *p.parents),
+            stash_stack_shared=lambda p: False,
+        )
+
+    assert check(f"cd {srv} && cd shared && git reset --hard") is not None
+    assert check(f"pushd {srv} && cd shared && git add -A") is not None
+    assert check(f"cd {srv} && cd .. && git reset --hard") is None
 
 
 def test_several_cds_check_every_target():
