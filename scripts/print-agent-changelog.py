@@ -26,9 +26,9 @@ CHANGELOG = "CHANGELOG.md"
 ACTIONS = ("none", "optional", "recommended", "required")
 RANK = {name: i for i, name in enumerate(ACTIONS)}
 HEADING = re.compile(r"^## (\d{4}-\d{2}-\d{2})\s+[—–-]\s+(.+)$")
-DATED_HEADING = re.compile(r"^##\s*\d{4}-\d")
-ACTION = re.compile(r"^\s*-\s+\*\*Action:\*\*\s+(.+?)\s*$", re.IGNORECASE)
-DO = re.compile(r"^\s*-\s+\*\*Do:\*\*\s+(.+)$", re.IGNORECASE)
+ANY_HEADING = re.compile(r"^(?:#{1,6}\s|##)")
+FIELD = re.compile(r"^\s*-\s+\*\*(Action|Do):\*\*\s+(.+?)\s*$", re.IGNORECASE)
+FENCE = re.compile(r"^(`{3,}|~{3,})")
 
 
 @dataclass(frozen=True)
@@ -48,67 +48,70 @@ def normalize_action(raw: str) -> str:
 
 
 def parse_entries(text: str, *, strict: bool = True) -> list[Entry]:
-    """Parse dated changelog entries; ignore prose and the format example.
+    """Parse dated changelog entries; ignore prose and fenced examples.
 
-    In *strict* mode (NEW), a dated heading that is not "date - title", or has a
-    missing Do, a missing Action, or an Action that is not
-    optional/recommended/required raises RuntimeError. Silent drops look like a
-    code-only bump to callers.
+    An entry runs from its "## date - title" heading to the next heading, and
+    everything from the Do field to that point is its instruction.
+
+    In *strict* mode (NEW), anything that could hide or alter an instruction
+    raises RuntimeError: a missing, repeated or unknown field, a field outside a
+    dated entry (usually a mistyped heading), or an unclosed code fence. Silent
+    drops look like a code-only bump to callers.
 
     In non-strict mode (OLD) those rows are skipped so a typo that was later
     fixed does not permanently fail every range that starts at that pin.
     """
     entries: list[Entry] = list()
     current: dict[str, str] | None = None
+    fence = ""
+
+    def fail(message: str) -> None:
+        if strict:
+            raise RuntimeError(message)
 
     def flush() -> None:
         nonlocal current
         if current is None:
             return
-        label = f"{current['date']} - {current['title']}"
-        action = current.get("action")
-        body = current.get("do", "").strip()
-        error = None
-        if action is None:
-            error = f"{label}: missing Action"
+        row, current = current, None
+        label = f"{row['date']} - {row['title']}"
+        action = row.get("action")
+        if "error" in row:
+            fail(f"{label}: {row['error']}")
+        elif action is None:
+            fail(f"{label}: missing Action")
         elif action not in RANK or action == "none":
-            error = f"{label}: unparseable Action {action!r}"
-        elif not body:
-            error = f"{label}: missing Do"
-        if error:
-            current = None
-            if strict:
-                raise RuntimeError(error)
-            return
-        assert action is not None
-        entries.append(Entry(current["date"], current["title"], action, body))
-        current = None
+            fail(f"{label}: unparseable Action {action!r}")
+        elif "do" not in row:
+            fail(f"{label}: missing Do")
+        else:
+            entries.append(Entry(row["date"], row["title"], action, row["do"]))
 
     for line in text.splitlines():
-        match = HEADING.match(line)
-        if match:
+        if fence:
+            if line.startswith(fence) and not line.strip().strip(fence[0]):
+                fence = ""
+        elif opening := FENCE.match(line):
+            fence = opening.group(1)
+        elif ANY_HEADING.match(line):
             flush()
-            current = {"date": match.group(1), "title": match.group(2).strip()}
+            if match := HEADING.match(line):
+                current = {"date": match.group(1), "title": match.group(2).strip()}
             continue
-        if DATED_HEADING.match(line):
-            # Close the previous entry so these fields cannot overwrite it.
-            flush()
-            if strict:
-                raise RuntimeError(f"malformed entry heading: {line!r}")
+        elif field := FIELD.match(line):
+            name, value = field.group(1).lower(), field.group(2)
+            if current is None:
+                fail(f"field outside a dated entry (check the heading): {line!r}")
+            elif name in current:
+                current["error"] = f"repeated {field.group(1)}"
+            else:
+                current[name] = normalize_action(value) if name == "action" else value
             continue
-        if current is None:
-            continue
-        action_match = ACTION.match(line)
-        if action_match:
-            current["action"] = normalize_action(action_match.group(1))
-            continue
-        do_match = DO.match(line)
-        if do_match:
-            current["do"] = do_match.group(1).strip()
-            continue
-        if "do" in current and line.startswith(" ") and line.strip():
+        if current and "do" in current and line.strip():
             current["do"] += " " + line.strip()
     flush()
+    if fence:
+        fail("unclosed code fence")
     return entries
 
 

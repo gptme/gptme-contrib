@@ -31,10 +31,12 @@ Prose, not an entry.
 
 ## Entry format
 
+````markdown
 ## YYYY-MM-DD - short title
 
 - **Action:** recommended
 - **Do:** this is the format example, not a real entry
+````
 
 ## Entries
 
@@ -98,7 +100,7 @@ def test_checked_in_changelog_parses():
     assert "Agent changelog convention" in titles
 
 
-def test_parse_skips_prose_and_placeholder_heading():
+def test_parse_skips_prose_and_fenced_example():
     entries = mod.parse_entries(SAMPLE)
     assert [e.title for e in entries] == [
         "required migration",
@@ -208,32 +210,58 @@ def test_edited_entry_is_emitted(repo: Path, action: str, do: str):
     assert [(e.action, e.do) for e in added] == [(action, do)]
 
 
-def test_rewrapped_do_is_not_an_edit(repo: Path):
+@pytest.mark.parametrize("indent", ["  ", "\t", ""])
+def test_rewrapped_do_is_not_an_edit(repo: Path, indent: str):
     head = "## 2026-11-26 - hook\n\n- **Action:** required\n"
     old = commit(repo, "CHANGELOG.md", head + "- **Do:** Move the hooks path.\n")
-    new = commit(repo, "CHANGELOG.md", head + "- **Do:** Move the\n  hooks path.\n")
+    wrapped = f"- **Do:** Move the\n{indent}hooks path.\n"
+    new = commit(repo, "CHANGELOG.md", head + wrapped)
     assert mod.entries_between(repo, old, new) == []
 
 
-@pytest.mark.parametrize(
-    "heading",
-    ["## 2026-11-28: migration", "## 2026-11-28 migration", "##2026-11-28 - x"],
-)
-def test_malformed_heading_is_an_error(heading: str):
-    text = f"{heading}\n\n- **Action:** required\n- **Do:** Migrate.\n"
-    with pytest.raises(RuntimeError, match="malformed entry heading"):
-        mod.parse_entries(text)
-
-
-def test_malformed_heading_does_not_overwrite_previous_entry():
+def test_do_keeps_everything_up_to_the_next_heading():
     text = (
-        "## 2026-11-29 - hook\n\n- **Action:** required\n- **Do:** Install.\n\n"
-        "## 2026-11-28: old\n\n- **Action:** optional\n- **Do:** Other.\n"
+        "## 2026-11-26 - hook\n\n- **Action:** required\n- **Do:** Run:\n\n"
+        "```bash\n# not a heading\nmake hooks\n```\n\n- then restart.\n"
     )
-    entries = mod.parse_entries(text, strict=False)
-    assert [(e.title, e.action, e.do) for e in entries] == [
-        ("hook", "required", "Install.")
-    ]
+    (entry,) = mod.parse_entries(text)
+    assert entry.do == "Run: ```bash # not a heading make hooks ``` - then restart."
+
+
+VALID = "## 2026-11-29 - hook\n\n- **Action:** required\n- **Do:** Install.\n\n"
+BAD_HEADINGS = [
+    "## 2026-11-28: migration",
+    "## 2026-11-28 migration",
+    "##2026-11-28 - migration",
+    "### 2026-11-28 - migration",
+    "## 2026/11/28 - migration",
+    "## Unreleased",
+]
+
+
+@pytest.mark.parametrize("prefix", ["", VALID])
+@pytest.mark.parametrize("heading", BAD_HEADINGS)
+def test_malformed_heading_is_an_error(prefix: str, heading: str):
+    row = f"{heading}\n\n- **Action:** optional\n- **Do:** Migrate.\n"
+    text = "## Entries\n\n" + prefix + row
+    with pytest.raises(RuntimeError, match="outside a dated entry"):
+        mod.parse_entries(text)
+    # OLD parsing skips the bad row and leaves the entry above it intact.
+    kept = mod.parse_entries(text, strict=False)
+    assert [e.do for e in kept] == (["Install."] if prefix else [])
+
+
+@pytest.mark.parametrize(
+    ("extra", "error"),
+    [
+        ("- **Action:** optional\n", "repeated Action"),
+        ("- **Do:** Something else.\n", "repeated Do"),
+        ("```\nnever closed\n", "unclosed code fence"),
+    ],
+)
+def test_ambiguous_entry_is_an_error(extra: str, error: str):
+    with pytest.raises(RuntimeError, match=error):
+        mod.parse_entries(VALID + extra)
 
 
 def test_malformed_old_changelog_is_skipped(repo: Path):
