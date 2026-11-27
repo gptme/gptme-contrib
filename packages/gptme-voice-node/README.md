@@ -138,13 +138,13 @@ Client → Server: {"type": "vision_event", ...}
 Client → Server: {"type": "vision_look_result", "request_id": "...", ...}
 Server → Client: {"type": "audio", "audio": "<base64>"}
 Server → Client: {"type": "audio_end"}
-Server → Client: {"type": "sound_cue", "cue": "dispatch", "sample_rate": 24000, "audio": "<base64>"}
+Server → Client: {"type": "sound_cue", "cue": "dispatch", "sample_rate": 8000, "audio": "<base64>"}
 Server → Client: {"type": "vision_look_request", "request_id": "..."}
 ```
 
 `sound_cue` is a short complete clip (e.g. the "working on it" chime when the
-agent dispatches a subagent). The node plays it with the mic muted for its
-duration.
+agent dispatches a subagent). Cues arrive at 8 kHz; the node upsamples them to
+24 kHz and plays them with the mic muted for their duration.
 
 With a vision source configured, the node appends `vision=1` to the connect URL
 so the server only exposes the `look` tool to camera-equipped clients. Events

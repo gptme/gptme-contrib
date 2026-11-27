@@ -1,5 +1,6 @@
 """Tests for gptme-voice-node that don't require real audio hardware or network."""
 
+import array
 import asyncio
 import base64
 import json
@@ -642,6 +643,27 @@ class TestSoundCue:
 
         assert [c.args[0] for c in speaker.write.call_args_list] == [speech, cue]
         assert node._playing is True  # speech has not sent audio_end yet
+
+    @pytest.mark.asyncio
+    async def test_server_rate_cue_is_upsampled_and_played(self):
+        # gptme-voice generates its cues at 8 kHz and labels them so; the
+        # speaker stream is 24 kHz.
+        node = _make_node()
+        cue = array.array("h", [0, 300, -300]).tobytes()
+        mock_ws = AsyncMock()
+        mock_ws.recv.side_effect = [
+            _cue_msg(cue, sample_rate=8000),
+            ConnectionClosed(None, None),
+        ]
+        speaker = MagicMock()
+
+        with patch("gptme_voice_node.node._run_audio_io", _fake_audio_io):
+            await node._recv_loop(mock_ws, speaker)
+
+        speaker.write.assert_called_once()
+        played = array.array("h", speaker.write.call_args.args[0])
+        assert played.tolist() == [0, 100, 200, 300, 100, -100, -300, -300, -300]
+        assert node._playing is False
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
