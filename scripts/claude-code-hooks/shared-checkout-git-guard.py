@@ -43,14 +43,20 @@ from typing import Any, Mapping
 # "opts": -C <dir>, -c k=v, --no-pager, --git-dir/--work-tree[=]<path>, ...).
 # Agents add -c and --no-pager routinely; without them in the prefix every rule
 # would miss `git --no-pager reset --hard`.
+# An option value: quoted (may contain spaces, e.g. a macOS path) or bare.
+_VALUE = r"""(?:"[^"]*"|'[^']*'|\S+)"""
 _GIT_OPT = (
-    r"(?:-[Cc]\s+\S+"
-    r"|--(?:git-dir|work-tree|namespace|exec-path|config-env)(?:=|\s+)\S+"
-    r"|--[a-z][a-z-]*(?:=\S+)?"
-    r"|-[pP])"
+    r"(?:-[Cc]\s+"
+    + _VALUE
+    + r"|--(?:git-dir|work-tree|namespace|exec-path|config-env)(?:=|\s+)"
+    + _VALUE
+    + r"|--[a-z][a-z-]*(?:="
+    + _VALUE
+    + r")?"
+    + r"|-[pP])"
 )
 _GIT = r"(?:^|[;&|()\s])git(?P<opts>(?:\s+" + _GIT_OPT + r")*)\s+"
-_TARGET_OPT_RE = re.compile(r"(?:-C\s+|--work-tree(?:=|\s+))(?P<path>\S+)")
+_TARGET_OPT_RE = re.compile(r"(?:-C\s+|--work-tree(?:=|\s+))(?P<path>" + _VALUE + r")")
 _END = r"(?:\s|$|[;&|)])"
 
 # Stack writes (for repos with linked worktrees): also allow ``create`` (no

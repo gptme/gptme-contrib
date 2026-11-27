@@ -149,6 +149,24 @@ def test_git_dash_c_targets_the_named_repo():
     assert detect("git -C /repo -C shared add -A", cwd=OTHER) is not None
 
 
+def test_quoted_option_paths_with_spaces():
+    spaced = Path("/Users/me/My Repos/shared")
+
+    def check(command: str):
+        return guard.detect(
+            command,
+            OTHER,
+            shared_checkout=lambda p: spaced in (p, *p.parents),
+            stash_stack_shared=lambda p: False,
+        )
+
+    assert check(f'git -C "{spaced}" reset --hard') is not None
+    assert check(f"git -C '{spaced}' clean -fd") is not None
+    assert check(f'git --work-tree="{spaced}" add -A') is not None
+    assert check(f'git -C "{spaced}" status') is None
+    assert detect(f'git -C "{SHARED}" reset --hard', cwd=OTHER) is not None
+
+
 def test_work_tree_option_targets_that_tree():
     assert detect(f"git --work-tree={SHARED} clean -fd", cwd=OTHER) is not None
     assert detect(f"git --work-tree {SHARED} reset --hard", cwd=OTHER) is not None
