@@ -196,17 +196,44 @@ def test_malformed_new_changelog_is_an_error_not_an_empty_result(repo: Path):
     assert mod.main([old, new, "--repo", str(repo)]) == 2
 
 
-def test_action_upgrade_is_emitted(repo: Path):
-    old_text = (
-        "## 2026-11-26 - hook\n\n" "- **Action:** optional\n" "- **Do:** Try it.\n"
-    )
-    new_text = (
-        "## 2026-11-26 - hook\n\n" "- **Action:** required\n" "- **Do:** Try it.\n"
-    )
-    old = commit(repo, "CHANGELOG.md", old_text)
-    new = commit(repo, "CHANGELOG.md", new_text)
+@pytest.mark.parametrize(
+    ("action", "do"),
+    [("required", "Try it."), ("optional", "Try it with --strict.")],
+)
+def test_edited_entry_is_emitted(repo: Path, action: str, do: str):
+    entry = "## 2026-11-26 - hook\n\n- **Action:** {}\n- **Do:** {}\n"
+    old = commit(repo, "CHANGELOG.md", entry.format("optional", "Try it."))
+    new = commit(repo, "CHANGELOG.md", entry.format(action, do))
     added = mod.entries_between(repo, old, new)
-    assert [(e.title, e.action) for e in added] == [("hook", "required")]
+    assert [(e.action, e.do) for e in added] == [(action, do)]
+
+
+def test_rewrapped_do_is_not_an_edit(repo: Path):
+    head = "## 2026-11-26 - hook\n\n- **Action:** required\n"
+    old = commit(repo, "CHANGELOG.md", head + "- **Do:** Move the hooks path.\n")
+    new = commit(repo, "CHANGELOG.md", head + "- **Do:** Move the\n  hooks path.\n")
+    assert mod.entries_between(repo, old, new) == []
+
+
+@pytest.mark.parametrize(
+    "heading",
+    ["## 2026-11-28: migration", "## 2026-11-28 migration", "##2026-11-28 - x"],
+)
+def test_malformed_heading_is_an_error(heading: str):
+    text = f"{heading}\n\n- **Action:** required\n- **Do:** Migrate.\n"
+    with pytest.raises(RuntimeError, match="malformed entry heading"):
+        mod.parse_entries(text)
+
+
+def test_malformed_heading_does_not_overwrite_previous_entry():
+    text = (
+        "## 2026-11-29 - hook\n\n- **Action:** required\n- **Do:** Install.\n\n"
+        "## 2026-11-28: old\n\n- **Action:** optional\n- **Do:** Other.\n"
+    )
+    entries = mod.parse_entries(text, strict=False)
+    assert [(e.title, e.action, e.do) for e in entries] == [
+        ("hook", "required", "Install.")
+    ]
 
 
 def test_malformed_old_changelog_is_skipped(repo: Path):

@@ -28,7 +28,8 @@ includes `optional`). File those as tasks in the agent workspace.
 
 ## Entry format
 
-Newest first, below [Entries](#entries). The heading date is UTC.
+Newest first, below [Entries](#entries). The heading date is UTC. Editing an
+existing row (heading, Action or Do) prints it again on the next bump.
 
 ````markdown
 ## YYYY-MM-DD - short title

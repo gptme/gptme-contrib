@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Print agent-facing gptme-contrib changelog entries between two pins.
 
-Reads CHANGELOG.md at OLD and NEW and emits entries whose (date, title) pair
-appeared in NEW but not OLD. Code-only pin bumps produce no output.
+Reads CHANGELOG.md at OLD and NEW and emits entries that are new or edited in
+NEW: a change to the date, title, Action or Do text counts. Code-only pin bumps
+produce no output.
 
 Usage::
 
@@ -25,6 +26,7 @@ CHANGELOG = "CHANGELOG.md"
 ACTIONS = ("none", "optional", "recommended", "required")
 RANK = {name: i for i, name in enumerate(ACTIONS)}
 HEADING = re.compile(r"^## (\d{4}-\d{2}-\d{2})\s+[—–-]\s+(.+)$")
+DATED_HEADING = re.compile(r"^##\s*\d{4}-\d")
 ACTION = re.compile(r"^\s*-\s+\*\*Action:\*\*\s+(.+?)\s*$", re.IGNORECASE)
 DO = re.compile(r"^\s*-\s+\*\*Do:\*\*\s+(.+)$", re.IGNORECASE)
 
@@ -35,10 +37,6 @@ class Entry:
     title: str
     action: str
     do: str
-
-    @property
-    def key(self) -> tuple[str, str, str]:
-        return (self.date, self.title, self.action)
 
 
 def normalize_action(raw: str) -> str:
@@ -52,9 +50,10 @@ def normalize_action(raw: str) -> str:
 def parse_entries(text: str, *, strict: bool = True) -> list[Entry]:
     """Parse dated changelog entries; ignore prose and the format example.
 
-    In *strict* mode (NEW), a dated heading with a missing Do, a missing
-    Action, or an Action that is not optional/recommended/required raises
-    RuntimeError. Silent drops look like a code-only bump to callers.
+    In *strict* mode (NEW), a dated heading that is not "date - title", or has a
+    missing Do, a missing Action, or an Action that is not
+    optional/recommended/required raises RuntimeError. Silent drops look like a
+    code-only bump to callers.
 
     In non-strict mode (OLD) those rows are skipped so a typo that was later
     fixed does not permanently fail every range that starts at that pin.
@@ -90,6 +89,12 @@ def parse_entries(text: str, *, strict: bool = True) -> list[Entry]:
         if match:
             flush()
             current = {"date": match.group(1), "title": match.group(2).strip()}
+            continue
+        if DATED_HEADING.match(line):
+            # Close the previous entry so these fields cannot overwrite it.
+            flush()
+            if strict:
+                raise RuntimeError(f"malformed entry heading: {line!r}")
             continue
         if current is None:
             continue
@@ -139,8 +144,8 @@ def entries_between(
 ) -> list[Entry]:
     new_entries = parse_entries(git_show(repo, new, path))
     old_text = git_show(repo, old, path, missing_ok=True)
-    old_keys = {entry.key for entry in parse_entries(old_text, strict=False)}
-    return [entry for entry in new_entries if entry.key not in old_keys]
+    seen = set(parse_entries(old_text, strict=False))
+    return [entry for entry in new_entries if entry not in seen]
 
 
 def filter_action(entries: list[Entry], min_action: str) -> list[Entry]:
