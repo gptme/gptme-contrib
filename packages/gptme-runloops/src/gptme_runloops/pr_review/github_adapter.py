@@ -195,7 +195,11 @@ def _iter_range_lines(line_range: str):
         end = int(parts[1]) if len(parts) > 1 else start
     except (ValueError, IndexError):
         start, end = 1, 1
-    yield from range(start, end + 1)
+    # The model can report "49-42"; an empty range would leave nothing to post.
+    # Iterate in the declared direction: post_inline_finding anchors on the
+    # first line and uses the rest as fallbacks, so the start must come first.
+    step = 1 if end >= start else -1
+    yield from range(start, end + step, step)
 
 
 def _severity_label(severity: Severity) -> str:
