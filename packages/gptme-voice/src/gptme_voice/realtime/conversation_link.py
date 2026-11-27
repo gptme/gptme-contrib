@@ -135,7 +135,7 @@ async def fetch_conversation_context(
     workspace = chat_config.get("workspace") if isinstance(chat_config, dict) else None
     return ConversationContext(
         instructions=format_conversation_context(log if isinstance(log, list) else []),
-        workspace=os.path.expanduser(workspace)
+        workspace=os.path.abspath(os.path.expanduser(workspace))
         if isinstance(workspace, str) and workspace
         else None,
     )
@@ -216,8 +216,10 @@ class LiveTranscriptSink:
         seen = self._seen.get(i)
         if seen is None or seen[0] != text:
             return False
-        # Small slack: the timer fires settle_seconds after the last change.
-        return now - seen[1] >= self._settle_seconds - 0.05
+        # Small slack (the timer fires settle_seconds after the last change),
+        # never more than half the window, so a tiny window still holds.
+        slack = min(0.05, self._settle_seconds / 2)
+        return now - seen[1] >= self._settle_seconds - slack
 
     def _schedule(self, delay: float) -> None:
         if self._timer is not None and not self._timer.done():

@@ -847,12 +847,35 @@ class OpenAIRealtimeClient:
         one is active. Returns True if a reply was interrupted.
         """
         interrupted = self._responding
+        deadline = asyncio.get_running_loop().time() + _TYPED_CANCEL_WAIT_SECONDS
+        await self.wait_until_ready()
+        await self._cancel_until_idle(deadline)
+        logger.info("Sending typed message: %s...", text[:100])
+        await self._send_event(
+            "conversation.item.create",
+            {
+                "item": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": text}],
+                }
+            },
+        )
+        # A reply can start while the item is sent (e.g. for an injected
+        # lookup result); check again right before response.create, with no
+        # await in between other than the send itself.
+        await self._cancel_until_idle(deadline)
+        await self._send_event("response.create", {})
+        return interrupted
+
+    async def _cancel_until_idle(self, deadline: float) -> None:
+        """Cancel active replies until the provider confirms none is running.
+
+        response.create is rejected until the provider confirms a cancel with
+        response.done, so our own flag is not trusted for that. A reply that
+        starts meanwhile is superseded by the typed message too.
+        """
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + _TYPED_CANCEL_WAIT_SECONDS
-        # response.create is rejected until the provider confirms the cancel
-        # with response.done; don't trust our own flag for that. A response
-        # that starts meanwhile (e.g. for an injected lookup result) is
-        # superseded by the typed message too, so cancel until idle.
         while self._responding:
             await self._send_event("response.cancel", {})
             remaining = deadline - loop.time()
@@ -861,14 +884,11 @@ class OpenAIRealtimeClient:
                     raise asyncio.TimeoutError
                 await asyncio.wait_for(self._response_idle.wait(), remaining)
             except asyncio.TimeoutError:
-                # A response.create now would be rejected while the provider
-                # still considers the reply active, leaving the typed turn
-                # unanswered. Report it undelivered instead.
+                # A response.create now would be rejected, leaving the typed
+                # turn unanswered. Report it undelivered instead.
                 raise asyncio.TimeoutError(
                     "provider did not confirm cancelling the active reply"
                 ) from None
-        await self.send_text_message(text)
-        return interrupted
 
     async def wait_until_ready(self, timeout: float | None = None) -> None:
         """Wait until the provider has applied our session configuration.

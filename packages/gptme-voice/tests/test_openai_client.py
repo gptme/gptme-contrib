@@ -1453,6 +1453,55 @@ def test_send_typed_message_reports_undelivered_if_cancel_is_never_confirmed() -
     asyncio.run(_exercise())
 
 
+def test_send_typed_message_rechecks_right_before_response_create() -> None:
+    """A reply that starts while the typed item is being sent is cancelled
+    before response.create, which would otherwise be rejected."""
+
+    async def _exercise() -> None:
+        fake_ws = _FakeWebSocket()
+
+        async def _fake_connect(*_args, **_kwargs):
+            return fake_ws
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "gptme_voice.realtime.openai_client.websockets.connect", _fake_connect
+            )
+            client = OpenAIRealtimeClient(api_key="test-key")
+            await client.connect()
+            await client._handle_event({"type": "session.updated"})
+            real_send = client._send_event
+
+            async def _send_and_race(event_type: str, data: dict) -> None:
+                await real_send(event_type, data)
+                if event_type == "conversation.item.create":
+                    # An injected result's reply starts during this send.
+                    await client._handle_event({"type": "response.created"})
+
+                    async def _confirm() -> None:
+                        await asyncio.sleep(0.02)
+                        await client._handle_event(
+                            {
+                                "type": "response.done",
+                                "response": {"status": "cancelled"},
+                            }
+                        )
+
+                    asyncio.ensure_future(_confirm())
+
+            client._send_event = _send_and_race  # type: ignore[method-assign]
+            baseline = len(fake_ws.sent)
+            assert await client.send_typed_message("stop") is False
+            assert [e["type"] for e in fake_ws.sent[baseline:]] == [
+                "conversation.item.create",
+                "response.cancel",
+                "response.create",
+            ]
+            await client.disconnect()
+
+    asyncio.run(_exercise())
+
+
 def test_send_text_message_times_out_if_session_never_becomes_ready() -> None:
     """A missing provider ready event must not pin the local handler forever."""
 

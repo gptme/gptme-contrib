@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 from dataclasses import dataclass
 
 import httpx
@@ -54,6 +55,7 @@ def test_fetch_context_reads_log_and_workspace() -> None:
 
     ctx = asyncio.run(run())
     assert ctx.workspace == "/tmp/ws"
+    assert os.path.isabs(ctx.workspace)
     assert ctx.instructions and "User: hi there" in ctx.instructions
 
 
@@ -226,6 +228,20 @@ def test_immediate_flush_holds_an_unsettled_speech_turn_and_keeps_order() -> Non
             {"role": "user", "text": "typed: stop", "turn_id": "webui-abc:1"},
         ]
     ]
+
+
+def test_settle_window_holds_even_when_configured_tiny() -> None:
+    sink = LiveTranscriptSink(
+        server_url="http://server",
+        api_key="key",
+        conversation_id="conv-1",
+        call_sid="webui-abc",
+        transcript=[Turn("user", "partial")],
+        settle_seconds=0.01,
+    )
+    sink._observe()
+    # Just observed: not settled, even though settle - 0.05 would be negative.
+    assert not sink._settled(0, "partial", sink._seen[0][1])
 
 
 def test_sink_reposts_a_turn_the_provider_revised() -> None:
