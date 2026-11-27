@@ -2843,3 +2843,260 @@ def test_stamp_survives_yaml_line_breaks_that_split_does_not_count(brk: str) -> 
     assert stamped == f'---\nfrom: bob\nsubject: "a{brk}b"\nread: true\n---\n\nfyi\n'
     assert stamped is not None
     assert yaml.safe_load(stamped.split("---")[1])["read"] is True
+
+
+# --- forgiving message-id resolution -------------------------------------
+# Callers usually hold a stem or a timestamp prefix (from a journal, task file,
+# or agent-mail notification) rather than the exact inbox filename. Exact-only
+# resolution made those messages unreachable even though they were on disk
+# (friction ledger 2026-11-27: "cannot find a visible on-disk Erik message by
+# timestamp or full stem"). Resolution stays containment-checked and refuses
+# ambiguous prefixes rather than guessing.
+
+
+def test_resolve_message_accepts_exact_filename(workspace: Path) -> None:
+    name = _seed_inbox(workspace, subject="exact")
+    resolved = agent_cli._resolve_message(name)
+    assert resolved is not None
+    mailbox_name, path = resolved
+    assert mailbox_name == "default"
+    assert path.name == name
+
+
+def test_resolve_message_accepts_stem_without_suffix(workspace: Path) -> None:
+    name = _seed_inbox(workspace, subject="stem")
+    stem = name.removesuffix(".md")
+    resolved = agent_cli._resolve_message(stem)
+    assert resolved is not None
+    assert resolved[1].name == name
+
+
+def test_resolve_message_accepts_unique_timestamp_prefix(workspace: Path) -> None:
+    name = _seed_inbox(workspace, subject="prefix")
+    prefix = name.split("-bob-", 1)[0]  # the timestamp part only
+    assert prefix != name
+    resolved = agent_cli._resolve_message(prefix)
+    assert resolved is not None
+    assert resolved[1].name == name
+
+
+def test_resolve_message_refuses_ambiguous_prefix(workspace: Path) -> None:
+    inbox = workspace / "messages" / "inbox"
+    for suffix in ("one", "two"):
+        (inbox / f"20260101-000000-000000-bob-shared-{suffix}.md").write_text(
+            f"---\nfrom: bob\nto: alice\nsubject: {suffix}\nread: false\n---\n\nhi\n"
+        )
+    # Two candidates share the prefix; guessing one would reply to the wrong thread.
+    assert agent_cli._resolve_message("20260101-000000-000000-bob-shared") is None
+    # An empty id must never match everything.
+    assert agent_cli._resolve_message("") is None
+
+
+def test_resolve_message_refuses_path_traversal(workspace: Path) -> None:
+    _seed_outbox(workspace, recipient="bob", subject="escape")
+    outbox_name = _only_outbox_msg(workspace).name
+    assert agent_cli._resolve_message(f"../outbox/{outbox_name}") is None
+
+
+def test_reply_finds_message_by_stem(workspace: Path) -> None:
+    name = _seed_inbox(workspace, subject="stem-reply")
+    stem = name.removesuffix(".md")
+    result = CliRunner().invoke(agent, ["reply", stem, "thanks"])
+    assert result.exit_code == 0, result.output
+    assert "not found" not in result.output
+
+
+def test_ambiguous_prefix_error_names_the_candidate_count(workspace: Path) -> None:
+    """A bare 'not found' for a shared prefix hides the real cause."""
+    inbox = workspace / "messages" / "inbox"
+    for suffix in ("one", "two"):
+        (inbox / f"20260101-000000-000000-bob-dup-{suffix}.md").write_text(
+            f"---\nfrom: bob\nto: alice\nsubject: {suffix}\nread: false\n---\n\nhi\n"
+        )
+    result = CliRunner().invoke(agent, ["reply", "20260101-000000-000000-bob-dup", "hi"])
+    assert result.exit_code == 1
+    assert "ambiguous" in result.output
+    assert "matches 2 message(s)" in result.output
+
+
+def test_read_resolves_stem_and_marks_it_read(workspace: Path) -> None:
+    """`read` must pass the resolved filename to the transport, not the stem."""
+    name = _seed_inbox(workspace, subject="read-by-stem")
+    stem = name.removesuffix(".md")
+    result = CliRunner().invoke(agent, ["read", stem])
+    assert result.exit_code == 0, result.output
+    assert _frontmatter(workspace / "messages" / "inbox" / name)["read"] is True
+
+
+@pytest.mark.parametrize("default_count", [1, 2])
+def test_prefix_ambiguity_spans_mailboxes(workspace: Path, default_count: int) -> None:
+    for i in range(default_count):
+        _write_local(workspace / "messages" / "inbox", f"shared-default-{i}.md", {})
+    _write_local(agent_cli._mailbox_root("ops") / "inbox", "shared-ops.md", {})
+    assert agent_cli._resolve_message("shared") is None
+    result = CliRunner().invoke(agent, ["ack", "shared"])
+    assert result.exit_code == 1
+    assert f"matches {default_count + 1} message(s)" in result.output
+    resolved = agent_cli._resolve_message("shared", mailbox="ops")
+    assert resolved is not None and resolved[1].name == "shared-ops.md"
+
+
+@pytest.mark.parametrize("reference", ["target", "target.md"])
+def test_exact_message_beats_other_mailbox_prefix(workspace: Path, reference: str) -> None:
+    _write_local(workspace / "messages" / "inbox", f"{reference}-followup.md", {})
+    inbox = agent_cli._mailbox_root("ops") / "inbox"
+    _write_local(inbox, "target.md", {})
+    assert agent_cli._resolve_message(reference) == ("ops", inbox / "target.md")
+
+
+@pytest.mark.parametrize("short_form", ["stem", "prefix"])
+def test_short_reply_keeps_canonical_parent(workspace: Path, short_form: str) -> None:
+    name = _seed_inbox(workspace, subject="threaded")
+    reference = name.removesuffix(".md") if short_form == "stem" else name.split("-bob-")[0]
+    result = CliRunner().invoke(agent, ["reply", reference, "thanks"])
+    assert result.exit_code == 0, result.output
+    assert _frontmatter(_only_outbox_msg(workspace))["in_reply_to"] == name
+    assert _frontmatter(workspace / "messages" / "inbox" / name)["replied"] is True
+    # Another spelling of the same id must not create a second reply.
+    again = CliRunner().invoke(agent, ["reply", name, "thanks again"])
+    assert again.exit_code == 0 and "already replied" in again.output
+    _only_outbox_msg(workspace)
+
+
+@pytest.mark.parametrize("has_exact", [False, True])
+def test_thread_root_does_not_guess_prefix(workspace: Path, has_exact: bool) -> None:
+    _write_local(workspace / "messages" / "outbox", "target-followup.md", {"subject": "wrong"})
+    if has_exact:
+        _write_local(workspace / "messages" / "inbox", "target.md", {"subject": "right"})
+    root = agent_cli._find_thread_root("target")
+    if has_exact:
+        assert root is not None and root[1]["subject"] == "right"
+    else:
+        assert root is None
+
+
+@pytest.mark.parametrize("reference", ["duplicate", "duplicate.md"])
+def test_duplicate_exact_ids_require_mailbox(workspace: Path, reference: str) -> None:
+    for mailbox in ("default", "ops"):
+        _write_local(agent_cli._mailbox_root(mailbox) / "inbox", "duplicate.md", {})
+    assert agent_cli._resolve_message(reference) is None
+    result = CliRunner().invoke(agent, ["ack", reference])
+    assert result.exit_code == 1 and "pass --mailbox" in result.output
+    assert agent_cli._resolve_message(reference, mailbox="ops") is not None
+
+
+def test_prefix_matches_are_literal_and_contained(workspace: Path) -> None:
+    inbox = workspace / "messages" / "inbox"
+    _write_local(inbox, "literal-other.md", {})
+    assert agent_cli._resolve_message("literal*") is None
+    _write_local(inbox, "literal*-target.md", {})
+    resolved = agent_cli._resolve_message("literal*")
+    assert resolved is not None and resolved[1].name == "literal*-target.md"
+    outside = workspace / "escape.md"
+    outside.write_text("outside")
+    (inbox / "escape-link.md").symlink_to(outside)
+    assert agent_cli._resolve_message("escape") is None
+
+
+def test_short_reply_preserves_wire_message_id(workspace: Path) -> None:
+    name = _seed_inbox(workspace, subject="wire")
+    path = workspace / "messages" / "inbox" / name
+    path.write_text(
+        path.read_text().replace("from: bob", "from: bob\nmessage_id: sender-original.md")
+    )
+    result = CliRunner().invoke(agent, ["reply", name.split("-bob-")[0], "thanks"])
+    assert result.exit_code == 0, result.output
+    assert _frontmatter(_only_outbox_msg(workspace))["in_reply_to"] == "sender-original.md"
+
+
+@pytest.mark.parametrize("has_message", [False, True])
+def test_prefix_ignores_non_message_files(workspace: Path, has_message: bool) -> None:
+    inbox = workspace / "messages" / "inbox"
+    _write_local(inbox, "target.md.orig", {})
+    if has_message:
+        _write_local(inbox, "target.md", {})
+    resolved = agent_cli._resolve_message("tar")
+    assert resolved == (("default", inbox / "target.md") if has_message else None)
+
+
+@pytest.mark.parametrize("reference_form", ["exact", "stem", "prefix"])
+def test_wire_reply_completes_local_tracker_entry(workspace: Path, reference_form: str) -> None:
+    name = _seed_inbox(workspace, subject="tracked-wire")
+    path = workspace / "messages" / "inbox" / name
+    path.write_text(path.read_text().replace("from: bob", "from: bob\nmessage_id: remote.md"))
+    tracker = ConversationTracker(workspace / "messages" / ".tracking")
+    tracker.track_message("agent:alice|bob", name, channel="agent")
+    reference = {
+        "exact": name,
+        "stem": name.removesuffix(".md"),
+        "prefix": name.split("-bob-")[0],
+    }[reference_form]
+    result = CliRunner().invoke(agent, ["reply", reference, "thanks"])
+    assert result.exit_code == 0, result.output
+    assert _frontmatter(_only_outbox_msg(workspace))["in_reply_to"] == "remote.md"
+    state = tracker.get_message_state("agent:alice|bob", name)
+    assert state is not None and state.state == MessageState.COMPLETED
+    assert tracker.get_message_state("agent:alice|bob", "remote.md") is None
+    sent_state = tracker.get_message_state("agent:alice|bob", _only_outbox_msg(workspace).name)
+    assert sent_state is not None and sent_state.in_reply_to == name
+
+
+def test_exact_ambiguity_count_excludes_prefix_siblings(workspace: Path) -> None:
+    for mailbox in ("default", "ops"):
+        _write_local(agent_cli._mailbox_root(mailbox) / "inbox", "duplicate.md", {})
+    _write_local(workspace / "messages" / "inbox", "duplicate.md-followup.md", {})
+    result = CliRunner().invoke(agent, ["ack", "duplicate.md"])
+    assert result.exit_code == 1
+    assert "matches 2 message(s)" in result.output
+
+
+def test_empty_message_id_does_not_resolve_hidden_file(workspace: Path) -> None:
+    _write_local(workspace / "messages" / "inbox", ".md", {})
+    assert agent_cli._resolve_message("") is None
+
+
+def test_prefix_reports_unreadable_mailbox(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    inbox = workspace / "messages" / "inbox"
+    original_iterdir = Path.iterdir
+
+    def iterdir(path: Path):
+        if path == inbox:
+            raise PermissionError("Permission denied")
+        return original_iterdir(path)
+
+    monkeypatch.setattr(Path, "iterdir", iterdir)
+    result = CliRunner().invoke(agent, ["ack", "missing"])
+    assert result.exit_code == 1
+    assert "Cannot read" in result.output and "Permission denied" in result.output
+
+
+@pytest.mark.parametrize("use_symlink", [False, True])
+def test_nested_message_keeps_relative_id(workspace: Path, use_symlink: bool) -> None:
+    inbox = workspace / "messages" / "inbox"
+    name = _seed_inbox(workspace, subject="nested")
+    nested = inbox / "sub" / name
+    nested.parent.mkdir()
+    (inbox / name).rename(nested)
+    reference = f"sub/{name}"
+    if use_symlink:
+        (inbox / "alias.md").symlink_to(nested)
+        reference = "alias.md"
+    result = CliRunner().invoke(agent, ["read", reference])
+    assert result.exit_code == 0, result.output
+    assert "nested" in result.output
+    tracker = ConversationTracker(workspace / "messages" / ".tracking")
+    tracker.track_message("agent:alice|bob", f"sub/{name}", channel="agent")
+    result = CliRunner().invoke(agent, ["reply", reference, "thanks"])
+    assert result.exit_code == 0, result.output
+    assert _frontmatter(_only_outbox_msg(workspace))["in_reply_to"] == f"sub/{name}"
+    state = tracker.get_message_state("agent:alice|bob", f"sub/{name}")
+    assert state is not None and state.state == MessageState.COMPLETED
+
+
+def test_exact_filename_precedes_stem_expansion(workspace: Path) -> None:
+    inbox = workspace / "messages" / "inbox"
+    _write_local(inbox, "target", {"subject": "exact"})
+    _write_local(agent_cli._mailbox_root("ops") / "inbox", "target.md", {"subject": "stem"})
+    assert agent_cli._resolve_message("target") == ("default", inbox / "target")

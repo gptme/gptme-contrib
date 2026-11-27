@@ -524,15 +524,24 @@ def _delivery_failed(message_id: str, *, mailbox: str = "default") -> bool:
     )
 
 
-def _track_sent(transport: AgentTransport, message_id: str, reply_to: str | None) -> None:
+def _track_sent(
+    transport: AgentTransport,
+    message_id: str,
+    reply_to: str | None,
+    *,
+    local_reply_to: str | None = None,
+) -> None:
     """Stamp a sent message into the shared tracker (channel='agent')."""
     tracker = _tracker()
     conv = transport.conversation_id_for(message_id)
-    tracker.track_message(conv, message_id, in_reply_to=reply_to, channel="agent")
+    tracker.track_message(conv, message_id, in_reply_to=local_reply_to or reply_to, channel="agent")
     if reply_to:
         # The inbound message we just answered is no longer pending.
         tracker.set_message_state(
-            conv, reply_to, MessageState.COMPLETED, metadata={"reply_id": message_id}
+            conv,
+            local_reply_to or reply_to,
+            MessageState.COMPLETED,
+            metadata={"reply_id": message_id},
         )
 
 
@@ -689,18 +698,107 @@ def _stamp_inbox(path: Path, flags: dict[str, bool]) -> None:
         write_inbox_metadata(path, stamped)
 
 
+def _message_id_candidates(message_id: str) -> list[str]:
+    """Filenames to try for a user-supplied message id, in order.
+
+    Callers routinely have a message *stem* or a timestamp prefix in hand (from a
+    journal, a task file, or an agent mail notification) rather than the exact
+    inbox filename, so a bare stem must resolve to its ``.md`` file.
+    """
+    candidates = [message_id]
+    if Path(message_id).suffix != ".md":
+        candidates.append(f"{message_id}.md")
+    return candidates
+
+
+def _prefix_matches(base: Path, message_id: str) -> list[Path]:
+    """Contained files starting with ``message_id``.
+
+    Uses literal ``str.startswith`` rather than a glob so message ids carrying
+    glob metacharacters cannot widen the match, and refuses ids containing a path
+    separator (those are handled by the exact-candidate path, which is
+    containment-checked). The caller checks uniqueness across all mailboxes.
+    """
+    if not message_id or os.sep in message_id or (os.altsep and os.altsep in message_id):
+        return []
+    try:
+        matches = []
+        for entry in sorted(base.iterdir()):
+            if entry.name.startswith(message_id) and entry.suffix == ".md":
+                path = _within(base, entry.name)
+                if path is not None and path.is_file():
+                    matches.append(path)
+        return matches
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        raise click.ClickException(f"Cannot read {base}: {exc}") from exc
+
+
+def _message_matches(
+    message_id: str,
+    *,
+    folder: str = "inbox",
+    mailbox: str | None = None,
+    allow_prefix: bool = True,
+) -> list[tuple[str, Path]]:
+    if not message_id:
+        return []
+    mailboxes = [_normalize_mailbox(mailbox)] if mailbox is not None else _known_mailboxes()
+    # Exhaust exact filenames (then stems) across the whole scope before trying
+    # prefixes. A prefix in default must not shadow an exact id in a named mailbox.
+    for candidate in _message_id_candidates(message_id):
+        matches = []
+        for mailbox_name in mailboxes:
+            path = _within(_mailbox_root(mailbox_name) / folder, candidate)
+            if path is not None and path.is_file():
+                matches.append((mailbox_name, path))
+        if matches:
+            return matches
+    if not allow_prefix:
+        return []
+    return [
+        (mailbox_name, path)
+        for mailbox_name in mailboxes
+        for path in _prefix_matches(_mailbox_root(mailbox_name) / folder, message_id)
+    ]
+
+
 def _resolve_message(
     message_id: str,
     *,
     folder: str = "inbox",
     mailbox: str | None = None,
+    allow_prefix: bool = True,
 ) -> tuple[str, Path] | None:
+    matches = _message_matches(
+        message_id, folder=folder, mailbox=mailbox, allow_prefix=allow_prefix
+    )
+    return matches[0] if len(matches) == 1 else None
+
+
+def _message_not_found_error(
+    message_id: str,
+    *,
+    folder: str = "inbox",
+    mailbox: str | None = None,
+) -> str:
+    """Error text for an unresolved id, naming ambiguity when that is the cause.
+
+    A bare "message not found" for a prefix that matched several files sends the
+    caller hunting for a longer stem with no idea how many candidates exist, and
+    the natural next move (pick one arbitrarily) is how a reply lands on the
+    wrong thread. Say the count instead.
+    """
     mailboxes = [_normalize_mailbox(mailbox)] if mailbox is not None else _known_mailboxes()
-    for mailbox_name in mailboxes:
-        path = _within(_mailbox_root(mailbox_name) / folder, message_id)
-        if path is not None and path.exists():
-            return mailbox_name, path
-    return None
+    count = len(_message_matches(message_id, folder=folder, mailbox=mailbox))
+    if count > 1:
+        return (
+            f"Error: ambiguous message id: {message_id} matches {count} "
+            f"message(s) in {', '.join(mailboxes)}/{folder}; pass --mailbox, a longer prefix or "
+            f"the full filename"
+        )
+    return f"Error: message not found: {message_id}"
 
 
 def _pending_for_mailboxes(
@@ -1015,7 +1113,7 @@ def _find_thread_root(thread: str) -> tuple[str, dict] | None:
     filename = thread.strip().strip("<>")
     for candidate in dict.fromkeys([filename, f"{_thread_key(filename)}.md"]):
         for folder in ("outbox", "inbox"):
-            resolved = _resolve_message(candidate, folder=folder)
+            resolved = _resolve_message(candidate, folder=folder, allow_prefix=False)
             if resolved is not None:
                 return resolved[0], meta_of(resolved[1]) or {}
     return None
@@ -1359,12 +1457,15 @@ def read(message_id: str, thread: bool, mailbox: str | None) -> None:
     """Read a message (marks it read), optionally with its thread."""
     resolved = _resolve_message(message_id, folder="inbox", mailbox=mailbox)
     if resolved is None:
-        click.echo(f"Error: message not found: {message_id}", err=True)
+        click.echo(_message_not_found_error(message_id, mailbox=mailbox), err=True)
         sys.exit(1)
     mailbox_name, msg_path = resolved
     transport = _transport(mailbox=mailbox_name)
     try:
-        click.echo(transport.read(message_id, include_thread=thread))
+        # Pass the resolved filename: the caller's id may be a stem or a prefix
+        # that the transport's exact lookup would reject.
+        local_id = msg_path.relative_to(transport.inbox.resolve()).as_posix()
+        click.echo(transport.read(local_id, include_thread=thread))
     except FileNotFoundError as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
@@ -1382,7 +1483,7 @@ def ack(message_id: str, mailbox: str | None) -> None:
     """
     resolved = _resolve_message(message_id, folder="inbox", mailbox=mailbox)
     if resolved is None:
-        click.echo(f"Error: message not found: {message_id}", err=True)
+        click.echo(_message_not_found_error(message_id, mailbox=mailbox), err=True)
         sys.exit(1)
     mailbox_name, msg_path = resolved
     transport = _transport(mailbox=mailbox_name)
@@ -1405,7 +1506,7 @@ def reply(message_id: str, content: str | None, mailbox: str | None) -> None:
     """Reply to an inbox message, threading via in_reply_to."""
     resolved = _resolve_message(message_id, folder="inbox", mailbox=mailbox)
     if resolved is None:
-        click.echo(f"Error: message not found: {message_id}", err=True)
+        click.echo(_message_not_found_error(message_id, mailbox=mailbox), err=True)
         sys.exit(1)
     mailbox_name, msg_path = resolved
     body = _read_body(content)
@@ -1414,9 +1515,10 @@ def reply(message_id: str, content: str | None, mailbox: str | None) -> None:
         deliver=_ssh_deliver(agents, mailbox=mailbox_name),
         mailbox=mailbox_name,
     )
+    local_id = msg_path.relative_to(transport.inbox.resolve()).as_posix()
     # Hold the lock from the replied re-check until replied:true is stamped, so
     # a concurrent session replying to the same message sees the stamp.
-    with _send_lock(transport, f"reply:{msg_path.name}"):
+    with _send_lock(transport, f"reply:{local_id}"):
         original = meta_of(msg_path)
         if original is None:
             click.echo(f"Error: message not found: {message_id}", err=True)
@@ -1438,7 +1540,7 @@ def reply(message_id: str, content: str | None, mailbox: str | None) -> None:
             subject = f"Re: {subject}"
         # The inbox filename is local; receive-only peers retain the sender's
         # original ID in frontmatter for reply links across the wire.
-        parent_id = str(original.get("message_id") or message_id)
+        parent_id = str(original.get("message_id") or local_id)
         reply_id = transport.send(recipient, subject, body, reply_to=parent_id)
         if _delivery_failed(reply_id, mailbox=mailbox_name):
             click.echo(
@@ -1447,7 +1549,7 @@ def reply(message_id: str, content: str | None, mailbox: str | None) -> None:
                 err=True,
             )
             sys.exit(1)
-        _track_sent(transport, reply_id, reply_to=message_id)
+        _track_sent(transport, reply_id, reply_to=parent_id, local_reply_to=local_id)
         _mark_replied(msg_path)
     click.echo(f"Replied to {recipient}: {subject}")
 
