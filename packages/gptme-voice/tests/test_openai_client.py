@@ -1423,6 +1423,36 @@ def test_send_typed_message_also_cancels_a_reply_that_starts_meanwhile() -> None
     asyncio.run(_exercise())
 
 
+def test_send_typed_message_reports_undelivered_if_cancel_is_never_confirmed() -> None:
+    """Without response.done, a response.create would be rejected: raise
+    instead of sending a turn that would go unanswered."""
+
+    async def _exercise() -> None:
+        fake_ws = _FakeWebSocket()
+
+        async def _fake_connect(*_args, **_kwargs):
+            return fake_ws
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "gptme_voice.realtime.openai_client.websockets.connect", _fake_connect
+            )
+            mp.setattr(
+                "gptme_voice.realtime.openai_client._TYPED_CANCEL_WAIT_SECONDS", 0.05
+            )
+            client = OpenAIRealtimeClient(api_key="test-key")
+            await client.connect()
+            await client._handle_event({"type": "session.updated"})
+            await client._handle_event({"type": "response.created"})
+            baseline = len(fake_ws.sent)
+            with pytest.raises(asyncio.TimeoutError):
+                await client.send_typed_message("stop")
+            assert [e["type"] for e in fake_ws.sent[baseline:]] == ["response.cancel"]
+            await client.disconnect()
+
+    asyncio.run(_exercise())
+
+
 def test_send_text_message_times_out_if_session_never_becomes_ready() -> None:
     """A missing provider ready event must not pin the local handler forever."""
 

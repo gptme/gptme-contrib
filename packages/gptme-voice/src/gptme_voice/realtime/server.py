@@ -86,6 +86,8 @@ from .twilio_integration import (
 from .xai_client import XAIRealtimeClient, _get_xai_api_key
 
 # Longest typed message accepted from the browser during a call.
+# Teardown waits this long for typed messages still being delivered.
+_TYPED_DRAIN_TIMEOUT_SECONDS = 3.0
 _MAX_TYPED_MESSAGE_CHARS = 8000
 
 # Header gptme-server's tunnel sets when this process is its voice sidecar.
@@ -3586,6 +3588,8 @@ class VoiceServer:
         transcript: list[TranscriptTurn] = []
         audio_converter = AudioConverter()
         live_sink: LiveTranscriptSink | None = None
+        typed_lock = asyncio.Lock()
+        typed_tasks: set[asyncio.Task[None]] = set()
         tool_workspace = self.workspace
 
         try:
@@ -3714,9 +3718,21 @@ class VoiceServer:
                 if data.get("type") == "commit":
                     await realtime_client.commit_audio()
                 elif data.get("type") == "text":
-                    await self._handle_browser_typed_message(
-                        websocket, realtime_client, transcript, live_sink, data
+                    # Off the receive loop: delivering a typed message can wait
+                    # for an interrupted reply to end, and microphone audio must
+                    # keep flowing meanwhile. The lock keeps typed turns in order.
+                    task = asyncio.create_task(
+                        self._typed_in_order(
+                            typed_lock,
+                            websocket,
+                            realtime_client,
+                            transcript,
+                            live_sink,
+                            data,
+                        )
                     )
+                    typed_tasks.add(task)
+                    task.add_done_callback(typed_tasks.discard)
 
         except WebSocketDisconnect:
             pass
@@ -3727,6 +3743,16 @@ class VoiceServer:
         except Exception as e:
             logger.exception("Error handling browser connection: %s", e)
         finally:
+            if typed_tasks:
+                # A message typed just before hanging up is still delivered
+                # and recorded; bounded, so a stuck provider can't hold teardown.
+                _done, pending = await asyncio.wait(
+                    set(typed_tasks), timeout=_TYPED_DRAIN_TIMEOUT_SECONDS
+                )
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    await asyncio.gather(*pending, return_exceptions=True)
             if realtime_client:
                 await self._disconnect_realtime_client(realtime_client)
             if live_sink is not None:
@@ -3903,6 +3929,15 @@ class VoiceServer:
         """
         message = {"type": "audio_end"}
         await websocket.send_text(json.dumps(message))
+
+    async def _typed_in_order(self, lock: asyncio.Lock, *args) -> None:
+        async with lock:
+            try:
+                await self._handle_browser_typed_message(*args)
+            except Exception:
+                # A browser that went away mid-delivery must not leak an
+                # unretrieved task exception; the call itself carries on.
+                logger.exception("Typed message handling failed")
 
     async def _handle_browser_typed_message(
         self,

@@ -3355,6 +3355,49 @@ def test_browser_typed_message_not_delivered_is_not_recorded(
     assert [(t.role, t.text) for t in seen["transcript"]] == [("user", "second try")]
 
 
+def test_browser_audio_keeps_flowing_while_a_typed_message_waits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Typed delivery can wait for an interrupted reply to end; microphone
+    audio sent meanwhile is forwarded at once, not queued behind it."""
+    server = VoiceServer(enable_browser_transport=True)
+    events: list[str] = []
+
+    class _SlowTypedClient(_FakeRealtimeClient):
+        async def send_typed_message(self, text: str) -> bool:
+            events.append("typed:start")
+            await asyncio.sleep(0.2)  # waiting for response.done
+            events.append("typed:sent")
+            return await super().send_typed_message(text)
+
+        async def send_audio(self, audio_data: bytes) -> None:
+            events.append("audio")
+            await super().send_audio(audio_data)
+
+    class _PacedSocket(_DummyBrowserWebSocket):
+        async def receive(self) -> dict[str, object]:
+            await asyncio.sleep(0.01)  # frames arrive over time, as in a call
+            return await super().receive()
+
+    websocket = _PacedSocket(
+        [
+            {
+                "type": "websocket.receive",
+                "text": json.dumps({"type": "text", "text": "stop"}),
+            },
+            {"type": "websocket.receive", "bytes": b"\x00\x00" * 160},
+            {"type": "websocket.disconnect"},
+        ]
+    )
+    fake_client = _SlowTypedClient()
+
+    seen = _run_browser_call(monkeypatch, server, websocket, fake_client)
+
+    assert events == ["typed:start", "audio", "typed:sent"]
+    # Teardown waited for the in-flight typed message to be delivered.
+    assert [(t.role, t.text) for t in seen["transcript"]] == [("user", "stop")]
+
+
 def test_probe_call_leaves_no_call_record(monkeypatch: pytest.MonkeyPatch) -> None:
     """?probe=1 calls skip all post-call bookkeeping."""
     server = VoiceServer(enable_browser_transport=True)

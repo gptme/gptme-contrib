@@ -861,8 +861,12 @@ class OpenAIRealtimeClient:
                     raise asyncio.TimeoutError
                 await asyncio.wait_for(self._response_idle.wait(), remaining)
             except asyncio.TimeoutError:
-                logger.warning("No response.done after cancel; sending anyway")
-                break
+                # A response.create now would be rejected while the provider
+                # still considers the reply active, leaving the typed turn
+                # unanswered. Report it undelivered instead.
+                raise asyncio.TimeoutError(
+                    "provider did not confirm cancelling the active reply"
+                ) from None
         await self.send_text_message(text)
         return interrupted
 
