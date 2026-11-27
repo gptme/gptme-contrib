@@ -120,6 +120,9 @@ def test_shared_checkout_denies_tree_wide_operations(command):
         "git switch main",
         "git checkout ./file.py",
         "git clean -n",
+        "git stash apply 1a2b3c4d",
+        'git stash apply "$sha"',
+        "sha=$(git stash create)",
         "git clean -nd",
         "git add -u path/to/file.py",
         "git add --chmod=+x script.sh",
@@ -157,6 +160,13 @@ def test_several_cds_check_every_target():
     assert detect(f"cd /tmp && cd {SHARED} && git reset --hard", cwd=OTHER) is not None
     assert detect(f"cd {OTHER} && cd {SHARED}; git add -A", cwd=OTHER) is not None
     assert detect(f"cd /tmp && cd {OTHER} && git reset --hard", cwd=OTHER) is None
+
+
+def test_cd_inside_a_quoted_argument_is_not_a_directory_change():
+    assert detect(f'git stash push -m "cd {SHARED}"', cwd=OTHER) is None
+    assert detect(f"git commit -am 'cd {SHARED}'", cwd=OTHER) is None
+    # A quoted cd target still counts.
+    assert detect(f'cd "{SHARED}" && git add -A', cwd=OTHER) is not None
 
 
 def test_unresolvable_directories_fail_closed():

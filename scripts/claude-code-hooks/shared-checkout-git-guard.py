@@ -9,7 +9,7 @@ Two scopes:
 
 * **Shared checkouts** (opt-in per repo with ``git config safety.sharedCheckout
   true``; ``scripts/git/setup-shared-checkout.sh`` sets it): deny whole-tree
-  operations (stash, ``reset --hard``, bare/whole-index ``reset``,
+  operations (stash writes other than ``create``/``apply <sha>``, ``reset --hard``, bare/whole-index ``reset``,
   ``--autostash``, ``clean -fd``, ``checkout .``, forced ``checkout``/``switch``,
   ``restore .``) and broad
   staging (``add -A``/``.``/``--all``, ``commit -a``).
@@ -53,8 +53,6 @@ _GIT = r"(?:^|[;&|()\s])git(?P<opts>(?:\s+" + _GIT_OPT + r")*)\s+"
 _TARGET_OPT_RE = re.compile(r"(?:-C\s+|--work-tree(?:=|\s+))(?P<path>\S+)")
 _END = r"(?:\s|$|[;&|)])"
 
-# Every stash subcommand except the read-only ones rewrites tree and/or stack.
-_STASH_RE = re.compile(_GIT + r"stash(?!\s+(?:list|show)" + _END + r")(?:\s|$)")
 # Stack writes (for repos with linked worktrees): also allow ``create`` (no
 # stack write) and ``apply <sha|$var>`` (applies a specific object).
 _STASH_STACK_RE = re.compile(
@@ -115,7 +113,9 @@ _COMMIT_ALL_RE = re.compile(
 )
 
 SHARED_CHECKOUT_RULES: dict[str, re.Pattern[str]] = {
-    "git stash": _STASH_RE,
+    # Same allowances as the stack rule: list/show/create, and
+    # `stash apply <sha>` (the documented recovery path) stay allowed.
+    "git stash": _STASH_STACK_RE,
     "git reset --hard": _RESET_HARD_RE,
     "git reset (whole index)": _RESET_INDEX_RE,
     "git reset -- . (whole index)": _RESET_ALL_RE,
@@ -149,6 +149,10 @@ def _resolve_cd_target(target: str, cwd: Path) -> Path | None:
         return None
 
 
+# Quoted arguments that are not a cd target (e.g. `stash push -m "cd x"`).
+_QUOTED_NOT_CD_RE = re.compile(r"(?<!cd )(?<!cd\t)(['\"])(?:(?!\1).)*\1")
+
+
 def effective_cwds(command: str, cwd: Path) -> list[Path]:
     """Directories *command*'s git calls may run in.
 
@@ -156,6 +160,8 @@ def effective_cwds(command: str, cwd: Path) -> list[Path]:
     runs the rest even when the cd fails; several ``cd``s can hop anywhere)
     every resolvable ``cd`` target and *cwd* are all checked: fail closed.
     """
+    # A `cd` inside a quoted argument is text, not a directory change.
+    command = _QUOTED_NOT_CD_RE.sub('""', command)
     targets = [m.group("path") for m in _CD_RE.finditer(command)]
     if not targets:
         return [cwd]
