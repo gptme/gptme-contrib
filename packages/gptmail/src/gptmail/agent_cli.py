@@ -689,6 +689,38 @@ def _stamp_inbox(path: Path, flags: dict[str, bool]) -> None:
         write_inbox_metadata(path, stamped)
 
 
+def _message_id_candidates(message_id: str) -> list[str]:
+    """Filenames to try for a user-supplied message id, in order.
+
+    Callers routinely have a message *stem* or a timestamp prefix in hand (from a
+    journal, a task file, or an agent mail notification) rather than the exact
+    inbox filename, so a bare stem must resolve to its ``.md`` file.
+    """
+    candidates = [message_id]
+    if Path(message_id).suffix != ".md":
+        candidates.append(f"{message_id}.md")
+    return candidates
+
+
+def _unique_prefix_match(base: Path, message_id: str) -> str | None:
+    """Inbox filename starting with ``message_id``, only when exactly one does.
+
+    Uses literal ``str.startswith`` rather than a glob so message ids carrying
+    glob metacharacters cannot widen the match, and refuses ids containing a path
+    separator (those are handled by the exact-candidate path, which is
+    containment-checked). Ambiguous prefixes resolve to nothing rather than to an
+    arbitrary sibling.
+    """
+    if not message_id or os.sep in message_id or (os.altsep and os.altsep in message_id):
+        return None
+    try:
+        names = sorted(p.name for p in base.iterdir() if p.is_file())
+    except OSError:
+        return None
+    matches = [name for name in names if name.startswith(message_id)]
+    return matches[0] if len(matches) == 1 else None
+
+
 def _resolve_message(
     message_id: str,
     *,
@@ -697,9 +729,16 @@ def _resolve_message(
 ) -> tuple[str, Path] | None:
     mailboxes = [_normalize_mailbox(mailbox)] if mailbox is not None else _known_mailboxes()
     for mailbox_name in mailboxes:
-        path = _within(_mailbox_root(mailbox_name) / folder, message_id)
-        if path is not None and path.exists():
-            return mailbox_name, path
+        base = _mailbox_root(mailbox_name) / folder
+        for candidate in _message_id_candidates(message_id):
+            path = _within(base, candidate)
+            if path is not None and path.is_file():
+                return mailbox_name, path
+        match = _unique_prefix_match(base, message_id)
+        if match is not None:
+            path = _within(base, match)
+            if path is not None and path.is_file():
+                return mailbox_name, path
     return None
 
 

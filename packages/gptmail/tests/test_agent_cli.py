@@ -2843,3 +2843,64 @@ def test_stamp_survives_yaml_line_breaks_that_split_does_not_count(brk: str) -> 
     assert stamped == f'---\nfrom: bob\nsubject: "a{brk}b"\nread: true\n---\n\nfyi\n'
     assert stamped is not None
     assert yaml.safe_load(stamped.split("---")[1])["read"] is True
+
+
+# --- forgiving message-id resolution -------------------------------------
+# Callers usually hold a stem or a timestamp prefix (from a journal, task file,
+# or agent-mail notification) rather than the exact inbox filename. Exact-only
+# resolution made those messages unreachable even though they were on disk
+# (friction ledger 2026-11-27: "cannot find a visible on-disk Erik message by
+# timestamp or full stem"). Resolution stays containment-checked and refuses
+# ambiguous prefixes rather than guessing.
+
+
+def test_resolve_message_accepts_exact_filename(workspace: Path) -> None:
+    name = _seed_inbox(workspace, subject="exact")
+    resolved = agent_cli._resolve_message(name)
+    assert resolved is not None
+    mailbox_name, path = resolved
+    assert mailbox_name == "default"
+    assert path.name == name
+
+
+def test_resolve_message_accepts_stem_without_suffix(workspace: Path) -> None:
+    name = _seed_inbox(workspace, subject="stem")
+    stem = name.removesuffix(".md")
+    resolved = agent_cli._resolve_message(stem)
+    assert resolved is not None
+    assert resolved[1].name == name
+
+
+def test_resolve_message_accepts_unique_timestamp_prefix(workspace: Path) -> None:
+    name = _seed_inbox(workspace, subject="prefix")
+    prefix = name.split("-bob-", 1)[0]  # the timestamp part only
+    assert prefix != name
+    resolved = agent_cli._resolve_message(prefix)
+    assert resolved is not None
+    assert resolved[1].name == name
+
+
+def test_resolve_message_refuses_ambiguous_prefix(workspace: Path) -> None:
+    inbox = workspace / "messages" / "inbox"
+    for suffix in ("one", "two"):
+        (inbox / f"20260101-000000-000000-bob-shared-{suffix}.md").write_text(
+            f"---\nfrom: bob\nto: alice\nsubject: {suffix}\nread: false\n---\n\nhi\n"
+        )
+    # Two candidates share the prefix; guessing one would reply to the wrong thread.
+    assert agent_cli._resolve_message("20260101-000000-000000-bob-shared") is None
+    # An empty id must never match everything.
+    assert agent_cli._resolve_message("") is None
+
+
+def test_resolve_message_refuses_path_traversal(workspace: Path) -> None:
+    _seed_outbox(workspace, recipient="bob", subject="escape")
+    outbox_name = _only_outbox_msg(workspace).name
+    assert agent_cli._resolve_message(f"../outbox/{outbox_name}") is None
+
+
+def test_reply_finds_message_by_stem(workspace: Path) -> None:
+    name = _seed_inbox(workspace, subject="stem-reply")
+    stem = name.removesuffix(".md")
+    result = CliRunner().invoke(agent, ["reply", stem, "thanks"])
+    assert result.exit_code == 0, result.output
+    assert "not found" not in result.output
