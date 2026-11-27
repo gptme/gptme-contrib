@@ -137,18 +137,32 @@ def test_index_preserves_old_chunks_when_replacement_add_fails(tmp_path, monkeyp
 
     chromadb.api.shared_system_client.SharedSystemClient._identifier_to_system.clear()
     original_add = chromadb.Collection.add
+    original_upsert = chromadb.Collection.upsert
     replacement_hash = hashlib.sha256(b"version two content").hexdigest()
 
-    def fail_replacement_add(self, *args, **kwargs):
+    def _writes_replacement(args, kwargs):
         metadatas = kwargs.get("metadatas")
         if metadatas is None and len(args) >= 3:
             metadatas = args[2]
         metadatas = metadatas or []
-        if any(metadata.get("content_hash") == replacement_hash for metadata in metadatas):
+        return any(metadata.get("content_hash") == replacement_hash for metadata in metadatas)
+
+    def fail_replacement_add(self, *args, **kwargs):
+        if _writes_replacement(args, kwargs):
             raise RuntimeError("simulated embedding failure")
         return original_add(self, *args, **kwargs)
 
+    def fail_replacement_upsert(self, *args, **kwargs):
+        if _writes_replacement(args, kwargs):
+            raise RuntimeError("simulated embedding failure")
+        return original_upsert(self, *args, **kwargs)
+
+    # The indexer writes batches through upsert (so an unchanged re-index
+    # refreshes last_modified), so a failure injection on add alone never
+    # fires. Patch both write paths: the invariant is that a failed
+    # replacement write must not sweep the old chunks, whichever call is used.
     monkeypatch.setattr(chromadb.Collection, "add", fail_replacement_add)
+    monkeypatch.setattr(chromadb.Collection, "upsert", fail_replacement_upsert)
     second = _run_index(runner, index_dir, [src])
     assert second.exit_code == 1, second.output
     assert "simulated embedding failure" in second.output
