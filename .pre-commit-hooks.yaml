@@ -39,6 +39,8 @@
     Fails when a code or test file over the line limit (default 2,000) is
     new or has grown past its entry in the checked-in
     ``file-size-baseline.json``. Shrinking lowers the entry automatically.
+    Add ``args: [--growth=warn]`` and ``verbose: true`` to report growth
+    without failing.
     Create the baseline once with ``file-size-ratchet --init``.
   entry: file-size-ratchet
   language: python

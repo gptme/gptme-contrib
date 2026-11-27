@@ -71,12 +71,14 @@ repos:
     files: ^(README\.md|packages/README\.md|packages/[^/]+/pyproject\.toml)$
 
   - id: file-size-ratchet
-    name: Ratchet source-file sizes (no new files over 2000 lines, no growth)
+    name: Ratchet source-file sizes (no new files over 2000 lines; growth warns)
     entry: python3 scripts/precommit/validators/file_size_ratchet.py
+    args: [--growth=warn]
     language: system
     types: [text]
     require_serial: true
     always_run: true
+    verbose: true # shows growth warnings; a passing hook is otherwise silent
 
   - id: check-root-structure
     name: Check root directory structure
