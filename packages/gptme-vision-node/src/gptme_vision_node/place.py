@@ -22,6 +22,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import stat
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
@@ -98,8 +99,8 @@ class HistogramEmbedder:
             ).flatten()
         ]
         if self.v_bins:
-            # Same total mass as the H+S histogram, so brightness carries
-            # equal weight in the cosine similarity.
+            # Same total mass as the H+S histogram. Its cosine contribution
+            # also depends on how concentrated each histogram is.
             parts.append(
                 cv2.calcHist([region], [2], None, [self.v_bins], [0, 256]).flatten()
             )
@@ -326,6 +327,10 @@ class PlaceRecognizer:
         # target rather than replacing the link with a separate gallery.
         path = Path(path).resolve()
         path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            existing_mode = stat.S_IMODE(path.stat().st_mode)
+        except FileNotFoundError:
+            existing_mode = None
         # Write-then-rename so a crash or full disk never truncates the
         # existing gallery (every enrolled sample would be lost).
         fd, tmp_name = tempfile.mkstemp(
@@ -335,6 +340,10 @@ class PlaceRecognizer:
             with os.fdopen(fd, "w") as f:
                 f.write(json.dumps(payload))
                 f.flush()
+                # Keep deliberate sharing permissions on existing galleries;
+                # new files retain mkstemp's private 0600 default.
+                if existing_mode is not None:
+                    os.fchmod(f.fileno(), existing_mode)
                 os.fsync(f.fileno())
             os.replace(tmp_name, path)
         except BaseException:

@@ -550,6 +550,61 @@ def _cue_msg(pcm: bytes, **extra) -> str:
 
 class TestSoundCue:
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("speech_first", [False, True])
+    async def test_audio_end_waits_for_inflight_cue(self, speech_first):
+        node = _make_node()
+        cue = b"\x01\x02" * 256
+        speech = b"\x00\x01" * 256
+        messages: asyncio.Queue[str] = asyncio.Queue()
+        if speech_first:
+            messages.put_nowait(
+                json.dumps(
+                    {"type": "audio", "audio": base64.b64encode(speech).decode()}
+                )
+            )
+        messages.put_nowait(_cue_msg(cue))
+        ws = AsyncMock()
+        cue_started = asyncio.Event()
+        finish_cue = asyncio.Event()
+        end_handled = asyncio.Event()
+
+        async def audio_io(function, pcm):
+            if pcm == cue:
+                cue_started.set()
+                await finish_cue.wait()
+            return function(pcm)
+
+        async def recv():
+            if end_handled.is_set():
+                raise ConnectionClosed(None, None)
+            message = await messages.get()
+            if json.loads(message)["type"] == "audio_end":
+                end_handled.set()
+            return message
+
+        ws.recv.side_effect = recv
+        with patch("gptme_voice_node.node._run_audio_io", audio_io):
+            task = asyncio.create_task(node._recv_loop(ws, MagicMock()))
+            try:
+                await asyncio.wait_for(cue_started.wait(), timeout=1)
+                messages.put_nowait(json.dumps({"type": "audio_end"}))
+                # Let the event loop run while the cue write is suspended.
+                await asyncio.sleep(0)
+                assert not end_handled.is_set()
+                assert node._mic_muted()
+                finish_cue.set()
+                await asyncio.wait_for(task, timeout=1)
+            finally:
+                finish_cue.set()
+                if not task.done():
+                    task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+        assert end_handled.is_set()
+        assert not node._playing
+        assert node._mic_muted()  # cooldown begins only after playback
+
+    @pytest.mark.asyncio
     async def test_sound_cue_is_played_and_mutes_mic_only_while_playing(self):
         node = _make_node()
         pcm = b"\x01\x02" * 256

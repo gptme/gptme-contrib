@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import stat
 
 import numpy as np
 import pytest
@@ -322,6 +323,34 @@ def test_save_through_symlink_updates_target_and_preserves_link(tmp_path):
     assert set(PlaceRecognizer.from_file(target).places) == {"kitchen", "office"}
     assert link.read_bytes() == target.read_bytes()
     assert list(target.parent.glob("*.tmp")) == []
+
+
+@pytest.mark.parametrize("mode", [0o600, 0o640, 0o644])
+@pytest.mark.parametrize("through_symlink", [False, True])
+def test_save_preserves_existing_gallery_mode(tmp_path, mode, through_symlink):
+    target = tmp_path / "gallery.json"
+    rec = PlaceRecognizer()
+    rec.enroll("kitchen", wifi_sig=KITCHEN_WIFI)
+    rec.save(target)
+    target.chmod(mode)
+    path = target
+    if through_symlink:
+        path = tmp_path / "places.json"
+        path.symlink_to(target.name)
+
+    rec.enroll("office", wifi_sig=OFFICE_WIFI)
+    rec.save(path)
+
+    assert stat.S_IMODE(target.stat().st_mode) == mode
+    assert set(PlaceRecognizer.from_file(target).places) == {"kitchen", "office"}
+    if through_symlink:
+        assert path.is_symlink()
+
+
+def test_new_gallery_is_private(tmp_path):
+    path = tmp_path / "gallery.json"
+    PlaceRecognizer().save(path)
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
 def test_save_failure_keeps_existing_gallery(tmp_path, monkeypatch):
