@@ -272,6 +272,34 @@ def test_full_run_does_not_double_count(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("legacy", [False, True], ids=["full", "legacy"])
+def test_rebuild_preserves_state_when_logs_unavailable(
+    tmp_path: Path, legacy: bool
+) -> None:
+    logs, state = tmp_path / "logs", tmp_path / "state.json"
+    _write_log(logs, "2025-10-02-zesty")
+    EffectivenessTracker(logs_dir=logs, state_file=state).analyze()
+    if legacy:
+        saved = json.loads(state.read_text())
+        del saved["processed_logs"]
+        state.write_text(json.dumps(saved))
+    original = state.read_bytes()
+    logs.rename(tmp_path / "offline-logs")
+
+    tracker = EffectivenessTracker(logs_dir=logs, state_file=state)
+    before = tracker.state.to_dict()
+    with pytest.raises(FileNotFoundError, match="Cannot rebuild"):
+        tracker.analyze(incremental=legacy)
+    assert state.read_bytes() == original
+    assert tracker.state.to_dict() == before
+
+    # Once logs return, the same tracker can rebuild normally.
+    (tmp_path / "offline-logs").rename(logs)
+    rebuilt = tracker.analyze(incremental=legacy)
+    assert rebuilt.processed_count == rebuilt.total_sessions == 1
+    assert rebuilt.processed_logs == ["2025-10-02-zesty"]
+
+
+@pytest.mark.parametrize("legacy", [False, True], ids=["full", "legacy"])
 @pytest.mark.parametrize("interrupted", [False, True], ids=["limit", "checkpoint"])
 def test_rebuild_resumes_exactly_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, legacy: bool, interrupted: bool

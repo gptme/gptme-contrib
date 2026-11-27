@@ -291,6 +291,10 @@ class EffectivenessTracker:
         if not incremental or (
             self.state.last_processed and not self.state.processed_logs
         ):
+            if not self.logs_dir.is_dir():
+                raise FileNotFoundError(
+                    f"Cannot rebuild statistics: logs directory unavailable: {self.logs_dir}"
+                )
             # Legacy watermarks cannot identify which earlier-sorting logs were
             # counted. Rebuild from available logs once, just like --full,
             # rather than guessing membership or adding to the old counters.
