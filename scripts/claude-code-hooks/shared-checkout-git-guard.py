@@ -82,9 +82,8 @@ _RESET_ALL_RE = re.compile(
     _GIT + r"reset(?:\s+(?:-q|--quiet|--mixed|HEAD(?:[~^]\d*)*))*\s+--\s+\." + _END
 )
 _AUTOSTASH_RE = re.compile(_GIT + r"(?:pull|rebase)\b[^;&|\n]*\s--autostash" + _END)
-_CLEAN_RE = re.compile(
-    _GIT + r"clean(?=[^;&|\n]*\s-[A-Za-z]*f)(?=[^;&|\n]*\s-[A-Za-z]*d)"
-)
+# Any forced clean deletes other sessions' untracked files (-d adds dirs).
+_CLEAN_RE = re.compile(_GIT + r"clean(?=[^;&|\n]*\s(?:-[A-Za-z]*f|--force))")
 # `checkout [-f|-q] [HEAD|@[~^n]] [--] .` reverts every tracked file.
 _CHECKOUT_ALL_RE = re.compile(
     _GIT
@@ -105,7 +104,11 @@ _RESTORE_ALL_RE = re.compile(
 )
 # Broad staging sweeps other sessions' changes into your commit.
 _ADD_ALL_RE = re.compile(
-    _GIT + r"add(?:\s+-[a-zA-Z]+)*\s+(?:-A|--all|\.|:/)(?:\s|$|[;&|)])"
+    _GIT
+    + r"add(?:\s+-[a-zA-Z]+)*\s+(?:"
+    + r"(?:-A|--all|\.|:/)(?:\s|$|[;&|)])"
+    # -u/--update without a pathspec stages every tracked modification
+    + r"|(?:-u|--update)(?:\s+-[a-zA-Z-]+)*\s*(?:$|[;&|)\n]))"
 )
 _COMMIT_ALL_RE = re.compile(
     _GIT + r"commit\b[^;&|\n]*\s(?:-[a-zA-Z]*a[a-zA-Z]*|--all)" + _END
@@ -117,11 +120,11 @@ SHARED_CHECKOUT_RULES: dict[str, re.Pattern[str]] = {
     "git reset (whole index)": _RESET_INDEX_RE,
     "git reset -- . (whole index)": _RESET_ALL_RE,
     "git pull/rebase --autostash": _AUTOSTASH_RE,
-    "git clean -fd": _CLEAN_RE,
+    "git clean -f": _CLEAN_RE,
     "git checkout .": _CHECKOUT_ALL_RE,
     "git checkout/switch -f": _CHECKOUT_FORCE_RE,
     "git restore .": _RESTORE_ALL_RE,
-    "git add -A / . (broad staging)": _ADD_ALL_RE,
+    "git add -A / -u / . (broad staging)": _ADD_ALL_RE,
     "git commit -a (broad staging)": _COMMIT_ALL_RE,
 }
 

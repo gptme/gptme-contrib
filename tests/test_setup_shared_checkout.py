@@ -21,14 +21,23 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+# Global/system git config (core.hooksPath, init.templateDir) must not change
+# which hook runs, for setup and for the git calls the tests make.
+_ISOLATED = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+
+
 def _git(repo: Path, *args: str) -> str:
     return subprocess.run(
-        ["git", "-C", str(repo), *args], check=True, capture_output=True, text=True
+        ["git", "-C", str(repo), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={**os.environ, **_ISOLATED},
     ).stdout.strip()
 
 
 def _run(repo: Path, *args: str, home: Path) -> subprocess.CompletedProcess[str]:
-    env = {**os.environ, "HOME": str(home), "GIT_CONFIG_GLOBAL": os.devnull}
+    env = {**os.environ, "HOME": str(home), **_ISOLATED}
     return subprocess.run(
         ["bash", str(SCRIPT), *args, str(repo)],
         capture_output=True,
@@ -105,6 +114,27 @@ def test_hook_runs_hooks_without_stashing_unstaged_changes(
     assert _git(repo, "show", "--name-only", "--format=", "HEAD") == "mine.txt"
 
 
+def test_git_safe_commit_accepts_the_installed_wrapper(
+    repo: Path, tmp_path: Path
+) -> None:
+    """git-safe-commit relaxes its untracked-files guard only for hooks it
+    knows don't stash; the setup wrapper must count as one."""
+    _git(repo, "commit", "-q", "--allow-empty", "-m", "init")
+    assert _run(repo, home=tmp_path).returncode == 0
+    (repo / "other-session-new-file.txt").write_text("not mine\n")
+    (repo / "mine.txt").write_text("mine\n")
+    result = subprocess.run(
+        [str(SCRIPT.with_name("git-safe-commit")), "mine.txt", "-m", "mine"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "HOME": str(tmp_path), **_ISOLATED},
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _git(repo, "show", "--name-only", "--format=", "HEAD") == "mine.txt"
+    assert (repo / "other-session-new-file.txt").exists()
+
+
 def test_existing_hook_is_kept_and_rerun_is_idempotent(
     repo: Path, tmp_path: Path
 ) -> None:
@@ -133,7 +163,7 @@ def test_hook_path_is_home_relative_when_contrib_is_under_home(
     scripts.mkdir(parents=True)
     for name in ("setup-shared-checkout.sh", "pre-commit-auto-stage"):
         shutil.copy2(SCRIPT.with_name(name), scripts / name)
-    env = {**os.environ, "HOME": str(home), "GIT_CONFIG_GLOBAL": os.devnull}
+    env = {**os.environ, "HOME": str(home), **_ISOLATED}
     result = subprocess.run(
         ["bash", str(scripts / "setup-shared-checkout.sh"), str(repo)],
         capture_output=True,
