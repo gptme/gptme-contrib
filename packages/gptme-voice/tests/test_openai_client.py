@@ -1352,6 +1352,10 @@ def test_send_typed_message_interrupts_an_active_reply() -> None:
             mp.setattr(
                 "gptme_voice.realtime.openai_client.websockets.connect", _fake_connect
             )
+            # The fake provider never acknowledges response.create.
+            mp.setattr(
+                "gptme_voice.realtime.openai_client._TYPED_CANCEL_WAIT_SECONDS", 0.3
+            )
             client = OpenAIRealtimeClient(api_key="test-key")
             await client.connect()
             await client._handle_event({"type": "session.updated"})
@@ -1397,6 +1401,10 @@ def test_send_typed_message_also_cancels_a_reply_that_starts_meanwhile() -> None
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr(
                 "gptme_voice.realtime.openai_client.websockets.connect", _fake_connect
+            )
+            # The fake provider never acknowledges response.create.
+            mp.setattr(
+                "gptme_voice.realtime.openai_client._TYPED_CANCEL_WAIT_SECONDS", 0.3
             )
             client = OpenAIRealtimeClient(api_key="test-key")
             await client.connect()
@@ -1466,6 +1474,10 @@ def test_send_typed_message_rechecks_right_before_response_create() -> None:
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr(
                 "gptme_voice.realtime.openai_client.websockets.connect", _fake_connect
+            )
+            # The fake provider never acknowledges response.create.
+            mp.setattr(
+                "gptme_voice.realtime.openai_client._TYPED_CANCEL_WAIT_SECONDS", 0.3
             )
             client = OpenAIRealtimeClient(api_key="test-key")
             await client.connect()
@@ -1537,6 +1549,60 @@ def test_typed_item_already_sent_counts_as_delivered_on_a_late_cancel_timeout() 
             types = [e["type"] for e in fake_ws.sent[baseline:]]
             assert types[0] == "conversation.item.create"
             assert "response.create" not in types
+            await client.disconnect()
+
+    asyncio.run(_exercise())
+
+
+def test_back_to_back_typed_messages_dont_send_a_rejected_response_create() -> None:
+    """The second typed message waits for the first's reply to be acknowledged,
+    then cancels it, instead of sending a response.create that is rejected."""
+
+    async def _exercise() -> None:
+        fake_ws = _FakeWebSocket()
+
+        async def _fake_connect(*_args, **_kwargs):
+            return fake_ws
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "gptme_voice.realtime.openai_client.websockets.connect", _fake_connect
+            )
+            client = OpenAIRealtimeClient(api_key="test-key")
+            await client.connect()
+            await client._handle_event({"type": "session.updated"})
+            real_send = client._send_event
+
+            async def _provider(event_type: str, data: dict) -> None:
+                await real_send(event_type, data)
+
+                async def _later(event: dict) -> None:
+                    await asyncio.sleep(0.02)
+                    await client._handle_event(event)
+
+                if event_type == "response.create":
+                    asyncio.ensure_future(_later({"type": "response.created"}))
+                elif event_type == "response.cancel":
+                    asyncio.ensure_future(
+                        _later(
+                            {
+                                "type": "response.done",
+                                "response": {"status": "cancelled"},
+                            }
+                        )
+                    )
+
+            client._send_event = _provider  # type: ignore[method-assign]
+            baseline = len(fake_ws.sent)
+            assert await client.send_typed_message("first") is False
+            assert await client.send_typed_message("second") is True
+            assert [e["type"] for e in fake_ws.sent[baseline:]] == [
+                "conversation.item.create",
+                "response.create",
+                "response.cancel",
+                "conversation.item.create",
+                "response.create",
+            ]
             await client.disconnect()
 
     asyncio.run(_exercise())

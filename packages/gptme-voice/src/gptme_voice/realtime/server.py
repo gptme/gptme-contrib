@@ -94,6 +94,15 @@ _MAX_TYPED_MESSAGE_CHARS = 8000
 _BROWSER_SECRET_HEADER = "x-gptme-voice-secret"
 
 
+def _same_dir(a: str | None, b: str | None) -> bool:
+    if not a or not b:
+        return a == b
+    try:
+        return Path(a).expanduser().resolve() == Path(b).expanduser().resolve()
+    except OSError:
+        return False
+
+
 def _is_probe_call(websocket) -> bool:
     """``?probe=1``: a test call that leaves no trace.
 
@@ -3519,6 +3528,11 @@ class VoiceServer:
                             text,
                             allow_continuation=False,
                         )
+                        if probe:
+                            await self._send_probe_event(
+                                websocket,
+                                {"type": "transcript", "role": "user", "text": text},
+                            )
 
         except WebSocketDisconnect:
             pass  # Normal path when _schedule_hangup closes the WebSocket
@@ -3632,6 +3646,15 @@ class VoiceServer:
                 websocket, transport="browser"
             )
             rag_for_ws = self._rag_for_websocket(websocket, transport="browser")
+            if rag_for_ws is not None and not _same_dir(tool_workspace, self.workspace):
+                # The index covers the server's workspace, not the conversation's:
+                # searching it would answer (and leak) from an unrelated workspace.
+                logger.info(
+                    "workspace_search disabled: call workspace %s is not the indexed %s",
+                    tool_workspace,
+                    self.workspace,
+                )
+                rag_for_ws = None
             session_cfg = self._build_session_config(
                 instructions=instructions,
                 include_body_tools=body_adapter is not None,

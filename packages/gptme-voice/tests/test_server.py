@@ -280,6 +280,33 @@ def test_local_text_turn_is_persisted_in_transcript(
     assert persisted == [TranscriptTurn(role="user", text="what do you see?")]
 
 
+def test_local_probe_reports_text_turns(monkeypatch: pytest.MonkeyPatch) -> None:
+    server = VoiceServer()
+
+    class _RecordingPeer(_PeerWebSocket):
+        messages: list[str] = []
+
+        async def send_text(self, message: str) -> None:
+            self.messages.append(message)
+
+    websocket = _RecordingPeer(
+        "127.0.0.1", incoming=[{"type": "text", "text": "probe hello"}]
+    )
+    websocket.messages = []
+    websocket.query_params = {"probe": "1"}
+
+    async def _build(*, caller_id: str, handoff_id: str | None) -> str:
+        return "You are Bob."
+
+    monkeypatch.setattr(server, "_build_session_instructions", _build)
+    monkeypatch.setattr(server, "_make_client", lambda *_a, **_k: _FakeRealtimeClient())
+    monkeypatch.setattr("gptme_voice.realtime.server.GptmeToolBridge", _DummyToolBridge)
+    asyncio.run(server.handle_local_websocket(websocket))
+
+    sent = [json.loads(m) for m in websocket.messages]
+    assert {"type": "transcript", "role": "user", "text": "probe hello"} in sent
+
+
 def test_local_text_timeout_keeps_connection_open(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3576,6 +3603,49 @@ def test_browser_clear_on_a_closed_socket_is_harmless() -> None:
             raise RuntimeError("Cannot call send once a close message has been sent")
 
     asyncio.run(server._send_browser_clear(_Closed()))  # does not raise
+
+
+def test_conversation_workspace_other_than_the_indexed_one_disables_rag(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """workspace_search covers the server's workspace; a call bound to another
+    workspace must not search (and leak) it."""
+    from gptme_voice.realtime.conversation_link import ConversationContext
+
+    server = VoiceServer(enable_browser_transport=True, workspace=str(tmp_path / "a"))
+    server.browser_secret = "s3cret"
+    server.gptme_server_url = "http://127.0.0.1:5700"
+    server.gptme_server_key = "k"
+    sentinel_rag = object()
+    monkeypatch.setattr(server, "_rag_for_websocket", lambda *a, **k: sentinel_rag)
+
+    async def _fetch(*args, **kwargs):
+        return ConversationContext(instructions=None, workspace=str(tmp_path / "b"))
+
+    bridges: list[dict] = []
+
+    class _RecordingBridge(_DummyToolBridge):
+        def __init__(self, *args, **kwargs) -> None:
+            bridges.append(kwargs)
+
+    async def _build(*, caller_id: str, handoff_id: str | None) -> str:
+        return "You are Bob."
+
+    websocket = _DummyBrowserWebSocket([{"type": "websocket.disconnect"}])
+    websocket.query_params = {"conversation_id": "conv-1"}
+    websocket.headers = {"x-gptme-voice-secret": "s3cret"}
+    websocket.client = None
+    monkeypatch.setattr(
+        "gptme_voice.realtime.server.fetch_conversation_context", _fetch
+    )
+    monkeypatch.setattr(server, "_build_session_instructions", _build)
+    monkeypatch.setattr(
+        server, "_make_client", lambda _cfg, **_kw: _FakeRealtimeClient()
+    )
+    monkeypatch.setattr("gptme_voice.realtime.server.GptmeToolBridge", _RecordingBridge)
+    asyncio.run(server.handle_browser_websocket(websocket))
+    assert bridges[0]["rag"] is None
+    assert bridges[0]["workspace"] == str(tmp_path / "b")
 
 
 def test_probe_reporting_sends_transcript_and_tool_events() -> None:

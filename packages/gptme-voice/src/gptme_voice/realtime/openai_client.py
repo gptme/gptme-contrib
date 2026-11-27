@@ -468,6 +468,9 @@ class OpenAIRealtimeClient:
         # Set between response.done and the next response.created.
         self._response_idle = asyncio.Event()
         self._response_idle.set()
+        # Set on response.created; lets a typed message wait for its own reply
+        # to be acknowledged before the next one is allowed through.
+        self._response_started = asyncio.Event()
 
         # Audio arriving before the session is ready would be forwarded to a
         # session that is not configured yet, causing silent calls (observed on
@@ -876,7 +879,17 @@ class OpenAIRealtimeClient:
                 "was not confirmed cancelled; not requesting a reply for it"
             )
             return True
+        self._response_started.clear()
         await self._send_event("response.create", {})
+        # Hold until the provider acknowledges the reply (bounded): typed
+        # messages are serialized, and the next one must see this reply as
+        # active (and cancel it) instead of sending a rejected response.create.
+        try:
+            await asyncio.wait_for(
+                self._response_started.wait(), _TYPED_CANCEL_WAIT_SECONDS
+            )
+        except asyncio.TimeoutError:
+            logger.warning("No response.created for the typed message's reply")
         return interrupted
 
     async def _cancel_until_idle(self, deadline: float) -> bool:
@@ -1345,6 +1358,7 @@ class OpenAIRealtimeClient:
         elif event_type == "response.created":
             self._responding = True
             self._response_idle.clear()
+            self._response_started.set()
             if self.on_response_start:
                 await self._call_callback(self.on_response_start)
             logger.debug("Response started (mic muted)")
