@@ -1342,12 +1342,11 @@ class GptmeToolBridge:
                 if arguments.get(key) is not None
             }
             if self.rag is None or not self.rag.enabled:
-                self._log_workspace_search("", None, filters, 0.0, status="unavailable")
+                self._log_workspace_search(None, filters, 0.0, status="unavailable")
                 return {"error": "workspace_search is not enabled on this server."}
             query = arguments.get("query") or ""
             if not isinstance(query, str) or not query.strip():
                 self._log_workspace_search(
-                    query if isinstance(query, str) else "",
                     None,
                     filters,
                     0.0,
@@ -1368,7 +1367,6 @@ class GptmeToolBridge:
                 # Cancellation is a BaseException, so the handler below never
                 # sees it: an interrupted lookup must still leave a receipt.
                 self._log_workspace_search(
-                    query.strip(),
                     None,
                     filters,
                     (time.monotonic() - started) * 1000.0,
@@ -1380,7 +1378,6 @@ class GptmeToolBridge:
                 # absence of a line cannot be told apart from a lookup that
                 # never ran, which is the correlation gap this log closes.
                 self._log_workspace_search(
-                    query.strip(),
                     None,
                     filters,
                     (time.monotonic() - started) * 1000.0,
@@ -1388,7 +1385,7 @@ class GptmeToolBridge:
                 )
                 raise
             self._log_workspace_search(
-                query.strip(), result, filters, (time.monotonic() - started) * 1000.0
+                result, filters, (time.monotonic() - started) * 1000.0
             )
             return result
 
@@ -1399,7 +1396,6 @@ class GptmeToolBridge:
 
     @staticmethod
     def _log_workspace_search(
-        query: str,
         result: object,
         filters: Mapping[str, Any],
         elapsed_ms: float,
@@ -1424,16 +1420,22 @@ class GptmeToolBridge:
         string (a missing value renders as ``None`` and would pass a substring
         assertion).
         """
+        # Keep user text and workspace paths out of the receipt, including its
+        # structured payload. Correlate with the existing request log instead.
         fields: dict[str, Any] = {
-            "query": query,
-            "filters": dict(filters),
-            "status": "error" if error is not None else status,
-            "backend": None,
-            "mode": None,
-            "selected_files": None,
-            "results": None,
-            "elapsed_ms": round(elapsed_ms, 1),
+            f"{key}_count": len(value) if isinstance(value, list | tuple) else None
+            for key, value in filters.items()
         }
+        fields.update(
+            {
+                "status": "error" if error is not None else status,
+                "backend": None,
+                "mode": None,
+                "selected_files": None,
+                "results": None,
+                "elapsed_ms": round(elapsed_ms, 1),
+            }
+        )
         if error is not None:
             fields["error"] = type(error).__name__
         elif status is not None:
@@ -1441,7 +1443,7 @@ class GptmeToolBridge:
         elif isinstance(result, Mapping):
             coverage = result.get("coverage")
             coverage = coverage if isinstance(coverage, Mapping) else {}
-            fields["status"] = result.get("status")
+            fields["status"] = result.get("status") or "unknown"
             fields["backend"] = result.get("backend")
             fields["mode"] = coverage.get("mode")
             fields["selected_files"] = coverage.get("selected_files")
@@ -1450,10 +1452,10 @@ class GptmeToolBridge:
             fields["status"] = "ok"
             fields["result_type"] = type(result).__name__
         logger.info(
-            "workspace_search(%r) filters=%s status=%s backend=%s mode=%s "
-            "selected=%s results=%s elapsed=%.0fms",
-            query,
-            fields["filters"],
+            "workspace_search() include_paths_count=%s exclude_paths_count=%s "
+            "status=%s backend=%s mode=%s selected=%s results=%s elapsed=%.0fms",
+            fields.get("include_paths_count", 0),
+            fields.get("exclude_paths_count", 0),
             fields["status"],
             fields["backend"],
             fields["mode"],

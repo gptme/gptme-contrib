@@ -593,11 +593,16 @@ async def test_bridge_logs_a_correlatable_search_receipt(
     ]
     assert len(receipts) == 1
     receipt = receipts[0]
-    assert receipt["query"] == "Delivered the release"
-    assert receipt["filters"] == {
-        "include_paths": ["state/standup-brief.json"],
-        "exclude_paths": ["journal/"],
-    }
+    assert "query" not in receipt
+    assert "filters" not in receipt
+    assert receipt["include_paths_count"] == 1
+    assert receipt["exclude_paths_count"] == 1
+    logged = " ".join(
+        r.getMessage() for r in caplog.records if hasattr(r, "workspace_search")
+    )
+    assert "Delivered the release" not in logged
+    assert "state/standup-brief.json" not in logged
+    assert "journal/" not in logged
     assert receipt["status"] == "ok"
     assert receipt["backend"] == "lexical"
     assert receipt["mode"] == "filtered"
@@ -701,3 +706,21 @@ async def test_bridge_logs_a_receipt_for_a_cancelled_search(
         r.workspace_search for r in caplog.records if "workspace_search(" in r.message
     ]
     assert [r["status"] for r in receipts] == ["cancelled"]
+
+
+@pytest.mark.parametrize("result", [{}, {"status": None}, []])
+def test_search_receipt_has_explicit_status_for_unexpected_payloads(
+    result: object, caplog: pytest.LogCaptureFixture
+) -> None:
+    import logging
+
+    from gptme_voice.realtime.tool_bridge import GptmeToolBridge
+
+    with caplog.at_level(logging.INFO, logger="gptme_voice.realtime.tool_bridge"):
+        GptmeToolBridge._log_workspace_search(result, {}, 1.0)
+
+    receipts = [
+        r.workspace_search for r in caplog.records if hasattr(r, "workspace_search")
+    ]
+    assert len(receipts) == 1
+    assert receipts[0]["status"] == ("unknown" if isinstance(result, dict) else "ok")
