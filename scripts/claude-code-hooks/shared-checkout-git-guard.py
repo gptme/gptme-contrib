@@ -389,9 +389,17 @@ def _git_invocation(
 
 
 def _split_args(
-    args: list[str], short_with_value: str = "", long_with_value: tuple = ()
+    args: list[str],
+    short_with_value: str = "",
+    long_with_value: tuple = (),
+    short_attached_value: str = "",
 ) -> tuple[list[str], list[str], str]:
-    """``(long flags, positionals incl. after --, short option letters)``."""
+    """``(long flags, positionals incl. after --, short option letters)``.
+
+    ``short_with_value`` letters take a value (the rest of the cluster or the
+    next token); ``short_attached_value`` letters take an optional value only
+    in the same cluster (``commit -S<key>``, ``-u<mode>``).
+    """
     longs: list[str] = []
     positionals: list[str] = []
     shorts = ""
@@ -407,6 +415,9 @@ def _split_args(
                 i += 1  # the value is the next token
         elif arg.startswith("-") and arg != "-":
             for j, letter in enumerate(arg[1:], start=1):
+                if letter in short_attached_value:
+                    shorts += letter
+                    break  # the rest of the cluster (if any) is the value
                 if letter in short_with_value:
                     if j == len(arg) - 1:
                         i += 1  # the value is the next token
@@ -418,8 +429,24 @@ def _split_args(
     return longs, positionals, shorts
 
 
-def _whole_tree(paths: list[str]) -> bool:
-    return any(path in _WHOLE_TREE for path in paths)
+def _whole_tree(paths: list[str], base: Path | None = None) -> bool:
+    """Whether a pathspec covers the whole tree: `.`, `:/`, ..., or (from
+    *base*) a path that resolves to the repository root or above it."""
+    if any(path in _WHOLE_TREE for path in paths):
+        return True
+    dot_git = (
+        _git_dir_marker(base) if base is not None and base != UNKNOWN_DIR else None
+    )
+    if dot_git is None or base is None:
+        return False
+    root = dot_git.parent
+    for path in paths:
+        if _unresolvable(path) or path.startswith(":"):
+            continue
+        resolved = _resolve(path, base)
+        if resolved != UNKNOWN_DIR and (resolved == root or resolved in root.parents):
+            return True
+    return False
 
 
 _AUTOSTASH_CONFIG_RE = re.compile(
@@ -428,7 +455,10 @@ _AUTOSTASH_CONFIG_RE = re.compile(
 
 
 def _classify(
-    sub: str | None, args: list[str], configs: tuple[str, ...] = ()
+    sub: str | None,
+    args: list[str],
+    configs: tuple[str, ...] = (),
+    base: Path | None = None,
 ) -> tuple[str | None, bool]:
     """``(shared-checkout rule it breaks, whether it writes the stash stack)``."""
     if sub == "stash":
@@ -454,7 +484,7 @@ def _classify(
             paths = args[args.index("--") + 1 :]
         else:
             paths = positionals[1:]
-        if _whole_tree(paths):
+        if _whole_tree(paths, base):
             return "git reset -- . (whole index)", False
         if paths:
             return None, False
@@ -475,7 +505,7 @@ def _classify(
             return "git checkout/switch -f", False
         explicit = "--" in args
         paths = positionals if explicit else positionals
-        if _whole_tree(paths):
+        if _whole_tree(paths, base):
             return "git checkout .", False
         return None, False
     if sub == "switch":
@@ -487,12 +517,12 @@ def _classify(
         _l, positionals, _s = _split_args(
             args, "s", ("--source", "--pathspec-from-file")
         )
-        return ("git restore ." if _whole_tree(positionals) else None), False
+        return ("git restore ." if _whole_tree(positionals, base) else None), False
     if sub == "add":
         longs, paths, shorts = _split_args(
             args, "", ("--chmod", "--pathspec-from-file")
         )
-        if "--all" in longs or "A" in shorts or _whole_tree(paths):
+        if "--all" in longs or "A" in shorts or _whole_tree(paths, base):
             return "git add -A / -u / . (broad staging)", False
         if ("--update" in longs or "u" in shorts) and not paths:
             return "git add -A / -u / . (broad staging)", False
@@ -500,7 +530,7 @@ def _classify(
     if sub == "commit":
         longs, _paths, shorts = _split_args(
             args,
-            "mFcCtS",
+            "mFcCt",
             (
                 "--message",
                 "--file",
@@ -515,6 +545,7 @@ def _classify(
                 "--trailer",
                 "--pathspec-from-file",
             ),
+            short_attached_value="Su",
         )
         if "--all" in longs or "a" in shorts:
             return "git commit -a (broad staging)", False
@@ -596,6 +627,7 @@ def detect(
     fallback: list[Path] = []
     scopes: list[tuple[list[Path], list[Path]]] = []
     exported: dict[str, str] = {}  # `export GIT_DIR=...` for later commands
+    dir_stack: list[list[Path]] = []  # pushd/popd
     for kind, argv, separator in _split_commands(tokens):
         if kind == "(":  # a subshell: its cd's end with it
             scopes.append((list(dirs), list(fallback)))
@@ -613,6 +645,8 @@ def detect(
             argv = []
         if argv:
             word = argv[0]
+            if word == "pushd":
+                dir_stack.append(list(dirs))
             if word in ("cd", "pushd"):
                 rest = [a for a in argv[1:] if not a.startswith("-") or a == "-"]
                 cd_target = rest[0] if rest else "~"
@@ -623,12 +657,13 @@ def detect(
                 else:
                     dirs = list(dict.fromkeys(new + dirs))
             elif word == "popd":
-                dirs = list(dict.fromkeys(dirs + [UNKNOWN_DIR]))
+                dirs = dir_stack.pop() if dir_stack else dirs + [UNKNOWN_DIR]
             elif os.path.basename(word) == "git":
                 targets, sub, args, configs = _git_invocation(
                     argv, dirs, {**exported, **env}
                 )
-                rule, stack_write = _classify(sub, args, configs)
+                base = next((t for t in targets if t != UNKNOWN_DIR), None)
+                rule, stack_write = _classify(sub, args, configs, base)
                 if (
                     rule is None
                     and sub in ("pull", "rebase", "merge")
@@ -644,7 +679,11 @@ def detect(
                 if rule or stack_write:
                     name = rule or "git stash"
                     if UNKNOWN_DIR in targets:
-                        return _unknown_reason(name)
+                        # Fail closed where the guard applies; an unmarked
+                        # repo keeps its contract (`cd "$X"` idioms work).
+                        if shared_checkout(cwd) or stash_stack_shared(cwd):
+                            return _unknown_reason(name)
+                        targets = [t for t in targets if t != UNKNOWN_DIR]
                     if rule:
                         for target in targets:
                             if shared_checkout(target):

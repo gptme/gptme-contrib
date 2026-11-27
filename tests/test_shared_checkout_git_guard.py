@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -342,18 +343,63 @@ def test_cd_inside_a_quoted_argument_is_not_a_directory_change():
     assert detect(f'cd "{SHARED}" && git add -A', cwd=OTHER) is not None
 
 
-def test_unresolvable_directories_fail_closed():
+def test_unresolvable_directories_fail_closed_where_guarded():
     for command in (
         'cd "$WORKTREE" && git reset --hard',
         'cd /tmp && cd "$SHARED" && git reset --hard',
         'git -C "$REPO" clean -fd',
         "cd `pwd` && git add -A",
     ):
-        reason = detect(command, cwd=OTHER)
+        reason = detect(command, cwd=SHARED)
         assert reason is not None and "literal path" in reason, command
+        # An unmarked repo keeps its contract: common `cd "$X"` idioms work.
+        assert detect(command, cwd=OTHER) is None, command
     # Harmless commands in an unknown directory stay allowed.
-    assert detect('cd "$WORKTREE" && git status', cwd=OTHER) is None
-    assert detect('git -C "$REPO" log -1', cwd=OTHER) is None
+    assert detect('cd "$WORKTREE" && git status', cwd=SHARED) is None
+    assert detect('git -C "$REPO" log -1', cwd=SHARED) is None
+
+
+def test_pushd_popd_return_to_the_previous_directory():
+    assert (
+        detect(f"pushd {OTHER} && make && popd && git add -A", cwd=SHARED) is not None
+    )
+    assert detect(f"pushd {SHARED} && popd && git add -A", cwd=OTHER) is None
+    assert (
+        detect("pushd build && make && popd && git commit -am wip", cwd=OTHER) is None
+    )
+
+
+def test_commit_dash_s_does_not_swallow_the_next_option():
+    assert detect("git commit -S -a -m wip", cwd=SHARED) is not None
+    assert detect("git commit -S --all -m x", cwd=SHARED) is not None
+    assert detect("git commit -Skey123 -m x -- a.py", cwd=SHARED) is None
+    assert detect("git commit -uall -m x -- a.py", cwd=SHARED) is None
+
+
+def test_paths_resolving_to_the_repo_root_are_whole_tree(tmp_path):
+    root = tmp_path / "repo"
+    (root / ".git").mkdir(parents=True)
+    (root / "src").mkdir()
+
+    def check(command: str, cwd: Path):
+        return guard.detect(
+            command,
+            cwd,
+            shared_checkout=lambda p: True,
+            stash_stack_shared=lambda p: False,
+            autostash=lambda p, sub: False,
+        )
+
+    for command in (
+        "git checkout -- ..",
+        "git restore ..",
+        "git add ..",
+        "git reset -- ..",
+    ):
+        assert check(command, root / "src") is not None, command
+    assert check(f"git restore {root}", root / "src") is not None
+    assert check("git restore ./.", root) is not None
+    assert check("git restore ../src/a.py", root / "src") is None
 
 
 def test_cd_with_semicolon_checks_both_directories():
@@ -391,7 +437,10 @@ def _git(*args: str, cwd: Path) -> None:
     subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
 
 
-def test_real_repo_predicates(tmp_path):
+def test_real_repo_predicates(tmp_path, monkeypatch):
+    # The guard reads real git config: keep the developer's global/system out.
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
     main = tmp_path / "main"
     main.mkdir()
     _git("init", "-q", cwd=main)
