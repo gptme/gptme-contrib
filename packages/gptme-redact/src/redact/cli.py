@@ -83,10 +83,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _read_input(file: str) -> str | None:
-    """The input text, or None (after an error message) when it is not UTF-8.
+    """The input text, or None (after an error message) when decoding fails.
 
-    Newline bytes are preserved. stdin is read as bytes and decoded strictly. `sys.stdin.read()` uses
-    `errors="surrogateescape"`, so an invalid byte survives as a lone surrogate
+    Newline bytes are preserved. stdin is decoded strictly with its declared
+    encoding. `sys.stdin.read()` uses `errors="surrogateescape"`, so an invalid
+    byte survives as a lone surrogate
     (`0xff` -> "\\udcff") and passed every pattern, while the same bytes from a
     file were refused; the same payload must not behave differently by how it
     was supplied.
@@ -95,7 +96,7 @@ def _read_input(file: str) -> str | None:
         if file == "-":
             buf = getattr(sys.stdin, "buffer", None)
             if buf is not None:
-                return bytes(buf.read()).decode("utf-8")
+                return bytes(buf.read()).decode(sys.stdin.encoding or "utf-8")
             # A replaced stdin (tests) has no buffer; round-trip the text back
             # through the bytes surrogateescape produced.
             return sys.stdin.read().encode("utf-8", "surrogateescape").decode("utf-8")
