@@ -322,8 +322,12 @@ def test_legacy_state_preserves_archived_log_statistics(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("checkpoint_interval", [1, 100])
+@pytest.mark.parametrize("missing", [False, True], ids=["unreadable", "missing"])
 def test_full_rebuild_preserves_state_on_unreadable_log(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, checkpoint_interval: int
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    checkpoint_interval: int,
+    missing: bool,
 ) -> None:
     logs, state = tmp_path / "logs", tmp_path / "state.json"
     for name in ["2025-10-02-amber", "2025-10-02-zesty"]:
@@ -339,12 +343,19 @@ def test_full_rebuild_preserves_state_on_unreadable_log(
             raise PermissionError("temporarily unreadable")
         return original_open(file, *args, **kwargs)
 
+    conversation = logs / "2025-10-02-zesty" / "conversation.jsonl"
+    contents = conversation.read_bytes()
+    if missing:
+        conversation.unlink()
     with monkeypatch.context() as patch:
-        patch.setattr("builtins.open", deny_zesty)
-        with pytest.raises(PermissionError, match="temporarily unreadable"):
+        if not missing:
+            patch.setattr("builtins.open", deny_zesty)
+        with pytest.raises(FileNotFoundError if missing else PermissionError):
             tracker.analyze(incremental=False, checkpoint_interval=checkpoint_interval)
     assert state.read_bytes() == original
     assert tracker.state.to_dict() == before
+    if missing:
+        conversation.write_bytes(contents)
     rebuilt = tracker.analyze(incremental=False)
     assert rebuilt.total_sessions == rebuilt.processed_count == 2
     assert rebuilt.lesson_stats["lessons/workflow/a.md"].total_inclusions == 2

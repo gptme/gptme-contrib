@@ -208,9 +208,6 @@ class EffectivenessTracker:
         Returns list of lessons found in the conversation.
         """
         conv_file = log_dir / "conversation.jsonl"
-        if not conv_file.exists():
-            return []
-
         lessons_found: list[dict[str, str | list[str]]] = []
 
         # Let read failures propagate: unreadable is not a log with no lessons.
