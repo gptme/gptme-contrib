@@ -215,6 +215,15 @@ def test_json_escaped_http_basic_authorization_header_is_redacted() -> None:
     assert b64 not in r.redacted
 
 
+def test_doubly_json_escaped_http_basic_authorization_header_is_redacted() -> None:
+    # Two JSON nestings put three backslashes before each quote.
+    b64 = "dXNlcjpwYXNzd29yZA=="  # base64("user:password")
+    header = "Authorization" + "\\" * 3 + '"' + ": " + "\\" * 3 + '"Basic ' + b64
+    r = redact(header, literals=[])
+    assert r.blocked
+    assert b64 not in r.redacted
+
+
 def test_out_to_dev_stdout_under_a_redirect_keeps_later_writes(tmp_path) -> None:
     import os
     from pathlib import Path

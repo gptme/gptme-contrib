@@ -485,11 +485,12 @@ _PATTERNS: list[Pattern] = [
     # The header name is usually quoted, and JSON/YAML use `:` or `=`, so the
     # raw HTTP-wire form alone misses `headers={"Authorization": "Basic ..."}`.
     # The quotes may be backslash-escaped: nested JSON tool output renders the
-    # header as `\"Authorization\": \"Basic ...\"`, where a bare `['\"]?` never
-    # matches because a backslash sits between the name and the quote.
+    # header as `\"Authorization\": \"Basic ...\"`, and a second nesting puts
+    # three backslashes before each quote (`2**level - 1`). `\\*` covers every
+    # level; `\\?` only covered one.
     Pattern(
         re.compile(
-            r"\bAuthorization\\?['\"]?\s*[:=]\s*\\?['\"]?Basic\s+[A-Za-z0-9+/]{4,}={0,2}",
+            r"\bAuthorization\\*['\"]?\s*[:=]\s*\\*['\"]?Basic\s+[A-Za-z0-9+/]{4,}={0,2}",
             re.IGNORECASE,
         ),
         Severity.CRITICAL,
