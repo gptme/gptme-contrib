@@ -196,6 +196,34 @@ def test_malformed_new_changelog_is_an_error_not_an_empty_result(repo: Path):
     assert mod.main([old, new, "--repo", str(repo)]) == 2
 
 
+def test_malformed_old_changelog_is_skipped(repo: Path):
+    old_text = (
+        "## 2026-11-26 - typo\n\n"
+        "- **Action:** requried\n"
+        "- **Do:** Install the guard.\n\n"
+        "## 2026-11-26 - keep\n\n"
+        "- **Action:** recommended\n"
+        "- **Do:** Keep this.\n"
+    )
+    new_text = (
+        "## 2026-11-27 - fixed\n\n"
+        "- **Action:** required\n"
+        "- **Do:** Install the guard.\n\n"
+        "## 2026-11-26 - keep\n\n"
+        "- **Action:** recommended\n"
+        "- **Do:** Keep this.\n"
+    )
+    old = commit(repo, "CHANGELOG.md", old_text)
+    new = commit(repo, "CHANGELOG.md", new_text)
+    added = mod.entries_between(repo, old, new)
+    assert [e.title for e in added] == ["fixed"]
+    assert mod.main([old, new, "--repo", str(repo)]) == 0
+
+
+def test_resolve_repo_defaults_to_script_checkout():
+    assert mod.resolve_repo(None) == REPO_ROOT
+
+
 def test_cli_json_and_text(repo: Path):
     old = commit(repo, "CHANGELOG.md", SAMPLE)
     updated = SAMPLE.replace(

@@ -49,12 +49,15 @@ def normalize_action(raw: str) -> str:
     return token.split()[0].strip("`").lower()
 
 
-def parse_entries(text: str) -> list[Entry]:
+def parse_entries(text: str, *, strict: bool = True) -> list[Entry]:
     """Parse dated changelog entries; ignore prose and the format example.
 
-    A dated heading with a missing Do, a missing Action, or an Action that is
-    not optional/recommended/required raises RuntimeError. Silent drops look
-    like a code-only bump to callers.
+    In *strict* mode (NEW), a dated heading with a missing Do, a missing
+    Action, or an Action that is not optional/recommended/required raises
+    RuntimeError. Silent drops look like a code-only bump to callers.
+
+    In non-strict mode (OLD) those rows are skipped so a typo that was later
+    fixed does not permanently fail every range that starts at that pin.
     """
     entries: list[Entry] = list()
     current: dict[str, str] | None = None
@@ -66,12 +69,19 @@ def parse_entries(text: str) -> list[Entry]:
         label = f"{current['date']} - {current['title']}"
         action = current.get("action")
         body = current.get("do", "").strip()
+        error = None
         if action is None:
-            raise RuntimeError(f"{label}: missing Action")
-        if action not in RANK or action == "none":
-            raise RuntimeError(f"{label}: unparseable Action {action!r}")
-        if not body:
-            raise RuntimeError(f"{label}: missing Do")
+            error = f"{label}: missing Action"
+        elif action not in RANK or action == "none":
+            error = f"{label}: unparseable Action {action!r}"
+        elif not body:
+            error = f"{label}: missing Do"
+        if error:
+            current = None
+            if strict:
+                raise RuntimeError(error)
+            return
+        assert action is not None
         entries.append(Entry(current["date"], current["title"], action, body))
         current = None
 
@@ -128,7 +138,7 @@ def entries_between(
 ) -> list[Entry]:
     new_entries = parse_entries(git_show(repo, new, path))
     old_text = git_show(repo, old, path, missing_ok=True)
-    old_keys = {entry.key for entry in parse_entries(old_text)}
+    old_keys = {entry.key for entry in parse_entries(old_text, strict=False)}
     return [entry for entry in new_entries if entry.key not in old_keys]
 
 
@@ -145,18 +155,14 @@ def render_text(entries: list[Entry]) -> str:
     return "\n".join(lines)
 
 
+def script_checkout() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
 def resolve_repo(explicit: Path | None) -> Path:
     if explicit is not None:
         return explicit.resolve()
-    result = subprocess.run(
-        ["git", "rev-parse", "--show-toplevel"],
-        capture_output=True,
-        text=True,
-        timeout=20,
-    )
-    if result.returncode:
-        raise RuntimeError("not inside a git repository; pass --repo")
-    return Path(result.stdout.strip())
+    return script_checkout()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -170,7 +176,7 @@ def main(argv: list[str] | None = None) -> int:
         "--repo",
         type=Path,
         default=None,
-        help="gptme-contrib checkout (default: current git root)",
+        help="gptme-contrib checkout (default: this script's repository)",
     )
     parser.add_argument(
         "--path",
