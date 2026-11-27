@@ -3637,7 +3637,11 @@ class VoiceServer:
                 )
                 if context.workspace:
                     tool_workspace = context.workspace
-            same_workspace = _same_dir(tool_workspace, self.workspace)
+            # An unknown workspace (config unreadable) is not assumed to be the
+            # server's: fail closed for the server workspace's context.
+            same_workspace = _same_dir(tool_workspace, self.workspace) and (
+                context is None or context.workspace_known
+            )
             instructions = await self._build_session_instructions(
                 caller_id=caller_id,
                 handoff_id=handoff_id,
@@ -3659,7 +3663,7 @@ class VoiceServer:
                 websocket, transport="browser"
             )
             rag_for_ws = self._rag_for_websocket(websocket, transport="browser")
-            if rag_for_ws is not None and not _same_dir(tool_workspace, self.workspace):
+            if rag_for_ws is not None and not same_workspace:
                 # The index covers the server's workspace, not the conversation's:
                 # searching it would answer (and leak) from an unrelated workspace.
                 logger.info(
@@ -4014,31 +4018,44 @@ class VoiceServer:
         # Deliver first: a message the model never got must not be recorded in
         # the conversation as if it had been part of the call, and a provider
         # hiccup must not end the call (like the /local text path).
+        delivered = False
+
+        def _record() -> None:
+            nonlocal delivered
+            delivered = True
+            # A distinct item id keeps it from being merged with a speech partial.
+            _append_transcript_turn(
+                transcript,
+                "user",
+                text,
+                item_id=f"typed-{uuid.uuid4().hex[:8]}",
+                allow_continuation=False,
+            )
+            if live_sink is not None:
+                live_sink.notify(immediate=True)
+
         try:
-            # Drop queued playback right before the new reply is requested, so
+            # Recorded the moment the provider has it (before any wait), and
+            # playback is cleared right before the new reply is requested, so
             # it never clips the start of the answer this message triggers.
-            # Always: the provider may have finished streaming a long reply
-            # the browser is still playing, and the typed message supersedes it.
+            # Always clear: the provider may have finished streaming a long
+            # reply the browser is still playing, and the message supersedes it.
             await realtime_client.send_typed_message(
-                text, before_reply=lambda: self._send_browser_clear(websocket)
+                text,
+                before_reply=lambda: self._send_browser_clear(websocket),
+                on_delivered=_record,
             )
         except (
             RuntimeError,
             asyncio.TimeoutError,  # session never became ready
             websockets.ConnectionClosed,
         ) as exc:
-            logger.warning("Typed message not delivered to the provider: %r", exc)
-            return
-        # A distinct item id keeps it from being merged with a speech partial.
-        _append_transcript_turn(
-            transcript,
-            "user",
-            text,
-            item_id=f"typed-{uuid.uuid4().hex[:8]}",
-            allow_continuation=False,
-        )
-        if live_sink is not None:
-            live_sink.notify(immediate=True)
+            # Not delivered: a message the model never got must not be
+            # recorded, and a provider hiccup must not end the call.
+            if not delivered:
+                logger.warning("Typed message not delivered to the provider: %r", exc)
+                return
+            logger.warning("Typed message delivered, reply not requested: %r", exc)
         if probe:
             await self._send_probe_event(
                 websocket, {"type": "transcript", "role": "user", "text": text}

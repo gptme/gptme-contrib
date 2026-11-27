@@ -845,6 +845,7 @@ class OpenAIRealtimeClient:
         self,
         text: str,
         before_reply: Callable[[], Awaitable[None]] | None = None,
+        on_delivered: Callable[[], None] | None = None,
     ) -> bool:
         """Deliver a message the user typed during the call.
 
@@ -868,6 +869,11 @@ class OpenAIRealtimeClient:
                 }
             },
         )
+        # The provider has the message now: record it before anything that
+        # waits (cancels, the reply acknowledgement), so it can't be ordered
+        # after its own answer or lost to a teardown cancel.
+        if on_delivered is not None:
+            on_delivered()
         # A reply can start while the item is sent (e.g. for an injected
         # lookup result); check again right before response.create, with no
         # await in between other than the send itself.

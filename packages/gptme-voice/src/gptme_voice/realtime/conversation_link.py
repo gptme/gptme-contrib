@@ -47,6 +47,9 @@ FINAL_FLUSH_ATTEMPTS = 5
 class ConversationContext:
     instructions: str | None
     workspace: str | None
+    # False when the conversation's config couldn't be read, so its workspace
+    # is unknown (not "the server's default"): callers must fail closed.
+    workspace_known: bool = True
 
 
 def _conversation_url(server_url: str, conversation_id: str, suffix: str = "") -> str:
@@ -112,12 +115,15 @@ async def fetch_conversation_context(
         data = resp.json()
         return data if isinstance(data, dict) else {}
 
-    async def _load(c: httpx.AsyncClient) -> tuple[dict[str, Any], dict[str, Any]]:
+    async def _load(
+        c: httpx.AsyncClient,
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
         conversation = await _get(c, "")
         try:
-            config = await _get(c, "/config")
-        except (httpx.HTTPError, ValueError):
-            config = {}
+            config: dict[str, Any] | None = await _get(c, "/config")
+        except (httpx.HTTPError, ValueError) as exc:
+            logger.warning("Could not load the config of %s: %s", conversation_id, exc)
+            config = None
         return conversation, config
 
     try:
@@ -128,16 +134,19 @@ async def fetch_conversation_context(
             conversation, config = await _load(client)
     except (httpx.HTTPError, ValueError) as exc:
         logger.warning("Could not load conversation %s: %s", conversation_id, exc)
-        return ConversationContext(instructions=None, workspace=None)
+        return ConversationContext(
+            instructions=None, workspace=None, workspace_known=False
+        )
 
     log = conversation.get("log")
-    chat_config = config.get("chat")
+    chat_config = config.get("chat") if config is not None else None
     workspace = chat_config.get("workspace") if isinstance(chat_config, dict) else None
     return ConversationContext(
         instructions=format_conversation_context(log if isinstance(log, list) else []),
         workspace=os.path.abspath(os.path.expanduser(workspace))
         if isinstance(workspace, str) and workspace
         else None,
+        workspace_known=config is not None,
     )
 
 

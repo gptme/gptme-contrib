@@ -92,6 +92,20 @@ def test_fetch_context_tolerates_a_malformed_log(log: object) -> None:
         assert ctx.instructions is None
 
 
+def test_fetch_context_marks_the_workspace_unknown_when_config_fails() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/config"):
+            return httpx.Response(500)
+        return httpx.Response(200, json={"log": []})
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
+            return await fetch_conversation_context("http://s", "k", "c", client=c)
+
+    ctx = asyncio.run(run())
+    assert ctx.workspace is None and ctx.workspace_known is False
+
+
 def test_fetch_context_tolerates_malformed_config() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/config"):

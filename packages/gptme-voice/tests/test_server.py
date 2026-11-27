@@ -183,11 +183,15 @@ class _FakeRealtimeClient:
     async def send_text_message(self, text: str) -> None:
         self.sent_text.append(text)
 
-    async def send_typed_message(self, text: str, before_reply=None) -> bool:
-        if self.typed_error is not None:  # one-shot
+    async def send_typed_message(
+        self, text: str, before_reply=None, on_delivered=None
+    ) -> bool:
+        if self.typed_error is not None:  # one-shot, before delivery
             error, self.typed_error = self.typed_error, None
             raise error
         self.sent_typed.append(text)
+        if on_delivered is not None:
+            on_delivered()
         if before_reply is not None:
             await before_reply()
         return self.typed_interrupts
@@ -3393,11 +3397,13 @@ def test_browser_audio_keeps_flowing_while_a_typed_message_waits(
     events: list[str] = []
 
     class _SlowTypedClient(_FakeRealtimeClient):
-        async def send_typed_message(self, text: str, before_reply=None) -> bool:
+        async def send_typed_message(
+            self, text: str, before_reply=None, on_delivered=None
+        ) -> bool:
             events.append("typed:start")
             await asyncio.sleep(0.2)  # waiting for response.done
             events.append("typed:sent")
-            return await super().send_typed_message(text, before_reply)
+            return await super().send_typed_message(text, before_reply, on_delivered)
 
         async def send_audio(self, audio_data: bytes) -> None:
             events.append("audio")
@@ -3675,6 +3681,106 @@ def test_bootstrap_without_workspace_context_skips_digest_and_history(
     without = asyncio.run(_run(False))
     assert "DIGEST-A" in with_ctx and "CALLS-A" in with_ctx
     assert "DIGEST-A" not in without and "CALLS-A" not in without
+
+
+def test_typed_turn_is_recorded_before_its_answer_and_survives_teardown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The typed turn is recorded when the provider has it: before an answer
+    that streams in during the acknowledgement wait, and even if teardown
+    cancels that wait."""
+    monkeypatch.setattr("gptme_voice.realtime.server._TYPED_DRAIN_TIMEOUT_SECONDS", 0.1)
+    server = VoiceServer(enable_browser_transport=True)
+    callbacks: dict = {}
+
+    class _AnswersDuringAck(_FakeRealtimeClient):
+        async def send_typed_message(
+            self, text: str, before_reply=None, on_delivered=None
+        ) -> bool:
+            on_delivered()
+            await callbacks["on_ai_transcript"]("the answer")
+            await asyncio.sleep(10)  # stuck waiting for response.created
+            return False
+
+    client = _AnswersDuringAck()
+
+    def _make(_cfg, **kwargs):
+        callbacks.update(kwargs)
+        return client
+
+    seen: dict = {}
+
+    async def _on_call_end(caller_id, source, transcript, *args, **kwargs):
+        seen["transcript"] = list(transcript)
+
+    async def _build(**_kwargs) -> str:
+        return "You are Bob."
+
+    websocket = _DummyBrowserWebSocket(
+        [
+            {
+                "type": "websocket.receive",
+                "text": json.dumps({"type": "text", "text": "the question"}),
+            },
+            {"type": "websocket.disconnect"},
+        ]
+    )
+    monkeypatch.setattr(server, "_build_session_instructions", _build)
+    monkeypatch.setattr(server, "_make_client", _make)
+    monkeypatch.setattr(server, "_on_call_end", _on_call_end)
+    monkeypatch.setattr("gptme_voice.realtime.server.GptmeToolBridge", _DummyToolBridge)
+
+    asyncio.run(server.handle_browser_websocket(websocket))
+    assert [(t.role, t.text) for t in seen["transcript"]] == [
+        ("user", "the question"),
+        ("assistant", "the answer"),
+    ]
+
+
+def test_unknown_conversation_workspace_fails_closed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Config unreadable: the workspace is unknown, not assumed to be the
+    server's, so no digest/history/workspace_search from the server's."""
+    from gptme_voice.realtime.conversation_link import ConversationContext
+
+    server = VoiceServer(enable_browser_transport=True, workspace=str(tmp_path))
+    server.browser_secret = "s3cret"
+    server.gptme_server_url = "http://127.0.0.1:5700"
+    server.gptme_server_key = "k"
+    monkeypatch.setattr(server, "_rag_for_websocket", lambda *a, **k: object())
+
+    async def _fetch(*args, **kwargs):
+        return ConversationContext(
+            instructions=None, workspace=None, workspace_known=False
+        )
+
+    built: list[dict] = []
+    bridges: list[dict] = []
+
+    async def _build(**kwargs) -> str:
+        built.append(kwargs)
+        return "You are Bob."
+
+    class _RecordingBridge(_DummyToolBridge):
+        def __init__(self, *args, **kwargs) -> None:
+            bridges.append(kwargs)
+
+    websocket = _DummyBrowserWebSocket([{"type": "websocket.disconnect"}])
+    websocket.query_params = {"conversation_id": "conv-1"}
+    websocket.headers = {"x-gptme-voice-secret": "s3cret"}
+    websocket.client = None
+    monkeypatch.setattr(
+        "gptme_voice.realtime.server.fetch_conversation_context", _fetch
+    )
+    monkeypatch.setattr(server, "_build_session_instructions", _build)
+    monkeypatch.setattr(
+        server, "_make_client", lambda _cfg, **_kw: _FakeRealtimeClient()
+    )
+    monkeypatch.setattr("gptme_voice.realtime.server.GptmeToolBridge", _RecordingBridge)
+    asyncio.run(server.handle_browser_websocket(websocket))
+    assert built[0].get("workspace_context") is False
+    assert bridges[0]["rag"] is None
 
 
 def test_probe_reporting_sends_transcript_and_tool_events() -> None:
