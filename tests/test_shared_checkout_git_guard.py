@@ -224,6 +224,27 @@ def test_failed_cd_then_semicolon_checks_cwd_too():
     assert detect(f"cd {OTHER} && git status && git reset --hard", cwd=SHARED) is None
 
 
+def test_git_dir_environment_and_wrappers_are_followed():
+    for command in (
+        f"GIT_DIR={SHARED}/.git GIT_WORK_TREE={SHARED} git reset --hard",
+        f"env GIT_DIR={SHARED}/.git git reset --hard",
+        f"export GIT_DIR={SHARED}/.git; git stash",
+        f"GIT_WORK_TREE={SHARED} git clean -fd",
+    ):
+        assert detect(command, cwd=OTHER) is not None, command
+    for command in (
+        "timeout 10 git reset --hard",
+        "nice git stash",
+        "nice -n 5 git add -A",
+        "stdbuf -oL git add -A",
+        "sudo -u me git clean -fd",
+        "env -u PAGER git reset --hard",
+    ):
+        assert detect(command, cwd=SHARED) is not None, command
+    assert detect("timeout 10 git status", cwd=SHARED) is None
+    assert detect(f"GIT_DIR={OTHER}/.git git reset --hard", cwd=OTHER) is None
+
+
 def test_work_tree_option_targets_that_tree():
     assert detect(f"git --work-tree={SHARED} clean -fd", cwd=OTHER) is not None
     assert detect(f"git --work-tree {SHARED} reset --hard", cwd=OTHER) is not None

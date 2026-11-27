@@ -59,7 +59,11 @@ _WHOLE_TREE = {".", "./", ":/", ":", "*"}
 _SEPARATOR_CHARS = set(";&|()")
 # Leading words that run the rest of the command as a program, and shell
 # keywords that can precede a command (`if true; then git ...; fi`).
-_WRAPPERS = {"command", "builtin", "exec", "time", "nohup", "env", "sudo"}
+_WRAPPERS = {
+    "command", "builtin", "exec", "time", "nohup", "env", "sudo", "doas",
+    "timeout", "nice", "ionice", "stdbuf", "chrt", "taskset",
+}  # fmt: skip
+_ASSIGNMENT_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.DOTALL)
 _KEYWORDS = {"if", "then", "elif", "else", "while", "until", "do", "!", "{"}
 
 
@@ -245,21 +249,43 @@ def _split_commands(tokens: list[str]) -> list[tuple[str, list[str], str]]:
     return items
 
 
-def _strip_wrappers(argv: list[str]) -> list[str]:
+def _strip_wrappers(argv: list[str]) -> tuple[list[str], dict[str, str]]:
+    """The command without leading assignments, keywords and wrappers.
+
+    Also returns the ``NAME=value`` assignments passed over (``GIT_DIR=...
+    git``, ``env GIT_DIR=... git``). A wrapper's own options and arguments
+    (``timeout 10``, ``nice -n 5``, ``env -u NAME``) end where the wrapped
+    command starts, so after a wrapper this jumps to the next ``git`` word.
+    """
+    env: dict[str, str] = {}
     i = 0
     while i < len(argv):
         word = argv[i]
-        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", word):
+        assignment = _ASSIGNMENT_RE.match(word)
+        if assignment:
+            env[assignment.group(1)] = assignment.group(2)
             i += 1
         elif word in _KEYWORDS:
             i += 1
         elif word in _WRAPPERS:
-            i += 1
-            while i < len(argv) and argv[i].startswith("-"):
+            rest = argv[i + 1 :]
+            git_at = next(
+                (k for k, tok in enumerate(rest) if os.path.basename(tok) == "git"),
+                None,
+            )
+            if git_at is None:
                 i += 1
+                while i < len(argv) and argv[i].startswith("-"):
+                    i += 1
+            else:
+                for tok in rest[:git_at]:
+                    assignment = _ASSIGNMENT_RE.match(tok)
+                    if assignment:
+                        env[assignment.group(1)] = assignment.group(2)
+                i += 1 + git_at
         else:
             break
-    return argv[i:]
+    return argv[i:], env
 
 
 def _unresolvable(text: str) -> bool:
@@ -281,12 +307,14 @@ def _resolve(path: str, base: Path) -> Path:
 
 
 def _git_invocation(
-    argv: list[str], dirs: list[Path]
+    argv: list[str], dirs: list[Path], env: Mapping[str, str] | None = None
 ) -> tuple[list[Path], str | None, list[str], tuple[str, ...]]:
     """Target directories, subcommand, its arguments and ``-c`` settings."""
     c_paths: list[str] = []
     configs: list[str] = []
-    git_dir = work_tree = None
+    # GIT_DIR / GIT_WORK_TREE act like --git-dir / --work-tree (which win).
+    git_dir = (env or {}).get("GIT_DIR")
+    work_tree = (env or {}).get("GIT_WORK_TREE")
     i = 1
     while i < len(argv):
         arg = argv[i]
@@ -537,6 +565,7 @@ def detect(
     # later `;`, `||`, `|` or `&` (the rest then runs where the cd failed).
     fallback: list[Path] = []
     scopes: list[tuple[list[Path], list[Path]]] = []
+    exported: dict[str, str] = {}  # `export GIT_DIR=...` for later commands
     for kind, argv, separator in _split_commands(tokens):
         if kind == "(":  # a subshell: its cd's end with it
             scopes.append((list(dirs), list(fallback)))
@@ -545,7 +574,13 @@ def detect(
             if scopes:
                 dirs, fallback = scopes.pop()
             continue
-        argv = _strip_wrappers(argv)
+        argv, env = _strip_wrappers(argv)
+        if argv and argv[0] == "export":
+            for word in argv[1:]:
+                assignment = _ASSIGNMENT_RE.match(word)
+                if assignment:
+                    exported[assignment.group(1)] = assignment.group(2)
+            argv = []
         if argv:
             word = argv[0]
             if word in ("cd", "pushd"):
@@ -560,7 +595,9 @@ def detect(
             elif word == "popd":
                 dirs = list(dict.fromkeys(dirs + [UNKNOWN_DIR]))
             elif os.path.basename(word) == "git":
-                targets, sub, args, configs = _git_invocation(argv, dirs)
+                targets, sub, args, configs = _git_invocation(
+                    argv, dirs, {**exported, **env}
+                )
                 rule, stack_write = _classify(sub, args, configs)
                 if rule or stack_write:
                     name = rule or "git stash"
