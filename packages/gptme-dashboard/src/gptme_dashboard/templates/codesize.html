@@ -1,0 +1,81 @@
+<section id="codesize">
+  <h2>Code size</h2>
+  {% for warning in codesize.warnings %}<p>{{ warning }}</p>{% endfor %}
+  <h3>Largest source files</h3>
+  <p>{% for threshold in codesize.thresholds %}{% if not loop.first %} · {% endif %}{{ codesize.over_threshold[threshold|string] | length }} files at or above {{ "{:,}".format(threshold) }} lines{% endfor %}</p>
+  {% if codesize.largest_files %}
+  <div style="overflow-x:auto">
+    <table>
+      <thead><tr><th>File</th><th>Lines</th><th>Commits in 90 days</th></tr></thead>
+      <tbody>
+        {% for file in codesize.largest_files %}
+        <tr>
+          <td><code>{{ file.path }}</code></td>
+          <td>{{ "{:,}".format(file.lines) }}</td>
+          <td>{{ file.changes }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+  {% if codesize.packages %}
+  <h3>Python packages</h3>
+  <p>Test share is test lines divided by source and test lines. CI shows membership in the package test matrix.
+    {% if codesize.agent_repos_scanned %}
+    External dependents count declarations across {{ codesize.agent_repos_scanned }} supplied agent checkouts.
+    {% else %}
+    External dependent counts are unavailable in this build.
+    {% endif %}
+  </p>
+  <details>
+    <summary>How review candidates are flagged</summary>
+    <ul>
+      <li><strong>Upstream</strong> · Stable package with two or more external agent dependents.</li>
+      <li><strong>Remove</strong> · Experimental package with zero observed internal and external dependents and no commit in 90 days. Requires an external checkout scan.</li>
+      <li><strong>Split</strong> · Source file at or above {{ "{:,}".format(codesize.thresholds[0]) }} lines.</li>
+    </ul>
+    <p>Dependent counts use declared Python dependencies, including optional dependencies. CLI callers and dynamic imports require separate review.</p>
+  </details>
+  <div style="overflow-x:auto">
+    <table>
+      <thead><tr><th>Package</th><th>Source lines</th>{% if codesize.comparison_week %}<th>Δ since {{ codesize.comparison_week }}</th>{% endif %}<th>Test share</th><th>Last commit</th><th>Internal dependents</th><th>External dependents</th><th>In test matrix</th><th>Review</th></tr></thead>
+      <tbody>
+        {% for package in codesize.packages %}
+        <tr>
+          <td><code>{{ package.name }}</code></td>
+          <td>{{ "{:,}".format(package.source_lines) }}</td>
+          {% if codesize.comparison_week %}<td>{{ "{:+,}".format(package.source_delta) }}</td>{% endif %}
+          <td title="{{ '{:,}'.format(package.test_lines) }} test lines">{{ "{:.0%}".format(package.tests_ratio) }}</td>
+          <td>{{ package.last_commit or "Unknown" }}</td>
+          <td>{{ package.internal_dependents }}</td>
+          <td>{{ package.external_dependents if package.external_dependents is not none else "Unknown" }}</td>
+          <td>{{ "Unknown" if package.ci_selected is none else ("Yes" if package.ci_selected else "No") }}</td>
+          <td>{{ package.flags | join(", ") or "—" }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+  <h3>Weekly Git samples</h3>
+  {% if codesize.history %}
+  <div style="overflow-x:auto">
+    <table>
+      <thead><tr><th>Week</th><th>Source lines</th><th>Test lines</th><th>Largest file</th></tr></thead>
+      <tbody>
+        {% for point in codesize.history %}
+        <tr>
+          <td>{{ point.week }}</td>
+          <td>{{ "{:,}".format(point.source_lines) }}</td>
+          <td>{{ "{:,}".format(point.test_lines) }}</td>
+          <td><code>{{ point.largest_file }}</code> ({{ "{:,}".format(point.largest_file_lines) }})</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p>Weekly samples need Git history.</p>
+  {% endif %}
+</section>

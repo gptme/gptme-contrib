@@ -173,3 +173,58 @@ gptme-contrib deploys its own dashboard this way; see
 ```bash
 uv run pytest packages/gptme-dashboard/tests/ -v
 ```
+
+## `codesize` — where code is hard to review
+
+A repo-agnostic size report, meant to be the shared tool behind gptme's
+[arewetiny](https://gptme.org/docs/arewetiny.html) page, the gptme-contrib
+dashboard, and an agent workspace's own code-shape review.
+
+```bash
+# markdown (default) — leads with the largest source files
+gptme-dashboard codesize --repo .
+
+# machine-readable, for a dashboard section or CI artifact
+gptme-dashboard codesize --repo . --code-only --json
+
+# monolith with internal areas: map path prefixes to groups
+gptme-dashboard codesize --repo ../gptme --groups ../gptme/codesize-groups.json
+```
+
+What it reports, in priority order:
+
+1. **largest source files** — a 3,000-line module is a review problem regardless of
+   repo size;
+2. **files over thresholds** (default 1,500 and 3,000 lines);
+3. **hotspots** — size × change frequency over a 90-day window: big *and* churning;
+4. **lines per group**, split into source and tests with a test ratio;
+5. **weekly trend** sampled from git history, so growth is visible without stored state.
+
+The profile is detected from the layout, first match wins: `brain`
+(`tasks/` + `lessons/` + `journal/`, grouped by top-level surface), `metarepo`
+(two or more submodules, grouped by submodule), `monorepo` (by `packages/*`) and
+`monolith` (by top-level directory). Override the grouping with
+`--groups file.json` or a `codesize-groups.json` in the repo root.
+
+In a git repository only tracked files are counted (`pnpm-lock.yaml` excluded). Submodule contents are
+counted for a `metarepo` only (including churn and trend). The current numbers
+read what is checked out, while the trend reads the pinned commits; a submodule
+that is missing or off its pin is reported as a warning.
+
+It only reads: nothing is deleted or rewritten. Use it to decide what to split,
+upstream or drop.
+
+### Code size on the dashboard
+
+```bash
+make --no-print-directory ci-list-packages-json > /tmp/ci-packages.json
+gptme-dashboard generate --workspace . --codesize --ci-packages /tmp/ci-packages.json
+```
+
+The Code size section leads with large files, then shows package size and growth,
+declared dependents, last commit, and package test matrix membership. Counts
+use physical lines in tracked code files. The published dashboard has no agent
+checkouts. For a private review, pass `--dependent-repo PATH` for each agent
+checkout you want to count. Checkout counts use declared Python dependencies
+and extras. Review command-line consumers and dynamic imports before acting on
+a removal flag. See [the shared report tracking issue](https://github.com/gptme/gptme/issues/5291).
