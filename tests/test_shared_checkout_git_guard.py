@@ -71,6 +71,12 @@ def detect(command: str, cwd: Path = SHARED, *, worktrees: bool = False):
         "git checkout .",
         "git checkout HEAD -- .",
         "git checkout origin/master -- .",
+        'git restore -- "."',
+        "git checkout -- '.'",
+        'git reset -- "."',
+        "git stash; git status",
+        "git stash&&git status",
+        "git stash|cat",
         "git checkout main .",
         "git reset --keep origin/master",
         "git reset --merge HEAD~1",
@@ -138,6 +144,9 @@ def test_shared_checkout_denies_tree_wide_operations(command):
         "git add -v path/to/file.py",
         "git add -uv path/to/file.py",
         "git add -p",
+        'git commit -m "document -a behavior" -- docs/usage.md',
+        "git commit -m 'fix: -a and --all in docs' -- README.md",
+        "git commit -F msg.txt -- a.py",
         "git log --oneline -5",
         "git --no-pager log -1",
         "git -c core.pager=cat diff",
@@ -160,8 +169,8 @@ def test_git_dash_c_targets_the_named_repo():
     assert detect("git -C /repo -C shared add -A", cwd=OTHER) is not None
 
 
-def test_quoted_option_paths_with_spaces():
-    spaced = Path("/Users/me/My Repos/shared")
+def test_quoted_option_paths_with_spaces(tmp_path):
+    spaced = (tmp_path / "My Repos" / "shared").resolve()
 
     def check(command: str):
         return guard.detect(
@@ -196,7 +205,14 @@ def test_failed_cd_then_semicolon_checks_cwd_too():
 def test_work_tree_option_targets_that_tree():
     assert detect(f"git --work-tree={SHARED} clean -fd", cwd=OTHER) is not None
     assert detect(f"git --work-tree {SHARED} reset --hard", cwd=OTHER) is not None
-    assert detect(f"git --work-tree={OTHER} reset --hard", cwd=SHARED) is None
+    # --work-tree does not change the repository: from inside the shared
+    # checkout its index is still the one reset.
+    assert detect(f"git --work-tree={OTHER} reset HEAD", cwd=SHARED) is not None
+    assert detect("git --work-tree=/tmp stash drop", cwd=SHARED) is not None
+    assert (
+        detect(f"git --git-dir={OTHER}/.git --work-tree={OTHER} reset", cwd=SHARED)
+        is None
+    )
 
 
 def test_chained_relative_cds_resolve_in_order(tmp_path):

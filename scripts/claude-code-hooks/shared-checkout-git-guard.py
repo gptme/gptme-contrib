@@ -9,14 +9,24 @@ Two scopes:
 
 * **Shared checkouts** (opt-in per repo with ``git config safety.sharedCheckout
   true``; ``scripts/git/setup-shared-checkout.sh`` sets it): deny whole-tree
-  operations (stash writes other than ``create``/``apply <sha>``, ``reset --hard``, bare/whole-index ``reset``,
-  ``--autostash``, ``clean -fd``, ``checkout .``, forced ``checkout``/``switch``,
-  ``restore .``) and broad
-  staging (``add -A``/``.``/``--all``, ``commit -a``).
+  operations (stash writes other than ``create``/``apply <sha>``, ``reset
+  --hard``, a ``reset`` without paths, ``--autostash``, forced ``clean``,
+  ``checkout``/``restore`` of ``.``, forced ``checkout``/``switch``) and broad
+  staging (``add -A``/``-u``/``.``, ``commit -a``).
 * **Any repo with linked worktrees**: deny writes to the stash stack, because
   all worktrees of a repo share one ``refs/stash`` and "stash, check, pop" can
   pop a sibling's entry. ``stash list|show|create`` and ``stash apply <sha>``
   stay allowed.
+
+The command is tokenized like a shell would (``shlex``), split at ``;``,
+``&&``, ``||``, ``|``, ``&`` and parentheses, and every ``git`` invocation is
+parsed (global options, subcommand, arguments), so quoting, option clusters
+and separators without spaces don't change the outcome. ``cd``/``pushd`` are
+followed; a directory the guard can't determine (``cd "$DIR"``) fails closed
+for destructive commands, and so does a command that doesn't tokenize.
+
+It is a guard against common mistakes, not a sandbox: anything that hides git
+behind another program (``bash -c``, ``xargs``, aliases) is out of scope.
 
 The matcher (:func:`detect`) is a pure function of the command and the
 directory it runs in, so other runtimes (e.g. a gptme tool-confirm plugin) can
@@ -38,217 +48,17 @@ import shlex
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
-# A git invocation with any global options before the subcommand (captured as
-# "opts": -C <dir>, -c k=v, --no-pager, --git-dir/--work-tree[=]<path>, ...).
-# Agents add -c and --no-pager routinely; without them in the prefix every rule
-# would miss `git --no-pager reset --hard`.
-# An option value: quoted (may contain spaces, e.g. a macOS path) or bare.
-_VALUE = r"""(?:"[^"]*"|'[^']*'|\S+)"""
-_GIT_OPT = (
-    r"(?:-[Cc]\s+"
-    + _VALUE
-    + r"|--(?:git-dir|work-tree|namespace|exec-path|config-env)(?:=|\s+)"
-    + _VALUE
-    + r"|--[a-z][a-z-]*(?:="
-    + _VALUE
-    + r")?"
-    + r"|-[pP])"
-)
-_GIT = r"(?:^|[;&|()\s])git(?P<opts>(?:\s+" + _GIT_OPT + r")*)\s+"
-# -C, --work-tree and --git-dir all name the repository acted on (the
-# predicates find a repo from inside its .git directory too).
-_TARGET_OPT_RE = re.compile(
-    r"(?:-C\s+|--(?:work-tree|git-dir)(?:=|\s+))(?P<path>" + _VALUE + r")"
-)
-_END = r"(?:\s|$|[;&|)])"
+# Stands for a directory the guard cannot determine from the command text
+# (``cd "$DIR"``, ``git -C "$(...)"``). Destructive commands there are denied.
+UNKNOWN_DIR = Path("<unresolvable>")
 
-# Stack writes (for repos with linked worktrees): also allow ``create`` (no
-# stack write) and ``apply <sha|$var>`` (applies a specific object).
-_STASH_STACK_RE = re.compile(
-    _GIT
-    + r"stash(?!\s+(?:list|show|create)"
-    + _END
-    + r")"
-    + r'(?!\s+apply(?:\s+(?:-q|--quiet|--index))*\s+(?:[0-9a-f]{7,40}|"?\$\{?\w+\}?"?)'
-    + _END
-    + r")(?:\s|$)"
-)
-_RESET_HARD_RE = re.compile(_GIT + r"reset(?:\s+[^;&|\n]*)?\s+--hard" + _END)
-# A mixed reset without a pathspec (or with ``-- .``) rewrites the whole index,
-# unstaging every other session's staged files, and ``reset <commit>`` also
-# moves the branch. One bare argument can be a commit or a path and only git
-# knows which, so it is denied; paths take ``reset -- <path>``. ``--soft``,
-# ``reset -- path`` and ``reset <commit> <path>...`` stay allowed.
-_RESET_INDEX_RE = re.compile(
-    _GIT
-    + r"reset(?:\s+(?:-q|--quiet|--mixed|--no-refresh|--keep|--merge))*"
-    + r"(?:\s+[^\s;&|)\-][^\s;&|)]*)?"
-    + r"(?:\s+(?:-q|--quiet|--mixed|--no-refresh|--keep|--merge))*\s*(?:$|[;&|)\n])"
-)
-_RESET_ALL_RE = re.compile(
-    _GIT + r"reset(?:\s+(?:-q|--quiet|--mixed|HEAD(?:[~^]\d*)*))*\s+--\s+\." + _END
-)
-_AUTOSTASH_RE = re.compile(_GIT + r"(?:pull|rebase)\b[^;&|\n]*\s--autostash" + _END)
-# Any forced clean deletes other sessions' untracked files (-d adds dirs).
-_CLEAN_RE = re.compile(_GIT + r"clean(?=[^;&|\n]*\s(?:-[A-Za-z]*f|--force))")
-# `checkout [-f|-q] [HEAD|@[~^n]] [--] .` reverts every tracked file.
-# `checkout [opts] [<tree-ish>] [--] .` overwrites every tracked file (and,
-# with a tree-ish, the index) from that tree.
-_CHECKOUT_ALL_RE = re.compile(
-    _GIT
-    + r"checkout(?:\s+(?:-f|--force|-q|--quiet|--no-overlay|--overlay))*"
-    + r"(?:\s+[^\s;&|)\-][^\s;&|)]*)?(?:\s+--)?\s+\."
-    + _END
-)
-# A forced switch throws away local modifications to every tracked file.
-_CHECKOUT_FORCE_RE = re.compile(
-    _GIT + r"(?:checkout|switch)\b[^;&|\n]*\s(?:-f|--force|--discard-changes)" + _END
-)
-# Options (incl. -S/-W/-s <tree>) then an optional `--` separator, then `.`.
-_RESTORE_ALL_RE = re.compile(
-    _GIT
-    + r"restore(?:\s+(?:-s\s+\S+|--source[=\s]\S+|--?[A-Za-z][\w-]*))*"
-    + r"(?:\s+--)?\s+\."
-    + _END
-)
-# Broad staging sweeps other sessions' changes into your commit.
-# `git add` with its arguments up to the next shell separator; whether it is
-# broad is decided on the tokens (see _add_is_broad), since option clusters
-# like -Av or --chmod=+x -A defeat a regex.
-_ADD_RE = re.compile(_GIT + r"add(?P<args>(?:\s+[^;&|\n]*)?)(?:$|[;&|\n])")
-
-
-def _add_is_broad(args: str) -> bool:
-    """Whether `git add <args>` stages the whole tree."""
-    try:
-        tokens = shlex.split(args)
-    except ValueError:
-        return True  # unbalanced quotes: fail closed
-    flags: list[str] = []
-    paths: list[str] = []
-    after_dashdash = False
-    for token in tokens:
-        if after_dashdash or not token.startswith("-") or token == "-":
-            paths.append(token)
-        elif token == "--":
-            after_dashdash = True
-        else:
-            flags.append(token)
-    short = "".join(f[1:] for f in flags if not f.startswith("--"))
-    if "--all" in flags or "A" in short:
-        return True
-    if any(path in (".", "./", ":/", ":") for path in paths):
-        return True
-    update = "--update" in flags or "u" in short
-    return update and not paths
-
-
-_COMMIT_ALL_RE = re.compile(
-    _GIT + r"commit\b[^;&|\n]*\s(?:-[a-zA-Z]*a[a-zA-Z]*|--all)" + _END
-)
-
-# Rules whose regex only finds the invocation; this decides if it is risky.
-_RULE_FILTERS: dict[re.Pattern[str], Any] = {
-    _ADD_RE: lambda m: _add_is_broad(m.group("args")),
-}
-
-SHARED_CHECKOUT_RULES: dict[str, re.Pattern[str]] = {
-    # Same allowances as the stack rule: list/show/create, and
-    # `stash apply <sha>` (the documented recovery path) stay allowed.
-    "git stash": _STASH_STACK_RE,
-    "git reset --hard": _RESET_HARD_RE,
-    "git reset (whole index)": _RESET_INDEX_RE,
-    "git reset -- . (whole index)": _RESET_ALL_RE,
-    "git pull/rebase --autostash": _AUTOSTASH_RE,
-    "git clean -f": _CLEAN_RE,
-    "git checkout .": _CHECKOUT_ALL_RE,
-    "git checkout/switch -f": _CHECKOUT_FORCE_RE,
-    "git restore .": _RESTORE_ALL_RE,
-    "git add -A / -u / . (broad staging)": _ADD_RE,
-    "git commit -a (broad staging)": _COMMIT_ALL_RE,
-}
-
-_LEADING_CD_RE = re.compile(
-    r"^\s*cd\s+(?P<path>'[^']*'|\"[^\"]*\"|[^\s;&|]+)\s*(?P<sep>&&|;|\n)"
-)
-
-
-_CD_RE = re.compile(
-    r"(?:^|[;&|()\s])(?:cd|pushd)\s+(?P<path>'[^']*'|\"[^\"]*\"|[^\s;&|)]+)"
-)
-
-
-def _resolve_cd_target(target: str, cwd: Path) -> Path | None:
-    target = target.strip("'\"")
-    if not target or target.startswith("-") or "$" in target or "`" in target:
-        return None
-    candidate = Path(os.path.expanduser(target))
-    if not candidate.is_absolute():
-        candidate = cwd / candidate
-    try:
-        return candidate.resolve()
-    except OSError:
-        return None
-
-
-# Quoted arguments that are not a cd target (e.g. `stash push -m "cd x"`).
-_QUOTED_NOT_CD_RE = re.compile(r"(?<!cd )(?<!cd\t)(['\"])(?:(?!\1).)*\1")
-
-
-def effective_cwds(command: str, cwd: Path) -> list[Path]:
-    """Directories *command*'s git calls may run in.
-
-    ``cd X && ...`` as the only ``cd`` runs in X only. Otherwise (``cd X; ...``
-    runs the rest even when the cd fails; several ``cd``s can hop anywhere)
-    every resolvable ``cd`` target and *cwd* are all checked: fail closed.
-    """
-    # A `cd` inside a quoted argument is text, not a directory change.
-    command = _QUOTED_NOT_CD_RE.sub('""', command)
-    targets = [m.group("path") for m in _CD_RE.finditer(command)]
-    if not targets:
-        return [cwd]
-    match = _LEADING_CD_RE.match(command)
-    # `cd X && a; b` runs b in cwd if the cd failed: the shortcut only holds
-    # when every later command is chained with && as well.
-    rest = command[match.end() :] if match is not None else ""
-    if (
-        len(targets) == 1
-        and match is not None
-        and match.group("sep") == "&&"
-        and not re.search(r";|\n|\|\|", rest)
-    ):
-        if _unresolvable(match.group("path")):
-            return [UNKNOWN_DIR]
-        only = _resolve_cd_target(match.group("path"), cwd)
-        if only is not None:
-            return [only]
-    # Each relative cd resolves against the directory the previous one
-    # reached (`cd /srv && cd shared` lands in /srv/shared); every directory
-    # along the way, and cwd, is checked.
-    dirs = [cwd]
-    current: Path = cwd
-    for target in targets:
-        if _unresolvable(target) or current == UNKNOWN_DIR:
-            stripped = target.strip("'\"")
-            if not _unresolvable(target) and stripped.startswith(("/", "~")):
-                resolved = _resolve_cd_target(target, cwd)  # absolute: known again
-            else:
-                resolved = UNKNOWN_DIR
-        else:
-            resolved = _resolve_cd_target(target, current)
-        if resolved is None:
-            continue
-        current = resolved
-        if resolved not in dirs:
-            dirs.append(resolved)
-    return dirs
-
-
-def effective_cwd(command: str, cwd: Path) -> Path:
-    """The first directory from :func:`effective_cwds` (kept for callers)."""
-    return effective_cwds(command, cwd)[0]
+# Paths that mean "the whole tree" to add/checkout/restore/reset.
+_WHOLE_TREE = {".", "./", ":/", ":", "*"}
+_SEPARATOR_CHARS = set(";&|()")
+# Leading words that run the rest of the command as a program.
+_WRAPPERS = {"command", "builtin", "exec", "time", "nohup", "env", "sudo"}
 
 
 def _git_dir_marker(start: Path) -> Path | None:
@@ -290,96 +100,345 @@ def is_shared_checkout(cwd: Path) -> bool:
     return result.stdout.strip() == "true"
 
 
-# Stands for a directory the guard cannot determine from the command text
-# (``cd "$DIR"``, ``git -C "$(...)"``). Destructive commands there are denied.
-UNKNOWN_DIR = Path("<unresolvable>")
+def _tokens(command: str) -> list[str] | None:
+    lexer = shlex.shlex(
+        command.replace("\n", " ; "), posix=True, punctuation_chars=";&|()"
+    )
+    lexer.whitespace_split = True
+    try:
+        return list(lexer)
+    except ValueError:
+        return None
+
+
+def _is_separator(token: str) -> bool:
+    return bool(token) and set(token) <= _SEPARATOR_CHARS
+
+
+def _split_commands(tokens: list[str]) -> list[tuple[list[str], str]]:
+    """``(argv, separator after it)`` for each simple command."""
+    commands: list[tuple[list[str], str]] = []
+    argv: list[str] = []
+    for token in tokens:
+        if _is_separator(token):
+            if argv:
+                commands.append((argv, token))
+                argv = []
+            elif commands:
+                prev_argv, _prev_sep = commands[-1]
+                commands[-1] = (prev_argv, token)
+        else:
+            argv.append(token)
+    if argv:
+        commands.append((argv, ""))
+    return commands
+
+
+def _strip_wrappers(argv: list[str]) -> list[str]:
+    i = 0
+    while i < len(argv):
+        word = argv[i]
+        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", word):
+            i += 1
+        elif word in _WRAPPERS:
+            i += 1
+            while i < len(argv) and argv[i].startswith("-"):
+                i += 1
+        else:
+            break
+    return argv[i:]
 
 
 def _unresolvable(text: str) -> bool:
     return "$" in text or "`" in text
 
 
-def _target_dirs(command: str, pattern: re.Pattern[str], cwd: Path) -> list[Path]:
-    """Directories each matching git invocation acts on.
+def _resolve(path: str, base: Path) -> Path:
+    if _unresolvable(path) or path == "-":
+        return UNKNOWN_DIR
+    candidate = Path(os.path.expanduser(path))
+    if not candidate.is_absolute():
+        if base == UNKNOWN_DIR:
+            return UNKNOWN_DIR
+        candidate = base / candidate
+    try:
+        return candidate.resolve()
+    except OSError:
+        return candidate
 
-    Honours ``-C`` (repeated ones chain, as in git) and ``--work-tree``.
-    """
-    dirs = []
-    keep = _RULE_FILTERS.get(pattern)
-    for match in pattern.finditer(command):
-        if keep is not None and not keep(match):
+
+def _git_invocation(
+    argv: list[str], dirs: list[Path]
+) -> tuple[list[Path], str | None, list[str]]:
+    """Target directories, subcommand and its arguments of a git argv."""
+    c_paths: list[str] = []
+    git_dir = work_tree = None
+    i = 1
+    while i < len(argv):
+        arg = argv[i]
+        if arg in ("-C", "-c") or arg in (
+            "--git-dir",
+            "--work-tree",
+            "--namespace",
+            "--config-env",
+            "--super-prefix",
+        ):
+            value = argv[i + 1] if i + 1 < len(argv) else ""
+            if arg == "-C":
+                c_paths.append(value)
+            elif arg == "--git-dir":
+                git_dir = value
+            elif arg == "--work-tree":
+                work_tree = value
+            i += 2
             continue
-        target = cwd
-        for opt in _TARGET_OPT_RE.finditer(match.group("opts") or ""):
-            raw = opt.group("path").strip("'\"")
-            if _unresolvable(raw) or target == UNKNOWN_DIR:
-                target = UNKNOWN_DIR
-                continue
-            path = Path(os.path.expanduser(raw))
-            target = path if path.is_absolute() else target / path
-        dirs.append(target)
-    return dirs
+        if arg.startswith("--git-dir="):
+            git_dir = arg.split("=", 1)[1]
+        elif arg.startswith("--work-tree="):
+            work_tree = arg.split("=", 1)[1]
+        elif not arg.startswith("-"):
+            break
+        i += 1
+    sub = argv[i] if i < len(argv) else None
+    args = argv[i + 1 :]
+    targets: list[Path] = []
+    for base in dirs:
+        repo = base
+        for c_path in c_paths:  # -C options chain, as in git
+            repo = _resolve(c_path, repo)
+        # --git-dir picks the repository (the predicates find a repo from
+        # inside its .git too); --work-tree only adds the tree it touches.
+        if git_dir is not None:
+            targets.append(_resolve(git_dir, repo))
+        else:
+            targets.append(repo)
+        if work_tree is not None:
+            targets.append(_resolve(work_tree, repo))
+    return targets, sub, args
+
+
+def _split_args(
+    args: list[str], short_with_value: str = "", long_with_value: tuple = ()
+) -> tuple[list[str], list[str], str]:
+    """``(long flags, positionals incl. after --, short option letters)``."""
+    longs: list[str] = []
+    positionals: list[str] = []
+    shorts = ""
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--":
+            positionals.extend(args[i + 1 :])
+            break
+        if arg.startswith("--"):
+            longs.append(arg.split("=", 1)[0])
+            if arg in long_with_value:
+                i += 1  # the value is the next token
+        elif arg.startswith("-") and arg != "-":
+            for j, letter in enumerate(arg[1:], start=1):
+                if letter in short_with_value:
+                    if j == len(arg) - 1:
+                        i += 1  # the value is the next token
+                    break  # the rest of the cluster is the value
+                shorts += letter
+        else:
+            positionals.append(arg)
+        i += 1
+    return longs, positionals, shorts
+
+
+def _whole_tree(paths: list[str]) -> bool:
+    return any(path in _WHOLE_TREE for path in paths)
+
+
+def _classify(sub: str | None, args: list[str]) -> tuple[str | None, bool]:
+    """``(shared-checkout rule it breaks, whether it writes the stash stack)``."""
+    if sub == "stash":
+        op = args[0] if args else "push"
+        if op in ("list", "show", "create"):
+            return None, False
+        if op == "apply":
+            _l, refs, _s = _split_args(args[1:])
+            # A specific object is fine; no ref, stash@{n} or n is an index
+            # into the stack a sibling worktree can shift.
+            if refs and not refs[0].startswith("stash@") and not refs[0].isdigit():
+                return None, False
+        return "git stash", True
+    if sub == "reset":
+        longs, positionals, shorts = _split_args(args)
+        if "--hard" in longs:
+            return "git reset --hard", False
+        if "--soft" in longs or "--patch" in longs or "p" in shorts:
+            return None, False
+        explicit = "--" in args
+        paths = positionals if explicit else positionals[1:]
+        if _whole_tree(paths):
+            return "git reset -- . (whole index)", False
+        if paths:
+            return None, False
+        # No paths: rewrites the whole index (and moves the branch with a
+        # commit). One bare argument may be a commit or a path; only git
+        # knows, so it is treated as a commit. Paths use `reset -- <path>`.
+        return "git reset (whole index)", False
+    if sub == "clean":
+        longs, _p, shorts = _split_args(args, "e", ("--exclude",))
+        forced = "--force" in longs or "f" in shorts
+        dry = "--dry-run" in longs or "n" in shorts
+        return ("git clean -f" if forced and not dry else None), False
+    if sub == "checkout":
+        longs, positionals, shorts = _split_args(
+            args, "bB", ("--orphan", "--conflict", "--pathspec-from-file")
+        )
+        if "--force" in longs or "f" in shorts:
+            return "git checkout/switch -f", False
+        explicit = "--" in args
+        paths = positionals if explicit else positionals
+        if _whole_tree(paths):
+            return "git checkout .", False
+        return None, False
+    if sub == "switch":
+        longs, _p, shorts = _split_args(args, "cC", ("--orphan", "--conflict"))
+        if {"--force", "--discard-changes"} & set(longs) or "f" in shorts:
+            return "git checkout/switch -f", False
+        return None, False
+    if sub == "restore":
+        _l, positionals, _s = _split_args(
+            args, "s", ("--source", "--pathspec-from-file")
+        )
+        return ("git restore ." if _whole_tree(positionals) else None), False
+    if sub == "add":
+        longs, paths, shorts = _split_args(
+            args, "", ("--chmod", "--pathspec-from-file")
+        )
+        if "--all" in longs or "A" in shorts or _whole_tree(paths):
+            return "git add -A / -u / . (broad staging)", False
+        if ("--update" in longs or "u" in shorts) and not paths:
+            return "git add -A / -u / . (broad staging)", False
+        return None, False
+    if sub == "commit":
+        longs, _paths, shorts = _split_args(
+            args,
+            "mFcCtS",
+            (
+                "--message",
+                "--file",
+                "--author",
+                "--date",
+                "--reuse-message",
+                "--reedit-message",
+                "--fixup",
+                "--squash",
+                "--template",
+                "--cleanup",
+                "--trailer",
+                "--pathspec-from-file",
+            ),
+        )
+        if "--all" in longs or "a" in shorts:
+            return "git commit -a (broad staging)", False
+        return None, False
+    if sub in ("pull", "rebase"):
+        longs, _p, _s = _split_args(args)
+        return (
+            "git pull/rebase --autostash" if "--autostash" in longs else None
+        ), False
+    return None, False
+
+
+def _shared_reason(rule: str, target: Path) -> str:
+    return (
+        f"Blocked `{rule}` in a shared checkout ({target}): other sessions' "
+        "uncommitted work lives in this tree, and this command can stash, "
+        "revert, unstage or sweep it up. Commit your own explicit paths "
+        "(`git add <paths>` / `git-safe-commit <paths>`), unstage paths with "
+        "`git reset -- <paths>`, pull with `git pull --ff-only` / "
+        "`git-safe-pull`, and do experiments that need reset/clean in a "
+        "separate worktree."
+    )
+
+
+def _stack_reason(target: Path) -> str:
+    return (
+        f"Blocked `git stash` in a repo with linked worktrees ({target}): all "
+        "worktrees share one stash stack, so a sibling's stash between your "
+        "push and pop makes you pop THEIR entry. For a baseline use `git show "
+        "origin/master:PATH` or a separate worktree; to set work aside use "
+        "`sha=$(git stash create)` then `git stash apply $sha`, or a temporary "
+        "commit."
+    )
+
+
+def _unknown_reason(rule: str) -> str:
+    return (
+        f"Blocked `{rule}`: it runs in a directory given by a shell variable or "
+        "substitution, so the guard cannot tell whether that is a shared "
+        "checkout (fail closed). Use a literal path (`cd /path/to/repo && ...` "
+        "or `git -C /path/to/repo ...`)."
+    )
+
+
+_DESTRUCTIVE_WORDS = re.compile(
+    r"\bgit\b.*\b(stash|reset|clean|checkout|switch|restore|add|commit|pull|rebase)\b",
+    re.DOTALL,
+)
 
 
 def detect(
     command: str,
     cwd: Path,
     *,
-    shared_checkout: Any = is_shared_checkout,
-    stash_stack_shared: Any = shares_stash_stack,
+    shared_checkout: Callable[[Path], bool] = is_shared_checkout,
+    stash_stack_shared: Callable[[Path], bool] = shares_stash_stack,
 ) -> str | None:
     """Return why *command* (run in *cwd*) must be denied, or None.
 
     The two predicates are injectable for tests and other runtimes.
     """
-    run_dirs = effective_cwds(command, cwd)
-    for name, pattern in SHARED_CHECKOUT_RULES.items():
-        targets = [
-            t
-            for d in run_dirs
-            for t in (
-                _target_dirs(command, pattern, d)
-                if d != UNKNOWN_DIR
-                else [UNKNOWN_DIR] * len(pattern.findall(command))
-            )
-        ]
-        for target in targets:
-            if target == UNKNOWN_DIR:
-                return (
-                    f"Blocked `{name}`: it runs in a directory given by a shell "
-                    "variable or substitution, so the guard cannot tell whether "
-                    "that is a shared checkout (fail closed). Use a literal path "
-                    "(`cd /path/to/repo && ...` or `git -C /path/to/repo ...`)."
-                )
-            if shared_checkout(target):
-                return (
-                    f"Blocked `{name}` in a shared checkout ({target}): other "
-                    "sessions' uncommitted work lives in this tree, and this "
-                    "command can stash, revert, unstage or sweep it up. Commit "
-                    "your own explicit paths (`git add <paths>` / `git-safe-commit "
-                    "<paths>`), unstage paths with `git reset -- <paths>`, pull "
-                    "with `git pull --ff-only` / `git-safe-pull`, and do "
-                    "experiments that need reset/clean in a separate worktree."
-                )
-    stash_targets = [
-        t
-        for d in run_dirs
-        for t in (
-            _target_dirs(command, _STASH_STACK_RE, d)
-            if d != UNKNOWN_DIR
-            else [UNKNOWN_DIR] * len(_STASH_STACK_RE.findall(command))
-        )
-    ]
-    for target in stash_targets:
-        if target == UNKNOWN_DIR or stash_stack_shared(target):
+    tokens = _tokens(command)
+    if tokens is None:
+        if _DESTRUCTIVE_WORDS.search(command):
             return (
-                f"Blocked `git stash` in a repo with linked worktrees ({target}): "
-                "all worktrees share one stash stack, so a sibling's stash between "
-                "your push and pop makes you pop THEIR entry. For a baseline use "
-                "`git show origin/master:PATH` or a separate worktree; to set work "
-                "aside use `sha=$(git stash create)` then `git stash apply $sha`, "
-                "or a temporary commit."
+                "Blocked: the command could not be tokenized (unbalanced "
+                "quotes?), so the guard cannot check its git invocations."
             )
+        return None
+    dirs: list[Path] = [cwd]
+    # Directories to fall back to if a `cd X && ...` chain is broken by a
+    # later `;`, `||`, `|` or `&` (the rest then runs where the cd failed).
+    fallback: list[Path] = []
+    for argv, separator in _split_commands(tokens):
+        argv = _strip_wrappers(argv)
+        if argv:
+            word = argv[0]
+            if word in ("cd", "pushd"):
+                rest = [a for a in argv[1:] if not a.startswith("-") or a == "-"]
+                target = rest[0] if rest else "~"
+                new = list(dict.fromkeys(_resolve(target, d) for d in dirs))
+                if separator == "&&":
+                    fallback = list(dict.fromkeys(fallback + dirs))
+                    dirs = new
+                else:
+                    dirs = list(dict.fromkeys(new + dirs))
+            elif word == "popd":
+                dirs = list(dict.fromkeys(dirs + [UNKNOWN_DIR]))
+            elif os.path.basename(word) == "git":
+                targets, sub, args = _git_invocation(argv, dirs)
+                rule, stack_write = _classify(sub, args)
+                if rule or stack_write:
+                    name = rule or "git stash"
+                    if UNKNOWN_DIR in targets:
+                        return _unknown_reason(name)
+                    if rule:
+                        for target in targets:
+                            if shared_checkout(target):
+                                return _shared_reason(rule, target)
+                    if stack_write:
+                        for target in targets:
+                            if stash_stack_shared(target):
+                                return _stack_reason(target)
+        if separator and separator != "&&" and fallback:
+            dirs = list(dict.fromkeys(dirs + fallback))
+            fallback = []
     return None
 
 
