@@ -246,9 +246,9 @@ def _may_carry_url_credential(token: str) -> bool:
     authority = token[scheme.end() : token.find("@", scheme.end())]
     if ":" in authority:
         return True
-    # A "/" before the first @ is a path scope (npm's /@types). Otherwise the
-    # userinfo may be a bare token, except for an SSH/git username.
-    return "/" not in authority and scheme.group(1).lower() not in ("ssh", "git")
+    # "/@" is a path scope (npm's /@types). Otherwise the userinfo may be a bare
+    # token, base64 "/" included, except for an SSH/git username.
+    return not authority.endswith("/") and scheme.group(1).lower() not in ("ssh", "git")
 
 
 def _drop_from_url_credential(text: str) -> str:
