@@ -31,6 +31,7 @@ def detect(command: str, cwd: Path = SHARED, *, worktrees: bool = False):
         cwd,
         shared_checkout=lambda p: SHARED in (p, *p.parents),
         stash_stack_shared=lambda p: worktrees,
+        autostash=lambda p, sub: False,
     )
 
 
@@ -278,11 +279,43 @@ def test_chained_relative_cds_resolve_in_order(tmp_path):
     assert check(f"cd {srv} && cd .. && git reset --hard") is None
 
 
-def test_untokenizable_destructive_command_fails_closed():
+def test_untokenizable_destructive_command_fails_closed_where_guarded():
     for command in ("git merge --autostash feature 'oops", 'git reset --hard "x'):
-        reason = detect(command, cwd=OTHER)
+        reason = detect(command, cwd=SHARED)
         assert reason is not None and "could not be tokenized" in reason
+        assert detect(command, cwd=OTHER, worktrees=True) is not None
+        # An unmarked repo without linked worktrees keeps its contract.
+        assert detect(command, cwd=OTHER) is None
     assert detect("echo 'unbalanced", cwd=SHARED) is None
+
+
+def test_autostash_enabled_in_config_is_caught():
+    def check(command: str, enabled: bool):
+        return guard.detect(
+            command,
+            SHARED,
+            shared_checkout=lambda p: True,
+            stash_stack_shared=lambda p: False,
+            autostash=lambda p, sub: enabled,
+        )
+
+    assert check("git pull --rebase", True) is not None
+    assert check("git merge feature", True) is not None
+    assert check("git pull --rebase", False) is None
+    assert check("git pull --no-autostash", True) is None
+
+
+def test_predicates_fail_closed_when_git_is_unavailable(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+
+    def boom(*args, **kwargs):
+        raise OSError("git not found")
+
+    monkeypatch.setattr(guard.subprocess, "run", boom)
+    assert guard.is_shared_checkout(repo) is True
+    assert guard.autostash_enabled(repo, "pull") is True
+    assert guard.is_shared_checkout(tmp_path / "not-a-repo-x") is False
 
 
 def test_cd_inside_a_subshell_does_not_leak():
@@ -382,6 +415,10 @@ def test_real_repo_predicates(tmp_path):
     assert guard.shares_stash_stack(main) is True
     assert guard.shares_stash_stack(tmp_path / "wt") is True
     assert guard.detect("git add -A", main) is not None
+    _git("config", "rebase.autoStash", "true", cwd=main)
+    assert guard.detect("git pull --rebase", main) is not None
+    _git("config", "rebase.autoStash", "false", cwd=main)
+    assert guard.detect("git pull --rebase", main) is None
 
 
 def test_hook_output_and_non_bash_passthrough(tmp_path):

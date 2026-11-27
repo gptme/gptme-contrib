@@ -87,7 +87,7 @@ def shares_stash_stack(cwd: Path) -> bool:
         linked = dot_git / "worktrees"
         return linked.is_dir() and any(linked.iterdir())
     except OSError:
-        return False
+        return True  # can't tell: fail closed
 
 
 def is_shared_checkout(cwd: Path) -> bool:
@@ -102,8 +102,35 @@ def is_shared_checkout(cwd: Path) -> bool:
             timeout=5,
         )
     except (OSError, subprocess.TimeoutExpired):
+        return True  # inside a repo but can't read its config: fail closed
+    if result.returncode == 1:  # the key is unset
         return False
-    return result.stdout.strip() == "true"
+    return result.returncode != 0 or result.stdout.strip() == "true"
+
+
+def autostash_enabled(cwd: Path, subcommand: str) -> bool:
+    """Whether a plain ``pull``/``rebase``/``merge`` at *cwd* would autostash.
+
+    Reads the effective config (any scope). Errors count as enabled.
+    """
+    keys = {
+        "rebase": ["rebase.autoStash"],
+        "merge": ["merge.autoStash"],
+        "pull": ["rebase.autoStash", "merge.autoStash"],
+    }.get(subcommand, [])
+    for key in keys:
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(cwd), "config", "--type=bool", "--get", key],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return True
+        if result.returncode not in (0, 1) or result.stdout.strip() == "true":
+            return True
+    return False
 
 
 _HEREDOC_RE = re.compile(r"""(['"]?)([^\s;&|()<>'"]+)\1""")
@@ -547,14 +574,17 @@ def detect(
     *,
     shared_checkout: Callable[[Path], bool] = is_shared_checkout,
     stash_stack_shared: Callable[[Path], bool] = shares_stash_stack,
+    autostash: Callable[[Path, str], bool] = autostash_enabled,
 ) -> str | None:
     """Return why *command* (run in *cwd*) must be denied, or None.
 
-    The two predicates are injectable for tests and other runtimes.
+    The predicates are injectable for tests and other runtimes.
     """
     tokens = _tokens(command)
     if tokens is None:
-        if _DESTRUCTIVE_WORDS.search(command):
+        # Only where the guard applies: unmarked repos keep their contract.
+        guarded = shared_checkout(cwd) or stash_stack_shared(cwd)
+        if guarded and _DESTRUCTIVE_WORDS.search(command):
             return (
                 "Blocked: the command could not be tokenized (unbalanced "
                 "quotes?), so the guard cannot check its git invocations."
@@ -599,6 +629,18 @@ def detect(
                     argv, dirs, {**exported, **env}
                 )
                 rule, stack_write = _classify(sub, args, configs)
+                if (
+                    rule is None
+                    and sub in ("pull", "rebase", "merge")
+                    and "--no-autostash" not in args
+                    and UNKNOWN_DIR not in targets
+                ):
+                    # Autostash can also be on in config (any scope).
+                    for target in targets:
+                        if shared_checkout(target) and autostash(target, sub):
+                            return _shared_reason(
+                                f"git {sub} (autostash enabled in config)", target
+                            )
                 if rule or stack_write:
                     name = rule or "git stash"
                     if UNKNOWN_DIR in targets:
