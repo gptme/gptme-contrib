@@ -286,6 +286,39 @@ def get_collection(client: ClientAPI, name: str, embedding_function=None) -> Col
         )
 
 
+def _overlap_near(left: str, right: str, expected: int) -> str:
+    """Suffix of ``left`` that prefixes ``right``, closest to ``expected`` chars.
+
+    Repetitive text matches at many lengths, so the longest match can swallow a
+    whole chunk. Only lengths up to twice the expected overlap are considered,
+    and never all of ``right`` (every chunk adds new text). With no match,
+    nothing is dropped.
+    """
+    limit = min(len(left), len(right) - 1, 2 * expected)
+    for size in sorted(range(1, limit + 1), key=lambda n: (abs(n - expected), n)):
+        if left.endswith(right[:size]):
+            return right[:size]
+    return ""
+
+
+def _int_or_none(value: Any) -> int | None:
+    # bool is an int subclass but never a valid position.
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _chunk_start(chunk: Document) -> int | None:
+    """Token offset where ``chunk`` starts.
+
+    Recorded as ``chunk_start`` metadata, and also encoded in the chunk id
+    ("<base_id>#chunk<i>-<start>") for entries whose metadata lacks it.
+    """
+    start = _int_or_none(chunk.metadata.get("chunk_start"))
+    if start is not None:
+        return start
+    match = re.search(r"#chunk\d+-(\d+)$", chunk.doc_id or "")
+    return int(match.group(1)) if match else None
+
+
 class Indexer:
     """Handles document indexing and embedding storage."""
 
@@ -1770,24 +1803,29 @@ class Indexer:
         Returns:
             List of document chunks, ordered by chunk index
         """
-        # Get all documents from collection
-        all_docs = self.collection.get()
-        all_ids = all_docs["ids"] or []
-        all_doc_contents = all_docs["documents"] or []
-        all_metas = all_docs["metadatas"] or []
-
-        # Filter chunks belonging to this document
+        # Hold the lock across the id scan and the reads, so a concurrent write
+        # cannot shift the scan offsets or delete a chunk in between — either
+        # would make reconstruct_document return truncated content.
         chunks = []
-        for i, doc_id in enumerate(all_ids):
-            if doc_id.startswith(base_doc_id):
-                chunk = Document(
-                    content=all_doc_contents[i],
-                    metadata=all_metas[i],  # type: ignore[arg-type]
-                    doc_id=doc_id,
-                )
-                chunks.append(chunk)
+        with self._index_writer_lock():
+            ids = self._document_ids(base_doc_id)
+            for start in range(0, len(ids), _PAGE_SIZE):
+                page = self.collection.get(ids=ids[start : start + _PAGE_SIZE])
+                contents = page["documents"] or []
+                metas = page["metadatas"] or []
+                for i, doc_id in enumerate(page["ids"]):
+                    metadata = dict(metas[i] or {})
+                    chunks.append(
+                        Document(
+                            content=contents[i],
+                            metadata=metadata,
+                            doc_id=doc_id,
+                            chunk_index=_int_or_none(metadata.get("chunk_index")),
+                        )
+                    )
 
-        # Sort chunks by index
+        # The collection stores chunk_index only in metadata (Document.chunk_index
+        # does not round-trip), and returns entries in storage order.
         chunks.sort(key=lambda x: x.chunk_index or 0)
         return chunks
 
@@ -1804,8 +1842,7 @@ class Indexer:
         if not chunks:
             raise ValueError(f"No chunks found for document {doc_id}")
 
-        # Combine chunk contents
-        content = "\n".join(chunk.content for chunk in chunks)
+        content = self._merge_chunk_contents(chunks)
 
         # Use metadata from first chunk, removing chunk-specific fields
         # Create clean metadata without chunk-specific fields
@@ -1826,6 +1863,50 @@ class Indexer:
             source_path=chunks[0].source_path,
             last_modified=chunks[0].last_modified,
         )
+
+    def _chunk_end(self, chunk: Document) -> int | None:
+        """Token offset where ``chunk`` ends.
+
+        Prefer the recorded ``chunk_end``; without it, derive the end from the
+        chunk's start plus its token count (recorded, or by re-encoding).
+        """
+        end = _int_or_none(chunk.metadata.get("chunk_end"))
+        if end is not None:
+            return end
+        start = _chunk_start(chunk)
+        if start is None:
+            return None
+        count = _int_or_none(chunk.metadata.get("token_count"))
+        if count is None:
+            count = len(self.processor.encoding.encode(chunk.content))
+        return start + count
+
+    def _merge_chunk_contents(self, chunks: list[Document]) -> str:
+        """Concatenate ordered chunks, dropping the token overlap between neighbours.
+
+        Chunks are cut from the original text, so they are joined as-is (no
+        separator). A chunk that starts before the previous one ended repeats
+        those tokens; the repeated text is located by re-encoding the chunk and
+        checked against both neighbours before it is dropped, with a bounded
+        suffix/prefix search as fallback.
+        """
+        encoding = self.processor.encoding
+        content = chunks[0].content
+        prev_end = self._chunk_end(chunks[0])
+        for chunk in chunks[1:]:
+            text = chunk.content
+            start = _chunk_start(chunk)
+            overlap = ""
+            if prev_end is not None and start is not None and prev_end > start:
+                tokens = encoding.encode(text)
+                candidate = encoding.decode(tokens[: prev_end - start])
+                if content.endswith(candidate) and text.startswith(candidate):
+                    overlap = candidate
+                else:
+                    overlap = _overlap_near(content, text, len(candidate))
+            content += text[len(overlap) :]
+            prev_end = self._chunk_end(chunk)
+        return content
 
     def verify_document(
         self,
