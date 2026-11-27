@@ -1503,6 +1503,45 @@ def test_send_typed_message_rechecks_right_before_response_create() -> None:
     asyncio.run(_exercise())
 
 
+def test_typed_item_already_sent_counts_as_delivered_on_a_late_cancel_timeout() -> None:
+    """If a reply starts while the item is sent and is never confirmed
+    cancelled, the message still counts as delivered (the provider has it):
+    no exception, so the caller records it; no rejected response.create."""
+
+    async def _exercise() -> None:
+        fake_ws = _FakeWebSocket()
+
+        async def _fake_connect(*_args, **_kwargs):
+            return fake_ws
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "gptme_voice.realtime.openai_client.websockets.connect", _fake_connect
+            )
+            mp.setattr(
+                "gptme_voice.realtime.openai_client._TYPED_CANCEL_WAIT_SECONDS", 0.05
+            )
+            client = OpenAIRealtimeClient(api_key="test-key")
+            await client.connect()
+            await client._handle_event({"type": "session.updated"})
+            real_send = client._send_event
+
+            async def _send_and_race(event_type: str, data: dict) -> None:
+                await real_send(event_type, data)
+                if event_type == "conversation.item.create":
+                    await client._handle_event({"type": "response.created"})
+
+            client._send_event = _send_and_race  # type: ignore[method-assign]
+            baseline = len(fake_ws.sent)
+            assert await client.send_typed_message("stop") is True
+            types = [e["type"] for e in fake_ws.sent[baseline:]]
+            assert types[0] == "conversation.item.create"
+            assert "response.create" not in types
+            await client.disconnect()
+
+    asyncio.run(_exercise())
+
+
 def test_send_text_message_times_out_if_session_never_becomes_ready() -> None:
     """A missing provider ready event must not pin the local handler forever."""
 
