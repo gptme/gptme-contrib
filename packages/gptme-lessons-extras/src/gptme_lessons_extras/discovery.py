@@ -91,10 +91,14 @@ class LessonDiscovery:
     def extract_features(self, lesson_path: Path) -> LessonFeatures:
         """Extract features from a lesson file."""
         lesson_id = lesson_path.stem
+        # Cache by file, not stem: git/commit.md and workflow/commit.md share
+        # a stem but are different lessons. Preserve symlink aliases because
+        # category is derived from the caller's path, not the resolved target.
+        cache_key = str(lesson_path.absolute())
 
         # Check cache first
-        if lesson_id in self.features_cache:
-            return self.features_cache[lesson_id]
+        if cache_key in self.features_cache:
+            return self.features_cache[cache_key]
 
         content = lesson_path.read_text()
 
@@ -164,7 +168,7 @@ class LessonDiscovery:
         )
 
         # Cache features
-        self.features_cache[lesson_id] = features
+        self.features_cache[cache_key] = features
         return features
 
     def load_metrics(self) -> Dict[str, Dict]:
@@ -466,23 +470,30 @@ class LessonDiscovery:
             List of (lesson_a, lesson_b, similarity_score) tuples
         """
         duplicates = []
-        processed = set()
 
-        lesson_files = [
-            f for f in self.lessons_dir.rglob("*.md") if f.name not in NON_LESSON_FILES
-        ]
+        # Feature extraction preserves alias categories, but duplicate discovery
+        # must not compare a symlink target with itself or repeat its matches.
+        lesson_files = []
+        seen_targets = set()
+        # Prefer the real file's name; sort aliases as a stable fallback when
+        # their target lies outside the scanned tree.
+        candidates = sorted(
+            self.lessons_dir.rglob("*.md"), key=lambda path: (path.is_symlink(), path)
+        )
+        for path in candidates:
+            if path.name in NON_LESSON_FILES:
+                continue
+            target = path.resolve()
+            if target in seen_targets:
+                continue
+            seen_targets.add(target)
+            lesson_files.append(path)
 
         for i, lesson_a in enumerate(lesson_files):
             features_a = self.extract_features(lesson_a)
 
             for lesson_b in lesson_files[i + 1 :]:
                 features_b = self.extract_features(lesson_b)
-
-                # Skip if already processed
-                pair = tuple(sorted([features_a.lesson_id, features_b.lesson_id]))
-                if pair in processed:
-                    continue
-                processed.add(pair)
 
                 # Compute similarity
                 text_similarity = self.compute_text_similarity(
