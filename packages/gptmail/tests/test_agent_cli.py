@@ -3037,6 +3037,8 @@ def test_wire_reply_completes_local_tracker_entry(workspace: Path, reference_for
     state = tracker.get_message_state("agent:alice|bob", name)
     assert state is not None and state.state == MessageState.COMPLETED
     assert tracker.get_message_state("agent:alice|bob", "remote.md") is None
+    sent_state = tracker.get_message_state("agent:alice|bob", _only_outbox_msg(workspace).name)
+    assert sent_state is not None and sent_state.in_reply_to == name
 
 
 def test_exact_ambiguity_count_excludes_prefix_siblings(workspace: Path) -> None:

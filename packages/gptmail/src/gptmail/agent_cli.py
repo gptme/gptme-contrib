@@ -534,7 +534,7 @@ def _track_sent(
     """Stamp a sent message into the shared tracker (channel='agent')."""
     tracker = _tracker()
     conv = transport.conversation_id_for(message_id)
-    tracker.track_message(conv, message_id, in_reply_to=reply_to, channel="agent")
+    tracker.track_message(conv, message_id, in_reply_to=local_reply_to or reply_to, channel="agent")
     if reply_to:
         # The inbound message we just answered is no longer pending.
         tracker.set_message_state(
