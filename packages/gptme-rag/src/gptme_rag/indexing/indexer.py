@@ -36,6 +36,9 @@ def _glob_match_path(path: str, pattern: str) -> bool:
     return GitIgnoreSpecPattern(pattern).match_file(path) is not None
 
 
+# Max entries per collection read/delete call.
+_PAGE_SIZE = 1000
+
 # HuggingFace namespaces used for sentence-transformer / embedding models.
 # Model names in these namespaces contain a slash but are NOT OpenRouter model names.
 # Used by _looks_like_openrouter_model() as a fallback heuristic for legacy
@@ -1964,31 +1967,81 @@ class Indexer:
 
         return status
 
+    def _iter_ids(self, where: dict | None = None) -> Generator[str, None, None]:
+        """Yield all ids (optionally filtered), read in bounded pages.
+
+        Chroma's unbounded get() can exceed SQLite's variable limit on large
+        collections.
+        """
+        offset = 0
+        while True:
+            page = self.collection.get(where=where, include=[], limit=_PAGE_SIZE, offset=offset)[
+                "ids"
+            ]
+            yield from page
+            if len(page) < _PAGE_SIZE:
+                return
+            offset += len(page)
+
+    def _document_ids(self, base_doc_id: str) -> list[str]:
+        """Ids of a document and its chunks.
+
+        Chunk ids are "<base_id>#chunk<i>-<start>" and chroma has no id-prefix
+        filter, so scan the ids. Match the "#chunk" separator too: a bare prefix
+        test also claims any id that merely extends this one.
+        """
+        chunk_prefix = f"{base_doc_id}#chunk"
+        return [i for i in self._iter_ids() if i == base_doc_id or i.startswith(chunk_prefix)]
+
+    def _delete_document_ids(self, doc_id: str, deleted: list[int]) -> None:
+        """Delete the entries for ``doc_id``, counting each deleted page in ``deleted[0]``.
+
+        The count is kept outside the call so pages deleted before an exception
+        are still counted by the caller.
+        """
+        # Hold the lock across the paged reads: a concurrent write would shift
+        # the offsets and skip ids.
+        with self._index_writer_lock():
+            # Callers may also pass a source path; keep deleting by source.
+            by_source = set(self._iter_ids(where={"source": doc_id}))
+            ids = sorted(set(self._document_ids(doc_id)) | by_source)
+            for start in range(0, len(ids), _PAGE_SIZE):
+                page = ids[start : start + _PAGE_SIZE]
+                self.collection.delete(ids=page)
+                deleted[0] += len(page)
+
     def delete_document(self, doc_id: str) -> bool:
         """Delete a document and all its chunks from the index.
 
         Args:
-            doc_id: Base document ID (without chunk suffix)
+            doc_id: Base document ID (without chunk suffix), or a source path
 
         Returns:
-            bool: True if deletion was successful
+            bool: True if entries were found and deleted, False if nothing
+            matched or the delete failed
         """
+        deleted = [0]
         try:
-            # First try to delete by exact ID
-            self.collection.delete(ids=[doc_id])
-            logger.debug(f"Deleted document: {doc_id}")
-
-            # Then delete any related chunks
             try:
-                self.collection.delete(where={"source": doc_id})
-                logger.debug(f"Deleted related chunks for: {doc_id}")
-            except Exception as chunk_e:
-                logger.warning(f"Error deleting chunks for {doc_id}: {chunk_e}")
-
-            return True
+                self._delete_document_ids(doc_id, deleted)
+            except NotFoundError:
+                # The cached Collection object is stale: the collection was
+                # recreated (reset_collection in another process) before the
+                # delete finished. Re-bind and retry once against the new
+                # collection, as delete_documents does — never wipe the index.
+                # Entries already deleted from the old collection still count.
+                logger.debug("Collection handle stale on delete_document; refreshing and retrying")
+                self._refresh_collection()
+                self._delete_document_ids(doc_id, deleted)
         except Exception as e:
             logger.error(f"Error deleting document {doc_id}: {e}")
             return False
+
+        if not deleted[0]:
+            logger.debug(f"No document or chunks found for: {doc_id}")
+            return False
+        logger.debug(f"Deleted {deleted[0]} entries for: {doc_id}")
+        return True
 
     def _get_valid_files(
         self, path: Path, glob_pattern: str = "**/*.*", file_limit: int = 100_000
