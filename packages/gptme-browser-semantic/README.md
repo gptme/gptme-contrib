@@ -83,8 +83,14 @@ state = browser_extract()                       # ExtractResult; .data is the AR
 
   Selectors: when the snapshot line carries `[ref=eN]`, that ref is reused.
   Otherwise the locator is `role={role}[name='{name}']`, which gptme's
-  `click_element` / `fill_element` accept. Other bracket attributes such as
-  `[level=1]` are ignored.
+  `click_element` / `fill_element` accept. This selector matches the whole,
+  case-sensitive accessible name; duplicate role/name pairs get `>> nth=i`.
+  Other bracket attributes such as `[level=1]` are ignored.
+
+  Native `<select>` elements and editable ARIA comboboxes both appear as
+  `combobox`, potentially with option descendants. The snapshot cannot tell
+  them apart, so comboboxes keep the `fill` default. For a native select, use
+  `browser_act(observed, method="select", arguments=["value"])` explicitly.
 
 - **`browser_act(action_or_observed, *, method=None, arguments=None, retry_on_stale=True) -> ActResult`**
   Two forms:
@@ -98,11 +104,17 @@ state = browser_extract()                       # ExtractResult; .data is the AR
   returns a clear failure instead of guessing.
 
   **Stale-selector recovery**: when a cached selector no longer resolves (the
-  page re-rendered or swapped refs), the element is re-observed once with the
-  same query and the action retried on the fresh top match. Errors that suggest
-  the action already ran (navigation, detached target) are not retried, to
-  avoid double-acting. `retry_on_stale=False` returns the first failure
-  immediately.
+  page re-rendered or swapped refs), the page is re-observed once with the same
+  query and the action retried on the same element: same role and name, and
+  either the same selector or the only such match. If it cannot be identified
+  (for example, one of two duplicates disappeared), the first failure is
+  returned. A duplicate role/name pair is never retried: twins are
+  indistinguishable, so neither a positional `>> nth=i` ordinal (the page can
+  reorder them) nor a `[ref=eN]` (refs are reassigned on re-render) identifies
+  which twin the caller chose — the first failure is returned instead of
+  risking a lookalike. Errors that suggest the action already ran (navigation,
+  detached target) are not retried, to avoid double-acting.
+  `retry_on_stale=False` returns the first failure immediately.
 
 - **`browser_extract(instruction=None, *, schema=None) -> ExtractResult`**
   Always returns the raw ARIA snapshot in `.data`; `instruction` is ignored.
