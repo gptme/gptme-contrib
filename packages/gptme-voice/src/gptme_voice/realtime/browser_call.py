@@ -200,7 +200,7 @@ async def handle_browser_websocket(server: VoiceServer, websocket):
         instructions = await server._build_session_instructions(
             caller_id=caller_id, handoff_id=handoff_id, **other_workspace
         )
-        if context is not None and conversation_id:
+        if context is not None and context.loaded and conversation_id:
             if context.instructions:
                 instructions = f"{instructions}\n\n{context.instructions}"
             live_sink = _srv.LiveTranscriptSink(
@@ -366,7 +366,13 @@ async def handle_browser_websocket(server: VoiceServer, websocket):
         if live_sink is not None:
             await live_sink.close()
         if unknown_workspace is not None:
-            unknown_workspace.cleanup()
+            if tool_bridge is not None and getattr(tool_bridge, "_pending_tasks", None):
+                # A lookup may still run in it; the OS temp cleanup removes it.
+                _srv.logger.info(
+                    "Leaving %s for a lookup still running", unknown_workspace.name
+                )
+            else:
+                unknown_workspace.cleanup()
         if probe:
             _srv.logger.info(
                 "Probe call ended (%d turns); no call record", len(transcript)

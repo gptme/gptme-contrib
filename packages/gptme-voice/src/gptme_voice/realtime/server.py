@@ -697,16 +697,16 @@ def _append_transcript_turn(
     # Replace only when the new text is at least as long as the stored one —
     # a shorter retransmission (e.g. a provider-side correction) is silently
     # ignored so we never truncate a longer partial already in the transcript.
-    if (
-        allow_continuation
-        and item_id is not None
-        and transcript
-        and transcript[-1].role == role
-        and transcript[-1].item_id == item_id
-    ):
-        if len(cleaned) >= len(transcript[-1].text):
-            transcript[-1] = TranscriptTurn(role=role, text=cleaned, item_id=item_id)
-        return  # same item_id — never append a second entry regardless
+    # Look back a few turns: a typed turn can land between a partial and its completion.
+    if allow_continuation and item_id is not None:
+        for index in range(len(transcript) - 1, max(-1, len(transcript) - 6), -1):
+            turn = transcript[index]
+            if turn.role == role and turn.item_id == item_id:
+                if len(cleaned) >= len(turn.text):
+                    transcript[index] = TranscriptTurn(
+                        role=role, text=cleaned, item_id=item_id
+                    )
+                return  # same item_id — never append a second entry regardless
 
     # Prefix heuristic fallback: only when BOTH the current event and the
     # stored entry have no item_id.  If the stored entry has item_id="A"

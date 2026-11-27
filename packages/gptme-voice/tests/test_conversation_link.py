@@ -295,6 +295,45 @@ def test_notify_during_a_post_does_not_cancel_it() -> None:
     assert posts == [["first"], ["second"]]
 
 
+def test_a_notify_during_a_busy_post_keeps_the_retry_backoff() -> None:
+    """409 during a POST that a notify arrived for: wait retry_seconds, don't
+    fire the next POST right away."""
+    times: list[float] = []
+    gate = asyncio.Event()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        times.append(asyncio.get_running_loop().time())
+        if len(times) == 1:
+            await gate.wait()
+            return httpx.Response(409, json={})
+        return httpx.Response(200, json={})
+
+    transcript = [Turn("user", "first")]
+
+    async def run() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
+            sink = LiveTranscriptSink(
+                server_url="http://server",
+                api_key="key",
+                conversation_id="conv-1",
+                call_sid="webui-abc",
+                transcript=transcript,
+                client=c,
+                settle_seconds=0.01,
+                retry_seconds=0.3,
+            )
+            sink.notify(immediate=True)
+            await asyncio.sleep(0.05)
+            transcript.append(Turn("user", "second"))
+            sink.notify(immediate=True)  # arrives mid-POST
+            gate.set()
+            await asyncio.sleep(0.6)
+            await sink.close()
+
+    asyncio.run(run())
+    assert len(times) >= 2 and times[1] - times[0] >= 0.25
+
+
 def test_sink_reposts_a_turn_the_provider_revised() -> None:
     posts: list[dict] = []
 

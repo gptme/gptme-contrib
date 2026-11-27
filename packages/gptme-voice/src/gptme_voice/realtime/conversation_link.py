@@ -50,6 +50,9 @@ class ConversationContext:
     # False when the conversation's config couldn't be read, so its workspace
     # is unknown (not "the server's default"): callers must fail closed.
     workspace_known: bool = True
+    # False when the conversation itself couldn't be loaded (404, auth, ...):
+    # nothing may be posted to it.
+    loaded: bool = True
 
 
 def _conversation_url(server_url: str, conversation_id: str, suffix: str = "") -> str:
@@ -135,7 +138,7 @@ async def fetch_conversation_context(
     except (httpx.HTTPError, ValueError) as exc:
         logger.warning("Could not load conversation %s: %s", conversation_id, exc)
         return ConversationContext(
-            instructions=None, workspace=None, workspace_known=False
+            instructions=None, workspace=None, workspace_known=False, loaded=False
         )
 
     log = conversation.get("log")
@@ -252,10 +255,11 @@ class LiveTranscriptSink:
             return
         again, self._again = self._again, None
         if result == "retry":
+            # Keep the backoff; turns that arrived meanwhile go with the retry.
             self._schedule(self._retry_seconds)
         elif result == "held":
             self._schedule(self._settle_seconds)
-        if again is not None:
+        elif again is not None:
             self._schedule(again)
 
     def _get_client(self) -> httpx.AsyncClient:

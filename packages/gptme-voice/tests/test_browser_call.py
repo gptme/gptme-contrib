@@ -685,3 +685,63 @@ def test_sidecar_secret_check_handles_non_ascii_and_missing_headers(
         websocket.close = _close
         asyncio.run(server.handle_browser_websocket(websocket))  # no TypeError
         assert closed == [1008] and websocket.accepted is False
+
+
+def test_speech_completion_after_a_typed_turn_updates_the_partial() -> None:
+    """Typing while a speech partial is last: the later completion of that
+    speech still updates the partial in place instead of adding a duplicate."""
+    from gptme_voice.realtime.server import _append_transcript_turn
+
+    transcript: list[TranscriptTurn] = []
+    _append_transcript_turn(transcript, "user", "Hello, use", item_id="speech-1")
+    _append_transcript_turn(
+        transcript, "user", "stop", item_id="typed-1", allow_continuation=False
+    )
+    _append_transcript_turn(
+        transcript, "user", "Hello, use the other file", item_id="speech-1"
+    )
+    assert [(t.text, t.item_id) for t in transcript] == [
+        ("Hello, use the other file", "speech-1"),
+        ("stop", "typed-1"),
+    ]
+
+
+def test_unloaded_conversation_gets_no_transcript_posts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from gptme_voice.realtime.conversation_link import ConversationContext
+
+    server = VoiceServer(enable_browser_transport=True)
+    server.browser_secret = "s3cret"
+    server.gptme_server_url = "http://127.0.0.1:5700"
+    server.gptme_server_key = "k"
+
+    async def _fetch(*args, **kwargs):
+        return ConversationContext(
+            instructions=None, workspace=None, workspace_known=False, loaded=False
+        )
+
+    sinks: list[object] = []
+
+    class _NoSink:
+        def __init__(self, *args, **kwargs) -> None:
+            sinks.append(self)
+
+    async def _build(**_kwargs) -> str:
+        return "x"
+
+    websocket = _DummyBrowserWebSocket([{"type": "websocket.disconnect"}])
+    websocket.query_params = {"conversation_id": "missing"}
+    websocket.headers = {"x-gptme-voice-secret": "s3cret"}
+    websocket.client = None
+    monkeypatch.setattr(
+        "gptme_voice.realtime.server.fetch_conversation_context", _fetch
+    )
+    monkeypatch.setattr("gptme_voice.realtime.server.LiveTranscriptSink", _NoSink)
+    monkeypatch.setattr(server, "_build_session_instructions", _build)
+    monkeypatch.setattr(
+        server, "_make_client", lambda _cfg, **_kw: _FakeRealtimeClient()
+    )
+    monkeypatch.setattr("gptme_voice.realtime.server.GptmeToolBridge", _DummyToolBridge)
+    asyncio.run(server.handle_browser_websocket(websocket))
+    assert sinks == []
