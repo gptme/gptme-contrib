@@ -5,6 +5,9 @@ must drop its indexed chunks without storing the empty-file tombstone, and a
 failed replacement write must leave the previous chunks in place.
 """
 
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
+
 import pytest
 
 pytest.importorskip("chromadb")
@@ -241,6 +244,70 @@ def test_sweep_refreshes_a_stale_collection_handle(indexer, tmp_path, monkeypatc
     assert calls, "the sweep never hit the stale handle"
     remaining = set(indexer.collection.get()["ids"])
     assert not (stale_ids & remaining), f"stale chunks survived the retried sweep: {remaining}"
+
+
+def test_file_replacement_serializes_collection_through_sweep(indexer, tmp_path, monkeypatch):
+    _check_serialized_replacement(indexer, tmp_path, monkeypatch, directory=False)
+
+
+def test_directory_replacement_serializes_collection_through_sweep(indexer, tmp_path, monkeypatch):
+    _check_serialized_replacement(indexer, tmp_path, monkeypatch, directory=True)
+
+
+def _check_serialized_replacement(indexer, tmp_path, monkeypatch, directory):
+    """A delayed B replacement must not delete a newer writer's reused A ids."""
+    f = tmp_path / "note.md"
+    original = _words(200)
+    f.write_text(original)
+
+    def reindex():
+        if directory:
+            return indexer.index_directory(tmp_path, glob_pattern="*.md")
+        return indexer.index_file(f)
+
+    reindex()
+    original_ids = set(_ids_for(indexer, f))
+    snapshotted, release, second_collected = Event(), Event(), Event()
+    real_snapshot = indexer._snapshot_source_ids
+    real_collect = indexer.collect_documents
+    first_snapshot = True
+
+    def paused_snapshot(sources):
+        nonlocal first_snapshot
+        result = real_snapshot(sources)
+        if first_snapshot:
+            first_snapshot = False
+            snapshotted.set()
+            assert release.wait(10), "test never released first writer"
+        return result
+
+    def observed_collect(*args, **kwargs):
+        result = real_collect(*args, **kwargs)
+        if snapshotted.is_set():
+            second_collected.set()
+        return result
+
+    monkeypatch.setattr(indexer, "_snapshot_source_ids", paused_snapshot)
+    monkeypatch.setattr(indexer, "collect_documents", observed_collect)
+    f.write_text(original + " generation B")
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(reindex)
+        try:
+            assert snapshotted.wait(10), "first writer never took its snapshot"
+            f.write_text(original)
+            second = pool.submit(reindex)
+            # On the broken path A completes while B is paused. The fixed path
+            # must not even collect A until B has finished its replacement.
+            interleaved = second_collected.wait(0.5)
+            if interleaved:
+                second.result(timeout=10)
+        finally:
+            release.set()
+        first.result(timeout=10)
+        second.result(timeout=10)
+
+    assert set(_ids_for(indexer, f)) == original_ids, "B deleted the newer writer's A chunks"
+    assert not interleaved, "file collection escaped the replacement's writer lock"
 
 
 def test_sweep_keeps_chunks_added_by_a_concurrent_writer(indexer, tmp_path, monkeypatch):

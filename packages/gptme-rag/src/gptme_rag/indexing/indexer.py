@@ -5,11 +5,12 @@ import re
 import subprocess
 import time
 from collections.abc import Generator, Iterable, Sequence
-from contextlib import nullcontext
+from contextlib import contextmanager
 from datetime import datetime
 from functools import lru_cache
 from logging import Filter
 from pathlib import Path
+from threading import RLock, local
 from typing import Any, cast
 
 import chromadb
@@ -366,6 +367,10 @@ class Indexer:
                 (search, status) to prevent accidental data loss when an explicit
                 --embedding-function differs from the stored model.
         """
+        # flock is not reentrant across separately opened descriptors. Keep
+        # nested batch/sweep locks inside one thread-owned outer file lock.
+        self._writer_thread_lock = RLock()
+        self._writer_lock_state = local()
         self.collection_name = collection_name
         # Populated by auto-detect when the stored model cannot be re-loaded
         # (API key absent for OpenRouter, weights missing for sentence-transformers).
@@ -799,11 +804,22 @@ class Indexer:
         if scoring_weights:
             self.scoring_weights.update(scoring_weights)
 
+    @contextmanager
     def _index_writer_lock(self):
         persist_dir = getattr(self, "persist_directory", None)
         if persist_dir is None:
-            return nullcontext()
-        return index_writer_lock(persist_dir)
+            yield
+            return
+        with self._writer_thread_lock:
+            if getattr(self._writer_lock_state, "held", False):
+                yield
+                return
+            with index_writer_lock(persist_dir):
+                self._writer_lock_state.held = True
+                try:
+                    yield
+                finally:
+                    self._writer_lock_state.held = False
 
     def _collection_confirmed_missing(self, collection_name: str) -> bool:
         """True only when the catalog lists no collection of this name.
@@ -1267,11 +1283,10 @@ class Indexer:
     def _add_then_sweep(self, documents: list[Document], sources: Iterable[str]) -> None:
         """Add ``documents``, then delete only the ids this run made stale.
 
-        The sweep is limited to ids snapshotted *before* the add: an id another
-        writer adds in the meantime is never in the snapshot, so it cannot be
-        deleted. Deleting everything for the source that this run did not write
-        would let two writers of the same file delete each other's chunks. A
-        failed add raises before the sweep, so the old ids stay in place.
+        Callers hold the writer lock from file collection through this sweep:
+        a concurrent replacement must not upsert a snapshotted id that we then
+        delete. The snapshot also limits deletion to previously stored ids.
+        A failed add raises before the sweep, so the old ids stay in place.
         """
         new_ids = {doc_id for doc in documents if (doc_id := self._generate_doc_id(doc).doc_id)}
         prior_ids = self._snapshot_source_ids(sources)
@@ -1296,6 +1311,10 @@ class Indexer:
         Returns:
             Number of files indexed
         """
+        with self._index_writer_lock():
+            return self._index_directory_locked(directory, glob_pattern)
+
+    def _index_directory_locked(self, directory: Path, glob_pattern: str) -> int:
         directory = directory.resolve()  # Convert to absolute path
 
         # Collect documents using the new method
@@ -2321,6 +2340,12 @@ class Indexer:
         Returns:
             Number of documents indexed
         """
+        # Collect inside the lock too: otherwise a waiting writer could apply
+        # an older file generation after a newer replacement has completed.
+        with self._index_writer_lock():
+            return self._index_file_locked(path)
+
+    def _index_file_locked(self, path: Path) -> int:
         documents = self.collect_documents(path)
         stored = [doc for doc in documents if not _is_tombstone(doc)]
         sources = sorted({str(s) for doc in documents if (s := doc.metadata.get("source"))})
