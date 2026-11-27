@@ -108,6 +108,13 @@ call becomes `error` instead. PRs always come from the tool result (`gh pr
 create` output). gptme's markdown tool format has no call ids, so there they
 are reported with the call.
 
+Codex results decode structured exit codes and stdout inside `exec` text blocks,
+including legacy shell metadata. A nonzero result is an error, not a landing;
+a running cell or process remains unknown even if another result succeeded.
+Per-call `workdir` controls commit attribution without changing the session cwd.
+This does not track continuation handles: later polls do not inherit the original
+command, and actual commits/pushes can still arrive through git's reflogs.
+
 ### Privacy
 
 Events never contain prompts, replies, shell commands or tool output. Commands
