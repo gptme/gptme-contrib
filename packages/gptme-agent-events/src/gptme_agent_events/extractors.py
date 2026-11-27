@@ -365,9 +365,9 @@ def _codex_output(out: Any) -> tuple[int | None, bool, str]:
                 text = data["output"]
             block_running = raw_code is None and data.get("session_id") is not None
             running |= block_running
-            # A yielded structured process has authoritative running status;
-            # status-like stdout must not turn it into a failure.
-            status_text = "" if block_running else text
+            # Structured output is stdout, not fallback status framing. Keep
+            # legacy status-only dicts usable when they have no stdout field.
+            status_text = "" if block_running or "output" in data else text
         else:
             # Only the first raw block is tool framing. Later raw blocks are
             # script stdout; structured sibling results above still carry status.

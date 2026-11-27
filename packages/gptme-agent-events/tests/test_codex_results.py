@@ -118,7 +118,7 @@ def test_failed_structured_results_are_errors(ex, code, shape):
 @pytest.mark.parametrize("workdir", ["/worktree", "../worktree"])
 def test_commit_uses_its_own_workdir_and_unescaped_identity(ex, tool, workdir):
     ex.feed(call(workdir=workdir, tool=tool))
-    ex.feed(record({"cwd": "/another-turn"}, "turn_context"))
+    ex.feed(record({"cwd": "/another-turn/nested"}, "turn_context"))
     (commit,) = ex.feed(result(text="hooks [100%]\n[main abc1234] x\n"))
     assert commit.kind == "commit"
     assert commit.detail["dir"] == "/worktree"
@@ -485,3 +485,13 @@ def test_empty_workdir_uses_session_default(ex, tool):
     (commit,) = ex.feed(result())
     assert commit.detail["dir"] == "/session"
     assert commit.detail["repo"] == "o/session"
+
+
+@pytest.mark.parametrize(
+    "stdout", ["Process exited with code 1", "Process running with session ID 7"]
+)
+def test_structured_stdout_without_status_cannot_invent_status(ex, stdout):
+    ex.feed(call())
+    (commit,) = ex.feed(result(blocks=[json.dumps({"output": stdout + "\n[main abc1234] x"})]))
+    assert commit.kind == "commit"
+    assert commit.detail["sha"] == "abc1234"
