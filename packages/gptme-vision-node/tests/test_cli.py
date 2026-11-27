@@ -304,3 +304,188 @@ def test_cli_enroll_save_failure_is_clean_error(tmp_path, monkeypatch):
     assert "failed to save gallery" in result.output
     assert "gallery is read-only" in result.output
     assert "Traceback" not in result.output
+
+
+@pytest.mark.parametrize("interval", ["-1", "nan", "inf"])
+def test_cli_detect_rejects_bad_interval(tmp_path, interval):
+    img = _write_scene(tmp_path / "a.png", 2)
+    result = CliRunner().invoke(
+        cli.main, ["detect", "--source", str(img), "--interval", interval]
+    )
+    assert result.exit_code == 2
+    assert "Invalid value for '--interval'" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_cli_detect_live_camera_empty_read_keeps_polling(monkeypatch):
+    class FlakyCamera:
+        stop_on_empty = False
+
+        def __init__(self):
+            self.reads = [None, scene_frame(4)]
+
+        def get_frame(self):
+            if not self.reads:
+                raise KeyboardInterrupt
+            return self.reads.pop(0)
+
+    monkeypatch.setattr(cli, "make_source", lambda spec: FlakyCamera())
+    result = CliRunner().invoke(
+        cli.main, ["detect", "--source", "camera:0", "--interval", "0"]
+    )
+
+    assert result.exit_code == 0
+    assert "(no frame)" in result.output
+    # The frame after the transient empty read was still processed.
+    assert "(no detections)" in result.output or "\tbox=" in result.output
+
+
+def test_cli_detect_once_on_dead_camera_fails(monkeypatch):
+    class DeadCamera:
+        stop_on_empty = False
+
+        def get_frame(self):
+            return None
+
+    monkeypatch.setattr(cli, "make_source", lambda spec: DeadCamera())
+    result = CliRunner().invoke(cli.main, ["detect", "--source", "camera:0", "--once"])
+
+    assert result.exit_code == 1
+    assert "source produced no frame" in result.output
+
+
+@pytest.mark.parametrize("once", [False, True])
+def test_cli_detect_failed_camera_reopen(monkeypatch, once):
+    """Exercise real capture-source polling through a multi-poll outage."""
+    from unittest.mock import Mock
+
+    expected = scene_frame(4)
+    dropped = Mock()
+    dropped.isOpened.return_value = True
+    dropped.read.return_value = (False, None)
+    unavailable = [Mock(), Mock()]
+    for cap in unavailable:
+        cap.isOpened.return_value = False
+    recovered = Mock()
+    recovered.isOpened.return_value = True
+    recovered.read.return_value = (True, expected)
+    captures = [dropped, *unavailable, recovered]
+    open_capture = Mock(side_effect=captures)
+    monkeypatch.setattr(cv2, "VideoCapture", open_capture)
+    detector = Mock()
+    detector.detect.return_value = []
+    monkeypatch.setattr(cli, "PersonDetector", lambda: detector)
+    monkeypatch.setattr(cli, "MotionDetector", lambda: detector)
+    polls = 0
+
+    def next_poll(interval):
+        nonlocal polls
+        polls += 1
+        if polls == len(captures):
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli.time, "sleep", next_poll)
+    args = ["detect", "--source", "rtsp://cam/stream"]
+    if once:
+        args.append("--once")
+    result = CliRunner().invoke(cli.main, args)
+
+    if once:
+        assert result.exit_code == 1
+        assert "source produced no frame" in result.output
+        dropped.release.assert_called_once()
+        detector.detect.assert_not_called()
+        assert open_capture.call_count == 1
+    else:
+        assert result.exit_code == 0, result.output
+        assert result.output.count("(no frame)") == 3
+        assert "(no detections)" in result.output
+        for cap in captures:
+            cap.release.assert_called_once()
+        assert open_capture.call_count == len(captures)
+        assert detector.detect.call_count == 2
+        assert detector.detect.call_args.args[0] is expected
+
+
+@pytest.mark.parametrize("command", [["detect"], ["detect", "--once"], ["look"]])
+def test_cli_camera_that_never_opens_exits_naming_source(monkeypatch, command):
+    from unittest.mock import Mock
+
+    unavailable = Mock()
+    unavailable.isOpened.return_value = False
+    monkeypatch.setattr(cv2, "VideoCapture", Mock(return_value=unavailable))
+    # Fail instead of hanging if detect starts polling a source that never opened.
+    monkeypatch.setattr(cli.time, "sleep", Mock(side_effect=AssertionError("polled")))
+
+    result = CliRunner().invoke(cli.main, [*command, "--source", "rtsp://typo/stream"])
+
+    assert result.exit_code == 1, result.output
+    assert "failed to open capture source: 'rtsp://typo/stream'" in result.output
+
+
+def test_cli_reenroll_legacy_gallery_into_separate_path(tmp_path):
+    """The documented v2 upgrade preserves v1 and uses one new gallery throughout."""
+    from gptme_vision_node.place import HistogramEmbedder, PlaceRecognizer
+
+    legacy_path = tmp_path / "places.json"
+    legacy = PlaceRecognizer(HistogramEmbedder(v_bins=0))
+    legacy.enroll("old-room", scene_frame(11))
+    legacy.save(legacy_path)
+    original = legacy_path.read_bytes()
+    runner = CliRunner()
+    kitchen = _write_scene(tmp_path / "kitchen.png", 101)
+    office = _write_scene(tmp_path / "office.png", 202)
+
+    blocked = runner.invoke(
+        cli.main,
+        [
+            "enroll",
+            "--place",
+            "kitchen",
+            "--source",
+            str(kitchen),
+            "--gallery",
+            str(legacy_path),
+            "--no-wifi",
+        ],
+    )
+    assert blocked.exit_code == 1
+    assert "embedder mismatch" in blocked.output
+    assert legacy_path.read_bytes() == original
+
+    new_path = tmp_path / "places-v2.json"
+    for name, image in (("kitchen", kitchen), ("office", office)):
+        result = runner.invoke(
+            cli.main,
+            [
+                "enroll",
+                "--place",
+                name,
+                "--source",
+                str(image),
+                "--gallery",
+                str(new_path),
+                "--no-wifi",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+
+    result = runner.invoke(
+        cli.main,
+        [
+            "whereami",
+            "--source",
+            str(kitchen),
+            "--gallery",
+            str(new_path),
+            "--no-wifi",
+            "--json",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)[0]["place"] == "kitchen"
+    assert set(PlaceRecognizer.from_file(new_path).places) == {"kitchen", "office"}
+    assert legacy_path.read_bytes() == original
+    assert set(
+        PlaceRecognizer.from_file(legacy_path, HistogramEmbedder(v_bins=0)).places
+    ) == {"old-room"}

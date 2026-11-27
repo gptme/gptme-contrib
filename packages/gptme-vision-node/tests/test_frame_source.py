@@ -100,3 +100,89 @@ def test_camera_returns_none_after_retry_budget(monkeypatch):
     source = OpenCVCameraSource(0, read_attempts=2)
 
     assert source.get_frame() is None
+
+
+def test_camera_reopens_after_stream_drop(monkeypatch):
+    """A dropped stream must be released and reopened, not read forever."""
+    expected = solid_frame((4, 5, 6))
+    captures = []
+
+    class DroppedCapture:
+        released = False
+
+        def isOpened(self):
+            return True
+
+        def read(self):
+            return False, None
+
+        def release(self):
+            self.released = True
+
+    class RecoveredCapture(DroppedCapture):
+        def read(self):
+            return True, expected
+
+    def open_capture(_source):
+        cap = DroppedCapture() if not captures else RecoveredCapture()
+        captures.append(cap)
+        return cap
+
+    monkeypatch.setattr(cv2, "VideoCapture", open_capture)
+    source = OpenCVCameraSource("rtsp://cam/stream", read_attempts=2)
+
+    assert source.get_frame() is None
+    assert captures[0].released
+    assert source.get_frame() is expected
+    assert len(captures) == 2
+
+
+def test_camera_that_never_opened_raises_with_source_name(monkeypatch):
+    """A typo or missing camera is an error, and a later call retries the open."""
+    from unittest.mock import Mock
+
+    expected = solid_frame((7, 8, 9))
+    unavailable = Mock()
+    unavailable.isOpened.return_value = False
+    recovered = Mock()
+    recovered.isOpened.return_value = True
+    recovered.read.return_value = (True, expected)
+    monkeypatch.setattr(cv2, "VideoCapture", Mock(side_effect=[unavailable, recovered]))
+    source = OpenCVCameraSource("rtsp://typo/stream")
+
+    with pytest.raises(RuntimeError, match="rtsp://typo/stream"):
+        source.get_frame()
+    unavailable.release.assert_called_once()
+    unavailable.read.assert_not_called()
+    assert source.get_frame() is expected
+
+
+def test_camera_retries_failed_reopens_until_recovery(monkeypatch):
+    """After a drop, a stream that cannot be reopened yet is an empty poll."""
+    from unittest.mock import Mock
+
+    expected = solid_frame((7, 8, 9))
+    dropped = Mock()
+    dropped.isOpened.return_value = True
+    dropped.read.return_value = (False, None)
+    unavailable = [Mock(), Mock()]
+    for cap in unavailable:
+        cap.isOpened.return_value = False
+    recovered = Mock()
+    recovered.isOpened.return_value = True
+    recovered.read.return_value = (True, expected)
+    captures = [dropped, *unavailable, recovered]
+    open_capture = Mock(side_effect=captures)
+    monkeypatch.setattr(cv2, "VideoCapture", open_capture)
+    source = OpenCVCameraSource("rtsp://cam/stream", read_attempts=2)
+
+    assert source.get_frame() is None
+    dropped.release.assert_called_once()
+    for cap in unavailable:
+        assert source.get_frame() is None
+        cap.release.assert_called_once()
+        cap.read.assert_not_called()
+    assert source.get_frame() is expected
+    assert open_capture.call_count == len(captures)
+    source.release()
+    recovered.release.assert_called_once()

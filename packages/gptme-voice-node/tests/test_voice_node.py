@@ -215,7 +215,7 @@ class TestRecvLoop:
         mock_ws.recv.side_effect = [json.dumps(message), ConnectionClosed(None, None)]
         speaker = MagicMock()
 
-        await node._recv_loop(mock_ws, speaker)
+        await node._recv_loop(mock_ws, speaker, vision_started=True)
 
         bridge.handle_message.assert_awaited_once_with(message, mock_ws.send)
         speaker.write.assert_not_called()
@@ -525,3 +525,228 @@ class TestBackoff:
             patch("gptme_voice_node.node.asyncio.sleep", side_effect=stop_on_sleep),
         ):
             await node.run_forever()
+
+
+# ---------------------------------------------------------------------------
+# gptme-contrib#2381: sound cues and vision start failures
+# ---------------------------------------------------------------------------
+
+
+async def _fake_audio_io(function, *args, **kwargs):
+    return function(*args, **kwargs)
+
+
+def _cue_msg(pcm: bytes, **extra) -> str:
+    return json.dumps(
+        {
+            "type": "sound_cue",
+            "cue": "dispatch",
+            "sample_rate": 24000,
+            "audio": base64.b64encode(pcm).decode(),
+            **extra,
+        }
+    )
+
+
+class TestSoundCue:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("speech_first", [False, True])
+    async def test_audio_end_waits_for_inflight_cue(self, speech_first):
+        node = _make_node()
+        cue = b"\x01\x02" * 256
+        speech = b"\x00\x01" * 256
+        messages: asyncio.Queue[str] = asyncio.Queue()
+        if speech_first:
+            messages.put_nowait(
+                json.dumps(
+                    {"type": "audio", "audio": base64.b64encode(speech).decode()}
+                )
+            )
+        messages.put_nowait(_cue_msg(cue))
+        ws = AsyncMock()
+        cue_started = asyncio.Event()
+        finish_cue = asyncio.Event()
+        end_handled = asyncio.Event()
+
+        async def audio_io(function, pcm):
+            if pcm == cue:
+                cue_started.set()
+                await finish_cue.wait()
+            return function(pcm)
+
+        async def recv():
+            if end_handled.is_set():
+                raise ConnectionClosed(None, None)
+            message = await messages.get()
+            if json.loads(message)["type"] == "audio_end":
+                end_handled.set()
+            return message
+
+        ws.recv.side_effect = recv
+        with patch("gptme_voice_node.node._run_audio_io", audio_io):
+            task = asyncio.create_task(node._recv_loop(ws, MagicMock()))
+            try:
+                await asyncio.wait_for(cue_started.wait(), timeout=1)
+                messages.put_nowait(json.dumps({"type": "audio_end"}))
+                # Let the event loop run while the cue write is suspended.
+                await asyncio.sleep(0)
+                assert not end_handled.is_set()
+                assert node._mic_muted()
+                finish_cue.set()
+                await asyncio.wait_for(task, timeout=1)
+            finally:
+                finish_cue.set()
+                if not task.done():
+                    task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+        assert end_handled.is_set()
+        assert not node._playing
+        assert node._mic_muted()  # cooldown begins only after playback
+
+    @pytest.mark.asyncio
+    async def test_sound_cue_is_played_and_mutes_mic_only_while_playing(self):
+        node = _make_node()
+        pcm = b"\x01\x02" * 256
+        mock_ws = AsyncMock()
+        mock_ws.recv.side_effect = [_cue_msg(pcm), ConnectionClosed(None, None)]
+        speaker = MagicMock()
+        muted_during_write = []
+        speaker.write.side_effect = lambda _pcm: muted_during_write.append(
+            node._mic_muted()
+        )
+
+        with patch("gptme_voice_node.node._run_audio_io", _fake_audio_io):
+            await node._recv_loop(mock_ws, speaker)
+
+        speaker.write.assert_called_once_with(pcm)
+        assert muted_during_write == [True]
+        assert node._playing is False
+        assert node._play_ended_at > 0  # echo cooldown starts after the cue
+
+    @pytest.mark.asyncio
+    async def test_sound_cue_during_speech_keeps_mic_muted(self):
+        node = _make_node()
+        speech = b"\x00\x01" * 256
+        cue = b"\x01\x02" * 256
+        mock_ws = AsyncMock()
+        mock_ws.recv.side_effect = [
+            json.dumps({"type": "audio", "audio": base64.b64encode(speech).decode()}),
+            _cue_msg(cue),
+            ConnectionClosed(None, None),
+        ]
+        speaker = MagicMock()
+
+        with patch("gptme_voice_node.node._run_audio_io", _fake_audio_io):
+            await node._recv_loop(mock_ws, speaker)
+
+        assert [c.args[0] for c in speaker.write.call_args_list] == [speech, cue]
+        assert node._playing is True  # speech has not sent audio_end yet
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "msg",
+        [
+            json.dumps({"type": "sound_cue", "audio": 123}),
+            json.dumps({"type": "sound_cue", "audio": "not base64!"}),
+            _cue_msg(b"\x01\x02", sample_rate=16000),
+        ],
+    )
+    async def test_malformed_sound_cue_is_ignored(self, msg, caplog):
+        node = _make_node()
+        mock_ws = AsyncMock()
+        mock_ws.recv.side_effect = [msg, ConnectionClosed(None, None)]
+        speaker = MagicMock()
+
+        with patch("gptme_voice_node.node._run_audio_io", _fake_audio_io):
+            await node._recv_loop(mock_ws, speaker)
+
+        speaker.write.assert_not_called()
+        assert node._playing is False
+        assert "ignoring malformed message" in caplog.text
+
+
+class TestVisionStartFailure:
+    @pytest.mark.asyncio
+    async def test_look_uses_only_the_current_sessions_started_bridge(self):
+        vision = MagicMock()
+        vision.stop = AsyncMock()
+
+        async def handle_message(data, send):
+            if data.get("type") != "vision_look_request":
+                return False
+            await send(
+                json.dumps(
+                    {
+                        "type": "vision_look_result",
+                        "request_id": data["request_id"],
+                        "image": "cached-frame",
+                    }
+                )
+            )
+            return True
+
+        vision.handle_message = AsyncMock(side_effect=handle_message)
+        node = _make_node(vision_bridge=vision)
+        pcm = b"\x00\x01" * 32
+        # Reconnects can fail, recover, and fail again. A successful session
+        # must not leave the next failed one able to read its cached frame.
+        for started in (False, True, False):
+            vision.start.side_effect = (
+                None if started else RuntimeError("pipeline already running")
+            )
+            vision.handle_message.reset_mock()
+            vision.stop.reset_mock()
+            mic, speaker = MagicMock(), MagicMock()
+            node._pa.open.side_effect = [mic, speaker]
+            ws = AsyncMock()
+            ws.recv.side_effect = [
+                json.dumps({"type": "vision_look_request", "request_id": "look-1"}),
+                json.dumps({"type": "audio", "audio": base64.b64encode(pcm).decode()}),
+                ConnectionClosed(None, None),
+            ]
+            with (
+                patch.object(node, "_send_loop", AsyncMock()),
+                patch("gptme_voice_node.node._run_audio_io", _fake_audio_io),
+            ):
+                await node._session(ws)
+
+            result = json.loads(ws.send.call_args.args[0])
+            assert result["type"] == "vision_look_result"
+            assert result["request_id"] == "look-1"
+            if started:
+                assert result["image"] == "cached-frame"
+                vision.stop.assert_awaited_once()
+            else:
+                assert "image" not in result
+                assert "unavailable" in result["error"].lower()
+                vision.handle_message.assert_not_awaited()
+                vision.stop.assert_not_awaited()
+            speaker.write.assert_called_once_with(pcm)
+
+    @pytest.mark.asyncio
+    async def test_vision_start_failure_keeps_voice_session_alive(self, caplog):
+        vision = MagicMock()
+        vision.start.side_effect = RuntimeError("pipeline already running")
+        vision.stop = AsyncMock()
+        node = _make_node(vision_bridge=vision)
+        mic = MagicMock()
+        speaker = MagicMock()
+        node._pa.open.side_effect = [mic, speaker]
+        ran = []
+
+        async def loop(*_args):
+            ran.append(True)
+            node.stop()
+
+        with (
+            patch.object(node, "_send_loop", AsyncMock(side_effect=loop)),
+            patch.object(node, "_recv_loop", AsyncMock(side_effect=loop)),
+        ):
+            await node._session(AsyncMock())
+
+        assert ran == [True, True]  # audio loops still ran
+        vision.stop.assert_not_awaited()  # nothing was started
+        assert "vision bridge unavailable this session" in caplog.text
+        mic.close.assert_called_once()
+        speaker.close.assert_called_once()

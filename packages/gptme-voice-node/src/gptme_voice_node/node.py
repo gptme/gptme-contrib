@@ -15,6 +15,7 @@ Protocol:
   Client → Server: {"type": "vision_event", ...} / {"type": "vision_look_result", ...}
   Server → Client: {"type": "audio", "audio": "<base64>"}
   Server → Client: {"type": "audio_end"}
+  Server → Client: {"type": "sound_cue", "cue": "...", "sample_rate": 24000, "audio": "<base64>"}
 """
 
 import asyncio
@@ -234,10 +235,11 @@ class VoiceNode:
                 mic_started = True
                 speaker.start_stream()
                 speaker_started = True
-                if self.vision_bridge is not None:
-                    self.vision_bridge.start(asyncio.get_running_loop(), ws.send)
+                vision_started = self._start_vision(ws)
                 send_task = asyncio.create_task(self._send_loop(ws, mic))
-                recv_task = asyncio.create_task(self._recv_loop(ws, speaker))
+                recv_task = asyncio.create_task(
+                    self._recv_loop(ws, speaker, vision_started)
+                )
                 try:
                     # End the session as soon as either loop ends. When the
                     # socket drops mid-playback the recv loop returns, but the
@@ -254,13 +256,33 @@ class VoiceNode:
                         if not task.done():
                             task.cancel()
                     await asyncio.gather(send_task, recv_task, return_exceptions=True)
-                    if self.vision_bridge is not None:
+                    if vision_started and self.vision_bridge is not None:
                         await self.vision_bridge.stop()
             finally:
                 await _drain_audio_io()
                 _close_stream(speaker, speaker_started)
         finally:
             _close_stream(mic, mic_started)
+
+    def _start_vision(self, ws) -> bool:
+        """Start the camera bridge; a failure must not take down voice.
+
+        A previous session's capture thread can still be blocked in an RTSP
+        read after ``stop`` timed out, so ``start`` may fail. Voice keeps
+        working without the camera for this session.
+        """
+        if self.vision_bridge is None:
+            return False
+        try:
+            self.vision_bridge.start(asyncio.get_running_loop(), ws.send)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "[%s] vision bridge unavailable this session: %s",
+                self.node_name,
+                exc,
+            )
+            return False
+        return True
 
     async def _send_loop(self, ws, mic_stream) -> None:
         """Continuously read mic and forward to server (unless muted)."""
@@ -272,7 +294,9 @@ class VoiceNode:
                 msg = {"type": "audio", "audio": base64.b64encode(raw).decode()}
                 await ws.send(json.dumps(msg))
 
-    async def _recv_loop(self, ws, speaker_stream) -> None:
+    async def _recv_loop(
+        self, ws, speaker_stream, vision_started: bool = False
+    ) -> None:
         """Receive audio frames from server and play them.
 
         Uses explicit ws.recv() rather than ``async for`` so that the loop
@@ -300,12 +324,29 @@ class VoiceNode:
                 data = json.loads(raw_msg)
                 if not isinstance(data, dict):
                     raise TypeError("message must be a JSON object")
+                msg_type = data.get("type")
+                if msg_type == "vision_look_request" and not vision_started:
+                    # The connection advertises a configured camera before its
+                    # pipeline starts. Never serve a previous session's cached
+                    # frame when startup failed; settle look with an error.
+                    request_id = data.get("request_id")
+                    if isinstance(request_id, str) and request_id:
+                        await ws.send(
+                            json.dumps(
+                                {
+                                    "type": "vision_look_result",
+                                    "request_id": request_id,
+                                    "error": "Camera unavailable for this session.",
+                                }
+                            )
+                        )
+                    continue
                 if (
-                    self.vision_bridge is not None
+                    vision_started
+                    and self.vision_bridge is not None
                     and await self.vision_bridge.handle_message(data, ws.send)
                 ):
                     continue
-                msg_type = data.get("type")
                 if msg_type == "audio":
                     audio = data.get("audio")
                     if not isinstance(audio, str):
@@ -313,12 +354,38 @@ class VoiceNode:
                     pcm = base64.b64decode(audio, validate=True)
                     self._playing = True
                     await _run_audio_io(speaker_stream.write, pcm)
+                elif msg_type == "sound_cue":
+                    await self._play_sound_cue(data, speaker_stream)
                 elif msg_type == "audio_end" and self._playing:
                     self._playing = False
                     self._play_ended_at = time.monotonic()
                     log.debug("[%s] audio_end received", self.node_name)
             except (ValueError, TypeError) as exc:
                 log.warning("[%s] ignoring malformed message: %s", self.node_name, exc)
+
+    async def _play_sound_cue(self, data: dict, speaker_stream) -> None:
+        """Play a short server-side cue (e.g. "working on it" chime).
+
+        A cue is a complete clip, so the mic is muted only for its duration
+        unless agent speech was already playing.
+        """
+        audio = data.get("audio")
+        if not isinstance(audio, str):
+            raise TypeError("sound_cue message must contain a string payload")
+        sample_rate = data.get("sample_rate", SAMPLE_RATE)
+        if sample_rate != SAMPLE_RATE:
+            raise ValueError(f"sound_cue sample_rate {sample_rate!r} != {SAMPLE_RATE}")
+        pcm = base64.b64decode(audio, validate=True)
+        if not pcm:
+            return
+        was_playing = self._playing
+        self._playing = True
+        try:
+            await _run_audio_io(speaker_stream.write, pcm)
+        finally:
+            if not was_playing:
+                self._playing = False
+                self._play_ended_at = time.monotonic()
 
     # --- Reconnect loop ---
 

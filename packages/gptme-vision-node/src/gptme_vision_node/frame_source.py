@@ -66,7 +66,13 @@ class OpenCVCameraSource:
     """Webcam (V4L2 index), Pi camera, or network stream (RTSP/HTTP URL).
 
     The capture is opened lazily on first ``get_frame`` so constructing the
-    source is cheap and testable without hardware.
+    source is cheap and testable without hardware. After ``read_attempts``
+    consecutive failed reads the capture is released and reopened on the
+    next call, so a node recovers when a stream comes back.
+
+    A source that has never opened raises ``RuntimeError`` naming it (typo,
+    missing camera). Once it has opened, a failed reopen returns None;
+    callers control the polling interval.
     """
 
     stop_on_empty = False
@@ -77,22 +83,33 @@ class OpenCVCameraSource:
         self.source = source
         self.read_attempts = read_attempts
         self._cap: cv2.VideoCapture | None = None
+        self._has_opened = False
 
-    def _ensure_open(self) -> cv2.VideoCapture:
+    def _ensure_open(self) -> cv2.VideoCapture | None:
         if self._cap is None:
             self._cap = cv2.VideoCapture(self.source)
             if not self._cap.isOpened():
                 cap, self._cap = self._cap, None
                 cap.release()
-                raise RuntimeError(f"failed to open capture source: {self.source!r}")
+                if not self._has_opened:
+                    raise RuntimeError(
+                        f"failed to open capture source: {self.source!r}"
+                    )
+                return None
+            self._has_opened = True
         return self._cap
 
     def get_frame(self) -> np.ndarray | None:
         cap = self._ensure_open()
+        if cap is None:
+            return None
         for _ in range(self.read_attempts):
             ok, frame = cap.read()
             if ok and frame is not None:
                 return frame
+        # A dropped network stream (or unplugged webcam) never recovers on
+        # the same handle; release it so the next call reopens the source.
+        self.release()
         return None
 
     def release(self) -> None:

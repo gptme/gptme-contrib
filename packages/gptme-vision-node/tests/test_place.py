@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import stat
 
 import numpy as np
 import pytest
@@ -39,7 +40,7 @@ def test_embedder_output_is_normalized():
 def test_embedder_handles_frames_smaller_than_grid():
     vec = HistogramEmbedder(grid=2).embed(np.zeros((1, 1, 3), dtype=np.uint8))
 
-    assert vec.shape == (24 * 8 * 5,)
+    assert vec.shape == ((24 * 8 + 8) * 5,)
     assert np.isfinite(vec).all()
 
 
@@ -265,3 +266,108 @@ def test_from_file_rejects_mismatched_embedder(tmp_path):
 
     loaded = PlaceRecognizer.from_file(gallery, CustomEmbedder())
     assert set(loaded.places) == {"kitchen"}
+
+
+# -- brightness (gptme-contrib#2381) -----------------------------------------
+
+
+def test_embedder_separates_black_gray_white():
+    emb = HistogramEmbedder()
+    black, gray, white = (
+        emb.embed(solid_frame(c)) for c in ((0, 0, 0), (128, 128, 128), (255,) * 3)
+    )
+    # Hue/saturation alone put all three into one bin (cosine exactly 1.0).
+    assert cosine_similarity(black, white) < 0.6
+    assert cosine_similarity(black, gray) < 0.6
+    assert cosine_similarity(gray, white) < 0.6
+
+
+def test_lens_capped_frame_does_not_match_bright_room_at_full_confidence():
+    rec = PlaceRecognizer()
+    rec.enroll("white-office", solid_frame((245, 245, 245)))
+    rec.enroll("dark-hallway", solid_frame((25, 25, 25)))
+    results = rec.recognize(solid_frame((0, 0, 0)))
+    assert results[0][0] == "dark-hallway"
+    scores = dict(results)
+    assert scores["white-office"] < 0.6
+
+
+def test_embedder_id_includes_brightness_and_legacy_v1_is_kept():
+    assert HistogramEmbedder().embedder_id == "histogram-h24-s8-val8-grid2-v2"
+    legacy = HistogramEmbedder(v_bins=0)
+    assert legacy.embedder_id == "histogram-h24-s8-grid2-v1"
+    assert legacy.embed(solid_frame((1, 2, 3))).shape == (24 * 8 * 5,)
+
+
+def test_embedder_rejects_negative_v_bins():
+    with pytest.raises(ValueError, match="v_bins"):
+        HistogramEmbedder(v_bins=-1)
+
+
+# -- atomic save (gptme-contrib#2381) ----------------------------------------
+
+
+def test_save_through_symlink_updates_target_and_preserves_link(tmp_path):
+    target = tmp_path / "shared" / "gallery.json"
+    rec = PlaceRecognizer()
+    rec.enroll("kitchen", KITCHEN)
+    rec.save(target)
+    link = tmp_path / "places.json"
+    link.symlink_to("shared/gallery.json")
+
+    loaded = PlaceRecognizer.from_file(link)
+    loaded.enroll("office", OFFICE)
+    loaded.save(link)
+
+    assert link.is_symlink()
+    assert set(PlaceRecognizer.from_file(target).places) == {"kitchen", "office"}
+    assert link.read_bytes() == target.read_bytes()
+    assert list(target.parent.glob("*.tmp")) == []
+
+
+@pytest.mark.parametrize("mode", [0o600, 0o640, 0o644])
+@pytest.mark.parametrize("through_symlink", [False, True])
+def test_save_preserves_existing_gallery_mode(tmp_path, mode, through_symlink):
+    target = tmp_path / "gallery.json"
+    rec = PlaceRecognizer()
+    rec.enroll("kitchen", wifi_sig=KITCHEN_WIFI)
+    rec.save(target)
+    target.chmod(mode)
+    path = target
+    if through_symlink:
+        path = tmp_path / "places.json"
+        path.symlink_to(target.name)
+
+    rec.enroll("office", wifi_sig=OFFICE_WIFI)
+    rec.save(path)
+
+    assert stat.S_IMODE(target.stat().st_mode) == mode
+    assert set(PlaceRecognizer.from_file(target).places) == {"kitchen", "office"}
+    if through_symlink:
+        assert path.is_symlink()
+
+
+def test_new_gallery_is_private(tmp_path):
+    path = tmp_path / "gallery.json"
+    PlaceRecognizer().save(path)
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_save_failure_keeps_existing_gallery(tmp_path, monkeypatch):
+    path = tmp_path / "places.json"
+    rec = PlaceRecognizer()
+    rec.enroll("kitchen", KITCHEN)
+    rec.save(path)
+    before = path.read_text()
+
+    rec.enroll("office", OFFICE)
+
+    def boom(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("gptme_vision_node.place.os.replace", boom)
+    with pytest.raises(OSError, match="disk full"):
+        rec.save(path)
+
+    assert path.read_text() == before
+    assert [p.name for p in tmp_path.iterdir()] == ["places.json"]

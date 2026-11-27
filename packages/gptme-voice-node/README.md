@@ -80,6 +80,27 @@ systemd-friendly:
 Use `wss://` whenever microphone audio crosses a network. The node logs a
 warning for non-local `ws://` URLs and redacts credentials embedded in the URL.
 
+### `/local` is loopback-only
+
+`gptme-voice-server`'s `/local` endpoint has **no authentication**, so the
+server only admits loopback peers and closes any other client with code 1008.
+A node on another machine cannot connect to it directly, not even over
+`wss://`. Do **not** put `/local` behind a reverse proxy: the server would see
+the proxy's loopback address and anyone who can reach the proxy would get an
+unauthenticated agent session.
+
+For a remote node (e.g. a Pi), forward a local port over SSH so the
+connection reaches the server from the host's own loopback, authenticated and
+encrypted by SSH:
+
+```bash
+# On the node: keep a tunnel to the voice host (autossh restarts it on drops)
+autossh -M 0 -N -o ServerAliveInterval=15 -o ExitOnForwardFailure=yes \
+  -L 8080:127.0.0.1:8080 voice-tunnel@voice-host
+# The node then talks to its end of the tunnel:
+GPTME_VOICE_NODE_SERVER=ws://localhost:8080/local gptme-voice-node
+```
+
 ## Raspberry Pi deployment
 
 1. Install as above. If you use a ReSpeaker XVF3800 array, flash it to USB
@@ -94,7 +115,8 @@ warning for non-local `ws://` URLs and redacts credentials embedded in the URL.
    sudo mkdir -p /etc/systemd/system/gptme-voice-node.service.d/
    sudo tee /etc/systemd/system/gptme-voice-node.service.d/local.conf <<'EOF'
    [Service]
-   Environment=GPTME_VOICE_NODE_SERVER=wss://voice.example.com/local
+   # Local end of the SSH tunnel to the voice host (see "/local is loopback-only")
+   Environment=GPTME_VOICE_NODE_SERVER=ws://localhost:8080/local
    Environment=GPTME_VOICE_NODE_NAME=livingroom
    EOF
    sudo systemctl daemon-reload
@@ -103,6 +125,8 @@ warning for non-local `ws://` URLs and redacts credentials embedded in the URL.
    ```
 
    The unit restarts automatically and caps memory at 128 MB and CPU at 50%.
+   Run the SSH tunnel as its own service (e.g. an `autossh` unit) so it comes
+   back after network drops; the node reconnects on its own once it is up.
 
 ## Protocol
 
@@ -114,8 +138,13 @@ Client → Server: {"type": "vision_event", ...}
 Client → Server: {"type": "vision_look_result", "request_id": "...", ...}
 Server → Client: {"type": "audio", "audio": "<base64>"}
 Server → Client: {"type": "audio_end"}
+Server → Client: {"type": "sound_cue", "cue": "dispatch", "sample_rate": 24000, "audio": "<base64>"}
 Server → Client: {"type": "vision_look_request", "request_id": "..."}
 ```
+
+`sound_cue` is a short complete clip (e.g. the "working on it" chime when the
+agent dispatches a subagent). The node plays it with the mic muted for its
+duration.
 
 With a vision source configured, the node appends `vision=1` to the connect URL
 so the server only exposes the `look` tool to camera-equipped clients. Events
