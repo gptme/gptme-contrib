@@ -1364,6 +1364,17 @@ class GptmeToolBridge:
                 result = await self.rag.search(
                     query.strip(), n_results=n_results_int, **filters
                 )
+            except asyncio.CancelledError:
+                # Cancellation is a BaseException, so the handler below never
+                # sees it: an interrupted lookup must still leave a receipt.
+                self._log_workspace_search(
+                    query.strip(),
+                    None,
+                    filters,
+                    (time.monotonic() - started) * 1000.0,
+                    status="cancelled",
+                )
+                raise
             except Exception as exc:
                 # A failed lookup must still leave a receipt: otherwise the
                 # absence of a line cannot be told apart from a lookup that
@@ -1404,9 +1415,10 @@ class GptmeToolBridge:
         retrieval that answered it.
 
         Every path emits exactly one receipt — success, a failed lookup
-        (``status=error``), an empty query (``status=invalid_query``) or a
-        disabled retriever (``status=unavailable``) — so "no receipt"
-        unambiguously means the bridge never handled the call.
+        (``status=error``), a cancelled one (``status=cancelled``), an empty
+        query (``status=invalid_query``) or a disabled retriever
+        (``status=unavailable``) — so "no receipt" unambiguously means the
+        bridge never handled the call.
         The fields are also attached as ``extra={"workspace_search": ...}`` so
         tests and log processors read typed values instead of the rendered
         string (a missing value renders as ``None`` and would pass a substring

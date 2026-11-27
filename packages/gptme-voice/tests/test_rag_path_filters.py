@@ -668,3 +668,36 @@ async def test_bridge_logs_a_receipt_for_guard_paths(
     ]
     assert [r["status"] for r in receipts] == ["unavailable", "invalid_query"]
     assert all(r["backend"] is None for r in receipts)
+
+
+@pytest.mark.asyncio
+async def test_bridge_logs_a_receipt_for_a_cancelled_search(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Cancellation is a BaseException, so it needs its own receipt."""
+    import asyncio
+    import logging
+
+    from gptme_voice.realtime.tool_bridge import GptmeToolBridge
+
+    class SlowRag:
+        enabled = True
+
+        async def search(self, *args: object, **kwargs: object) -> dict:
+            await asyncio.sleep(60)
+            return {}
+
+    bridge = GptmeToolBridge(workspace=str(tmp_path), rag=SlowRag())  # type: ignore[arg-type]
+    with caplog.at_level(logging.INFO, logger="gptme_voice.realtime.tool_bridge"):
+        task = asyncio.create_task(
+            bridge.handle_function_call("workspace_search", {"query": "standup brief"})
+        )
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    receipts = [
+        r.workspace_search for r in caplog.records if "workspace_search(" in r.message
+    ]
+    assert [r["status"] for r in receipts] == ["cancelled"]
