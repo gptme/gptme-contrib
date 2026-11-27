@@ -93,6 +93,24 @@ def main(remote_url: str, ref_lines: Iterable[str]) -> int:
             if not ok:
                 return _refuse(f"look up the {base} PR for {branch}", out)
             for number in out.split():
+                # Read the armed state first: `gh pr merge --disable-auto` fails
+                # on a PR that is not armed (notably a draft), which must not
+                # refuse a legitimate push.
+                ok, armed = _gh(
+                    "pr",
+                    "view",
+                    number,
+                    "--repo",
+                    base,
+                    "--json",
+                    "autoMergeRequest",
+                    "--jq",
+                    ".autoMergeRequest",
+                )
+                if not ok:
+                    return _refuse(f"read auto-merge state of {base}#{number}", armed)
+                if armed.strip() in ("", "null"):
+                    continue
                 disable = ("pr", "merge", number, "--repo", base, "--disable-auto")
                 ok, detail = _gh(*disable)
                 if not ok:

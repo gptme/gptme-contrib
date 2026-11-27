@@ -26,7 +26,15 @@ def _fake_gh(tmp_path: Path) -> dict[str, str]:
 printf '%s\\n' "$*" >> "$GH_LOG"
 case "$1" in
     api) printf '%s' "$PR_NUMBERS"; exit "${LOOKUP_RC:-0}" ;;
-    pr) exit "${DISABLE_RC:-0}" ;;
+    pr)
+        case "$2" in
+            view)
+                if [ -n "$AUTO_MERGE" ]; then printf '%s' "$AUTO_MERGE"; else printf '%s' '{"enabledBy":{"login":"someone"}}'; fi
+                exit "${VIEW_RC:-0}"
+                ;;
+            merge) exit "${DISABLE_RC:-0}" ;;
+        esac
+        ;;
 esac
 """
     )
@@ -66,9 +74,20 @@ def _run(env: dict[str, str], url: str = FORK, stdin: str = LINE):
 def test_open_pr_is_disarmed(tmp_path: Path, url: str) -> None:
     result = _run(_fake_gh(tmp_path), url)
     assert result.returncode == 0, result.stderr
-    lookup, disable = _calls(tmp_path)
+    lookup, view, disable = _calls(tmp_path)
     assert ":fix/x" in lookup
+    assert (
+        view
+        == "pr view 42 --repo gptme/gptme --json autoMergeRequest --jq .autoMergeRequest"
+    )
     assert disable == "pr merge 42 --repo gptme/gptme --disable-auto"
+
+
+def test_unarmed_pr_passes_without_a_disable(tmp_path: Path) -> None:
+    """An unarmed PR (e.g. a draft) must not fail `--disable-auto` and refuse the push."""
+    result = _run({**_fake_gh(tmp_path), "AUTO_MERGE": "null"})
+    assert result.returncode == 0, result.stderr
+    assert not any("--disable-auto" in c for c in _calls(tmp_path))
 
 
 def test_branch_without_an_open_pr_passes(tmp_path: Path) -> None:
@@ -93,7 +112,7 @@ def test_other_pushes_pass_untouched(tmp_path: Path, url: str, stdin: str) -> No
     assert _calls(tmp_path) == []
 
 
-@pytest.mark.parametrize(("failure", "calls"), [("LOOKUP_RC", 1), ("DISABLE_RC", 3)])
+@pytest.mark.parametrize(("failure", "calls"), [("LOOKUP_RC", 1), ("DISABLE_RC", 4)])
 def test_failure_refuses_the_push(tmp_path: Path, failure: str, calls: int) -> None:
     result = _run({**_fake_gh(tmp_path), failure: "1"})
     assert result.returncode == 1
