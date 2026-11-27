@@ -7,7 +7,8 @@ class. That class merges human asks (``mention``/``assign``/
 is automation (Codecov/Greptile/Dependabot). This gate preserves the human
 reasons and suppresses an ``author``/``comment`` PR notification only when the
 most recent comment/review actor is a bot or self and no unseen human activity
-exists. First-sight notifications remain eligible. The 2026-10-07 audit found
+exists. First-sight bot-only reports are consumed, while any earlier human
+comment or review preserves dispatch. The 2026-10-07 audit found
 83/214 self-actor echo completions despite the other self-trigger guards.
 
 The emitted ``detail`` carries the actor class (``; actor_class=<class>``) so
@@ -48,6 +49,7 @@ subject_state = os.environ.get("TEST_SUBJECT_STATE", "open")
 head_sha = os.environ.get("TEST_HEAD_SHA", "a65ead926a4080f6a17de9af384a6a87774f5761")
 comments = json.loads(os.environ.get("TEST_COMMENTS_JSON", "[]"))
 reviews = json.loads(os.environ.get("TEST_REVIEWS_JSON", "[]"))
+inline_comments = json.loads(os.environ.get("TEST_INLINE_COMMENTS_JSON", "[]"))
 
 
 def apply_jq(data, jq_expr):
@@ -112,6 +114,10 @@ if argv[0] == "api":
             out = reviews[:100]
         print(apply_jq(out, jq_expr) if jq_expr else json.dumps(out))
         sys.exit(0)
+    if "/pulls/" in endpoint and "/comments" in endpoint:
+        out = pages(inline_comments) if "--paginate" in argv else inline_comments[:100]
+        print(apply_jq(out, jq_expr) if jq_expr else json.dumps(out))
+        sys.exit(0)
     if endpoint.endswith(f"/issues/{notif_number}"):
         print(apply_jq({"state": subject_state}, jq_expr))
         sys.exit(0)
@@ -132,6 +138,7 @@ def _run_gate(
     reason: str = "author",
     comments: list[dict] | None = None,
     reviews: list[dict] | None = None,
+    inline_comments: list[dict] | None = None,
     author: str = "test-author",
     prior_timestamp: str | None = None,
     output_format: str = "jsonl",
@@ -147,6 +154,7 @@ def _run_gate(
     env["TEST_NOTIF_REASON"] = reason
     env["TEST_COMMENTS_JSON"] = json.dumps(comments or [])
     env["TEST_REVIEWS_JSON"] = json.dumps(reviews or [])
+    env["TEST_INLINE_COMMENTS_JSON"] = json.dumps(inline_comments or [])
     env.pop("BOT_USERNAME", None)
     env["PATH"] = f"{tmp}:{env['PATH']}"
 
@@ -287,11 +295,9 @@ def test_bot_only_comment_notification_suppressed() -> None:
 def test_first_sight_with_human_comment_predating_bot_emits() -> None:
     """First-sight notification with a human comment before the bot must emit.
 
-    Scenario (the bug fixed in this PR): a human commented at T1, then a bot
-    commented at T2 > T1.  The notification is first seen (no prior state) with
-    updated_at=T2 and latest actor=bot.  Without the prior guard, the suppression
-    would swallow the human ask.  With the guard, we emit so the human comment
-    can be dispatched.
+    A human commented at T1, then a bot commented at T2 > T1. The notification
+    is first seen with updated_at=T2. Classification must inspect all activity,
+    not just the newest actor, so consuming bot-only reports cannot hide the ask.
     """
     with tempfile.TemporaryDirectory() as tmp_str:
         tmp = Path(tmp_str)
@@ -565,3 +571,66 @@ def test_markdown_count_matches_actor_suppression(
         assert (
             state_dir / f"notif-{NOTIF_ID}.state"
         ).read_text() == "2026-08-26T17:15:04Z"
+
+
+@pytest.mark.parametrize("reason", ["author", "comment"])
+@pytest.mark.parametrize("output_format", ["jsonl", "markdown"])
+def test_first_sight_codecov_only_is_consumed(reason: str, output_format: str) -> None:
+    """A new PR's routine coverage report is not an LLM work item (#2598)."""
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+        result = _run_gate(
+            tmp,
+            state_dir,
+            reason=reason,
+            comments=[_bot_comment()],
+            output_format=output_format,
+        )
+        assert result.returncode in (0, 1), result.stderr
+        assert _emitted_notifications(result.stdout) == [], result.stdout
+        assert "notifications — 1 actionable" not in result.stdout
+        assert (
+            state_dir / f"notif-{NOTIF_ID}.state"
+        ).read_text() == "2026-08-26T17:15:04Z"
+        assert (
+            state_dir / f"notif-{NOTIF_ID}.map"
+        ).read_text() == f"{NOTIF_REPO}#{NOTIF_NUMBER}"
+
+
+@pytest.mark.parametrize("reason", ["author", "comment"])
+@pytest.mark.parametrize("output_format", ["jsonl", "markdown"])
+@pytest.mark.parametrize("activity_kind", ["comment", "review", "inline"])
+def test_first_sight_human_before_coverage_report_is_preserved(
+    reason: str, output_format: str, activity_kind: str
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+        human = _human_comment(created_at="2026-08-26T16:00:00Z")
+        result = _run_gate(
+            tmp,
+            state_dir,
+            reason=reason,
+            output_format=output_format,
+            comments=([human] if activity_kind == "comment" else []) + [_bot_comment()],
+            reviews=[
+                {
+                    "user": human["user"],
+                    "state": "CHANGES_REQUESTED",
+                    "submitted_at": human["created_at"],
+                }
+            ]
+            if activity_kind == "review"
+            else [],
+            inline_comments=[human] if activity_kind == "inline" else [],
+        )
+        assert result.returncode == 0, result.stderr
+        if output_format == "jsonl":
+            emitted = _emitted_notifications(result.stdout)
+            assert len(emitted) == 1, result.stdout
+            assert emitted[0]["detail"] == f"{reason}; actor_class=human"
+        else:
+            assert "notifications — 1 actionable" in result.stdout

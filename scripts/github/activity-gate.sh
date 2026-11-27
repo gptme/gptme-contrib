@@ -2695,26 +2695,20 @@ def notification_priority:
                 # per-run cap.
                 #
                 # Always fetch the actor class for PR author/comment notifications
-                # so the detail string is enriched even on first sight. Suppress
-                # only when prior is set: the prior dispatch already handled any
-                # human comment visible at that time, so a bot/self-only bump since
-                # then has nothing new to act on. The actor probe preserves any
-                # unseen human activity even if a self reply follows it. On first
-                # sight (prior empty), always
-                # emit — a human comment that predates the bot bump has never been
-                # dispatched and must not be silently swallowed.
+                # so the detail string is enriched even on first sight. With no
+                # watermark, inspect all human activity rather than blindly emit
+                # a routine coverage report. An earlier human comment or inline
+                # review still wins over a later bot bump. Repeat self-only bumps
+                # are consumed too; first-sight self activity remains eligible.
                 if [ "$_subj_type" = "PullRequest" ] \
                         && { [ "$_notif_reason" = "author" ] || [ "$_notif_reason" = "comment" ]; } \
                         && [ "$number" -gt 0 ] 2>/dev/null; then
-                    _actor_since=$prior
-                    _actor_kind="pr"
-                    if [ "$_notif_reason" = "comment" ]; then
-                        _actor_kind=pr-all
-                    fi
+                    _actor_since=${prior:-0000-01-01T00:00:00Z}
+                    _actor_kind=pr-all
                     _actor_class=$(notification_latest_actor_class \
                         "$repo" "$number" "$_actor_kind" "$_actor_since" "$notif_updated")
-                    if [ -n "$prior" ] \
-                            && { [ "$_actor_class" = "bot" ] || [ "$_actor_class" = "self" ]; }; then
+                    if [ "$_actor_class" = "bot" ] \
+                            || { [ -n "$prior" ] && [ "$_actor_class" = "self" ]; }; then
                         printf '%s' "$notif_updated" > "$state_file"
                         printf '%s#%s' "$repo" "$number" > "$map_file"
                         continue
@@ -2787,21 +2781,17 @@ def notification_priority:
                 fi
                 # Mirror the jsonl branch's bot/self-only author/comment filter so
                 # the reported count matches what would actually be dispatched.
-                # Same prior-set guard as jsonl branch: first-sight notifications
-                # (prior empty) must emit even when latest actor is a bot, because
-                # a human comment predating the bot bump has never been dispatched.
+                # Inspect all human activity on first sight, matching jsonl:
+                # bot-only coverage reports are not work, earlier human asks are.
                 if [ "$notif_subject_type" = "PullRequest" ] \
                         && { [ "$notif_reason" = "author" ] || [ "$notif_reason" = "comment" ]; } \
-                        && [ "$number" -gt 0 ] 2>/dev/null \
-                        && [ -n "$prior" ]; then
-                    _actor_since=$prior
-                    _actor_kind="pr"
-                    if [ "$notif_reason" = "comment" ]; then
-                        _actor_kind=pr-all
-                    fi
+                        && [ "$number" -gt 0 ] 2>/dev/null; then
+                    _actor_since=${prior:-0000-01-01T00:00:00Z}
+                    _actor_kind=pr-all
                     local _actor_class
                     _actor_class=$(notification_latest_actor_class "$repo" "$number" "$_actor_kind" "$_actor_since" "$notif_updated")
-                    if [ "$_actor_class" = "bot" ] || [ "$_actor_class" = "self" ]; then
+                    if [ "$_actor_class" = "bot" ] \
+                            || { [ -n "$prior" ] && [ "$_actor_class" = "self" ]; }; then
                         continue
                     fi
                 fi
