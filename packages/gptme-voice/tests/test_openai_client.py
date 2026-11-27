@@ -1647,6 +1647,59 @@ def test_typed_message_clears_playback_right_before_requesting_the_reply() -> No
     asyncio.run(_exercise())
 
 
+def test_a_reply_starting_during_the_clear_is_cancelled_before_response_create() -> (
+    None
+):
+    async def _exercise() -> None:
+        fake_ws = _FakeWebSocket()
+
+        async def _fake_connect(*_args, **_kwargs):
+            return fake_ws
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "gptme_voice.realtime.openai_client.websockets.connect", _fake_connect
+            )
+            mp.setattr(
+                "gptme_voice.realtime.openai_client._TYPED_CANCEL_WAIT_SECONDS", 0.3
+            )
+            client = OpenAIRealtimeClient(api_key="test-key")
+            await client.connect()
+            await client._handle_event({"type": "session.updated"})
+            order: list[str] = []
+
+            async def _clear() -> None:
+                order.append("clear")
+                # An injected lookup result starts a reply while we clear.
+                await client._handle_event({"type": "response.created"})
+
+                async def _confirm() -> None:
+                    await asyncio.sleep(0.02)
+                    await client._handle_event(
+                        {"type": "response.done", "response": {"status": "cancelled"}}
+                    )
+
+                asyncio.ensure_future(_confirm())
+
+            real_send = client._send_event
+
+            async def _record(event_type: str, data: dict) -> None:
+                order.append(event_type)
+                await real_send(event_type, data)
+
+            client._send_event = _record  # type: ignore[method-assign]
+            await client.send_typed_message("hi", before_reply=_clear)
+            assert order == [
+                "conversation.item.create",
+                "clear",
+                "response.cancel",
+                "response.create",
+            ]
+            await client.disconnect()
+
+    asyncio.run(_exercise())
+
+
 def test_send_text_message_times_out_if_session_never_becomes_ready() -> None:
     """A missing provider ready event must not pin the local handler forever."""
 

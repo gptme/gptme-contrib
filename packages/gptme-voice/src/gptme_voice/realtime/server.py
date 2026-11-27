@@ -18,6 +18,7 @@ import re
 import secrets
 import shlex
 import subprocess
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -1075,15 +1076,7 @@ class VoiceServer:
         # Built here, after the handoff roster is resolved, so the prompt never
         # describes a handoff tool the deployment cannot serve (the client drops
         # the tool when ``_available_agents`` is empty).
-        self._instructions = (
-            f"IDENTITY: You are {_display_name(self._agent_name)}. "
-            "Never claim to be another agent.\n\n"
-            + _build_runtime_identity_instructions(self.provider, self.model)
-            + "\n\n"
-            + _load_project_instructions(
-                self.workspace, available_agents=self._available_agents
-            )
-        )
+        self._instructions = self._base_instructions(self.workspace)
 
         # Active connections: call_sid -> (twilio_ws, realtime_client)
         self._connections: dict[str, tuple] = {}
@@ -1882,8 +1875,11 @@ class VoiceServer:
         consume_recent: bool = True,
         anonymous_is_operator: bool = True,
         workspace_context: bool = True,
+        base_instructions: str | None = None,
     ) -> SessionBootstrap:
-        instructions = self._instructions
+        instructions = (
+            base_instructions if base_instructions is not None else self._instructions
+        )
         if from_number:
             instructions = _build_caller_instructions(
                 instructions, from_number, self.workspace
@@ -2182,6 +2178,18 @@ class VoiceServer:
         # so a later inbound does not report those tasks as prior_leg.
         self._drop_prior_subagent_status(from_number)
 
+    def _base_instructions(self, workspace: str | None) -> str:
+        """Identity + runtime + the project prompt files of *workspace*."""
+        return (
+            f"IDENTITY: You are {_display_name(self._agent_name)}. "
+            "Never claim to be another agent.\n\n"
+            + _build_runtime_identity_instructions(self.provider, self.model)
+            + "\n\n"
+            + _load_project_instructions(
+                workspace, available_agents=self._available_agents
+            )
+        )
+
     async def _build_session_instructions(
         self,
         *,
@@ -2189,6 +2197,7 @@ class VoiceServer:
         from_number: str = "",
         handoff_id: str | None = None,
         workspace_context: bool = True,
+        base_instructions: str | None = None,
     ) -> str:
         return (
             await self._build_session_bootstrap(
@@ -2196,6 +2205,7 @@ class VoiceServer:
                 from_number=from_number,
                 handoff_id=handoff_id,
                 workspace_context=workspace_context,
+                base_instructions=base_instructions,
             )
         ).instructions
 
@@ -3622,6 +3632,7 @@ class VoiceServer:
         live_sink: LiveTranscriptSink | None = None
         typed_lock = asyncio.Lock()
         typed_tasks: set[asyncio.Task[None]] = set()
+        unknown_workspace: tempfile.TemporaryDirectory[str] | None = None
         tool_workspace = self.workspace
 
         try:
@@ -3639,14 +3650,33 @@ class VoiceServer:
                     tool_workspace = context.workspace
             # An unknown workspace (config unreadable) is not assumed to be the
             # server's: fail closed for the server workspace's context.
-            same_workspace = _same_dir(tool_workspace, self.workspace) and (
-                context is None or context.workspace_known
+            workspace_known = context is None or context.workspace_known
+            same_workspace = workspace_known and _same_dir(
+                tool_workspace, self.workspace
             )
+            if not workspace_known:
+                # Lookups must not run in (or read) the server's workspace on a
+                # guess: give them an empty private directory instead.
+                unknown_workspace = tempfile.TemporaryDirectory(
+                    prefix="gptme-voice-unknown-ws-"
+                )
+                tool_workspace = unknown_workspace.name
             instructions = await self._build_session_instructions(
                 caller_id=caller_id,
                 handoff_id=handoff_id,
-                # Only the server's own workspace gets its digest/call history.
-                **({} if same_workspace else {"workspace_context": False}),
+                # A call about another workspace gets that workspace's project
+                # prompt (or the default if unknown), and none of the server
+                # workspace's digest or call history.
+                **(
+                    {}
+                    if same_workspace
+                    else {
+                        "workspace_context": False,
+                        "base_instructions": self._base_instructions(
+                            tool_workspace if workspace_known else None
+                        ),
+                    }
+                ),
             )
             if context is not None and conversation_id:
                 if context.instructions:
@@ -3812,6 +3842,8 @@ class VoiceServer:
                     logger.exception("Error disconnecting the realtime client")
             if live_sink is not None:
                 await live_sink.close()
+            if unknown_workspace is not None:
+                unknown_workspace.cleanup()
             if probe:
                 logger.info(
                     "Probe call ended (%d turns); no call record", len(transcript)

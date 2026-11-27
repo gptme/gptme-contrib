@@ -3781,6 +3781,55 @@ def test_unknown_conversation_workspace_fails_closed(
     asyncio.run(server.handle_browser_websocket(websocket))
     assert built[0].get("workspace_context") is False
     assert bridges[0]["rag"] is None
+    # Lookups get an empty private directory, not the server's workspace,
+    # and the default prompt rather than the server workspace's project files.
+    tools_dir = bridges[0]["workspace"]
+    assert tools_dir != str(tmp_path) and "gptme-voice-unknown-ws-" in tools_dir
+    assert not Path(tools_dir).exists()  # cleaned up at the end of the call
+    assert built[0]["base_instructions"] == server._base_instructions(None)
+
+
+def test_call_about_another_workspace_gets_that_workspaces_project_prompt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from gptme_voice.realtime.conversation_link import ConversationContext
+
+    for name in ("a", "b"):
+        ws = tmp_path / name
+        ws.mkdir()
+        (ws / "gptme.toml").write_text('files = ["ABOUT.md"]\n')
+        (ws / "ABOUT.md").write_text(f"PROJECT-{name.upper()}-SECRET\n")
+    server = VoiceServer(enable_browser_transport=True, workspace=str(tmp_path / "a"))
+    assert "PROJECT-A-SECRET" in server._instructions
+    server.browser_secret = "s3cret"
+    server.gptme_server_url = "http://127.0.0.1:5700"
+    server.gptme_server_key = "k"
+
+    async def _fetch(*args, **kwargs):
+        return ConversationContext(instructions=None, workspace=str(tmp_path / "b"))
+
+    built: list[dict] = []
+
+    async def _build(**kwargs) -> str:
+        built.append(kwargs)
+        return "x"
+
+    websocket = _DummyBrowserWebSocket([{"type": "websocket.disconnect"}])
+    websocket.query_params = {"conversation_id": "conv-1"}
+    websocket.headers = {"x-gptme-voice-secret": "s3cret"}
+    websocket.client = None
+    monkeypatch.setattr(
+        "gptme_voice.realtime.server.fetch_conversation_context", _fetch
+    )
+    monkeypatch.setattr(server, "_build_session_instructions", _build)
+    monkeypatch.setattr(
+        server, "_make_client", lambda _cfg, **_kw: _FakeRealtimeClient()
+    )
+    monkeypatch.setattr("gptme_voice.realtime.server.GptmeToolBridge", _DummyToolBridge)
+    asyncio.run(server.handle_browser_websocket(websocket))
+
+    base = built[0]["base_instructions"]
+    assert "PROJECT-B-SECRET" in base and "PROJECT-A-SECRET" not in base
 
 
 def test_probe_reporting_sends_transcript_and_tool_events() -> None:

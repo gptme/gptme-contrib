@@ -877,22 +877,22 @@ class OpenAIRealtimeClient:
         # A reply can start while the item is sent (e.g. for an injected
         # lookup result); check again right before response.create, with no
         # await in between other than the send itself.
+        # Clear playback first: it can yield (a websocket send), and a reply
+        # could start meanwhile (an injected lookup result), so the final
+        # idle check must sit right before response.create.
+        if before_reply is not None:
+            await before_reply()
         try:
             interrupted = await self._cancel_until_idle(deadline) or interrupted
         except asyncio.TimeoutError:
             # The provider already has the message (the item was created), so
-            # it is delivered and gets recorded; only its own reply can't be
-            # requested while another stays active. It is in context for the
-            # model's next reply.
+            # it counts as delivered; only its own reply can't be requested
+            # while another stays active. It is in context for the next reply.
             logger.warning(
                 "Typed message delivered, but a reply that started meanwhile "
                 "was not confirmed cancelled; not requesting a reply for it"
             )
-            if before_reply is not None:
-                await before_reply()
             return True
-        if before_reply is not None:
-            await before_reply()
         self._response_started.clear()
         await self._send_event("response.create", {})
         # Hold until the provider acknowledges the reply (bounded): typed
