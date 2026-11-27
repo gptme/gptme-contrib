@@ -398,3 +398,46 @@ class TestSelectBestLesson:
         cluster = [_info(fp)]
         chosen = select_best_lesson(cluster)
         assert chosen["title"] == "Solo"
+
+
+def test_scalar_keywords_value_is_one_keyword_not_characters(tmp_path):
+    # A plain-string keywords value used to become a set of characters, so two
+    # unrelated lessons overlapped on shared letters (#2362 LX11).
+    from gptme_lessons_extras.similarity import (
+        calculate_keyword_overlap,
+        extract_keywords,
+    )
+
+    a = tmp_path / "a.md"
+    b = tmp_path / "b.md"
+    a.write_text("---\nmatch:\n  keywords: git rebase\n---\n# A\n")
+    b.write_text("---\nmatch:\n  keywords: bisect regression\n---\n# B\n")
+    ka, kb = extract_keywords(a), extract_keywords(b)
+    assert ka == {"git rebase"}
+    assert calculate_keyword_overlap(ka, kb) == 0.0
+
+
+@pytest.mark.parametrize(
+    "yaml_value",
+    ["404", "1.5", "true", "0", "2024-01-01", "0755", "12:30", "1_000"],
+)
+def test_non_string_scalar_keywords_value_yields_no_keyword(tmp_path, yaml_value):
+    # PyYAML's YAML 1.1 resolvers turn these into int/float/bool/date (0755 is
+    # octal 493, 12:30 is sexagesimal 750), so str() would not reproduce what
+    # the author wrote. gptme's lesson parser drops non-string keywords, so
+    # they never match; similarity must see the same keywords the matcher does.
+    from gptme_lessons_extras.similarity import extract_keywords
+
+    lesson = tmp_path / "lesson.md"
+    lesson.write_text(f"---\nmatch:\n  keywords: {yaml_value}\n---\n# L\n")
+    assert extract_keywords(lesson) == set()
+
+
+def test_non_string_and_blank_list_keywords_are_dropped(tmp_path):
+    from gptme_lessons_extras.similarity import extract_keywords
+
+    lesson = tmp_path / "lesson.md"
+    lesson.write_text(
+        "---\nmatch:\n  keywords: [0755, git rebase, true, '  ', '0755']\n---\n# L\n"
+    )
+    assert extract_keywords(lesson) == {"git rebase", "0755"}
