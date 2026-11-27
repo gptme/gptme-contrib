@@ -562,3 +562,39 @@ async def test_journal_glob_does_not_spend_the_reservation_twice(
     )
     sources = [r["source"] for r in result["results"]]
     assert "scripts/voice/brief.py" in sources
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("lexical")
+async def test_bridge_logs_a_correlatable_search_receipt(
+    corpus: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A call's lookup must be identifiable from the service log afterwards."""
+    import logging
+
+    from gptme_voice.realtime.tool_bridge import GptmeToolBridge
+
+    bridge = GptmeToolBridge(
+        workspace=str(corpus), rag=VoiceRag(str(corpus), enabled=True)
+    )
+    with caplog.at_level(logging.INFO, logger="gptme_voice.realtime.tool_bridge"):
+        result = await bridge.handle_function_call(
+            "workspace_search",
+            {
+                "query": "Delivered the release",
+                "include_paths": ["state/standup-brief.json"],
+                "exclude_paths": ["journal/"],
+            },
+        )
+
+    assert result["status"] == "ok"
+    receipts = [r.message for r in caplog.records if "workspace_search(" in r.message]
+    assert len(receipts) == 1
+    receipt = receipts[0]
+    assert "Delivered the release" in receipt
+    assert "status=ok" in receipt
+    assert "backend=lexical" in receipt
+    assert "mode=filtered" in receipt
+    assert "selected=1" in receipt
+    assert "results=1" in receipt
+    assert "elapsed=" in receipt

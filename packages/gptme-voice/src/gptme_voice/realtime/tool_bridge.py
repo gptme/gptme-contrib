@@ -1351,14 +1351,55 @@ class GptmeToolBridge:
                 for key in ("include_paths", "exclude_paths")
                 if arguments.get(key) is not None
             }
-            return await self.rag.search(
+            started = time.monotonic()
+            result = await self.rag.search(
                 query.strip(), n_results=n_results_int, **filters
             )
+            self._log_workspace_search(
+                query.strip(), result, filters, (time.monotonic() - started) * 1000.0
+            )
+            return result
 
         if name.startswith("body_"):
             return await self._handle_body_call(name, arguments)
 
         return {"error": f"Unknown function: {name}"}
+
+    @staticmethod
+    def _log_workspace_search(
+        query: str, result: object, filters: Mapping[str, Any], elapsed_ms: float
+    ) -> None:
+        """Log one receipt per workspace_search lookup.
+
+        The service log otherwise shows only the requested arguments, so after a
+        call there is no way to tell a real filtered lookup from a silent
+        recency fallback, or a bounded corpus from an ungranted selector. Those
+        are exactly the fields an operator needs to correlate a call with the
+        retrieval that answered it.
+        """
+        if not isinstance(result, Mapping):
+            logger.info(
+                "workspace_search(%r) filters=%s returned %s in %.0fms",
+                query,
+                dict(filters),
+                type(result).__name__,
+                elapsed_ms,
+            )
+            return
+        coverage = result.get("coverage")
+        coverage = coverage if isinstance(coverage, Mapping) else {}
+        logger.info(
+            "workspace_search(%r) filters=%s status=%s backend=%s mode=%s "
+            "selected=%s results=%d elapsed=%.0fms",
+            query,
+            dict(filters),
+            result.get("status"),
+            result.get("backend"),
+            coverage.get("mode"),
+            coverage.get("selected_files"),
+            len(result.get("results") or []),
+            elapsed_ms,
+        )
 
     @staticmethod
     def _clamp(value: float, limit: float) -> float:
