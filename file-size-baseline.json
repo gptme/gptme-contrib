@@ -11,7 +11,7 @@
     "packages/gptme-dashboard/src/gptme_dashboard/templates/index.html": 2103,
     "packages/gptme-dashboard/tests/test_generate.py": 5422,
     "packages/gptme-dashboard/tests/test_server.py": 2979,
-    "packages/gptme-rag/src/gptme_rag/indexing/indexer.py": 2282,
+    "packages/gptme-rag/src/gptme_rag/indexing/indexer.py": 2385,
     "packages/gptme-rag/tests/test_lesson_matcher.py": 2243,
     "packages/gptme-review/src/gptme_review/core.py": 8167,
     "packages/gptme-review/src/gptme_review/writer.py": 4592,
