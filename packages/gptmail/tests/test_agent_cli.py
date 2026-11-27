@@ -3007,3 +3007,64 @@ def test_short_reply_preserves_wire_message_id(workspace: Path) -> None:
     result = CliRunner().invoke(agent, ["reply", name.split("-bob-")[0], "thanks"])
     assert result.exit_code == 0, result.output
     assert _frontmatter(_only_outbox_msg(workspace))["in_reply_to"] == "sender-original.md"
+
+
+@pytest.mark.parametrize("has_message", [False, True])
+def test_prefix_ignores_non_message_files(workspace: Path, has_message: bool) -> None:
+    inbox = workspace / "messages" / "inbox"
+    _write_local(inbox, "target.md.orig", {})
+    if has_message:
+        _write_local(inbox, "target.md", {})
+    resolved = agent_cli._resolve_message("tar")
+    assert resolved == (("default", inbox / "target.md") if has_message else None)
+
+
+@pytest.mark.parametrize("reference_form", ["exact", "stem", "prefix"])
+def test_wire_reply_completes_local_tracker_entry(workspace: Path, reference_form: str) -> None:
+    name = _seed_inbox(workspace, subject="tracked-wire")
+    path = workspace / "messages" / "inbox" / name
+    path.write_text(path.read_text().replace("from: bob", "from: bob\nmessage_id: remote.md"))
+    tracker = ConversationTracker(workspace / "messages" / ".tracking")
+    tracker.track_message("agent:alice|bob", name, channel="agent")
+    reference = {
+        "exact": name,
+        "stem": name.removesuffix(".md"),
+        "prefix": name.split("-bob-")[0],
+    }[reference_form]
+    result = CliRunner().invoke(agent, ["reply", reference, "thanks"])
+    assert result.exit_code == 0, result.output
+    assert _frontmatter(_only_outbox_msg(workspace))["in_reply_to"] == "remote.md"
+    state = tracker.get_message_state("agent:alice|bob", name)
+    assert state is not None and state.state == MessageState.COMPLETED
+    assert tracker.get_message_state("agent:alice|bob", "remote.md") is None
+
+
+def test_exact_ambiguity_count_excludes_prefix_siblings(workspace: Path) -> None:
+    for mailbox in ("default", "ops"):
+        _write_local(agent_cli._mailbox_root(mailbox) / "inbox", "duplicate.md", {})
+    _write_local(workspace / "messages" / "inbox", "duplicate.md-followup.md", {})
+    result = CliRunner().invoke(agent, ["ack", "duplicate.md"])
+    assert result.exit_code == 1
+    assert "matches 2 message(s)" in result.output
+
+
+def test_empty_message_id_does_not_resolve_hidden_file(workspace: Path) -> None:
+    _write_local(workspace / "messages" / "inbox", ".md", {})
+    assert agent_cli._resolve_message("") is None
+
+
+def test_prefix_reports_unreadable_mailbox(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    inbox = workspace / "messages" / "inbox"
+    original_iterdir = Path.iterdir
+
+    def iterdir(path: Path):
+        if path == inbox:
+            raise PermissionError("Permission denied")
+        return original_iterdir(path)
+
+    monkeypatch.setattr(Path, "iterdir", iterdir)
+    result = CliRunner().invoke(agent, ["ack", "missing"])
+    assert result.exit_code == 1
+    assert "Cannot read" in result.output and "Permission denied" in result.output

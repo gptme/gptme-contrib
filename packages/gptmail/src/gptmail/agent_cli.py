@@ -524,7 +524,13 @@ def _delivery_failed(message_id: str, *, mailbox: str = "default") -> bool:
     )
 
 
-def _track_sent(transport: AgentTransport, message_id: str, reply_to: str | None) -> None:
+def _track_sent(
+    transport: AgentTransport,
+    message_id: str,
+    reply_to: str | None,
+    *,
+    local_reply_to: str | None = None,
+) -> None:
     """Stamp a sent message into the shared tracker (channel='agent')."""
     tracker = _tracker()
     conv = transport.conversation_id_for(message_id)
@@ -532,7 +538,10 @@ def _track_sent(transport: AgentTransport, message_id: str, reply_to: str | None
     if reply_to:
         # The inbound message we just answered is no longer pending.
         tracker.set_message_state(
-            conv, reply_to, MessageState.COMPLETED, metadata={"reply_id": message_id}
+            conv,
+            local_reply_to or reply_to,
+            MessageState.COMPLETED,
+            metadata={"reply_id": message_id},
         )
 
 
@@ -715,22 +724,26 @@ def _prefix_matches(base: Path, message_id: str) -> list[Path]:
     try:
         matches = []
         for entry in sorted(base.iterdir()):
-            if entry.name.startswith(message_id):
+            if entry.name.startswith(message_id) and entry.suffix == ".md":
                 path = _within(base, entry.name)
                 if path is not None and path.is_file():
                     matches.append(path)
         return matches
-    except OSError:
+    except FileNotFoundError:
         return []
+    except OSError as exc:
+        raise click.ClickException(f"Cannot read {base}: {exc}") from exc
 
 
-def _resolve_message(
+def _message_matches(
     message_id: str,
     *,
     folder: str = "inbox",
     mailbox: str | None = None,
     allow_prefix: bool = True,
-) -> tuple[str, Path] | None:
+) -> list[tuple[str, Path]]:
+    if not message_id:
+        return []
     mailboxes = [_normalize_mailbox(mailbox)] if mailbox is not None else _known_mailboxes()
     # Exhaust exact filenames (then stems) across the whole scope before trying
     # prefixes. A prefix in default must not shadow an exact id in a named mailbox.
@@ -741,14 +754,26 @@ def _resolve_message(
             if path is not None and path.is_file():
                 matches.append((mailbox_name, path))
         if matches:
-            return matches[0] if len(matches) == 1 else None
+            return matches
     if not allow_prefix:
-        return None
-    matches = [
+        return []
+    return [
         (mailbox_name, path)
         for mailbox_name in mailboxes
         for path in _prefix_matches(_mailbox_root(mailbox_name) / folder, message_id)
     ]
+
+
+def _resolve_message(
+    message_id: str,
+    *,
+    folder: str = "inbox",
+    mailbox: str | None = None,
+    allow_prefix: bool = True,
+) -> tuple[str, Path] | None:
+    matches = _message_matches(
+        message_id, folder=folder, mailbox=mailbox, allow_prefix=allow_prefix
+    )
     return matches[0] if len(matches) == 1 else None
 
 
@@ -766,10 +791,7 @@ def _message_not_found_error(
     wrong thread. Say the count instead.
     """
     mailboxes = [_normalize_mailbox(mailbox)] if mailbox is not None else _known_mailboxes()
-    count = sum(
-        len(_prefix_matches(_mailbox_root(mailbox_name) / folder, message_id))
-        for mailbox_name in mailboxes
-    )
+    count = len(_message_matches(message_id, folder=folder, mailbox=mailbox))
     if count > 1:
         return (
             f"Error: ambiguous message id: {message_id} matches {count} "
@@ -1525,7 +1547,7 @@ def reply(message_id: str, content: str | None, mailbox: str | None) -> None:
                 err=True,
             )
             sys.exit(1)
-        _track_sent(transport, reply_id, reply_to=parent_id)
+        _track_sent(transport, reply_id, reply_to=parent_id, local_reply_to=msg_path.name)
         _mark_replied(msg_path)
     click.echo(f"Replied to {recipient}: {subject}")
 
