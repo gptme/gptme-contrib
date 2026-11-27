@@ -1081,8 +1081,7 @@ def test_completed_subagent_logs_timing_summary(caplog) -> None:
                 )
 
                 task_id = dispatch["task_id"]
-                for _ in range(10):
-                    await asyncio.sleep(0)
+                await asyncio.wait_for(bridge._pending_tasks[task_id].task, timeout=3)
 
             assert any(
                 f"Task {task_id} timings" in record.message for record in caplog.records
@@ -1515,6 +1514,82 @@ def test_successful_execute_does_not_kill_same_group_descendant(
 
 
 @pytest.mark.skipif(not Path("/proc").exists(), reason="needs /proc")
+@pytest.mark.parametrize("exit_code", [0, 1])
+def test_delivers_response_after_exit_without_waiting_for_descendant_pipes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exit_code: int
+) -> None:
+    pid_file = tmp_path / "grandchild.pid"
+    script = tmp_path / "fake-subagent.sh"
+    script.write_text(
+        "#!/bin/sh\n"
+        "for task do :; done\n"
+        f'sleep 30 &\nprintf "%s" "$!" > {pid_file}\n'
+        'printf "%s" "The answer is ready." > "${task##* to the file: }"\n'
+        f"exit {exit_code}\n"
+    )
+    script.chmod(0o755)
+    monkeypatch.delenv("GPTME_VOICE_SUBAGENT_PATH", raising=False)
+
+    async def _exercise() -> None:
+        bridge = GptmeToolBridge(
+            workspace=str(tmp_path), gptme_path=str(script), timeout=20
+        )
+        dispatch = await bridge.handle_function_call(
+            "subagent", {"task": "quick lookup", "mode": "fast"}
+        )
+        pending = bridge._pending_tasks[dispatch["task_id"]].task
+        await asyncio.wait_for(pending, timeout=3)
+        (record,) = bridge.get_timings()
+        assert record["returncode"] == exit_code
+        expected_status = "success" if exit_code == 0 else "error"
+        completion = bridge._recent_completions[-1]
+        assert completion["status"] == expected_status
+        if exit_code == 0:
+            assert completion["output_preview"] == "The answer is ready."
+            assert _pid_alive(
+                int(pid_file.read_text())
+            ), "success killed background work"
+        resumed = GptmeToolBridge(workspace=str(tmp_path))
+        resumed.seed_prior_leg_status([record])
+        assert resumed._recent_completions[-1]["status"] == expected_status
+        assert resumed._recent_completions[-1]["returncode"] == exit_code
+
+    try:
+        asyncio.run(_exercise())
+    finally:
+        if pid_file.exists():
+            try:
+                os.kill(int(pid_file.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+def test_response_pause_does_not_signal_completion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script = tmp_path / "fake-subagent.sh"
+    script.write_text(
+        "#!/bin/sh\n"
+        "for task do :; done\n"
+        'response="${task##* to the file: }"\n'
+        'printf "%s" "First part" > "$response"\n'
+        "sleep 0.6\n"
+        'printf "%s" " remaining answer" >> "$response"\n'
+        "sleep 0.3\n"
+    )
+    script.chmod(0o755)
+    monkeypatch.delenv("GPTME_VOICE_SUBAGENT_PATH", raising=False)
+
+    async def _exercise() -> None:
+        bridge = GptmeToolBridge(workspace=str(tmp_path), gptme_path=str(script))
+        result = await asyncio.wait_for(bridge._execute("lookup", mode="fast"), 3)
+        assert result.success
+        assert result.output == "First part remaining answer"
+
+    asyncio.run(_exercise())
+
+
+@pytest.mark.skipif(not Path("/proc").exists(), reason="needs /proc")
 def test_cancel_kills_subagent_descendants(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1701,7 +1776,7 @@ def test_cancel_during_spawn_bounds_escaped_descendant_pipe_drain(
     pid_file = tmp_path / "escaped.pid"
     script = tmp_path / "fake-subagent.sh"
     script.write_text(
-        "#!/bin/sh\n" f"setsid sh -c 'echo $$ > {pid_file}; exec sleep 30' &\nwait\n"
+        f"#!/bin/sh\nsetsid sh -c 'echo $$ > {pid_file}; exec sleep 30' &\nwait\n"
     )
     script.chmod(0o755)
     monkeypatch.delenv("GPTME_VOICE_SUBAGENT_PATH", raising=False)

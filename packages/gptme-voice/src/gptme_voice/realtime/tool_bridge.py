@@ -123,6 +123,7 @@ _CUE_CALLBACK_TIMEOUT_SECONDS = 1.0
 # asyncio task (and its _pending_tasks entry) alive indefinitely.
 _RESULT_DELIVERY_TIMEOUT_SECONDS = 10.0
 _CANCEL_PIPE_DRAIN_TIMEOUT_SECONDS = 1.0
+_EXIT_PIPE_DRAIN_SECONDS = 0.1
 _DEFAULT_TRANSCRIPT_TAIL_TURNS = 8
 _DEFAULT_TRANSCRIPT_TAIL_CHARS = 1_600
 
@@ -933,9 +934,40 @@ class GptmeToolBridge:
                     if line:
                         stderr_lines.append(line)
 
+            async def _wait_for_exit_and_drain() -> None:
+                readers = (
+                    asyncio.create_task(_read_stdout()),
+                    asyncio.create_task(_read_stderr()),
+                    asyncio.create_task(process.wait()),
+                )
+                drained = asyncio.gather(*readers)
+                try:
+                    while not drained.done():
+                        await asyncio.wait((drained,), timeout=_EXIT_PIPE_DRAIN_SECONDS)
+                        if readers[2].done():
+                            readers[2].result()
+                            # Exit, not a pause between writes, is the completion
+                            # signal. Descendants may retain inherited pipes;
+                            # allow buffered output to drain, but do not await
+                            # their EOF or kill background work on success.
+                            if not drained.done():
+                                await asyncio.wait(
+                                    (drained,), timeout=_EXIT_PIPE_DRAIN_SECONDS
+                                )
+                            break
+                    if drained.done():
+                        await drained
+                finally:
+                    for reader in readers:
+                        if not reader.done():
+                            reader.cancel()
+                    # Consume cancellation/errors from the aggregate without
+                    # suppressing cancellation of this coroutine itself.
+                    await asyncio.gather(drained, *readers, return_exceptions=True)
+
             try:
                 await asyncio.wait_for(
-                    asyncio.gather(_read_stdout(), _read_stderr(), process.wait()),
+                    _wait_for_exit_and_drain(),
                     timeout=(
                         self.timeout
                         if _TIMEOUT_BINARY_AVAILABLE
@@ -972,7 +1004,7 @@ class GptmeToolBridge:
             stdout_text = "\n".join(stdout_lines).strip()
             stderr_text = "\n".join(stderr_lines).strip()
 
-            # Read the response file if it exists
+            # Read the response file only after the wrapper has exited.
             if response_file.exists():
                 output = response_file.read_text().strip()
                 if output:
