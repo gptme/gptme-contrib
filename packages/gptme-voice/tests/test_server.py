@@ -183,11 +183,13 @@ class _FakeRealtimeClient:
     async def send_text_message(self, text: str) -> None:
         self.sent_text.append(text)
 
-    async def send_typed_message(self, text: str) -> bool:
+    async def send_typed_message(self, text: str, before_reply=None) -> bool:
         if self.typed_error is not None:  # one-shot
             error, self.typed_error = self.typed_error, None
             raise error
         self.sent_typed.append(text)
+        if before_reply is not None:
+            await before_reply()
         return self.typed_interrupts
 
 
@@ -3391,11 +3393,11 @@ def test_browser_audio_keeps_flowing_while_a_typed_message_waits(
     events: list[str] = []
 
     class _SlowTypedClient(_FakeRealtimeClient):
-        async def send_typed_message(self, text: str) -> bool:
+        async def send_typed_message(self, text: str, before_reply=None) -> bool:
             events.append("typed:start")
             await asyncio.sleep(0.2)  # waiting for response.done
             events.append("typed:sent")
-            return await super().send_typed_message(text)
+            return await super().send_typed_message(text, before_reply)
 
         async def send_audio(self, audio_data: bytes) -> None:
             events.append("audio")
@@ -3605,7 +3607,7 @@ def test_browser_clear_on_a_closed_socket_is_harmless() -> None:
     asyncio.run(server._send_browser_clear(_Closed()))  # does not raise
 
 
-def test_conversation_workspace_other_than_the_indexed_one_disables_rag(
+def test_conversation_in_another_workspace_gets_no_workspace_search_or_digest(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """workspace_search covers the server's workspace; a call bound to another
@@ -3628,7 +3630,10 @@ def test_conversation_workspace_other_than_the_indexed_one_disables_rag(
         def __init__(self, *args, **kwargs) -> None:
             bridges.append(kwargs)
 
-    async def _build(*, caller_id: str, handoff_id: str | None) -> str:
+    built: list[dict] = []
+
+    async def _build(**kwargs) -> str:
+        built.append(kwargs)
         return "You are Bob."
 
     websocket = _DummyBrowserWebSocket([{"type": "websocket.disconnect"}])
@@ -3646,6 +3651,30 @@ def test_conversation_workspace_other_than_the_indexed_one_disables_rag(
     asyncio.run(server.handle_browser_websocket(websocket))
     assert bridges[0]["rag"] is None
     assert bridges[0]["workspace"] == str(tmp_path / "b")
+    # Nor the server workspace's activity digest / call history.
+    assert built[0].get("workspace_context") is False
+
+
+def test_bootstrap_without_workspace_context_skips_digest_and_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    server = VoiceServer(enable_browser_transport=True)
+    monkeypatch.setattr(
+        "gptme_voice.realtime.server._load_voice_digest", lambda _ws: "DIGEST-A"
+    )
+    monkeypatch.setattr(
+        "gptme_voice.realtime.server.load_callback_history_index", lambda _ws: "CALLS-A"
+    )
+
+    async def _run(workspace_context: bool) -> str:
+        return await server._build_session_instructions(
+            caller_id=None, workspace_context=workspace_context
+        )
+
+    with_ctx = asyncio.run(_run(True))
+    without = asyncio.run(_run(False))
+    assert "DIGEST-A" in with_ctx and "CALLS-A" in with_ctx
+    assert "DIGEST-A" not in without and "CALLS-A" not in without
 
 
 def test_probe_reporting_sends_transcript_and_tool_events() -> None:

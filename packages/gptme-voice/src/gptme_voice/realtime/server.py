@@ -1881,6 +1881,7 @@ class VoiceServer:
         standup_brief: str | None = None,
         consume_recent: bool = True,
         anonymous_is_operator: bool = True,
+        workspace_context: bool = True,
     ) -> SessionBootstrap:
         instructions = self._instructions
         if from_number:
@@ -1911,8 +1912,13 @@ class VoiceServer:
         if from_number:
             identity = _lookup_caller_identity(from_number, self.workspace)
             caller_is_operator = bool(identity and identity.is_operator)
+        # The digest and call history describe this server's workspace; a
+        # call about another workspace (a webui conversation elsewhere) gets
+        # neither.
         activity_digest = (
-            _load_voice_digest(self.workspace) if caller_is_operator else None
+            _load_voice_digest(self.workspace)
+            if caller_is_operator and workspace_context
+            else None
         )
         if activity_digest and not standup_brief:
             instructions = _prepend_activity_digest(activity_digest, instructions)
@@ -1920,7 +1926,7 @@ class VoiceServer:
         # Inject the compact call history index for operator inbound calls.
         # CALLBACK_WINDOW no longer gates this — the index covers all recent
         # calls so the agent can reference them on demand without a time cap.
-        if caller_is_operator and not standup_brief:
+        if caller_is_operator and workspace_context and not standup_brief:
             history_index = load_callback_history_index(self.workspace)
             if history_index:
                 instructions = history_index + "\n\n" + instructions
@@ -2182,12 +2188,14 @@ class VoiceServer:
         caller_id: str | None,
         from_number: str = "",
         handoff_id: str | None = None,
+        workspace_context: bool = True,
     ) -> str:
         return (
             await self._build_session_bootstrap(
                 caller_id=caller_id,
                 from_number=from_number,
                 handoff_id=handoff_id,
+                workspace_context=workspace_context,
             )
         ).instructions
 
@@ -3617,10 +3625,7 @@ class VoiceServer:
         tool_workspace = self.workspace
 
         try:
-            instructions = await self._build_session_instructions(
-                caller_id=caller_id,
-                handoff_id=handoff_id,
-            )
+            context = None
             if (
                 conversation_id
                 and self.gptme_server_url
@@ -3630,10 +3635,18 @@ class VoiceServer:
                 context = await fetch_conversation_context(
                     self.gptme_server_url, self.gptme_server_key, conversation_id
                 )
-                if context.instructions:
-                    instructions = f"{instructions}\n\n{context.instructions}"
                 if context.workspace:
                     tool_workspace = context.workspace
+            same_workspace = _same_dir(tool_workspace, self.workspace)
+            instructions = await self._build_session_instructions(
+                caller_id=caller_id,
+                handoff_id=handoff_id,
+                # Only the server's own workspace gets its digest/call history.
+                **({} if same_workspace else {"workspace_context": False}),
+            )
+            if context is not None and conversation_id:
+                if context.instructions:
+                    instructions = f"{instructions}\n\n{context.instructions}"
                 live_sink = LiveTranscriptSink(
                     server_url=self.gptme_server_url,
                     api_key=self.gptme_server_key,
@@ -4002,7 +4015,13 @@ class VoiceServer:
         # the conversation as if it had been part of the call, and a provider
         # hiccup must not end the call (like the /local text path).
         try:
-            await realtime_client.send_typed_message(text)
+            # Drop queued playback right before the new reply is requested, so
+            # it never clips the start of the answer this message triggers.
+            # Always: the provider may have finished streaming a long reply
+            # the browser is still playing, and the typed message supersedes it.
+            await realtime_client.send_typed_message(
+                text, before_reply=lambda: self._send_browser_clear(websocket)
+            )
         except (
             RuntimeError,
             asyncio.TimeoutError,  # session never became ready
@@ -4024,10 +4043,6 @@ class VoiceServer:
             await self._send_probe_event(
                 websocket, {"type": "transcript", "role": "user", "text": text}
             )
-        # Always drop queued playback: the provider may have finished streaming
-        # a long reply that the browser is still playing (responding == False),
-        # and the typed message supersedes it either way.
-        await self._send_browser_clear(websocket)
 
     async def _send_probe_event(self, websocket, event: dict) -> None:
         try:

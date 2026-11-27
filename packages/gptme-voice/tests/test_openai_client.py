@@ -1608,6 +1608,45 @@ def test_back_to_back_typed_messages_dont_send_a_rejected_response_create() -> N
     asyncio.run(_exercise())
 
 
+def test_typed_message_clears_playback_right_before_requesting_the_reply() -> None:
+    """The browser clear goes out after the old reply is cancelled and before
+    response.create, so it can't clip the start of the new answer."""
+
+    async def _exercise() -> None:
+        fake_ws = _FakeWebSocket()
+
+        async def _fake_connect(*_args, **_kwargs):
+            return fake_ws
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "gptme_voice.realtime.openai_client.websockets.connect", _fake_connect
+            )
+            mp.setattr(
+                "gptme_voice.realtime.openai_client._TYPED_CANCEL_WAIT_SECONDS", 0.2
+            )
+            client = OpenAIRealtimeClient(api_key="test-key")
+            await client.connect()
+            await client._handle_event({"type": "session.updated"})
+            order: list[str] = []
+
+            async def _clear() -> None:
+                order.append("clear")
+
+            real_send = client._send_event
+
+            async def _record(event_type: str, data: dict) -> None:
+                order.append(event_type)
+                await real_send(event_type, data)
+
+            client._send_event = _record  # type: ignore[method-assign]
+            await client.send_typed_message("hi", before_reply=_clear)
+            assert order == ["conversation.item.create", "clear", "response.create"]
+            await client.disconnect()
+
+    asyncio.run(_exercise())
+
+
 def test_send_text_message_times_out_if_session_never_becomes_ready() -> None:
     """A missing provider ready event must not pin the local handler forever."""
 

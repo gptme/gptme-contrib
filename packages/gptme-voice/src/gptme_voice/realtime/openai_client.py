@@ -12,7 +12,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Literal, Sequence
+from typing import Any, Awaitable, Callable, Literal, Sequence
 
 import websockets
 from gptme.config import get_config, get_project_config
@@ -841,7 +841,11 @@ class OpenAIRealtimeClient:
         """True while the model is producing a response."""
         return self._responding
 
-    async def send_typed_message(self, text: str) -> bool:
+    async def send_typed_message(
+        self,
+        text: str,
+        before_reply: Callable[[], Awaitable[None]] | None = None,
+    ) -> bool:
         """Deliver a message the user typed during the call.
 
         Like :meth:`send_text_message`, but a message typed while the model is
@@ -878,7 +882,11 @@ class OpenAIRealtimeClient:
                 "Typed message delivered, but a reply that started meanwhile "
                 "was not confirmed cancelled; not requesting a reply for it"
             )
+            if before_reply is not None:
+                await before_reply()
             return True
+        if before_reply is not None:
+            await before_reply()
         self._response_started.clear()
         await self._send_event("response.create", {})
         # Hold until the provider acknowledges the reply (bounded): typed
