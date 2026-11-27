@@ -112,6 +112,9 @@ Codex results decode structured exit codes and stdout inside `exec` text blocks,
 including legacy shell metadata. A nonzero result is an error, not a landing;
 a running cell or process remains unknown even if another result succeeded.
 Per-call `workdir` controls commit attribution without changing the session cwd.
+Cells with mixed or partially specified workdirs suppress shell landings rather
+than attributing a different checkout's commit to the session repository; errors
+are still reported, and reflogs remain authoritative for actual landings.
 This does not track continuation handles: later polls do not inherit the original
 command, and actual commits/pushes can still arrive through git's reflogs.
 

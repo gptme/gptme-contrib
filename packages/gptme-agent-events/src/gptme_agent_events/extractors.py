@@ -419,7 +419,11 @@ class CodexExtractor(Extractor):
             text = raw if isinstance(raw, str) else json.dumps(raw)
             ev, _ = self._tool(ts, name, self._command(text), call_id)
             workdir = self._workdir(text)
-            if call_id in self._pending and workdir:
+            if call_id in self._pending and workdir == "":
+                # Mixed/partial workdirs cannot safely borrow the session repo.
+                # Keep the call for error reporting, but suppress its landings.
+                self._pending[call_id] = (name, [], None, None)
+            elif call_id in self._pending and workdir:
                 # Resolve relative tool workdirs against the turn, never this
                 # follower process. Preserve that directory for this call only.
                 if not os.path.isabs(workdir):
@@ -472,7 +476,7 @@ class CodexExtractor(Extractor):
 
     @staticmethod
     def _workdir(text: str) -> str | None:
-        """Override the session cwd only when every command names the same workdir."""
+        """Return a shared workdir, None for default, or "" for ambiguous attribution."""
         try:
             args = json.loads(text)
         except ValueError:
@@ -486,8 +490,10 @@ class CodexExtractor(Extractor):
         # spans before scanning, but count the original commands for safety.
         workdir_text = _CODEX_CMD_RE.sub("", text)
         matches = list(_CODEX_WORKDIR_RE.finditer(workdir_text))
-        if len(matches) != len(commands):
+        if not matches:
             return None
+        if len(matches) != len(commands):
+            return ""
         for m in matches:
             try:
                 wd = (
@@ -496,9 +502,9 @@ class CodexExtractor(Extractor):
                     else re.sub(r"\\(['\\])", r"\1", m.group(2))
                 )
             except ValueError:
-                return None
+                return ""
             found.add(wd)
-        return found.pop() if len(found) == 1 else None
+        return found.pop() if len(found) == 1 else ""
 
 
 EXTRACTORS: dict[str, type[Extractor]] = {

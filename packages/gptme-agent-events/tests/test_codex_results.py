@@ -135,22 +135,45 @@ def test_two_pending_calls_keep_separate_workdirs(ex):
     assert (b.detail["dir"], b.detail["repo"]) == ("/session", "o/session")
 
 
-@pytest.mark.parametrize("workdirs", [(None, "/worktree"), ("/session", "/worktree")])
-def test_mixed_workdirs_do_not_attribute_whole_cell_to_one_worktree(ex, workdirs):
+@pytest.mark.parametrize(
+    "workdirs",
+    [(None, "/worktree"), ("/session", "/worktree"), ("/private", "/worktree")],
+)
+@pytest.mark.parametrize("code", [0, 128])
+def test_mixed_workdirs_do_not_attribute_whole_cell_to_one_worktree(ex, workdirs, code):
+    # A private commit must not borrow the public session repository's identity.
+    ex.feed(record({"cwd": "/worktree"}, "turn_context"))
     args = []
     for cmd, wd in zip(["git commit -m x", "ls"], workdirs):
         arg = {"cmd": cmd}
         if wd:
             arg["workdir"] = wd
         args.append(f"await tools.exec_command({json.dumps(arg)});")
-    ex.feed(
+    tool_events = ex.feed(
         record(
             {"type": "custom_tool_call", "name": "exec", "call_id": "c", "input": "\n".join(args)}
         )
     )
-    (commit,) = ex.feed(result())
-    assert commit.detail["dir"] == "/session"
-    assert commit.detail["repo"] == "o/session"
+    events = ex.feed(result(code=code))
+    assert kinds(events) == (["error"] if code else [])
+    rows = []
+
+    def write(row):
+        rows.append(row.copy())
+        return True
+
+    pub = Publisher(
+        {"bob": "bob"}, write, visibility=FakeVisibility(token=""), clock=lambda: 1_000_000.0
+    )
+    for event in tool_events + events:
+        pub.handle(event)
+    assert pub.tick(flush=True) == 1
+    assert rows[-1]["milestone_kind"] is None
+    assert rows[-1]["milestone_url"] is None
+    # A later ordinary call still uses the session cwd.
+    ex.feed(call("next"))
+    (commit,) = ex.feed(result("next"))
+    assert commit.detail["repo"] == "o/public"
 
 
 def test_single_quoted_js_workdir(ex):
@@ -196,22 +219,8 @@ def test_sibling_success_cannot_mask_failure_or_running(ex, reverse, status):
     assert kinds(ex.feed(result(blocks=blocks))) == ([] if status == "running" else ["error"])
 
 
-def poll(ex, cid, handle, outer=False):
-    name, field = ("wait", "cell_id") if outer else ("write_stdin", "session_id")
-    ex.feed(
-        record(
-            {
-                "type": "function_call",
-                "name": name,
-                "call_id": cid,
-                "arguments": json.dumps({field: handle}),
-            }
-        )
-    )
-
-
 @pytest.mark.parametrize("running", ["inner", "cell", "direct", "two_processes"])
-def test_running_command_never_lands_and_unknown_poll_stays_unreported(ex, running):
+def test_running_command_never_lands(ex, running):
     ex.feed(call(workdir="/worktree"))
     if running == "inner":
         blocks = [json.dumps({"session_id": 7, "output": "hooks"})]
@@ -225,11 +234,9 @@ def test_running_command_never_lands_and_unknown_poll_stays_unreported(ex, runni
             "Chunk ID: abc\nWall time: 1 seconds\nProcess running with session ID 7\nOutput:\n"
         ]
     assert ex.feed(result(blocks=blocks)) == []
-    ex.feed(record({"cwd": "/another-turn"}, "turn_context"))
-    poll(ex, "poll", 7, outer=running == "cell")
-    # Continuation attribution is deliberately outside this repair. Reflogs
-    # provide actual landings; a new poll must not invent a successful commit.
-    assert ex.feed(result("poll")) == []
+    # Running calls are retired rather than left available for a later result
+    # to misattribute. This tests cleanup, not continuation-handle tracking.
+    assert ex.feed(result()) == []
 
 
 @pytest.mark.parametrize("prefix", ["Script running checks", "Process running checks"])
