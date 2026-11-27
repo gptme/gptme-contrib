@@ -86,16 +86,14 @@ DEFAULT_EXCLUDE = (
     "**/node_modules/**",
     "dist/**",
     "build/**",
+    "generated/**",
     "**/generated/**",
 )
 
 
 def count_lines(path: Path) -> int:
-    """Line count, same rule as the codesize report; 0 for binary or unreadable."""
-    try:
-        data = path.read_bytes()
-    except OSError:
-        return 0
+    """Line count, same rule as the codesize report; unreadable files raise."""
+    data = path.read_bytes()
     if not data or b"\x00" in data:
         return 0
     return data.count(b"\n") + (0 if data.endswith(b"\n") else 1)
@@ -190,12 +188,11 @@ def check(paths: list[str], baseline_path: Path, default_threshold: int) -> int:
             files[rel] = lines
             changed = True
 
-    # A missing working-tree file may merely be outside a sparse checkout.
-    # Drop only paths also absent from the index (deleted or renamed).
-    missing = [p for p in files if not Path(p).exists()]
-    if missing:
+    # Index membership distinguishes deletions (including git rm --cached)
+    # from tracked files merely omitted by a sparse checkout.
+    if files:
         tracked = set(tracked_files())
-        for rel in missing:
+        for rel in list(files):
             if rel not in tracked:
                 del files[rel]
                 changed = True
@@ -231,7 +228,7 @@ def main(argv: list[str] | None = None) -> int:
         return init_baseline(baseline, args.threshold)
     try:
         return check(args.paths, baseline, args.threshold)
-    except ValueError as exc:
+    except (ValueError, OSError) as exc:
         print(exc, file=sys.stderr)
         return 1
 

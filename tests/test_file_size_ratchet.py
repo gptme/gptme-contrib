@@ -22,9 +22,11 @@ def repo(tmp_path, monkeypatch):
     return tmp_path
 
 
-def write(path: str, lines: int) -> str:
+def write(path: str, lines: int, *, tracked: bool = True) -> str:
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     Path(path).write_text("x\n" * lines)
+    if tracked:
+        subprocess.run(["git", "add", path], check=True)
     return path
 
 
@@ -94,6 +96,32 @@ def test_sparse_checkout_missing_tracked_file_keeps_ceiling(repo):
     assert read_baseline()["files"] == {"big.py": 15}
 
 
+def test_index_deletion_drops_ceiling_even_with_working_copy(repo):
+    baseline({"big.py": 15})
+    write("big.py", 15)
+    subprocess.run(["git", "rm", "--cached", "-f", "big.py"], check=True)
+    assert Path("big.py").exists()
+    assert ratchet.main([]) == 0
+    assert read_baseline()["files"] == {}
+    assert ratchet.main([write("big.py", 14)]) == 1
+
+
+def test_unreadable_file_does_not_lower_ceiling(repo, monkeypatch, capsys):
+    baseline({"big.py": 15})
+    write("big.py", 15)
+    original = Path.read_bytes
+
+    def read_bytes(path):
+        if path.name == "big.py":
+            raise PermissionError("cannot read big.py")
+        return original(path)
+
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+    assert ratchet.main(["big.py"]) == 1
+    assert read_baseline()["files"] == {"big.py": 15}
+    assert "cannot read big.py" in capsys.readouterr().err
+
+
 def test_hook_registrations_serialize_and_run_deletion_cleanup():
     import yaml
 
@@ -115,6 +143,8 @@ def test_non_code_and_excluded_files_are_ignored(repo):
         write("gen/schema.py", 50),
         write("web/vendor/lib.js", 50),
         write("app.min.js", 50),
+        write("generated/schema.py", 50),
+        write("src/generated/schema.py", 50),
     ]
     assert ratchet.main(paths) == 0
 
@@ -134,7 +164,7 @@ def test_init_records_tracked_oversized_files(repo):
     write("big.py", 12)
     write("small.py", 3)
     write("notes.md", 50)
-    write("untracked.py", 50)
+    write("untracked.py", 50, tracked=False)
     subprocess.run(["git", "add", "big.py", "small.py", "notes.md"], check=True)
     assert ratchet.main(["--init", "--threshold", "10"]) == 0
     data = read_baseline()
