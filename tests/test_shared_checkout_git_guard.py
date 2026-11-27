@@ -257,6 +257,23 @@ def test_chained_relative_cds_resolve_in_order(tmp_path):
     assert check(f"cd {srv} && cd .. && git reset --hard") is None
 
 
+def test_untokenizable_destructive_command_fails_closed():
+    for command in ("git merge --autostash feature 'oops", 'git reset --hard "x'):
+        reason = detect(command, cwd=OTHER)
+        assert reason is not None and "could not be tokenized" in reason
+    assert detect("echo 'unbalanced", cwd=SHARED) is None
+
+
+def test_cd_inside_a_subshell_does_not_leak():
+    # The cd happens in a subshell; `git add -A` runs in the shared cwd.
+    assert detect(f"(cd {OTHER} && make) && git add -A", cwd=SHARED) is not None
+    assert detect(f"(cd {OTHER}) && git reset --hard", cwd=SHARED) is not None
+    assert detect(f"x=$(cd {OTHER} && pwd) && git stash", cwd=SHARED) is not None
+    # Inside the subshell the cd applies.
+    assert detect(f"(cd {SHARED} && git reset --hard)", cwd=OTHER) is not None
+    assert detect(f"(cd {OTHER} && git reset --hard)", cwd=SHARED) is None
+
+
 def test_several_cds_check_every_target():
     # cwd unmarked; a later cd lands in the shared checkout.
     assert detect(f"cd /tmp && cd {SHARED} && git reset --hard", cwd=OTHER) is not None

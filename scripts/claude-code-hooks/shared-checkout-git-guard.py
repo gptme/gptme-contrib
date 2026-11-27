@@ -218,23 +218,31 @@ def _is_separator(token: str) -> bool:
     return bool(token) and set(token) <= _SEPARATOR_CHARS
 
 
-def _split_commands(tokens: list[str]) -> list[tuple[list[str], str]]:
-    """``(argv, separator after it)`` for each simple command."""
-    commands: list[tuple[list[str], str]] = []
+def _split_commands(tokens: list[str]) -> list[tuple[str, list[str], str]]:
+    """``(kind, argv, separator after it)`` items.
+
+    ``kind`` is ``"cmd"`` for a simple command, or ``"("`` / ``")"`` for the
+    bounds of a subshell (or command substitution), whose ``cd`` doesn't leak.
+    """
+    items: list[tuple[str, list[str], str]] = []
     argv: list[str] = []
     for token in tokens:
-        if _is_separator(token):
+        if token in ("(", ")"):
             if argv:
-                commands.append((argv, token))
+                items.append(("cmd", argv, ""))
                 argv = []
-            elif commands:
-                prev_argv, _prev_sep = commands[-1]
-                commands[-1] = (prev_argv, token)
+            items.append((token, [], ""))
+        elif _is_separator(token):
+            if argv:
+                items.append(("cmd", argv, token))
+                argv = []
+            elif items and items[-1][0] == "cmd":
+                items[-1] = ("cmd", items[-1][1], token)
         else:
             argv.append(token)
     if argv:
-        commands.append((argv, ""))
-    return commands
+        items.append(("cmd", argv, ""))
+    return items
 
 
 def _strip_wrappers(argv: list[str]) -> list[str]:
@@ -500,7 +508,7 @@ def _unknown_reason(rule: str) -> str:
 
 
 _DESTRUCTIVE_WORDS = re.compile(
-    r"\bgit\b.*\b(stash|reset|clean|checkout|switch|restore|add|commit|pull|rebase)\b",
+    r"\bgit\b.*\b(stash|reset|clean|checkout|switch|restore|add|commit|pull|rebase|merge)\b",
     re.DOTALL,
 )
 
@@ -528,7 +536,15 @@ def detect(
     # Directories to fall back to if a `cd X && ...` chain is broken by a
     # later `;`, `||`, `|` or `&` (the rest then runs where the cd failed).
     fallback: list[Path] = []
-    for argv, separator in _split_commands(tokens):
+    scopes: list[tuple[list[Path], list[Path]]] = []
+    for kind, argv, separator in _split_commands(tokens):
+        if kind == "(":  # a subshell: its cd's end with it
+            scopes.append((list(dirs), list(fallback)))
+            continue
+        if kind == ")":
+            if scopes:
+                dirs, fallback = scopes.pop()
+            continue
         argv = _strip_wrappers(argv)
         if argv:
             word = argv[0]
