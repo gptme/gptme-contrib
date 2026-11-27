@@ -412,8 +412,8 @@ def detect(
             word = argv[0]
             if word in ("cd", "pushd"):
                 rest = [a for a in argv[1:] if not a.startswith("-") or a == "-"]
-                target = rest[0] if rest else "~"
-                new = list(dict.fromkeys(_resolve(target, d) for d in dirs))
+                cd_target = rest[0] if rest else "~"
+                new = list(dict.fromkeys(_resolve(cd_target, d) for d in dirs))
                 if separator == "&&":
                     fallback = list(dict.fromkeys(fallback + dirs))
                     dirs = new
