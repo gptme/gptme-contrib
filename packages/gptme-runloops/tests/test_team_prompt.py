@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
-from gptme_runloops.team import TEAM_PROMPT_TEMPLATE, TeamRun
+from gptme_runloops.team import TeamRun
 
 
 @pytest.fixture()
@@ -43,8 +43,8 @@ def test_team_prompt_fills_agent_name(workspace: Path) -> None:
 def test_template_has_no_unfilled_placeholders(workspace: Path) -> None:
     """Guard the whole template, not just the timestamp line."""
     prompt = TeamRun(workspace=workspace).generate_prompt()
-    for placeholder in ("{agent_name}", "{current_time}", "{timestamp}"):
-        assert placeholder not in prompt
+    assert "{" not in prompt
+    assert "}" not in prompt
 
 
 def test_custom_template_is_used_verbatim(workspace: Path) -> None:
@@ -55,4 +55,3 @@ def test_custom_template_is_used_verbatim(workspace: Path) -> None:
 
     prompt = TeamRun(workspace=workspace).generate_prompt()
     assert prompt == "custom {timestamp} kept literally"
-    assert TEAM_PROMPT_TEMPLATE.format(agent_name="x", current_time="now") != prompt
