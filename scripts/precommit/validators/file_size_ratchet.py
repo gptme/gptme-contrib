@@ -5,8 +5,9 @@ A file under the threshold (default 2,000 lines) always passes. A file at or
 over it passes only if it is listed in the checked-in baseline and has not grown
 past its recorded size. When a listed file shrinks, the hook lowers its entry
 (or drops it once the file is back under the threshold); the baseline never
-goes up on its own. Growing an oversized file on purpose, or renaming one,
-means editing the baseline by hand, where review can see it.
+goes up on its own. A commit that shrinks or deletes a listed file fails until
+the lowered baseline is staged with it. Growing an oversized file on purpose, or
+renaming one, means editing the baseline by hand, where review can see it.
 
 The baseline (default ``file-size-baseline.json`` in the repo root)::
 
@@ -122,6 +123,23 @@ def save_baseline(path: Path, data: dict) -> None:
     path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
 
+def staged_entries(baseline_path: Path) -> dict[str, int]:
+    """The ``files`` mapping in the index: what the commit will record.
+
+    Empty when the baseline is not in the index (or is outside the checkout).
+    """
+    if baseline_path.is_absolute():
+        return {}
+    result = subprocess.run(
+        ["git", "show", f":./{baseline_path.as_posix()}"], capture_output=True
+    )
+    if result.returncode != 0:
+        return {}
+    data = json.loads(result.stdout)
+    files = data.get("files") if isinstance(data, dict) else None
+    return files if isinstance(files, dict) else {}
+
+
 def tracked_files() -> list[str]:
     out = subprocess.run(
         ["git", "-c", "core.quotePath=false", "ls-files", "-z"],
@@ -159,6 +177,7 @@ def check(paths: list[str], baseline_path: Path, default_threshold: int) -> int:
     files: dict[str, int] = data["files"]
     errors: list[str] = []
     changed = False
+    sizes: dict[str, int] = {}
 
     for rel in dict.fromkeys(paths):
         file = Path(rel)
@@ -168,7 +187,7 @@ def check(paths: list[str], baseline_path: Path, default_threshold: int) -> int:
             or not file.is_file()
         ):
             continue
-        lines = count_lines(file)
+        lines = sizes[rel] = count_lines(file)
         allowed = files.get(rel)
         if lines < threshold:
             if allowed is not None:
@@ -190,16 +209,30 @@ def check(paths: list[str], baseline_path: Path, default_threshold: int) -> int:
 
     # Index membership distinguishes deletions (including git rm --cached)
     # from tracked files merely omitted by a sparse checkout.
-    if files:
-        tracked = set(tracked_files())
-        for rel in list(files):
-            if rel not in tracked:
-                del files[rel]
-                changed = True
+    staged = staged_entries(baseline_path)
+    tracked = set(tracked_files()) if files or staged else set()
+    for rel in list(files):
+        if rel not in tracked:
+            del files[rel]
+            changed = True
 
     if changed and baseline_path.exists():
         save_baseline(baseline_path, data)
         print(f"Lowered entries in {baseline_path}; stage it with this commit.")
+    # Rewriting the file is not enough to stop a commit: in a shared checkout a
+    # retry sees the already-lowered, unstaged baseline, changes nothing, and
+    # would land the shrink or deletion without it. CI then fails on every later
+    # PR.
+    stale = [
+        rel
+        for rel, allowed in staged.items()
+        if rel not in tracked or sizes.get(rel, allowed) < allowed
+    ]
+    if stale:
+        errors.append(
+            f"{baseline_path}: the staged copy is not lowered for "
+            f"{', '.join(stale)}; stage it with this commit."
+        )
     for error in errors:
         print(error, file=sys.stderr)
     return 1 if errors else 0
