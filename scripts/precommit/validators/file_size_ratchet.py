@@ -9,6 +9,12 @@ goes up on its own. A commit that shrinks or deletes a listed file fails until
 the lowered baseline is staged with it. Growing an oversized file on purpose, or
 renaming one, means editing the baseline by hand, where review can see it.
 
+``--growth=warn`` reports growth of a listed file without failing (the default
+is ``--growth=error``). New oversized files still fail, and the baseline works
+as above. On GitHub Actions each warning is also emitted as an annotation.
+pre-commit hides a passing hook's output, so set ``verbose: true`` on the hook
+to see warnings locally.
+
 The baseline (default ``file-size-baseline.json`` in the repo root)::
 
     {
@@ -44,6 +50,7 @@ from __future__ import annotations
 import argparse
 import fnmatch
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -168,7 +175,21 @@ def init_baseline(path: Path, threshold: int) -> int:
     return 0
 
 
-def check(paths: list[str], baseline_path: Path, default_threshold: int) -> int:
+def warn(path: str, message: str) -> None:
+    """Print a non-blocking finding; also annotate it on GitHub Actions."""
+    print(f"warning: {path}: {message}")
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        data = message.replace("%", "%25")
+        prop = path.replace("%", "%25").replace(":", "%3A").replace(",", "%2C")
+        print(f"::warning file={prop},title=File-size ratchet::{data}")
+
+
+def check(
+    paths: list[str],
+    baseline_path: Path,
+    default_threshold: int,
+    growth: str = "error",
+) -> int:
     if baseline_path.exists():
         data = load_baseline(baseline_path)
     else:
@@ -199,10 +220,14 @@ def check(paths: list[str], baseline_path: Path, default_threshold: int) -> int:
                 "Split it instead of adding to it."
             )
         elif lines > allowed:
-            errors.append(
-                f"{rel}: grew from {allowed} to {lines} lines; it is already at or over "
-                f"the {threshold}-line limit and may only shrink."
+            grew = (
+                f"grew from {allowed} to {lines} lines; it is already at or over "
+                f"the {threshold}-line limit"
             )
+            if growth == "warn":
+                warn(rel, f"{grew}. Prefer putting new code in a new module.")
+            else:
+                errors.append(f"{rel}: {grew} and may only shrink.")
         elif lines < allowed:
             files[rel] = lines
             changed = True
@@ -255,12 +280,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--init", action="store_true", help="Create the baseline and exit."
     )
+    parser.add_argument(
+        "--growth",
+        choices=("error", "warn"),
+        default="error",
+        help="Whether growth of a file already over the limit fails or only warns.",
+    )
     args = parser.parse_args(argv)
     baseline = Path(args.baseline)
     if args.init:
         return init_baseline(baseline, args.threshold)
     try:
-        return check(args.paths, baseline, args.threshold)
+        return check(args.paths, baseline, args.threshold, args.growth)
     except (ValueError, OSError) as exc:
         print(exc, file=sys.stderr)
         return 1

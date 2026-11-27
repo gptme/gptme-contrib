@@ -59,6 +59,44 @@ def test_listed_file_growing_fails(repo, capsys):
     assert read_baseline()["files"] == {"big.py": 15}
 
 
+def test_growth_warn_reports_without_failing(repo, capsys, monkeypatch):
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    baseline({"big.py": 15})
+    assert ratchet.main(["--growth=warn", write("big.py", 16)]) == 0
+    out = capsys.readouterr().out
+    assert "warning: big.py: grew from 15 to 16 lines" in out
+    assert "::warning" not in out
+    # Warning about growth does not raise the ceiling.
+    assert read_baseline()["files"] == {"big.py": 15}
+
+
+def test_growth_warn_annotates_on_github_actions(repo, capsys, monkeypatch):
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    baseline({"a,b%.py": 15})
+    assert ratchet.main(["--growth=warn", write("a,b%.py", 16)]) == 0
+    out = capsys.readouterr().out
+    assert "::warning file=a%2Cb%25.py,title=File-size ratchet::grew from 15" in out
+
+
+def test_growth_warn_still_fails_new_oversized_files(repo, capsys):
+    baseline({"big.py": 15})
+    paths = [write("big.py", 16), write("new.py", THRESHOLD)]
+    assert ratchet.main(["--growth=warn", *paths]) == 1
+    err = capsys.readouterr().err
+    assert "new.py: 10 lines, at or over the 10-line limit" in err
+    assert "big.py" not in err
+
+
+def test_growth_warn_still_requires_staging_a_lowered_baseline(repo):
+    baseline({"big.py": 15})
+    subprocess.run(["git", "add", ratchet.DEFAULT_BASELINE], check=True)
+    path = write("big.py", 12)
+    assert ratchet.main(["--growth=warn", path]) == 1
+    assert read_baseline()["files"] == {"big.py": 12}
+    subprocess.run(["git", "add", ratchet.DEFAULT_BASELINE], check=True)
+    assert ratchet.main(["--growth=warn", path]) == 0
+
+
 def test_listed_file_at_size_passes_unchanged(repo):
     baseline({"big.py": 15})
     assert ratchet.main([write("big.py", 15)]) == 0
