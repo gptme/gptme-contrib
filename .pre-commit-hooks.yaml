@@ -32,3 +32,15 @@
   pass_filenames: false
   always_run: true
   additional_dependencies: [PyYAML]
+
+- id: file-size-ratchet
+  name: Ratchet source-file sizes (no new files over the limit, no growth)
+  description: >
+    Fails when a code or test file over the line limit (default 2,000) is
+    new or has grown past its entry in the checked-in
+    ``file-size-baseline.json``. Shrinking lowers the entry automatically.
+    Create the baseline once with ``file-size-ratchet --init``.
+  entry: file-size-ratchet
+  language: python
+  types: [text]
+  additional_dependencies: []

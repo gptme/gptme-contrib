@@ -11,12 +11,13 @@ build-backend = "setuptools.build_meta"
 
 [project.scripts]
 validate-root-structure = "validate_root_structure_yaml:main"
+file-size-ratchet = "file_size_ratchet:main"
 
 # The workspace root is installed when consumers use a remote Python
 # pre-commit hook. Package only the hook module instead of auto-discovering the
 # monorepo's many top-level directories.
 [tool.setuptools]
-py-modules = ["validate_root_structure_yaml"]
+py-modules = ["validate_root_structure_yaml", "file_size_ratchet"]
 package-dir = { "" = "scripts/precommit/validators" }
 
 [dependency-groups]

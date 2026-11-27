@@ -209,7 +209,10 @@ def generate(
     "thresholds",
     multiple=True,
     type=int,
-    help="File-size threshold in lines to flag (repeatable). Default: 1500 and 3000.",
+    help=(
+        "File-size threshold in lines to flag (repeatable). Default: 1500 and 3000, "
+        "plus the threshold in <repo>/file-size-baseline.json when present."
+    ),
 )
 @click.option(
     "--history-weeks",
