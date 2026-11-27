@@ -369,3 +369,57 @@ def test_a_reply_starting_during_the_clear_is_cancelled_before_response_create()
             await client.disconnect()
 
     asyncio.run(_exercise())
+
+
+def test_typed_message_waits_for_a_requested_reply_and_cancels_it() -> None:
+    """An injected result's response.create is in flight (not yet created):
+    the typed message waits for it to start, cancels it, then sends its own."""
+
+    async def _exercise() -> None:
+        fake_ws = _FakeWebSocket()
+
+        async def _fake_connect(*_args, **_kwargs):
+            return fake_ws
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "gptme_voice.realtime.openai_client.websockets.connect", _fake_connect
+            )
+            client = OpenAIRealtimeClient(api_key="test-key")
+            await client.connect()
+            await client._handle_event({"type": "session.updated"})
+            real_send = client._send_event
+
+            async def _provider(event_type: str, data: dict) -> None:
+                await real_send(event_type, data)
+                if event_type == "response.cancel":
+
+                    async def _done() -> None:
+                        await asyncio.sleep(0.02)
+                        await client._handle_event(
+                            {
+                                "type": "response.done",
+                                "response": {"status": "cancelled"},
+                            }
+                        )
+
+                    asyncio.ensure_future(_done())
+
+            client._send_event = _provider  # type: ignore[method-assign]
+            await client._send_event("response.create", {})  # an injected reply
+            baseline = len(fake_ws.sent)
+            typed = asyncio.create_task(client.send_typed_message("stop"))
+            await asyncio.sleep(0.1)
+            assert [e["type"] for e in fake_ws.sent[baseline:]] == []  # waiting
+            await client._handle_event({"type": "response.created"})
+            await asyncio.sleep(0.1)
+            await client._handle_event({"type": "response.created"})  # typed's own
+            assert await typed is True
+            assert [e["type"] for e in fake_ws.sent[baseline:]] == [
+                "response.cancel",
+                "conversation.item.create",
+                "response.create",
+            ]
+            await client.disconnect()
+
+    asyncio.run(_exercise())

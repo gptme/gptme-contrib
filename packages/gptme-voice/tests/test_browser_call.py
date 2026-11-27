@@ -767,3 +767,42 @@ def test_non_object_json_frames_are_ignored(monkeypatch: pytest.MonkeyPatch) -> 
     )
     assert fake_client.sent_typed == ["hi"]
     assert [(t.role, t.text) for t in seen["transcript"]] == [("user", "hi")]
+
+
+def test_call_about_another_workspace_leaves_no_call_record(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from gptme_voice.realtime.conversation_link import ConversationContext
+
+    server = VoiceServer(enable_browser_transport=True, workspace=str(tmp_path / "a"))
+    server.browser_secret = "s3cret"
+    server.gptme_server_url = "http://127.0.0.1:5700"
+    server.gptme_server_key = "k"
+    (tmp_path / "b").mkdir()
+
+    async def _fetch(*args, **kwargs):
+        return ConversationContext(instructions=None, workspace=str(tmp_path / "b"))
+
+    ended: list[str] = []
+
+    async def _on_call_end(caller_id, *args, **kwargs):
+        ended.append(caller_id)
+
+    async def _build(**_kwargs) -> str:
+        return "x"
+
+    websocket = _DummyBrowserWebSocket([{"type": "websocket.disconnect"}])
+    websocket.query_params = {"conversation_id": "conv-1"}
+    websocket.headers = {"x-gptme-voice-secret": "s3cret"}
+    websocket.client = None
+    monkeypatch.setattr(
+        "gptme_voice.realtime.server.fetch_conversation_context", _fetch
+    )
+    monkeypatch.setattr(server, "_build_session_instructions", _build)
+    monkeypatch.setattr(server, "_on_call_end", _on_call_end)
+    monkeypatch.setattr(
+        server, "_make_client", lambda _cfg, **_kw: _FakeRealtimeClient()
+    )
+    monkeypatch.setattr("gptme_voice.realtime.server.GptmeToolBridge", _DummyToolBridge)
+    asyncio.run(server.handle_browser_websocket(websocket))
+    assert ended == []

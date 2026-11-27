@@ -468,6 +468,7 @@ class OpenAIRealtimeClient:
         # Set between response.done and the next response.created.
         self._response_idle = asyncio.Event()
         self._response_idle.set()
+        self._response_requested = False
         # Set on response.created; lets a typed message wait for its own reply
         # to be acknowledged before the next one is allowed through.
         self._response_started = asyncio.Event()
@@ -917,20 +918,24 @@ class OpenAIRealtimeClient:
         """
         loop = asyncio.get_running_loop()
         cancelled = False
-        while self._responding:
-            await self._send_event("response.cancel", {})
-            cancelled = True
+        while self._responding or self._response_requested:
             remaining = deadline - loop.time()
-            try:
-                if remaining <= 0:
-                    raise asyncio.TimeoutError
-                await asyncio.wait_for(self._response_idle.wait(), remaining)
-            except asyncio.TimeoutError:
+            if remaining <= 0:
                 # A response.create now would be rejected, leaving the typed
                 # turn unanswered. Report it undelivered instead.
                 raise asyncio.TimeoutError(
                     "provider did not confirm cancelling the active reply"
-                ) from None
+                )
+            if self._responding:
+                await self._send_event("response.cancel", {})
+                cancelled = True
+                wait = remaining
+            else:
+                wait = min(0.05, remaining)  # requested: wait for it to start
+            try:
+                await asyncio.wait_for(self._response_idle.wait(), wait)
+            except asyncio.TimeoutError:
+                continue
         return cancelled
 
     async def wait_until_ready(self, timeout: float | None = None) -> None:
@@ -1279,6 +1284,11 @@ class OpenAIRealtimeClient:
             raise RuntimeError("Not connected to OpenAI Realtime API")
 
         event = {"type": event_type, **data}
+        if event_type == "response.create":
+            # Requested but not yet acknowledged (inject_message, tool output,
+            # typed): a typed message must treat it as active, not idle.
+            self._response_requested = True
+            self._response_idle.clear()
         await self._ws.send(json.dumps(event))
 
     async def _receive_loop(self) -> None:
@@ -1371,6 +1381,7 @@ class OpenAIRealtimeClient:
         # Response lifecycle — mute mic while responding
         elif event_type == "response.created":
             self._responding = True
+            self._response_requested = False
             self._response_idle.clear()
             self._response_started.set()
             if self.on_response_start:
@@ -1378,6 +1389,7 @@ class OpenAIRealtimeClient:
             logger.debug("Response started (mic muted)")
         elif event_type == "response.done":
             self._responding = False
+            self._response_requested = False
             self._response_idle.set()
             if self.on_response_end:
                 await self._call_callback(self.on_response_end)
@@ -1415,6 +1427,10 @@ class OpenAIRealtimeClient:
 
         # Errors
         elif event_type == "error":
+            if self._response_requested and not self._responding:
+                # The requested reply was rejected: nothing is pending.
+                self._response_requested = False
+                self._response_idle.set()
             error = event.get("error") or {}
             if not isinstance(error, dict):
                 error = {"message": str(error)}

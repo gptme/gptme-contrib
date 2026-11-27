@@ -158,6 +158,7 @@ async def handle_browser_websocket(server: VoiceServer, websocket):
     typed_lock = asyncio.Lock()
     typed_tasks: set[asyncio.Task[None]] = set()
     unknown_workspace: str | None = None  # private dir when the workspace is unknown
+    same_workspace = True
     tool_workspace = server.workspace
 
     try:
@@ -375,9 +376,13 @@ async def handle_browser_websocket(server: VoiceServer, websocket):
                 )
             else:
                 shutil.rmtree(unknown_workspace, ignore_errors=True)
-        if probe:
+        if probe or not same_workspace:
+            # Probes leave no trace; a call about another workspace must not
+            # land in this server workspace's call history or post-call runs.
             _srv.logger.info(
-                "Probe call ended (%d turns); no call record", len(transcript)
+                "%s call ended (%d turns); no call record",
+                "Probe" if probe else "Other-workspace",
+                len(transcript),
             )
             return
         await server._on_call_end(
