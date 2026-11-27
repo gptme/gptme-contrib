@@ -180,12 +180,14 @@ def test_missing_changelog_at_old_treats_all_new_entries_as_added(repo: Path):
         ("HEAD", "no-such-rev", "CHANGELOG.md"),
         ("no-such-rev", "HEAD", "CHANGELOG.md"),
         ("HEAD", "HEAD", "TYPO.md"),
+        ("HEAD", "HEAD", "docs"),
     ],
 )
 def test_failed_lookup_is_an_error_not_an_empty_result(
     repo: Path, old: str, new: str, path: str
 ):
     commit(repo, "CHANGELOG.md", SAMPLE)
+    commit(repo, "docs/guide.md", "guide\n")
     assert mod.main([old, new, "--repo", str(repo), "--path", path]) == 2
 
 
@@ -262,6 +264,21 @@ def test_malformed_heading_is_an_error(prefix: str, heading: str):
 def test_ambiguous_entry_is_an_error(extra: str, error: str):
     with pytest.raises(RuntimeError, match=error):
         mod.parse_entries(VALID + extra)
+
+
+@pytest.mark.parametrize(
+    "heading", ["## 2026-11-28 - migration", "### 2026-11-28 - migration"]
+)
+def test_unclosed_fence_cannot_hide_a_later_entry(heading: str):
+    text = (
+        VALID
+        + "```bash\nmake hooks\n\n"
+        + f"{heading}\n\n- **Action:** required\n- **Do:** Migrate.\n\n"
+        + "## 2026-11-27 - older\n\n- **Action:** optional\n- **Do:** Run:\n"
+        + "```\n"
+    )
+    with pytest.raises(RuntimeError, match="inside a code fence"):
+        mod.parse_entries(text)
 
 
 def test_malformed_old_changelog_is_skipped(repo: Path):

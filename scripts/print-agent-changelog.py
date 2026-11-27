@@ -55,8 +55,9 @@ def parse_entries(text: str, *, strict: bool = True) -> list[Entry]:
 
     In *strict* mode (NEW), anything that could hide or alter an instruction
     raises RuntimeError: a missing, repeated or unknown field, a field outside a
-    dated entry (usually a mistyped heading), or an unclosed code fence. Silent
-    drops look like a code-only bump to callers.
+    dated entry (usually a mistyped heading), a code fence that is unclosed, or
+    one that contains a dated heading or an entry's field. Silent drops look
+    like a code-only bump to callers.
 
     In non-strict mode (OLD) those rows are skipped so a typo that was later
     fixed does not permanently fail every range that starts at that pin.
@@ -89,8 +90,12 @@ def parse_entries(text: str, *, strict: bool = True) -> list[Entry]:
 
     for line in text.splitlines():
         if fence:
-            if line.startswith(fence) and not line.strip().strip(fence[0]):
+            closing = line.strip()
+            if closing.startswith(fence) and not closing.strip(fence[0]):
                 fence = ""
+            elif HEADING.match(line) or (current and FIELD.match(line)):
+                # A later fence would close this one and hide the rows between.
+                fail(f"entry line inside a code fence (unclosed?): {line!r}")
         elif opening := FENCE.match(line):
             fence = opening.group(1)
         elif ANY_HEADING.match(line):
@@ -132,14 +137,15 @@ def git_show(repo: Path, rev: str, path: str, *, missing_ok: bool = False) -> st
     raises. The one exception, with ``missing_ok``, is a valid revision that
     does not contain the file.
     """
-    result = run_git(repo, "show", f"{rev}:{path}")
+    # cat-file blob, not show: show lists a directory and exits 0.
+    result = run_git(repo, "cat-file", "blob", f"{rev}:{path}")
     if result.returncode == 0:
         return result.stdout
     if missing_ok:
         listed = run_git(repo, "ls-tree", "--name-only", rev, "--", path)
         if listed.returncode == 0 and not listed.stdout.strip():
             return ""
-    raise RuntimeError(result.stderr.strip() or f"git show {rev}:{path} failed")
+    raise RuntimeError(result.stderr.strip() or f"cannot read {rev}:{path}")
 
 
 def entries_between(
