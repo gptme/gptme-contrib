@@ -204,6 +204,17 @@ def test_quoted_http_basic_authorization_header_is_redacted() -> None:
     _contained(f'headers={{"Authorization": "Basic {b64}"}}', b64)
 
 
+def test_json_escaped_http_basic_authorization_header_is_redacted() -> None:
+    # Nested JSON tool output escapes the quotes, so a backslash sits between
+    # `Authorization` and its quote (and again before `Basic`). A bare quote
+    # class misses this shape and leaks the whole credential.
+    b64 = "dXNlcjpwYXNzd29yZA=="  # base64("user:password")
+    transcript = '{"output":"{\\"Authorization\\": \\"Basic ' + b64 + '\\"}"}'
+    r = redact(transcript, literals=[])
+    assert r.blocked
+    assert b64 not in r.redacted
+
+
 def test_out_to_dev_stdout_under_a_redirect_keeps_later_writes(tmp_path) -> None:
     import os
     from pathlib import Path
