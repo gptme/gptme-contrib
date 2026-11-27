@@ -846,9 +846,10 @@ class OpenAIRealtimeClient:
         over it), since a second ``response.create`` would be rejected while
         one is active. Returns True if a reply was interrupted.
         """
-        interrupted = self._responding
-        deadline = asyncio.get_running_loop().time() + _TYPED_CANCEL_WAIT_SECONDS
         await self.wait_until_ready()
+        interrupted = self._responding
+        # Bounds the cancel handshake only, not session setup.
+        deadline = asyncio.get_running_loop().time() + _TYPED_CANCEL_WAIT_SECONDS
         await self._cancel_until_idle(deadline)
         logger.info("Sending typed message: %s...", text[:100])
         await self._send_event(

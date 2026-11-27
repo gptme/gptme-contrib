@@ -3466,6 +3466,118 @@ def test_probe_call_never_touches_the_conversation_or_a_real_caller(
     assert len(seen_callers) == 1 and seen_callers[0].startswith("probe-")
 
 
+def test_probe_keeps_handoffs_and_reports_typed_turns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A probe never consumes a real caller's pending handoff, and a typed
+    message it sends is reported back like a spoken turn."""
+    server = VoiceServer(enable_browser_transport=True)
+    handoffs: list[str | None] = []
+
+    async def _build(*, caller_id: str, handoff_id: str | None) -> str:
+        handoffs.append(handoff_id)
+        return "You are Bob."
+
+    websocket = _DummyBrowserWebSocket(
+        [
+            {
+                "type": "websocket.receive",
+                "text": json.dumps({"type": "text", "text": "probe question"}),
+            },
+            {"type": "websocket.disconnect"},
+        ]
+    )
+    websocket.query_params = {"probe": "1", "handoff_id": "real-pending-handoff"}
+    monkeypatch.setattr(server, "_build_session_instructions", _build)
+    monkeypatch.setattr(
+        server, "_make_client", lambda _cfg, **_kw: _FakeRealtimeClient()
+    )
+    monkeypatch.setattr("gptme_voice.realtime.server.GptmeToolBridge", _DummyToolBridge)
+    asyncio.run(server.handle_browser_websocket(websocket))
+
+    assert handoffs == [None]
+    sent = [json.loads(m) for m in websocket.text_messages]
+    assert {"type": "transcript", "role": "user", "text": "probe question"} in sent
+
+
+def test_conversation_bound_call_end_is_not_promoted_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Turns were posted live to the real conversation; the end-of-call
+    promotion (keyed by caller id, i.e. webui:<id>) must not repost them."""
+    from gptme_voice.realtime.conversation_link import ConversationContext
+
+    server = VoiceServer(enable_browser_transport=True)
+    server.browser_secret = "s3cret"
+    server.gptme_server_url = "http://127.0.0.1:5700"
+    server.gptme_server_key = "k"
+
+    async def _fetch(*args, **kwargs):
+        return ConversationContext(instructions=None, workspace=None)
+
+    ended: list[dict] = []
+
+    async def _on_call_end(caller_id, source, transcript, metadata, **kwargs):
+        ended.append(metadata)
+
+    async def _build(*, caller_id: str, handoff_id: str | None) -> str:
+        return "You are Bob."
+
+    websocket = _DummyBrowserWebSocket([{"type": "websocket.disconnect"}])
+    websocket.query_params = {"conversation_id": "conv-1"}
+    websocket.headers = {"x-gptme-voice-secret": "s3cret"}
+    websocket.client = None
+    monkeypatch.setattr(
+        "gptme_voice.realtime.server.fetch_conversation_context", _fetch
+    )
+    monkeypatch.setattr(server, "_build_session_instructions", _build)
+    monkeypatch.setattr(server, "_on_call_end", _on_call_end)
+    monkeypatch.setattr(
+        server, "_make_client", lambda _cfg, **_kw: _FakeRealtimeClient()
+    )
+    monkeypatch.setattr("gptme_voice.realtime.server.GptmeToolBridge", _DummyToolBridge)
+    asyncio.run(server.handle_browser_websocket(websocket))
+    assert ended and ended[0].get("transcript_posted_live") == "1"
+
+    posted: list[str] = []
+    monkeypatch.setattr(
+        "gptme_voice.realtime.server.urllib.request.urlopen",
+        lambda *a, **k: posted.append("posted"),
+    )
+    server._promote_transcript_to_gptme(
+        "webui:conv-1",
+        [TranscriptTurn(role="user", text="hi")],
+        {"call_sid": "x", "transcript_posted_live": "1"},
+    )
+    assert posted == []
+
+
+def test_teardown_survives_a_failing_disconnect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the provider disconnect raises (e.g. a late callback on the closed
+    browser socket), the call is still recorded."""
+    server = VoiceServer(enable_browser_transport=True)
+
+    class _BrokenDisconnect(_FakeRealtimeClient):
+        async def disconnect(self, **kwargs: object) -> None:
+            raise RuntimeError("Cannot call send once a close message has been sent")
+
+    websocket = _DummyBrowserWebSocket([{"type": "websocket.disconnect"}])
+    seen = _run_browser_call(monkeypatch, server, websocket, _BrokenDisconnect())
+    assert seen.get("caller_id") == "local"
+
+
+def test_browser_clear_on_a_closed_socket_is_harmless() -> None:
+    server = VoiceServer(enable_browser_transport=True)
+
+    class _Closed:
+        async def send_text(self, _message: str) -> None:
+            raise RuntimeError("Cannot call send once a close message has been sent")
+
+    asyncio.run(server._send_browser_clear(_Closed()))  # does not raise
+
+
 def test_probe_reporting_sends_transcript_and_tool_events() -> None:
     from gptme_voice.realtime.server import _probe_reporting
 

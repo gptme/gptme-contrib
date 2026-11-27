@@ -2484,6 +2484,9 @@ class VoiceServer:
         if not self.gptme_server_url or not self.gptme_server_key:
             return
 
+        if metadata.get("transcript_posted_live"):
+            logger.debug("Skipping transcript promotion for %s: posted live", caller_id)
+            return
         call_sid = metadata.get("call_sid")
         if not call_sid:
             logger.warning(
@@ -3406,7 +3409,8 @@ class VoiceServer:
         caller_id = (
             _probe_caller_id() if probe else self._get_local_caller_id(websocket)
         )
-        handoff_id = self._get_local_handoff_id(websocket)
+        # A probe must not consume a real caller's pending handoff bootstrap.
+        handoff_id = None if probe else self._get_local_handoff_id(websocket)
         realtime_client: OpenAIRealtimeClient | None = None
         tool_bridge: GptmeToolBridge | None = None
         vision_bridge: VisionSessionBridge | None = None
@@ -3582,7 +3586,8 @@ class VoiceServer:
             if conversation_id
             else self._get_local_caller_id(websocket)
         )
-        handoff_id = self._get_local_handoff_id(websocket)
+        # A probe must not consume a real caller's pending handoff bootstrap.
+        handoff_id = None if probe else self._get_local_handoff_id(websocket)
         realtime_client: OpenAIRealtimeClient | None = None
         tool_bridge: GptmeToolBridge | None = None
         transcript: list[TranscriptTurn] = []
@@ -3729,6 +3734,7 @@ class VoiceServer:
                             transcript,
                             live_sink,
                             data,
+                            probe,
                         )
                     )
                     typed_tasks.add(task)
@@ -3754,7 +3760,11 @@ class VoiceServer:
                 if pending:
                     await asyncio.gather(*pending, return_exceptions=True)
             if realtime_client:
-                await self._disconnect_realtime_client(realtime_client)
+                try:
+                    await self._disconnect_realtime_client(realtime_client)
+                except Exception:
+                    # Still flush the transcript and record the call.
+                    logger.exception("Error disconnecting the realtime client")
             if live_sink is not None:
                 await live_sink.close()
             if probe:
@@ -3770,6 +3780,9 @@ class VoiceServer:
                     "caller_id": caller_id,
                     "provider": self.provider,
                     **({"handoff_id": handoff_id} if handoff_id else {}),
+                    # Already posted turn by turn to the real conversation; the
+                    # end-of-call promotion (keyed by caller id) must not repost.
+                    **({"transcript_posted_live": "1"} if live_sink else {}),
                 },
                 tool_bridge=tool_bridge,
             )
@@ -3946,6 +3959,7 @@ class VoiceServer:
         transcript: list[TranscriptTurn],
         live_sink: LiveTranscriptSink | None,
         data: dict,
+        probe: bool = False,
     ) -> None:
         """A message the user typed into the chat during the call.
 
@@ -3978,14 +3992,31 @@ class VoiceServer:
         )
         if live_sink is not None:
             live_sink.notify(immediate=True)
+        if probe:
+            await self._send_probe_event(
+                websocket, {"type": "transcript", "role": "user", "text": text}
+            )
         # Always drop queued playback: the provider may have finished streaming
         # a long reply that the browser is still playing (responding == False),
         # and the typed message supersedes it either way.
         await self._send_browser_clear(websocket)
 
+    async def _send_probe_event(self, websocket, event: dict) -> None:
+        try:
+            await websocket.send_text(json.dumps(event))
+        except Exception:  # client gone: reporting must never break the call
+            pass
+
     async def _send_browser_clear(self, websocket) -> None:
-        """Tell the browser to drop queued assistant audio (caller barge-in)."""
-        await websocket.send_text(json.dumps({"type": "clear"}))
+        """Tell the browser to drop queued assistant audio (caller barge-in).
+
+        Best effort: a barge-in during the teardown drain arrives after the
+        browser socket closed, and must not abort the rest of teardown.
+        """
+        try:
+            await websocket.send_text(json.dumps({"type": "clear"}))
+        except Exception as exc:
+            logger.debug("Could not send clear to the browser: %r", exc)
 
     def run(self):
         """Run the server."""
