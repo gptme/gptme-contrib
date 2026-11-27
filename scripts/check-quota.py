@@ -284,8 +284,22 @@ def _codex_credits(data: dict[str, object]) -> int | None:
     When the weekly plan allowance is spent, Codex keeps serving against this
     balance (codex /status: "Weekly limit: 0% left ... Credits: N credits"), so
     a weekly-exhausted pool with credits left is NOT a hard stop. An absent
-    value is unknown, NOT zero.
+    value is unknown, NOT zero. When supplied by the scraper, the capture time
+    must also be fresh: copying an old snapshot must not renew its balance.
+    Legacy caches without a capture time retain the file-age check above.
+    Negative balances count as exhausted, just like zero.
     """
+    captured_at = data.get("_captured_at")
+    if captured_at is not None:
+        if not isinstance(captured_at, str):
+            return None
+        try:
+            captured = datetime.fromisoformat(captured_at)
+            age = (datetime.now(timezone.utc) - captured).total_seconds()
+        except (ValueError, TypeError):
+            return None
+        if age < 0 or age > CODEX_USAGE_MAX_AGE_SECONDS:
+            return None
     credits = data.get("credits")
     if isinstance(credits, bool) or not isinstance(credits, int):
         return None

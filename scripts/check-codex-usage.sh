@@ -328,8 +328,17 @@ if split_idx < len(output):
 # Credit balance: /status prints "Credits: 25706 credits". When the weekly plan
 # allowance is spent, Codex keeps serving against this purchased balance, so a
 # weekly-exhausted pool with credits left is NOT a hard stop (check-quota.py
-# reads this). None when absent = unknown, not zero.
-credits_m = re.search(r'Credits:\s+([\d,]+)\s+credits', output)
+# reads this). This is account-wide and can appear after the Spark section.
+# Conflicting lines are ambiguous: never pick the first pool's balance. Repeated
+# identical lines (e.g. TUI scrollback) still describe one balance.
+credit_balances = {
+    int(value.replace(',', ''))
+    for value in re.findall(
+        r'^[ \t│┃]*Credits:[ \t]+([0-9]+(?:,[0-9]{3})*)[ \t]+credits\b',
+        output, re.MULTILINE,
+    )
+}
+credits = credit_balances.pop() if len(credit_balances) == 1 else None
 
 data = {
     'main': {
@@ -340,7 +349,7 @@ data = {
         'five_hour': parse_limit(spark_text, '5h', window_seconds=5 * 3600),
         'weekly':    parse_limit(spark_text, 'Weekly', window_seconds=7 * 24 * 3600),
     } if spark_text else None,
-    'credits': int(credits_m.group(1).replace(',', '')) if credits_m else None,
+    'credits': credits,
     '_source': 'live',
     '_captured_at': datetime.now(timezone.utc).isoformat(),
 }

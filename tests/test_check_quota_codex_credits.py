@@ -23,6 +23,7 @@ import os
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -41,9 +42,16 @@ def quota_mod():
     assert spec is not None and spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
     # dataclasses resolve annotations via sys.modules[cls.__module__]
+    previous = sys.modules.get(spec.name)
     sys.modules[spec.name] = mod
-    spec.loader.exec_module(mod)
-    return mod
+    try:
+        spec.loader.exec_module(mod)
+        yield mod
+    finally:
+        if previous is None:
+            sys.modules.pop(spec.name, None)
+        else:
+            sys.modules[spec.name] = previous
 
 
 def _patch_pool(
@@ -95,11 +103,12 @@ def test_weekly_exhausted_pool_with_credits_stays_available(
         assert row.pacing_status != "blocked"
 
 
+@pytest.mark.parametrize("credits", [0, -1])
 def test_weekly_exhausted_pool_with_zero_credits_stays_blocked(
-    quota_mod, monkeypatch, tmp_path
+    quota_mod, monkeypatch, tmp_path, credits
 ):
-    """Zero credits is the real hard stop."""
-    _patch_pool(quota_mod, monkeypatch, tmp_path, {"credits": 0})
+    """Zero or negative credits cannot lift the hard stop."""
+    _patch_pool(quota_mod, monkeypatch, tmp_path, {"credits": credits})
 
     row = quota_mod._shared_codex_pool_quota("gptme", "gpt-5.6-sol")
 
@@ -133,17 +142,22 @@ def test_stale_cache_credits_are_unknown_not_zero(quota_mod, monkeypatch, tmp_pa
     assert quota_mod._shared_codex_pool_quota("codex", "gpt-5.6-sol") is None
 
 
+@pytest.mark.parametrize(
+    "five_hour, blocked", [(0.97, False), (0.98, True), (1.0, True)]
+)
 def test_exhausted_five_hour_window_blocks_despite_credits(
-    quota_mod, monkeypatch, tmp_path
+    quota_mod, monkeypatch, tmp_path, five_hour, blocked
 ):
-    """Credits lift the weekly cap only."""
-    _patch_pool(quota_mod, monkeypatch, tmp_path, {"credits": 25_706}, five_hour=1.0)
+    """Credits lift the weekly cap only; the inherited 98% cutoff stays intact."""
+    _patch_pool(
+        quota_mod, monkeypatch, tmp_path, {"credits": 25_706}, five_hour=five_hour
+    )
 
     row = quota_mod._shared_codex_pool_quota("codex", "gpt-5.6-sol")
 
     assert row is not None
-    assert row.available is False
-    assert row.metadata["on_credits"] is False
+    assert row.available is not blocked
+    assert row.metadata["on_credits"] is not blocked
 
 
 def test_cache_rewrite_mid_row_cannot_drop_credits(quota_mod, monkeypatch, tmp_path):
@@ -232,3 +246,98 @@ def test_scraper_omits_credits_as_none_when_absent():
     data = _parse(STATUS_SCREEN.replace("Credits: 25,706 credits\n", ""))
 
     assert data["credits"] is None
+
+
+@pytest.mark.parametrize(
+    "line, expected",
+    [
+        ("│ Credits: 25,706 credits │", 25_706),
+        ("Credits: 25706 credits", 25_706),
+        ("Credits: 25,706 credits\nCredits: 25,706 credits", 25_706),
+        ("Note: Credits: 25,706 credits", None),
+        ("Credits: 25,70 credits", None),
+        ("Credits: -1 credits", None),
+    ],
+)
+def test_scraper_credit_line_formats(line, expected):
+    screen = STATUS_SCREEN.replace("Credits: 25,706 credits", line)
+
+    assert _parse(screen)["credits"] == expected
+
+
+def test_scraper_conflicting_credit_balances_are_unknown():
+    data = _parse(STATUS_SCREEN + "Codex-Spark\nCredits: 100 credits\n")
+
+    assert data["credits"] is None
+
+
+def test_scraper_account_credits_after_spark_are_preserved():
+    screen = STATUS_SCREEN.replace("Credits: 25,706 credits\n", "")
+    data = _parse(
+        screen + "Codex-Spark\nWeekly limit: 50% left\nCredits: 25,706 credits\n"
+    )
+
+    assert data["credits"] == 25_706
+
+
+def test_old_capture_cannot_lift_block_after_cache_copy(
+    quota_mod, monkeypatch, tmp_path
+):
+    captured = datetime.fromtimestamp(
+        time.time() - quota_mod.CODEX_USAGE_MAX_AGE_SECONDS - 60, timezone.utc
+    ).isoformat()
+    _patch_pool(
+        quota_mod,
+        monkeypatch,
+        tmp_path,
+        {"credits": 25_706, "_captured_at": captured},
+    )
+
+    row = quota_mod._shared_codex_pool_quota("codex", "gpt-5.6-sol")
+
+    assert row is not None
+    assert row.available is False
+    assert row.metadata["credits"] is None
+
+
+@pytest.mark.parametrize(
+    "captured", ["invalid", "2026-11-27T20:00:00", 123, "2999-01-01T00:00:00+00:00"]
+)
+def test_invalid_capture_cannot_lift_block(quota_mod, monkeypatch, tmp_path, captured):
+    _patch_pool(
+        quota_mod,
+        monkeypatch,
+        tmp_path,
+        {"credits": 25_706, "_captured_at": captured},
+    )
+
+    row = quota_mod._shared_codex_pool_quota("codex", "gpt-5.6-sol")
+
+    assert row.available is False
+    assert row.metadata["credits"] is None
+
+
+@pytest.mark.parametrize("age, available", [(899, True), (900, True), (901, False)])
+def test_credit_capture_freshness_boundary(
+    quota_mod, monkeypatch, tmp_path, age, available
+):
+    now = datetime(2026, 11, 27, 20, 0, tzinfo=timezone.utc)
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now
+
+    monkeypatch.setattr(quota_mod, "datetime", Clock)
+    monkeypatch.setattr(quota_mod, "_file_age_seconds", lambda path: 0)
+    captured = datetime.fromtimestamp(now.timestamp() - age, timezone.utc).isoformat()
+    _patch_pool(
+        quota_mod,
+        monkeypatch,
+        tmp_path,
+        {"credits": 25_706, "_captured_at": captured},
+    )
+
+    row = quota_mod._shared_codex_pool_quota("codex", "gpt-5.6-sol")
+
+    assert row.available is available
