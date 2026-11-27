@@ -314,3 +314,151 @@ async def test_retry_file_op_retries_async_callable_objects():
     result = await reader()
     assert result == "data"
     assert call_count[0] == 2
+
+
+# ---- Wait-curve contract (gptme/gptme-contrib#2586) ----
+#
+# Base wait before retry n (n=1 after the first failure):
+#   min(max_wait, min_wait * multiplier ** (n - 1))
+# Jitter only adds noise in [0, min_wait] and the final wait is capped again.
+
+
+@pytest.fixture
+def recorded_sleeps(monkeypatch):
+    """Record sync and async sleeps instead of performing them."""
+    import asyncio
+    import time
+
+    waits: list[float] = []
+
+    async def _fake_async_sleep(seconds: float) -> None:
+        waits.append(seconds)
+
+    monkeypatch.setattr(time, "sleep", waits.append)
+    monkeypatch.setattr(asyncio, "sleep", _fake_async_sleep)
+    return waits
+
+
+@pytest.fixture
+def jitter_noise(monkeypatch):
+    """Control the random noise tenacity's jitter wait adds (default: zero)."""
+    import random
+
+    state = {"noise": 0.0}
+
+    def _uniform(low: float, high: float) -> float:
+        return min(high, low + state["noise"])
+
+    monkeypatch.setattr(random, "uniform", _uniform)
+    return state
+
+
+def _exhaust_sync(decorator, exc: type[BaseException]) -> int:
+    calls = 0
+
+    @decorator
+    def always_fails():
+        nonlocal calls
+        calls += 1
+        raise exc("synthetic")
+
+    with pytest.raises(exc):
+        always_fails()
+    return calls
+
+
+async def _exhaust_async(decorator, exc: type[BaseException]) -> int:
+    calls = 0
+
+    @decorator
+    async def always_fails():
+        nonlocal calls
+        calls += 1
+        raise exc("synthetic")
+
+    with pytest.raises(exc):
+        await always_fails()
+    return calls
+
+
+# multiplier != 2 and min_wait != multiplier distinguish the exponent base
+# from the initial amplitude; max_wait=10 exercises the cap.
+_CURVE_KW = {"max_attempts": 5, "min_wait": 1, "max_wait": 10, "multiplier": 3}
+_CURVE = [1, 3, 9, 10]
+
+
+@pytest.mark.parametrize("jitter", [True, False])
+def test_retry_api_call_jitter_toggle_keeps_base_curve_sync(
+    recorded_sleeps, jitter_noise, jitter
+):
+    calls = _exhaust_sync(
+        retry_api_call(jitter=jitter, retry_on=_TemporaryError, **_CURVE_KW),
+        _TemporaryError,
+    )
+    assert calls == 5
+    assert recorded_sleeps == pytest.approx(_CURVE)
+
+
+@pytest.mark.parametrize("jitter", [True, False])
+async def test_retry_api_call_jitter_toggle_keeps_base_curve_async(
+    recorded_sleeps, jitter_noise, jitter
+):
+    calls = await _exhaust_async(
+        retry_api_call(jitter=jitter, retry_on=_TemporaryError, **_CURVE_KW),
+        _TemporaryError,
+    )
+    assert calls == 5
+    assert recorded_sleeps == pytest.approx(_CURVE)
+
+
+def test_retry_api_call_jitter_adds_noise_and_caps_final_wait(
+    recorded_sleeps, jitter_noise
+):
+    jitter_noise["noise"] = 0.5
+    _exhaust_sync(
+        retry_api_call(jitter=True, retry_on=_TemporaryError, **_CURVE_KW),
+        _TemporaryError,
+    )
+    # Noise is added on top of the base curve, then the result is capped.
+    assert recorded_sleeps == pytest.approx([1.5, 3.5, 9.5, 10])
+
+
+def test_retry_api_call_no_jitter_defaults(recorded_sleeps):
+    _exhaust_sync(
+        retry_api_call(jitter=False, retry_on=_TemporaryError), _TemporaryError
+    )
+    assert recorded_sleeps == pytest.approx([1.0, 2.0])
+
+
+def test_retry_file_op_default_curve_sync(recorded_sleeps):
+    calls = _exhaust_sync(retry_file_op(), OSError)
+    assert calls == 3
+    assert recorded_sleeps == pytest.approx([0.1, 0.2])
+
+
+async def test_retry_file_op_default_curve_async(recorded_sleeps):
+    calls = await _exhaust_async(retry_file_op(), OSError)
+    assert calls == 3
+    assert recorded_sleeps == pytest.approx([0.1, 0.2])
+
+
+@pytest.mark.parametrize("is_async", [False, True])
+async def test_retry_file_op_matches_api_curve(recorded_sleeps, is_async):
+    decorator = retry_file_op(retry_on=_TemporaryError, **_CURVE_KW)
+    if is_async:
+        calls = await _exhaust_async(decorator, _TemporaryError)
+    else:
+        calls = _exhaust_sync(decorator, _TemporaryError)
+    assert calls == 5
+    assert recorded_sleeps == pytest.approx(_CURVE)
+
+
+@pytest.mark.parametrize("preset", ["api_jitter", "api_plain", "file"])
+def test_single_attempt_never_sleeps(recorded_sleeps, preset):
+    decorator = {
+        "api_jitter": retry_api_call(max_attempts=1, jitter=True),
+        "api_plain": retry_api_call(max_attempts=1, jitter=False),
+        "file": retry_file_op(max_attempts=1, retry_on=Exception),
+    }[preset]
+    assert _exhaust_sync(decorator, _TemporaryError) == 1
+    assert recorded_sleeps == []
