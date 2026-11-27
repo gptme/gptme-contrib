@@ -4,6 +4,7 @@ import json
 import tempfile
 from pathlib import Path
 
+import pytest
 from gptme_lessons_extras.effectiveness_tracker import (
     EffectivenessTracker,
     LessonStats,
@@ -268,6 +269,55 @@ def test_full_run_does_not_double_count(tmp_path: Path) -> None:
     assert s.processed_count == 1
     assert stats.total_inclusions == 1
     assert stats.sessions_included == ["2025-10-02-one"]
+
+
+@pytest.mark.parametrize("legacy", [False, True], ids=["full", "legacy"])
+@pytest.mark.parametrize("interrupted", [False, True], ids=["limit", "checkpoint"])
+def test_rebuild_resumes_exactly_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, legacy: bool, interrupted: bool
+) -> None:
+    logs, state = tmp_path / "logs", tmp_path / "state.json"
+    names = ["2025-10-02-amber", "2025-10-02-middle", "2025-10-02-zesty"]
+    for name in names:
+        _write_log(logs, name)
+    EffectivenessTracker(logs_dir=logs, state_file=state).analyze()
+    if legacy:
+        saved = json.loads(state.read_text())
+        del saved["processed_logs"]
+        state.write_text(json.dumps(saved))
+
+    tracker = EffectivenessTracker(logs_dir=logs, state_file=state)
+    if interrupted:
+        process_log = tracker._process_log
+
+        def interrupt_after_checkpoint(log_dir: Path) -> list:
+            if log_dir.name == names[1]:
+                raise RuntimeError("interrupted after first checkpoint")
+            return process_log(log_dir)
+
+        monkeypatch.setattr(tracker, "_process_log", interrupt_after_checkpoint)
+        with pytest.raises(RuntimeError, match="interrupted after first checkpoint"):
+            tracker.analyze(incremental=legacy, checkpoint_interval=1)
+    else:
+        tracker.analyze(incremental=legacy, limit=1)
+
+    partial = EffectivenessTracker(logs_dir=logs, state_file=state).state
+    assert partial.processed_count == partial.total_sessions == 1
+    assert partial.processed_logs == names[:1]
+    assert partial.last_processed == names[0]
+    assert partial.lesson_stats["lessons/workflow/a.md"].total_inclusions == 1
+
+    # Resume from disk, then repeat: neither remaining logs nor the checkpointed
+    # log may be skipped or counted twice.
+    for _ in range(2):
+        resumed = EffectivenessTracker(logs_dir=logs, state_file=state).analyze()
+        assert resumed.processed_count == resumed.total_sessions == len(names)
+        assert resumed.processed_logs == names
+        assert resumed.last_processed == names[-1]
+        stats = resumed.lesson_stats["lessons/workflow/a.md"]
+        assert stats.total_inclusions == len(names)
+        assert stats.sessions_included == names
+        assert stats.keywords_matched == {"git": len(names)}
 
 
 def test_legacy_state_rebuilds_without_skipping_earlier_log(tmp_path: Path) -> None:
