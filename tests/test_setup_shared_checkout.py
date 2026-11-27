@@ -163,6 +163,15 @@ def test_installs_into_the_common_dir_from_a_linked_worktree(
     assert (repo / ".git" / "hooks" / "pre-commit").exists()
 
 
+def test_hooks_path_makes_setup_fail_loudly(repo: Path, tmp_path: Path) -> None:
+    _git(repo, "config", "core.hooksPath", ".githooks")
+    result = _run(repo, home=tmp_path)
+    assert result.returncode == 1
+    assert "core.hooksPath" in result.stderr
+    # The config part still applied.
+    assert _git(repo, "config", "--bool", "safety.sharedCheckout") == "true"
+
+
 def test_rejects_non_repo(tmp_path: Path) -> None:
     result = _run(tmp_path, home=tmp_path)
     assert result.returncode == 2

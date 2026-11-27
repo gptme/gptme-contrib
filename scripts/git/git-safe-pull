@@ -196,7 +196,7 @@ case "$LOCK_TIMEOUT" in
     ;;
 esac
 
-command -v flock >/dev/null 2>&1 || { echo "git-safe-pull: flock not found (macOS: brew install flock; Linux: util-linux)" >&2; exit 1; }
+command -v flock >/dev/null 2>&1 || { echo "git-safe-pull: flock not found (macOS: brew install flock; Linux: util-linux)" >&2; exit 2; }
 exec 9>"$LOCKFILE" || {
     echo "error: could not open lock file: $LOCKFILE" >&2
     exit 2

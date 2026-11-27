@@ -131,6 +131,10 @@ fi
 if [ "$(git config --global --get rebase.autoStash || true)" = "true" ]; then
   echo "note: global rebase.autoStash=true still applies to other repos (overridden here)"
 fi
+if [ "$HOOKS_PATH_SET" = 1 ]; then
+  echo "incomplete: config set, but the pre-commit hook was not installed (core.hooksPath)" >&2
+  exit 1
+fi
 echo "done. Claude Code guard: add scripts/claude-code-hooks/shared-checkout-git-guard.py"
 echo "as a PreToolUse Bash hook in ~/.claude/settings.json (see its docstring)."
 exit 0

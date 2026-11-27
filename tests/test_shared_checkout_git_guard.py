@@ -46,6 +46,10 @@ def detect(command: str, cwd: Path = SHARED, *, worktrees: bool = False):
         "git reset",
         "git reset HEAD",
         "git reset -- .",
+        "git reset origin/master",
+        "git reset 1a2b3c4d",
+        "git reset -q HEAD~2",
+        "git reset file.py",  # ambiguous: could be a commit; use `reset -- file.py`
         "git pull --rebase --autostash",
         "git rebase origin/master --autostash",
         "git clean -fd",
@@ -94,6 +98,8 @@ def test_shared_checkout_denies_tree_wide_operations(command):
         "git commit -m 'fix: thing' -- path/to/file.py",
         "git commit --amend --no-edit",
         "git reset -- path/to/file.py",
+        "git reset HEAD path/to/file.py",
+        "git reset origin/master -- path/to/file.py",
         "git reset --soft HEAD~1",
         "git pull --ff-only",
         "git restore path/to/file.py",
@@ -131,6 +137,13 @@ def test_work_tree_option_targets_that_tree():
     assert detect(f"git --work-tree={SHARED} clean -fd", cwd=OTHER) is not None
     assert detect(f"git --work-tree {SHARED} reset --hard", cwd=OTHER) is not None
     assert detect(f"git --work-tree={OTHER} reset --hard", cwd=SHARED) is None
+
+
+def test_several_cds_check_every_target():
+    # cwd unmarked; a later cd lands in the shared checkout.
+    assert detect(f"cd /tmp && cd {SHARED} && git reset --hard", cwd=OTHER) is not None
+    assert detect(f"cd {OTHER} && cd {SHARED}; git add -A", cwd=OTHER) is not None
+    assert detect(f"cd /tmp && cd {OTHER} && git reset --hard", cwd=OTHER) is None
 
 
 def test_cd_with_semicolon_checks_both_directories():

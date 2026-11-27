@@ -68,10 +68,15 @@ _STASH_STACK_RE = re.compile(
 )
 _RESET_HARD_RE = re.compile(_GIT + r"reset(?:\s+[^;&|\n]*)?\s+--hard" + _END)
 # A mixed reset without a pathspec (or with ``-- .``) rewrites the whole index,
-# unstaging every other session's staged files. ``--soft`` and
-# ``reset -- path`` stay allowed.
+# unstaging every other session's staged files, and ``reset <commit>`` also
+# moves the branch. One bare argument can be a commit or a path and only git
+# knows which, so it is denied; paths take ``reset -- <path>``. ``--soft``,
+# ``reset -- path`` and ``reset <commit> <path>...`` stay allowed.
 _RESET_INDEX_RE = re.compile(
-    _GIT + r"reset(?:\s+(?:-q|--quiet|--mixed|HEAD(?:[~^]\d*)*))*\s*(?:$|[;&|)\n])"
+    _GIT
+    + r"reset(?:\s+(?:-q|--quiet|--mixed|--no-refresh))*"
+    + r"(?:\s+[^\s;&|)\-][^\s;&|)]*)?"
+    + r"(?:\s+(?:-q|--quiet|--mixed|--no-refresh))*\s*(?:$|[;&|)\n])"
 )
 _RESET_ALL_RE = re.compile(
     _GIT + r"reset(?:\s+(?:-q|--quiet|--mixed|HEAD(?:[~^]\d*)*))*\s+--\s+\." + _END
@@ -125,30 +130,43 @@ _LEADING_CD_RE = re.compile(
 )
 
 
-def effective_cwds(command: str, cwd: Path) -> list[Path]:
-    """Where *command* may run: *cwd* and/or the target of a leading ``cd``.
+_CD_RE = re.compile(r"(?:^|[;&|()\s])cd\s+(?P<path>'[^']*'|\"[^\"]*\"|[^\s;&|)]+)")
 
-    Only one unambiguous leading ``cd`` is trusted; anything else keeps *cwd*
-    (fail closed: a second ``cd`` could hop back into the guarded checkout).
-    ``cd X && ...`` runs in X only. ``cd X; ...`` (or a newline) runs the rest
-    even when the cd fails, so both X and *cwd* are checked.
-    """
-    if len(re.findall(r"(?:^|[;&|()\s])cd\s", command)) != 1:
-        return [cwd]
-    match = _LEADING_CD_RE.match(command)
-    if match is None:
-        return [cwd]
-    target = match.group("path").strip("'\"")
+
+def _resolve_cd_target(target: str, cwd: Path) -> Path | None:
+    target = target.strip("'\"")
     if not target or target.startswith("-") or "$" in target or "`" in target:
-        return [cwd]
+        return None
     candidate = Path(os.path.expanduser(target))
     if not candidate.is_absolute():
         candidate = cwd / candidate
     try:
-        candidate = candidate.resolve()
+        return candidate.resolve()
     except OSError:
+        return None
+
+
+def effective_cwds(command: str, cwd: Path) -> list[Path]:
+    """Directories *command*'s git calls may run in.
+
+    ``cd X && ...`` as the only ``cd`` runs in X only. Otherwise (``cd X; ...``
+    runs the rest even when the cd fails; several ``cd``s can hop anywhere)
+    every resolvable ``cd`` target and *cwd* are all checked: fail closed.
+    """
+    targets = [m.group("path") for m in _CD_RE.finditer(command)]
+    if not targets:
         return [cwd]
-    return [candidate] if match.group("sep") == "&&" else [candidate, cwd]
+    match = _LEADING_CD_RE.match(command)
+    if len(targets) == 1 and match is not None and match.group("sep") == "&&":
+        only = _resolve_cd_target(match.group("path"), cwd)
+        if only is not None:
+            return [only]
+    dirs = [cwd]
+    for target in targets:
+        resolved = _resolve_cd_target(target, cwd)
+        if resolved is not None and resolved not in dirs:
+            dirs.append(resolved)
+    return dirs
 
 
 def effective_cwd(command: str, cwd: Path) -> Path:
@@ -231,9 +249,9 @@ def detect(
                     "sessions' uncommitted work lives in this tree, and this "
                     "command can stash, revert, unstage or sweep it up. Commit "
                     "your own explicit paths (`git add <paths>` / `git-safe-commit "
-                    "<paths>`), pull with `git pull --ff-only` / `git-safe-pull`, "
-                    "and do experiments that need reset/clean in a separate "
-                    "worktree."
+                    "<paths>`), unstage paths with `git reset -- <paths>`, pull "
+                    "with `git pull --ff-only` / `git-safe-pull`, and do "
+                    "experiments that need reset/clean in a separate worktree."
                 )
     stash_targets = [
         t for d in run_dirs for t in _target_dirs(command, _STASH_STACK_RE, d)
