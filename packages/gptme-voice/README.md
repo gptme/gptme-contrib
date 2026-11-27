@@ -288,11 +288,14 @@ emits one JSONL `utterance_trace` with `asr_ms` (speech stopped → transcript),
 | `GPTME_VOICE_SUBAGENT_MODEL_FAST` / `_SMART` | `openrouter/anthropic/claude-haiku-4.5` / gptme default | Subagent models (`GPTME_VOICE_SUBAGENT_MODEL` sets both) |
 | `GPTME_VOICE_SUBAGENT_TIMEOUT_FAST_SECONDS` / `_SMART_SECONDS` | `60` / `120` | Subagent timeouts |
 | `GPTME_VOICE_SUBAGENT_PATH` | `gptme` on `PATH` | gptme binary used for subagents |
+| `GPTME_VOICE_SUBAGENT_TRANSCRIPT_TAIL_MODE` | `prompt` | How the call transcript tail reaches the subagent: `prompt` sends it on the subprocess's stdin, which gptme appends to the prompt (never in argv); `flags` passes `--transcript-tail-file`/`--transcript-tail-turns` to a wrapper script that accepts them |
 | `GPTME_VOICE_RESUME_WINDOW_SECONDS` | `300` | Reconnects within this window resume the previous transcript |
 | `GPTME_VOICE_STATE_DIR` | `/tmp/gptme-voice-call-state` | Per-call state and transcript records |
 | `GPTME_VOICE_POST_CALL_COMMAND` | unset | Command run after a call, given the call record paths as arguments and `GPTME_VOICE_POST_CALL_JSON(S)` / `GPTME_VOICE_CALLER_ID` in its environment |
 | `GPTME_VOICE_POST_CALL_DELAY_SECONDS` | resume window | Intended post-call delay. The server runs the command right away and passes this value in the command's environment; the command is responsible for waiting (e.g. by scheduling a timer) |
 | `GPTME_VOICE_GPTME_SERVER_URL` / `_KEY` | unset | Also post call transcripts to a gptme server conversation |
+
+> **Upgrading a wrapper subagent:** before this setting existed, the bridge always passed `--transcript-tail-file`/`--transcript-tail-turns`. A wrapper that reads those flags must now set `GPTME_VOICE_SUBAGENT_TRANSCRIPT_TAIL_MODE=flags`. Otherwise it gets the tail on stdin, and a wrapper that does not pass its stdin on to gptme drops the tail without an error.
 
 ## Architecture
 

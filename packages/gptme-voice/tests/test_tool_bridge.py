@@ -436,6 +436,8 @@ def test_execute_passes_bounded_transcript_tail_to_wrapper() -> None:
 
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr(tool_bridge, "_spawn_subagent", _fake_create_subprocess_exec)
+            mp.setenv("GPTME_VOICE_SUBAGENT_PATH", "/fake/voice-subagent.sh")
+            mp.setenv("GPTME_VOICE_SUBAGENT_TRANSCRIPT_TAIL_MODE", "flags")
             bridge = GptmeToolBridge(
                 workspace="/fake/workspace",
                 transcript_provider=lambda: transcript,
@@ -452,6 +454,69 @@ def test_execute_passes_bounded_transcript_tail_to_wrapper() -> None:
         assert captured["tail_text"] == (
             "Assistant: first answer\nUser: second question\nAssistant: second answer"
         )
+
+    asyncio.run(_exercise())
+
+
+@pytest.mark.parametrize(
+    ("subagent_path", "mode"),
+    [
+        (None, None),
+        ("/usr/local/bin/gptme-2.0", None),
+        # The executable's name never decides: a wrapper must declare "flags".
+        ("/fake/voice-subagent.sh", None),
+        ("/fake/voice-subagent.sh", "prompt"),
+        ("/fake/gptme", "bogus"),
+    ],
+)
+def test_execute_inlines_transcript_tail_unless_flags_declared(
+    subagent_path: str | None, mode: str | None
+) -> None:
+    """Plain gptme has no --transcript-tail-* options; it would exit 2.
+
+    Unless the subagent declares the flags contract, the tail goes into the
+    prompt, whatever the executable is called.
+    """
+
+    async def _exercise() -> None:
+        captured: dict[str, object] = {}
+
+        async def _fake_create_subprocess_exec(*args, **kwargs):
+            captured["args"] = args
+            with kwargs["stdin"] as stdin:  # the real spawn closes it too
+                captured["stdin"] = stdin.read().decode()
+            return _FakeProcess(returncode=0)
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(tool_bridge, "_spawn_subagent", _fake_create_subprocess_exec)
+            if subagent_path is None:
+                mp.delenv("GPTME_VOICE_SUBAGENT_PATH", raising=False)
+            else:
+                mp.setenv("GPTME_VOICE_SUBAGENT_PATH", subagent_path)
+            if mode is None:
+                mp.delenv("GPTME_VOICE_SUBAGENT_TRANSCRIPT_TAIL_MODE", raising=False)
+            else:
+                mp.setenv("GPTME_VOICE_SUBAGENT_TRANSCRIPT_TAIL_MODE", mode)
+            bridge = GptmeToolBridge(
+                workspace="/fake/workspace",
+                transcript_provider=lambda: [
+                    {"role": "user", "text": "look up the star count"},
+                ],
+            )
+            # Explicit limits: the host may disable tail forwarding via env.
+            bridge.transcript_tail_turns = 8
+            bridge.transcript_tail_chars = 1_600
+            result = await bridge._execute("star count of gptme", mode="fast")
+
+        assert result.success is True
+        args = tuple(captured["args"])
+        assert not any(str(a).startswith("--transcript-tail") for a in args)
+        prompt = args[-1]
+        assert prompt.startswith("Request:\nstar count of gptme")
+        assert "(last 1 turns) is attached below as stdin, for context only" in prompt
+        # The transcript itself never reaches argv (readable via /proc).
+        assert not any("look up the star count" in str(a) for a in args)
+        assert captured["stdin"] == "User: look up the star count"
 
     asyncio.run(_exercise())
 
@@ -1394,6 +1459,8 @@ def test_subagent_reader_error_delivers_result_and_reaps_child(
     )
     script.chmod(0o755)
     monkeypatch.delenv("GPTME_VOICE_SUBAGENT_PATH", raising=False)
+    # The wrapper contract: the tail arrives as a temp file that must be removed.
+    monkeypatch.setenv("GPTME_VOICE_SUBAGENT_TRANSCRIPT_TAIL_MODE", "flags")
     monkeypatch.setattr(tool_bridge, "_TIMEOUT_BINARY_AVAILABLE", False)
     real_spawn = tool_bridge._spawn_subagent
     processes: list[tool_bridge._SubagentProcess] = []

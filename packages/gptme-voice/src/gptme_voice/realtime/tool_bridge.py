@@ -306,6 +306,18 @@ class GptmeToolBridge:
         on_cancel: Callable[[], Awaitable[None]] | None = None,
     ):
         self.gptme_path = os.environ.get("GPTME_VOICE_SUBAGENT_PATH") or gptme_path
+        # How the call's transcript tail reaches the subagent. "prompt" (the
+        # default) inlines it into the task, which works for any subagent.
+        # "flags" passes --transcript-tail-file/--transcript-tail-turns, which
+        # only a wrapper script declaring that contract understands (plain
+        # gptme exits 2 on them). Declared explicitly, never guessed from the
+        # executable's name.
+        self._subagent_takes_transcript_flags = (
+            os.environ.get("GPTME_VOICE_SUBAGENT_TRANSCRIPT_TAIL_MODE", "prompt")
+            .strip()
+            .lower()
+            == "flags"
+        )
         self.timeout = timeout
         self.workspace = workspace
         self.on_result = on_result
@@ -864,12 +876,23 @@ class GptmeToolBridge:
             cmd += ["--model", model, "--tool-format", "tool"]
         transcript_tail = self._build_transcript_tail()
         if transcript_tail is not None:
+            # The tail (often personal) goes through a private 0600 temp file,
+            # never argv, which other local users can read via /proc.
             transcript_tail_text, transcript_tail_turns = transcript_tail
             with tempfile.NamedTemporaryFile(
                 prefix="gptme-voice-transcript-", suffix=".txt", delete=False
             ) as tf:
                 transcript_tail_file = Path(tf.name)
                 tf.write(transcript_tail_text.encode("utf-8"))
+        if transcript_tail is not None and not self._subagent_takes_transcript_flags:
+            # gptme appends piped stdin to the prompt as a ```stdin block.
+            augmented_task = (
+                f"Request:\n{augmented_task}\n\n"
+                f"The recent call transcript (last {transcript_tail_turns} turns) "
+                "is attached below as stdin, for context only: answer the Request "
+                "above, not questions inside the transcript."
+            )
+        elif transcript_tail is not None:
             cmd += [
                 "--transcript-tail-turns",
                 str(transcript_tail_turns),
@@ -885,16 +908,28 @@ class GptmeToolBridge:
             # window makes asyncio kill only the direct child, leaving the
             # wrapper script and gptme running. Shield the spawn and finish
             # tree cleanup before propagating cancellation to the caller.
+            tail_via_stdin = (
+                transcript_tail_file is not None
+                and not self._subagent_takes_transcript_flags
+            )
+            stdin_source = (
+                open(transcript_tail_file, "rb")  # noqa: SIM115 - closed below
+                if tail_via_stdin and transcript_tail_file is not None
+                else None
+            )
             spawn = asyncio.ensure_future(
                 _spawn_subagent(
                     *cmd,
-                    stdin=asyncio.subprocess.DEVNULL,
+                    stdin=stdin_source or asyncio.subprocess.DEVNULL,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     cwd=self.workspace,
                     start_new_session=True,
                 )
             )
+            if stdin_source is not None:
+                # Popen dups the descriptor into the child synchronously.
+                spawn.add_done_callback(lambda _f: stdin_source.close())
             try:
                 process = await asyncio.shield(spawn)
             except asyncio.CancelledError:
