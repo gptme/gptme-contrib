@@ -4,12 +4,13 @@ import logging
 import re
 import subprocess
 import time
-from collections.abc import Generator, Sequence
-from contextlib import nullcontext
+from collections.abc import Generator, Iterable, Sequence
+from contextlib import contextmanager
 from datetime import datetime
 from functools import lru_cache
 from logging import Filter
 from pathlib import Path
+from threading import RLock, local
 from typing import Any, cast
 
 import chromadb
@@ -38,6 +39,10 @@ def _glob_match_path(path: str, pattern: str) -> bool:
 
 # Max entries per collection read/delete call.
 _PAGE_SIZE = 1000
+
+# Chroma's nonpersistent clients share the process-wide ephemeral system.
+# Their replacement operations need one lock even across Indexer instances.
+_EPHEMERAL_WRITER_LOCK = RLock()
 
 # HuggingFace namespaces used for sentence-transformer / embedding models.
 # Model names in these namespaces contain a slash but are NOT OpenRouter model names.
@@ -319,6 +324,11 @@ def _chunk_start(chunk: Document) -> int | None:
     return int(match.group(1)) if match else None
 
 
+def _is_tombstone(doc: Document) -> bool:
+    """True for the content-less marker Document.from_file yields for an empty file."""
+    return not doc.is_chunk and not (doc.content or "").strip()
+
+
 class Indexer:
     """Handles document indexing and embedding storage."""
 
@@ -363,6 +373,10 @@ class Indexer:
                 (search, status) to prevent accidental data loss when an explicit
                 --embedding-function differs from the stored model.
         """
+        # flock is not reentrant across separately opened descriptors. Keep
+        # nested batch/sweep locks inside one thread-owned outer file lock.
+        self._writer_thread_lock = RLock()
+        self._writer_lock_state = local()
         self.collection_name = collection_name
         # Populated by auto-detect when the stored model cannot be re-loaded
         # (API key absent for OpenRouter, weights missing for sentence-transformers).
@@ -796,11 +810,25 @@ class Indexer:
         if scoring_weights:
             self.scoring_weights.update(scoring_weights)
 
+    @contextmanager
     def _index_writer_lock(self):
         persist_dir = getattr(self, "persist_directory", None)
-        if persist_dir is None:
-            return nullcontext()
-        return index_writer_lock(persist_dir)
+        thread_lock = (
+            self._writer_thread_lock if persist_dir is not None else _EPHEMERAL_WRITER_LOCK
+        )
+        with thread_lock:
+            if persist_dir is None:
+                yield
+                return
+            if getattr(self._writer_lock_state, "held", False):
+                yield
+                return
+            with index_writer_lock(persist_dir):
+                self._writer_lock_state.held = True
+                try:
+                    yield
+                finally:
+                    self._writer_lock_state.held = False
 
     def _collection_confirmed_missing(self, collection_name: str) -> bool:
         """True only when the catalog lists no collection of this name.
@@ -1080,9 +1108,13 @@ class Indexer:
                 metadatas.append(doc.metadata)
                 ids.append(doc.doc_id)
 
-            # Add batch to collection
+            # Upsert, not add: index_file/index_directory no longer delete a
+            # source before re-adding it, so re-indexing unchanged content
+            # writes ids that already exist (they derive from the content
+            # hash). Upsert refreshes their metadata (last_modified feeds the
+            # recency boost) instead of skipping or rejecting the existing id.
             with self._index_writer_lock():
-                self.collection.add(documents=contents, metadatas=metadatas, ids=ids)  # type: ignore[arg-type]
+                self.collection.upsert(documents=contents, metadatas=metadatas, ids=ids)  # type: ignore[arg-type]
         except Exception as e:
             logger.error(f"Failed to process batch: {e}")
             raise
@@ -1227,6 +1259,58 @@ class Indexer:
 
         return self._decide_rel_path(rel_root, root, gitignore_specs) is True
 
+    def _snapshot_source_ids(self, sources: Iterable[str]) -> dict[str, set[str]]:
+        """Ids stored for each source *before* this run adds anything.
+
+        Read under the writer lock: the scan is offset-based, so a concurrent
+        write that inserts or deletes an id between pages would skip or repeat
+        ids and leave stale ones behind.
+        """
+        snapshot: dict[str, set[str]] = {}
+        for source in sources:
+            with self._index_writer_lock():
+                try:
+                    snapshot[source] = set(self._iter_ids(where={"source": source}))
+                except NotFoundError:
+                    # Another indexer may have reset the collection since this
+                    # instance last used it. Restart the scan on its new handle.
+                    self._refresh_collection()
+                    snapshot[source] = set(self._iter_ids(where={"source": source}))
+        return snapshot
+
+    def _delete_ids(self, ids: list[str]) -> None:
+        """Delete ids in bounded pages, each under the writer lock."""
+        for start in range(0, len(ids), _PAGE_SIZE):
+            page = ids[start : start + _PAGE_SIZE]
+            try:
+                with self._index_writer_lock():
+                    self.collection.delete(ids=page)
+            except NotFoundError:
+                # The cached Collection object is stale: the collection was
+                # recreated (reset_collection in another process) between the
+                # snapshot and this delete. Re-bind and retry once, as
+                # delete_documents does — never wipe the index to recover.
+                logger.debug("Collection handle stale on sweep; refreshing and retrying")
+                self._refresh_collection()
+                with self._index_writer_lock():
+                    self.collection.delete(ids=page)
+
+    def _add_then_sweep(self, documents: list[Document], sources: Iterable[str]) -> None:
+        """Add ``documents``, then delete only the ids this run made stale.
+
+        Callers hold the writer lock from file collection through this sweep:
+        a concurrent replacement must not upsert a snapshotted id that we then
+        delete. The snapshot also limits deletion to previously stored ids.
+        A failed add raises before the sweep, so the old ids stay in place.
+        """
+        new_ids = {doc_id for doc in documents if (doc_id := self._generate_doc_id(doc).doc_id)}
+        prior_ids = self._snapshot_source_ids(sources)
+        if documents:
+            self.add_documents(documents)
+        stale = sorted(set().union(*prior_ids.values()) - new_ids)
+        if stale:
+            self._delete_ids(stale)
+
     def index_directory(
         self,
         directory: Path,
@@ -1242,6 +1326,10 @@ class Indexer:
         Returns:
             Number of files indexed
         """
+        with self._index_writer_lock():
+            return self._index_directory_locked(directory, glob_pattern)
+
+    def _index_directory_locked(self, directory: Path, glob_pattern: str) -> int:
         directory = directory.resolve()  # Convert to absolute path
 
         # Collect documents using the new method
@@ -1265,11 +1353,15 @@ class Indexer:
                 "Re-index with a model that is available, or provide the required credentials."
             )
 
-        for source in sources:
-            self.delete_documents({"source": source})
+        # Empty files yield a content-less tombstone; the tombstone itself is not
+        # a document to store, and it leaves its source with no new ids so the
+        # stale sweep drops its old chunks.
+        stored = [doc for doc in documents if not _is_tombstone(doc)]
 
-        # Process the documents
-        self.add_documents(documents)
+        # Add first, sweep stale ids after: deleting before the add means one
+        # failed add (embedding backend, quota, transient Chroma error) leaves
+        # every source in the directory with neither its old nor its new chunks.
+        self._add_then_sweep(stored, sources)
 
         logger.info(f"Indexed {n_files} files from {directory}")
         return n_files
@@ -2263,11 +2355,22 @@ class Indexer:
         Returns:
             Number of documents indexed
         """
+        # Collect inside the lock too: otherwise a waiting writer could apply
+        # an older file generation after a newer replacement has completed.
+        with self._index_writer_lock():
+            return self._index_file_locked(path)
+
+    def _index_file_locked(self, path: Path) -> int:
         documents = self.collect_documents(path)
-        if documents:
-            self.add_documents(documents)
-            return len(documents)
-        return 0
+        stored = [doc for doc in documents if not _is_tombstone(doc)]
+        sources = sorted({str(s) for doc in documents if (s := doc.metadata.get("source"))})
+
+        # Add first, then drop whatever old ids the source no longer produces.
+        # An emptied file yields only a tombstone, so it has no new ids and the
+        # sweep removes everything previously indexed for it. Deleting before
+        # the add would lose the old chunks whenever the add fails.
+        self._add_then_sweep(stored, sources)
+        return len(stored)
 
     def get_all_documents(self) -> list[Document]:
         """Get all documents from the index.
