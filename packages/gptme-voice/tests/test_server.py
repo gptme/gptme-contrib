@@ -184,8 +184,9 @@ class _FakeRealtimeClient:
         self.sent_text.append(text)
 
     async def send_typed_message(self, text: str) -> bool:
-        if self.typed_error is not None:
-            raise self.typed_error
+        if self.typed_error is not None:  # one-shot
+            error, self.typed_error = self.typed_error, None
+            raise error
         self.sent_typed.append(text)
         return self.typed_interrupts
 
@@ -3318,8 +3319,15 @@ def test_browser_typed_message_during_a_reply_clears_playback(
     assert {"type": "clear"} in [json.loads(m) for m in websocket.text_messages]
 
 
+@pytest.mark.parametrize(
+    "error",
+    [
+        RuntimeError("Not connected to OpenAI Realtime API"),
+        asyncio.TimeoutError(),  # session never became ready
+    ],
+)
 def test_browser_typed_message_not_delivered_is_not_recorded(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, error: Exception
 ) -> None:
     """A provider hiccup drops the message, not the call, and nothing is posted."""
     server = VoiceServer(enable_browser_transport=True)
@@ -3329,18 +3337,22 @@ def test_browser_typed_message_not_delivered_is_not_recorded(
                 "type": "websocket.receive",
                 "text": json.dumps({"type": "text", "text": "lost message"}),
             },
+            {
+                "type": "websocket.receive",
+                "text": json.dumps({"type": "text", "text": "second try"}),
+            },
             {"type": "websocket.disconnect"},
         ]
     )
     fake_client = _FakeRealtimeClient()
-    fake_client.typed_error = RuntimeError("Not connected to OpenAI Realtime API")
+    fake_client.typed_error = error
 
     seen = _run_browser_call(monkeypatch, server, websocket, fake_client)
 
-    # The handler kept running to the normal disconnect and ended the call
-    # cleanly, with no turn for the undelivered message.
-    assert seen["transcript"] == []
-    assert {"type": "clear"} not in [json.loads(m) for m in websocket.text_messages]
+    # The call survived the failed send: the next message went through, and
+    # only that one is in the transcript.
+    assert fake_client.sent_typed == ["second try"]
+    assert [(t.role, t.text) for t in seen["transcript"]] == [("user", "second try")]
 
 
 def test_probe_call_leaves_no_call_record(monkeypatch: pytest.MonkeyPatch) -> None:

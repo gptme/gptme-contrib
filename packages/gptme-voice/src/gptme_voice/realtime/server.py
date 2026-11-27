@@ -3926,8 +3926,12 @@ class VoiceServer:
         # hiccup must not end the call (like the /local text path).
         try:
             await realtime_client.send_typed_message(text)
-        except (RuntimeError, websockets.ConnectionClosed) as exc:
-            logger.warning("Typed message not delivered to the provider: %s", exc)
+        except (
+            RuntimeError,
+            asyncio.TimeoutError,  # session never became ready
+            websockets.ConnectionClosed,
+        ) as exc:
+            logger.warning("Typed message not delivered to the provider: %r", exc)
             return
         # A distinct item id keeps it from being merged with a speech partial.
         _append_transcript_turn(

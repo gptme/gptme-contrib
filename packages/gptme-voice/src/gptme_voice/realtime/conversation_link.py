@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 import urllib.parse
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -174,6 +175,10 @@ class LiveTranscriptSink:
         # posted (e.g. a longer final transcript); revised turns are posted again
         # and the server updates them in place (same turn_id).
         self._posted: dict[int, str] = {}
+        # Index -> (text, when it last changed), to tell settled turns apart.
+        self._seen: dict[int, tuple[str, float]] = {}
+        # Turns that cannot be revised (typed messages).
+        self._final: set[int] = set()
         self._timer: asyncio.Task[None] | None = None
         self._lock = asyncio.Lock()
         self._closed = False
@@ -181,12 +186,35 @@ class LiveTranscriptSink:
     def notify(self, *, immediate: bool = False) -> None:
         """Call after the transcript changed; (re)starts the settle timer.
 
-        *immediate* skips the settle delay, for turns that cannot be revised
-        (typed messages, unlike provider speech transcripts).
+        *immediate* marks the newest turn as final (a typed message, unlike a
+        provider speech transcript, is never revised) and flushes without
+        waiting. Earlier turns still in their settle window are not posted
+        early: the flush stops there and retries once they settle, so the
+        chat keeps the call's order.
         """
         if self._closed:
             return
+        self._observe()
+        if immediate and self._transcript:
+            self._final.add(len(self._transcript) - 1)
         self._schedule(0 if immediate else self._settle_seconds)
+
+    def _observe(self) -> None:
+        now = time.monotonic()
+        for i, turn in enumerate(self._transcript):
+            text = str(turn.text)
+            seen = self._seen.get(i)
+            if seen is None or seen[0] != text:
+                self._seen[i] = (text, now)
+
+    def _settled(self, i: int, text: str, now: float) -> bool:
+        if i in self._final:
+            return True
+        seen = self._seen.get(i)
+        if seen is None or seen[0] != text:
+            return False
+        # Small slack: the timer fires settle_seconds after the last change.
+        return now - seen[1] >= self._settle_seconds - 0.05
 
     def _schedule(self, delay: float) -> None:
         if self._timer is not None and not self._timer.done():
@@ -195,24 +223,39 @@ class LiveTranscriptSink:
 
     async def _flush_after(self, delay: float) -> None:
         await asyncio.sleep(delay)
-        if await self.flush() == "retry" and not self._closed:
+        result = await self.flush(force=False)
+        if self._closed:
+            return
+        if result == "retry":
             self._schedule(self._retry_seconds)
+        elif result == "held":
+            self._schedule(self._settle_seconds)
 
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
             self._client = httpx.AsyncClient(timeout=10)
         return self._client
 
-    async def flush(self) -> str:
-        """Post unposted turns. Returns "ok", "retry" or "error"."""
+    async def flush(self, *, force: bool = True) -> str:
+        """Post unposted turns. Returns "ok", "held", "retry" or "error".
+
+        Without *force*, posting stops before the first turn still in its
+        settle window ("held": call again once it settled).
+        """
         async with self._lock:
-            pending = [
-                (i, turn)
-                for i, turn in enumerate(self._transcript)
-                if str(turn.text).strip() and self._posted.get(i) != turn.text
-            ]
+            self._observe()
+            now = time.monotonic()
+            pending = []
+            held = False
+            for i, turn in enumerate(self._transcript):
+                if not str(turn.text).strip() or self._posted.get(i) == turn.text:
+                    continue
+                if not force and not self._settled(i, str(turn.text), now):
+                    held = True
+                    break
+                pending.append((i, turn))
             if not pending:
-                return "ok"
+                return "held" if held else "ok"
             payload = {
                 "turns": [
                     {
@@ -240,16 +283,19 @@ class LiveTranscriptSink:
                         resp.status_code,
                     )
                 return "retry"
+            # Recorded as handled either way: a permanent rejection (auth, a
+            # malformed request) would fail again, so those turns are dropped
+            # rather than re-sent with every later turn.
+            self._posted.update((i, turn.text) for i, turn in pending)
             if resp.status_code >= 400:
-                # Auth or a malformed request: retrying cannot help.
                 logger.warning(
-                    "Live transcript post rejected (%d): %s",
+                    "Live transcript post rejected (%d), dropped %d turn(s): %s",
                     resp.status_code,
+                    len(pending),
                     resp.text[:200],
                 )
                 return "error"
-            self._posted.update((i, turn.text) for i, turn in pending)
-            return "ok"
+            return "held" if held else "ok"
 
     async def close(self) -> None:
         """Flush everything (retrying briefly) and release the HTTP client."""

@@ -1366,7 +1366,14 @@ def test_send_typed_message_interrupts_an_active_reply() -> None:
             await client._handle_event({"type": "response.created"})
             assert client.responding
             baseline = len(fake_ws.sent)
-            assert await client.send_typed_message("wait, not that") is True
+            typed = asyncio.create_task(client.send_typed_message("wait, not that"))
+            await asyncio.sleep(0.05)
+            # The new turn waits for the provider to confirm the cancel.
+            assert [e["type"] for e in fake_ws.sent[baseline:]] == ["response.cancel"]
+            await client._handle_event(
+                {"type": "response.done", "response": {"status": "cancelled"}}
+            )
+            assert await typed is True
             assert [e["type"] for e in fake_ws.sent[baseline:]] == [
                 "response.cancel",
                 "conversation.item.create",

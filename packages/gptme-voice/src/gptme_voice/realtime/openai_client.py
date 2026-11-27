@@ -43,6 +43,8 @@ _MAX_INSTRUCTIONS_LEN = 4096
 _MAX_PENDING_AUDIO_CHUNKS = 500
 # A provider handshake should normally complete in under a second. Bound text
 # turns so a missing ready event cannot pin a /local connection forever.
+# How long a typed message waits for an interrupted reply to end.
+_TYPED_CANCEL_WAIT_SECONDS = 2.0
 _SESSION_READY_TIMEOUT_SECONDS = 10.0
 # OpenAI's model catalog currently markets `gpt-realtime-2`, while the
 # Realtime API reference may still enumerate the older generic alias instead.
@@ -463,6 +465,9 @@ class OpenAIRealtimeClient:
         self._ws: websockets.ClientConnection | None = None
         self._receive_task: asyncio.Task | None = None
         self._responding = False  # True while AI is generating a response
+        # Set between response.done and the next response.created.
+        self._response_idle = asyncio.Event()
+        self._response_idle.set()
 
         # Audio arriving before the session is ready would be forwarded to a
         # session that is not configured yet, causing silent calls (observed on
@@ -844,7 +849,14 @@ class OpenAIRealtimeClient:
         interrupted = self._responding
         if interrupted:
             await self._send_event("response.cancel", {})
-            self._responding = False
+            # response.create is rejected until the provider confirms the
+            # cancel with response.done; don't trust our own flag for that.
+            try:
+                await asyncio.wait_for(
+                    self._response_idle.wait(), _TYPED_CANCEL_WAIT_SECONDS
+                )
+            except asyncio.TimeoutError:
+                logger.warning("No response.done after cancel; sending anyway")
         await self.send_text_message(text)
         return interrupted
 
@@ -1286,11 +1298,13 @@ class OpenAIRealtimeClient:
         # Response lifecycle — mute mic while responding
         elif event_type == "response.created":
             self._responding = True
+            self._response_idle.clear()
             if self.on_response_start:
                 await self._call_callback(self.on_response_start)
             logger.debug("Response started (mic muted)")
         elif event_type == "response.done":
             self._responding = False
+            self._response_idle.set()
             if self.on_response_end:
                 await self._call_callback(self.on_response_end)
             status = event.get("response", {}).get("status", "")

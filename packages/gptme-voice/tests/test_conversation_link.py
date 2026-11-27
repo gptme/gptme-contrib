@@ -114,9 +114,13 @@ def test_sink_retries_transient_errors_and_gives_up_on_permanent(
 
     first, second = asyncio.run(run())
     assert first == expected
-    # A transient failure leaves the turn pending, so the next flush posts it.
     assert second == "ok"
-    assert len(posts) == 2
+    if expected == "retry":
+        # A transient failure leaves the turn pending; the next flush posts it.
+        assert len(posts) == 2
+    else:
+        # A permanent rejection drops the turn instead of re-sending it.
+        assert len(posts) == 1
 
 
 def test_sink_posts_each_turn_once_with_stable_ids_and_retries_409() -> None:
@@ -155,6 +159,52 @@ def test_sink_posts_each_turn_once_with_stable_ids_and_retries_409() -> None:
         [{"role": "assistant", "text": "hi!", "turn_id": "webui-abc:1"}],
     ]
     assert posts[0]["call_metadata"] == {"source": "webui", "call_sid": "webui-abc"}
+
+
+def test_immediate_flush_holds_an_unsettled_speech_turn_and_keeps_order() -> None:
+    """A typed turn flushes at once, but an earlier speech partial still in its
+    settle window is not posted early; both follow once it settles, in order."""
+    posts: list[list[dict]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        posts.append(json.loads(request.content)["turns"])
+        return httpx.Response(200, json={})
+
+    transcript: list[Turn] = []
+
+    async def run() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
+            sink = LiveTranscriptSink(
+                server_url="http://server",
+                api_key="key",
+                conversation_id="conv-1",
+                call_sid="webui-abc",
+                transcript=transcript,
+                client=c,
+                settle_seconds=0.2,
+            )
+            transcript.append(Turn("user", "Hello, use"))  # speech partial
+            sink.notify()
+            transcript.append(Turn("user", "typed: stop"))
+            sink.notify(immediate=True)
+            await asyncio.sleep(0.05)
+            assert posts == []  # held behind the unsettled partial
+            transcript[0] = Turn("user", "Hello, use the other file")
+            sink.notify()
+            await asyncio.sleep(0.5)
+            await sink.close()
+
+    asyncio.run(run())
+    assert posts == [
+        [
+            {
+                "role": "user",
+                "text": "Hello, use the other file",
+                "turn_id": "webui-abc:0",
+            },
+            {"role": "user", "text": "typed: stop", "turn_id": "webui-abc:1"},
+        ]
+    ]
 
 
 def test_sink_reposts_a_turn_the_provider_revised() -> None:
