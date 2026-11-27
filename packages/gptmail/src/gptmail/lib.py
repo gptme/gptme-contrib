@@ -388,6 +388,13 @@ class UnrepliedEmail(NamedTuple):
     folder: str
 
 
+def _bare_address(header: str) -> str:
+    """Lower-cased address part of a From/To header ("" when none)."""
+    from email.utils import parseaddr
+
+    return parseaddr(header or "")[1].strip().lower()
+
+
 class AgentEmail:
     """Handles email operations for agent communication.
 
@@ -1899,7 +1906,7 @@ class AgentEmail:
             return "gmail"
         return None  # Use default account
 
-    def _build_message_index(self, folder: str) -> Dict[str, Dict]:
+    def _build_message_index(self, folder: str) -> Dict[str, list[Dict]]:
         """Build an index of existing messages for fast duplicate detection.
 
         This eliminates the O(n²) problem by reading all existing messages once
@@ -1909,9 +1916,11 @@ class AgentEmail:
             folder: The folder to index (inbox or sent)
 
         Returns:
-            Dict mapping message keys to metadata for comparison
+            Dict mapping message keys to the metadata of every message filed
+            under that key. A key can hold several messages: every reply in a
+            thread shares the primary key, and dedup has to see all of them.
         """
-        index = {}
+        index: Dict[str, list[Dict]] = {}
         folder_path = self.email_dir / folder
         locally_sent = self._load_local_sends()
 
@@ -1957,8 +1966,10 @@ class AgentEmail:
                 # Use In-Reply-To + Subject as primary key (most reliable for matching)
                 key = f"{in_reply_to}|{subject}|{to_addr}"
 
-                # Store metadata for comparison
-                index[key] = {
+                # Store metadata for comparison. Several files can share a
+                # key (all replies in one thread do), so keep every one of
+                # them instead of letting the last file win.
+                entry = {
                     "in_reply_to": in_reply_to,
                     "references": references,
                     "subject": subject,
@@ -1969,12 +1980,13 @@ class AgentEmail:
                     "body_snippet_raw": body_snippet_raw,
                     "file": existing_file,
                 }
+                index.setdefault(key, []).append(entry)
 
                 # Also index by subject+from for inbox messages
                 if folder == "inbox":
                     alt_key = f"{subject}|{from_addr}"
-                    if alt_key not in index:  # Don't overwrite if exists
-                        index[alt_key] = index[key]
+                    if alt_key != key:
+                        index.setdefault(alt_key, []).append(entry)
 
             except Exception as e:
                 logger.debug(f"Error indexing {existing_file}: {e}")
@@ -2066,11 +2078,15 @@ class AgentEmail:
         # Check index for potential duplicates using keys
         primary_key, alt_key = self._get_message_key(email_msg, folder)
 
-        candidates = []
-        if primary_key in index:
-            candidates.append(index[primary_key])
-        if alt_key and alt_key in index:
-            candidates.append(index[alt_key])
+        candidates: list[Dict] = []
+        seen_files = set()
+        for candidate_key in (primary_key, alt_key):
+            if not candidate_key:
+                continue
+            for entry in index.get(candidate_key, []):
+                if entry["file"] not in seen_files:
+                    seen_files.add(entry["file"])
+                    candidates.append(entry)
 
         # Check each candidate for actual duplicate
         for existing in candidates:
@@ -2096,7 +2112,12 @@ class AgentEmail:
             if to_addr and normalize_addr(existing["to"]) == normalize_addr(to_addr):
                 matches.append("to")
 
-            if from_addr and normalize_addr(existing["from"]) == normalize_addr(from_addr):
+            # Compare the address, not the header text: a re-synced copy may
+            # format the display name differently.
+            if from_addr and (
+                normalize_addr(existing["from"]) == normalize_addr(from_addr)
+                or _bare_address(existing["from"]) == (_bare_address(from_addr) or None)
+            ):
                 matches.append("from")
 
             # Date match (within 2 minutes)
@@ -2129,7 +2150,9 @@ class AgentEmail:
                 if "subject" in matches and "to" in matches and "date" in matches:
                     return True
             else:  # inbox
-                if "in_reply_to" in matches and "body" in matches:
+                # Same thread and text from a *different* sender is a separate
+                # reply ("Sounds good!" from two people), not a copy.
+                if "in_reply_to" in matches and "body" in matches and "from" in matches:
                     return True
                 if (
                     "subject" in matches
