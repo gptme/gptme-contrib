@@ -90,6 +90,10 @@ CONTENT_SUFFIXES = {".md", ".rst", ".toml", ".yaml", ".yml"}
 
 DEFAULT_THRESHOLDS = (1500, 3000)
 
+# The file-size-ratchet pre-commit hook's baseline. When a repo has one, its
+# threshold is always reported, so the report flags what the gate enforces.
+RATCHET_BASELINE = "file-size-baseline.json"
+
 # Generated files that carry a source suffix and would otherwise top every list.
 SKIP_FILES = {"pnpm-lock.yaml"}
 
@@ -367,6 +371,20 @@ def _shadowed_packages(root: Path) -> set[str]:
     return {p.name for p in packages.iterdir() if p.is_dir() and (root / p.name).is_dir()}
 
 
+def ratchet_threshold(root: Path, warnings: list[str] | None = None) -> int | None:
+    """The line threshold the repo's file-size ratchet enforces, if it has one."""
+    candidate = root / RATCHET_BASELINE
+    if not candidate.exists():
+        return None
+    try:
+        value = json.loads(candidate.read_text(encoding="utf-8")).get("threshold", 2000)
+        return int(value)
+    except (OSError, ValueError, TypeError, AttributeError) as exc:
+        if warnings is not None:
+            warnings.append(f"ignoring {candidate.name}: {exc}")
+        return None
+
+
 def _looks_binary(sample: bytes) -> bool:
     return b"\x00" in sample
 
@@ -452,6 +470,9 @@ def build_report(
         thresholds=sorted(set(thresholds)),
         code_only=code_only,
     )
+    gate = ratchet_threshold(root, report.warnings)
+    if gate is not None:
+        report.thresholds = sorted({*report.thresholds, gate})
     overrides = _load_group_map(root, group_map, report.warnings)
     shadowed = _shadowed_packages(root)
 

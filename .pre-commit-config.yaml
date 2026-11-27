@@ -70,6 +70,14 @@ repos:
     pass_filenames: false
     files: ^(README\.md|packages/README\.md|packages/[^/]+/pyproject\.toml)$
 
+  - id: file-size-ratchet
+    name: Ratchet source-file sizes (no new files over 2000 lines, no growth)
+    entry: python3 scripts/precommit/validators/file_size_ratchet.py
+    language: system
+    types: [text]
+    require_serial: true
+    always_run: true
+
   - id: check-root-structure
     name: Check root directory structure
     description: Ensures no new top-level files or directories are added without updating the allowlist.

@@ -105,6 +105,7 @@ ALLOWED_ROOT_ENTRIES = frozenset(
         ".pre-commit-hooks.yaml",
         "CONTRIBUTING.md",
         "conftest.py",  # Shared in-process CI interpreter guard for package tests.
+        "file-size-baseline.json",  # file-size-ratchet hook ceilings.
         "LICENSE",
         "Makefile",
         "mypy.ini",

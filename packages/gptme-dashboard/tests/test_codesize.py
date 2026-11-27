@@ -811,3 +811,44 @@ def test_submodule_test_classification_uses_its_own_paths(tmp_path: Path) -> Non
     assert report.history[-1].source_lines == report.total_source_lines == 120
     assert report.history[-1].test_lines == report.total_test_lines == 7
     assert report.history[-1].threshold_counts == {"20": 4, "40": 2}
+
+
+def test_ratchet_baseline_threshold_matches_the_gate(tmp_path: Path, monkeypatch) -> None:
+    """The report flags exactly the files the file-size-ratchet hook would fail."""
+    import importlib.util
+
+    hook_path = Path(__file__).parents[3] / "scripts/precommit/validators/file_size_ratchet.py"
+    spec = importlib.util.spec_from_file_location("file_size_ratchet", hook_path)
+    assert spec and spec.loader
+    ratchet = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ratchet)
+
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    _write(repo, "src/exact.py", 20)
+    _write(repo, "src/under.py", 19)
+    (repo / "file-size-baseline.json").write_text('{"threshold": 20, "files": {}}')
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "init")
+
+    report = build_report(repo, history_weeks=0)
+    assert 20 in report.thresholds
+    flagged = [f.path for f in report.over_threshold["20"]]
+    assert flagged == ["src/exact.py"]
+
+    monkeypatch.chdir(repo)
+    assert ratchet.main(["src/exact.py"]) == 1
+    assert ratchet.main(["src/under.py"]) == 0
+
+
+def test_unreadable_ratchet_baseline_is_a_warning(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    _write(repo, "src/a.py", 5)
+    (repo / "file-size-baseline.json").write_text("not json")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "init")
+
+    report = build_report(repo, history_weeks=0)
+    assert report.thresholds == [1500, 3000]
+    assert any("file-size-baseline.json" in w for w in report.warnings)
