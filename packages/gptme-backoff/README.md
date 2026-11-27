@@ -56,10 +56,10 @@ wall-clock timeout.
 |----------------|-------------|-------------|
 | `max_attempts` | 3           | Max attempts |
 | `timeout`      | `None`      | Wall-clock timeout (seconds) |
-| `min_wait`     | 1.0         | Minimum wait (seconds) |
+| `min_wait`     | 1.0         | Initial wait before the first retry (seconds) |
 | `max_wait`     | 60.0        | Maximum wait (seconds) |
-| `multiplier`   | 2.0         | Exponential backoff factor |
-| `jitter`       | `True`      | Add random jitter to waits |
+| `multiplier`   | 2.0         | Exponential growth factor per retry |
+| `jitter`       | `True`      | Add noise uniform in `[0, min_wait]` to each wait |
 | `retry_on`     | `Exception` | Exception type(s) that trigger a retry |
 
 ### `retry_file_op`
@@ -70,10 +70,34 @@ Preset for file I/O. Retries only `OSError` by default (EAGAIN, EBUSY, …), not
 | Parameter      | Default   | Description |
 |----------------|-----------|-------------|
 | `max_attempts` | 3         | Max attempts |
-| `min_wait`     | 0.1       | Minimum wait (seconds) |
+| `min_wait`     | 0.1       | Initial wait before the first retry (seconds) |
 | `max_wait`     | 5.0       | Maximum wait (seconds) |
-| `multiplier`   | 2.0       | Exponential backoff factor |
+| `multiplier`   | 2.0       | Exponential growth factor per retry |
 | `retry_on`     | `OSError` | Exception type(s) that trigger a retry |
+
+No jitter is applied.
+
+### Wait curve
+
+Both presets share one curve. `max_attempts` counts the first call, so an
+exhausted run sleeps `max_attempts - 1` times. Before retry `n` (`n = 1` after
+the first failure) the base wait is:
+
+```text
+min(max_wait, min_wait * multiplier ** (n - 1))
+```
+
+With `jitter=True` (`retry_api_call` only), noise uniform in `[0, min_wait]` is
+added and the result is capped at `max_wait` again. Jitter never changes the
+base curve. For example, `min_wait=1, multiplier=3, max_wait=10` waits
+`1, 3, 9, 10, …` before noise.
+
+> **Timing change (gptme/gptme-contrib#2586):** before this fix, the
+> no-jitter path used `multiplier` as the initial wait and always grew by ×2.
+> `retry_api_call(jitter=False)` waited `[2, 4]` with defaults; it now waits
+> `[1, 2]`. `retry_file_op()` waited `[2, 4]` despite its 0.1 s `min_wait`; it
+> now waits `[0.1, 0.2]`. The default `jitter=True` path of `retry_api_call` is
+> unchanged.
 
 ### `retry_sync` / `retry_async`
 

@@ -179,6 +179,15 @@ def _make_wait_strategy(
     multiplier: float,
     jitter: bool,
 ) -> wait_base:
+    """Build the wait strategy shared by the convenience presets.
+
+    Base wait before retry ``n`` (``n=1`` after the first failed attempt) is
+    ``min(max_wait, min_wait * multiplier ** (n - 1))``: *min_wait* is the
+    initial wait and *multiplier* the exponential factor. Jitter only adds
+    noise, uniform in ``[0, min_wait]``, on top of that base; the final wait
+    is still capped at *max_wait*. Toggling *jitter* never changes the base
+    curve.
+    """
     if jitter:
         return tenacity.wait_exponential_jitter(
             initial=min_wait,
@@ -186,7 +195,11 @@ def _make_wait_strategy(
             exp_base=multiplier,
             jitter=min_wait,
         )
-    return tenacity.wait_exponential(min=min_wait, max=max_wait, multiplier=multiplier)
+    # Tenacity's ``multiplier`` is the initial amplitude and ``exp_base`` the
+    # growth factor; map ours onto them so this matches the jitter branch.
+    return tenacity.wait_exponential(
+        multiplier=min_wait, max=max_wait, exp_base=multiplier
+    )
 
 
 def retry_api_call(
@@ -210,13 +223,16 @@ def retry_api_call(
     timeout : float | None
         Wall-clock timeout in seconds. ``None`` = no timeout.
     min_wait : float
-        Minimum wait between retries, seconds (default 1.0).
+        Initial wait before the first retry, seconds (default 1.0). The wait
+        before retry ``n`` is ``min_wait * multiplier ** (n - 1)``.
     max_wait : float
         Maximum wait between retries, seconds (default 60.0).
     multiplier : float
-        Exponential backoff multiplier (default 2.0).
+        Exponential growth factor applied per retry (default 2.0).
     jitter : bool
-        Add random jitter to wait times (default True).
+        Add random noise, uniform in ``[0, min_wait]``, to each wait (default
+        True). The final wait is still capped at *max_wait*; disabling jitter
+        does not change the base curve.
     retry_on : exception type or tuple
         Which exceptions trigger a retry (default ``Exception``).
 
@@ -264,11 +280,13 @@ def retry_file_op(
     max_attempts : int
         Maximum retry attempts (default 3).
     min_wait : float
-        Minimum wait, seconds (default 0.1).
+        Initial wait before the first retry, seconds (default 0.1). The wait
+        before retry ``n`` is ``min_wait * multiplier ** (n - 1)``, without
+        jitter.
     max_wait : float
         Maximum wait, seconds (default 5.0).
     multiplier : float
-        Exponential backoff multiplier (default 2.0).
+        Exponential growth factor applied per retry (default 2.0).
     retry_on : exception type or tuple
         Which exceptions trigger a retry (default ``OSError``).
 
@@ -285,9 +303,7 @@ def retry_file_op(
         retry_decorator = retry_async if _is_coroutine_callable(fn) else retry_sync
         return retry_decorator(
             stop=tenacity.stop_after_attempt(max_attempts),
-            wait=tenacity.wait_exponential(
-                min=min_wait, max=max_wait, multiplier=multiplier
-            ),
+            wait=_make_wait_strategy(min_wait, max_wait, multiplier, jitter=False),
             retry=tenacity.retry_if_exception_type(retry_on),
         )(fn)
 
