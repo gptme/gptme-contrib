@@ -475,7 +475,12 @@ class LessonDiscovery:
         # must not compare a symlink target with itself or repeat its matches.
         lesson_files = []
         seen_targets = set()
-        for path in self.lessons_dir.rglob("*.md"):
+        # Prefer the real file's name; sort aliases as a stable fallback when
+        # their target lies outside the scanned tree.
+        candidates = sorted(
+            self.lessons_dir.rglob("*.md"), key=lambda path: (path.is_symlink(), path)
+        )
+        for path in candidates:
             if path.name in NON_LESSON_FILES:
                 continue
             target = path.resolve()

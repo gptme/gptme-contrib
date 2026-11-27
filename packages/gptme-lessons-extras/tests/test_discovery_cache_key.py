@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+import pytest
 from gptme_lessons_extras.discovery import LessonDiscovery
 
 
@@ -73,3 +74,25 @@ def test_duplicates_compares_symlink_target_only_once(tmp_path: Path):
     a, b, similarity = duplicates[0]
     assert {a, b} == {"commit", "rebase"}
     assert similarity > 0.95
+
+
+def test_duplicates_alias_name_is_independent_of_walk_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    source = tmp_path / "git" / "commit.md"
+    alias = tmp_path / "workflow" / "commit-flow.md"
+    other = tmp_path / "other" / "rebase.md"
+    for path in (source, alias, other):
+        path.parent.mkdir()
+    source.write_text("# Identical lesson\n")
+    other.write_text(source.read_text())
+    alias.symlink_to(source)
+
+    results = []
+    for order in ((source, alias, other), (alias, other, source)):
+        monkeypatch.setattr(Path, "rglob", lambda self, pattern: iter(order))
+        results.append(LessonDiscovery(lessons_dir=tmp_path).find_all_duplicates())
+
+    assert results[0] == results[1]
+    assert len(results[0]) == 1
+    assert set(results[0][0][:2]) == {"commit", "rebase"}
