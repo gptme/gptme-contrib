@@ -109,3 +109,21 @@ class _DummyToolBridge:
 
     def get_timings(self) -> list[dict[str, object]]:
         return []
+
+
+class _FakeWebSocket:
+    def __init__(self) -> None:
+        self.sent: list[dict] = []
+        self.closed = False
+
+    async def send(self, message: str) -> None:
+        self.sent.append(json.loads(message))
+
+    def __aiter__(self) -> "_FakeWebSocket":
+        return self
+
+    async def __anext__(self) -> str:
+        raise StopAsyncIteration
+
+    async def close(self) -> None:
+        self.closed = True
