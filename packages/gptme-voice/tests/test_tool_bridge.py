@@ -1081,8 +1081,7 @@ def test_completed_subagent_logs_timing_summary(caplog) -> None:
                 )
 
                 task_id = dispatch["task_id"]
-                for _ in range(10):
-                    await asyncio.sleep(0)
+                await asyncio.wait_for(bridge._pending_tasks[task_id].task, timeout=3)
 
             assert any(
                 f"Task {task_id} timings" in record.message for record in caplog.records
