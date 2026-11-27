@@ -1043,7 +1043,8 @@ def _log_dropout(
         }
         if event_type:
             record["event"] = event_type
-        with open(log_dir / f"{session_id}.jsonl", "a", encoding="utf-8") as f:
+        safe_id = re.sub(r"[^a-zA-Z0-9_-]", "_", session_id)
+        with open(log_dir / f"{safe_id}.jsonl", "a", encoding="utf-8") as f:
             f.write(json.dumps(record) + "\n")
     except Exception:
         pass
