@@ -258,6 +258,43 @@ def test_settle_window_holds_even_when_configured_tiny() -> None:
     assert not sink._settled(0, "partial", sink._seen[0][1])
 
 
+def test_notify_during_a_post_does_not_cancel_it() -> None:
+    """A new turn while a flush is mid-POST waits for that POST, then posts."""
+    posts: list[list[str]] = []
+    gate = asyncio.Event()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        posts.append([t["text"] for t in json.loads(request.content)["turns"]])
+        if len(posts) == 1:
+            await gate.wait()
+        return httpx.Response(200, json={})
+
+    transcript = [Turn("user", "first")]
+
+    async def run() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
+            sink = LiveTranscriptSink(
+                server_url="http://server",
+                api_key="key",
+                conversation_id="conv-1",
+                call_sid="webui-abc",
+                transcript=transcript,
+                client=c,
+                settle_seconds=0.01,
+            )
+            sink.notify(immediate=True)
+            await asyncio.sleep(0.05)  # the first POST is in flight
+            transcript.append(Turn("user", "second"))
+            sink.notify(immediate=True)
+            await asyncio.sleep(0.05)
+            gate.set()
+            await asyncio.sleep(0.1)
+            await sink.close()
+
+    asyncio.run(run())
+    assert posts == [["first"], ["second"]]
+
+
 def test_sink_reposts_a_turn_the_provider_revised() -> None:
     posts: list[dict] = []
 

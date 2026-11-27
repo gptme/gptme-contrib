@@ -119,8 +119,11 @@ async def handle_browser_websocket(server: VoiceServer, websocket):
     the conversation's recent history, tools run in its workspace, and
     transcript turns are appended to it live.
     """
+    headers = getattr(websocket, "headers", None) or {}
+    # Bytes: compare_digest raises TypeError on non-ASCII str arguments.
     if server.browser_secret and not hmac.compare_digest(
-        websocket.headers.get(_srv._BROWSER_SECRET_HEADER, ""), server.browser_secret
+        str(headers.get(_srv._BROWSER_SECRET_HEADER, "")).encode(),
+        server.browser_secret.encode(),
     ):
         _srv.logger.warning(
             "Rejecting /voice client %s: missing or wrong sidecar secret",

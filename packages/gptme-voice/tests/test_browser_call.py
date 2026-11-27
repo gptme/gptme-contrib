@@ -666,3 +666,22 @@ def test_browser_websocket_requires_sidecar_secret_when_configured(
     good = _SecretSocket("s3cret")
     _run_browser_call(monkeypatch, server, good, _FakeRealtimeClient())
     assert good.accepted
+
+
+def test_sidecar_secret_check_handles_non_ascii_and_missing_headers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    server = VoiceServer(enable_browser_transport=True)
+    server.browser_secret = "s3cret"
+    for headers in ({"x-gptme-voice-secret": "s\u00e9cret"}, None):
+        websocket = _DummyBrowserWebSocket([{"type": "websocket.disconnect"}])
+        if headers is not None:
+            websocket.headers = headers
+        closed: list[int] = []
+
+        async def _close(code: int = 1000) -> None:
+            closed.append(code)
+
+        websocket.close = _close
+        asyncio.run(server.handle_browser_websocket(websocket))  # no TypeError
+        assert closed == [1008] and websocket.accepted is False

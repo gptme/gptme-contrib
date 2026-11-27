@@ -192,6 +192,8 @@ class LiveTranscriptSink:
         # Turns that cannot be revised (typed messages).
         self._final: set[int] = set()
         self._timer: asyncio.Task[None] | None = None
+        self._flushing = False  # the timer task is inside flush()
+        self._again: float | None = None  # a notify arrived during that flush
         self._lock = asyncio.Lock()
         self._closed = False
 
@@ -232,18 +234,29 @@ class LiveTranscriptSink:
 
     def _schedule(self, delay: float) -> None:
         if self._timer is not None and not self._timer.done():
+            if self._flushing:
+                # Never cancel a POST in flight; flush again right after it.
+                self._again = delay if self._again is None else min(self._again, delay)
+                return
             self._timer.cancel()
         self._timer = asyncio.create_task(self._flush_after(delay))
 
     async def _flush_after(self, delay: float) -> None:
         await asyncio.sleep(delay)
-        result = await self.flush(force=False)
+        self._flushing = True
+        try:
+            result = await self.flush(force=False)
+        finally:
+            self._flushing = False
         if self._closed:
             return
+        again, self._again = self._again, None
         if result == "retry":
             self._schedule(self._retry_seconds)
         elif result == "held":
             self._schedule(self._settle_seconds)
+        if again is not None:
+            self._schedule(again)
 
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
