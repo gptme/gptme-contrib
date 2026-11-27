@@ -306,12 +306,18 @@ class GptmeToolBridge:
         on_cancel: Callable[[], Awaitable[None]] | None = None,
     ):
         self.gptme_path = os.environ.get("GPTME_VOICE_SUBAGENT_PATH") or gptme_path
-        # Only a wrapper script (e.g. Bob's voice-subagent.sh) understands the
-        # --transcript-tail-* flags; plain gptme exits 2 on them, so for gptme
-        # itself the tail goes into the prompt instead.
-        self._subagent_takes_transcript_flags = Path(
-            self.gptme_path
-        ).name.lower() not in ("gptme", "gptme.exe")
+        # How the call's transcript tail reaches the subagent. "prompt" (the
+        # default) inlines it into the task, which works for any subagent.
+        # "flags" passes --transcript-tail-file/--transcript-tail-turns, which
+        # only a wrapper script declaring that contract understands (plain
+        # gptme exits 2 on them). Declared explicitly, never guessed from the
+        # executable's name.
+        self._subagent_takes_transcript_flags = (
+            os.environ.get("GPTME_VOICE_SUBAGENT_TRANSCRIPT_TAIL_MODE", "prompt")
+            .strip()
+            .lower()
+            == "flags"
+        )
         self.timeout = timeout
         self.workspace = workspace
         self.on_result = on_result

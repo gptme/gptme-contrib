@@ -288,6 +288,7 @@ emits one JSONL `utterance_trace` with `asr_ms` (speech stopped → transcript),
 | `GPTME_VOICE_SUBAGENT_MODEL_FAST` / `_SMART` | `openrouter/anthropic/claude-haiku-4.5` / gptme default | Subagent models (`GPTME_VOICE_SUBAGENT_MODEL` sets both) |
 | `GPTME_VOICE_SUBAGENT_TIMEOUT_FAST_SECONDS` / `_SMART_SECONDS` | `60` / `120` | Subagent timeouts |
 | `GPTME_VOICE_SUBAGENT_PATH` | `gptme` on `PATH` | gptme binary used for subagents |
+| `GPTME_VOICE_SUBAGENT_TRANSCRIPT_TAIL_MODE` | `prompt` | How the call transcript tail reaches the subagent: `prompt` inlines it into the task (works for plain gptme); `flags` passes `--transcript-tail-file`/`--transcript-tail-turns` to a wrapper script that accepts them |
 | `GPTME_VOICE_RESUME_WINDOW_SECONDS` | `300` | Reconnects within this window resume the previous transcript |
 | `GPTME_VOICE_STATE_DIR` | `/tmp/gptme-voice-call-state` | Per-call state and transcript records |
 | `GPTME_VOICE_POST_CALL_COMMAND` | unset | Command run after a call, given the call record paths as arguments and `GPTME_VOICE_POST_CALL_JSON(S)` / `GPTME_VOICE_CALLER_ID` in its environment |
