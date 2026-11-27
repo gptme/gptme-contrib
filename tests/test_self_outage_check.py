@@ -1014,7 +1014,7 @@ def test_package_redact_covers_posthog_aws_and_postgres() -> None:
     phx = "phx_" + "A1b2C3d4E5f6G7h8I9j0" + "_tail-Xy09"
     aws = "AKIA" + "0123456789ABCDEF"
     pg = "postgres://agent:supersecretpw@db.internal:5432/app"
-    out = soc._redact(f"keys {phx} {aws} {pg} oauth_not_allowed_for_organization")
+    out = soc._redact(f"oauth_not_allowed_for_organization keys {phx} {aws} {pg}")
     assert phx not in out
     assert aws not in out
     assert "supersecretpw" not in out
@@ -1400,3 +1400,172 @@ def test_failed_close_is_not_reported_as_recovered(
     assert "Closed issue" not in out.out
     assert "close of #97 failed" in out.err
     assert any(a[:2] == ["issue", "close"] for a in calls)
+
+
+@pytest.mark.parametrize("bad_line", ["[1,2,3]", "null", "42", '"text"', "9" * 5000])
+def test_non_object_jsonl_line_is_skipped(tmp_path: Path, bad_line: str) -> None:
+    records = [rec(40, "productive")] + [
+        rec(h, "failed", "api_error_403") for h in (1, 2, 3, 4)
+    ]
+    write_records(tmp_path, records)
+    rf = cfg_for(tmp_path).records_file
+    with rf.open("a") as f:
+        f.write(bad_line + "\n")
+    status = assess(tmp_path)
+    assert status["outage"] is True
+    assert status["auth_failures_in_window"] == 4
+    assert soc.last_productive_ts(rf, NOW) == NOW - timedelta(hours=40)
+
+
+@pytest.mark.parametrize(
+    "credential",
+    [
+        "bob:s3cr3t@proxy.internal:8080",
+        "https://alice:hunter2pw@example.com/v1",
+        "https://hunter2pw@proxy.internal",
+        "https://hunter2pw@proxy.internal/path/@scope",
+        "https://hunter2pw@proxy.internal/path:part/@scope",
+        "bob://hunter2pw:tail@proxy.internal",
+        "https://bob:hunter2pw;token=beta@proxy.internal",
+        "https://bob:hunter2pw;password=beta@proxy.internal",
+        "http://hunter2pw@proxy.internal:8080",
+        "https://glpat-hunter2pw@gitlab.example/o/r.git",
+        "https://dG9r/hunter2pw+eHl6==@proxy.internal",
+        "user:pa@ss@proxy.internal:8080",
+        "http://bob:pa/ss@example.com/x",
+        "https://bob:/hunter2pw@proxy.internal",
+        "https://bob://hunter2pw@proxy.internal",
+        "bob://hunter2pw@proxy.internal",
+        "https://build$:hunter2pw@_proxy.internal",
+        "https://a~b:hunter2pw@bücher.example",
+        "https://ci!:hunter2pw@%41host",
+        "https://x&y:hunter2pw@proxy.internal",
+        "https://(tmp):hunter2pw@proxy.internal",
+        "https://bob:" + "a" * 5000 + "@proxy.internal",
+    ],
+)
+def test_url_embedded_credentials_redacted(tmp_path: Path, credential: str) -> None:
+    records = [rec(40, "productive")]
+    for h in (1, 2, 3, 4):
+        r = rec(h, "failed", "api_error_403")
+        r["error"] = "proxy auth failed for " + credential
+        records.append(r)
+    write_records(tmp_path, records)
+    status = assess(tmp_path)
+    body = soc._issue_body(cfg_for(tmp_path), status)
+    assert status["sample_error"] == "proxy auth failed for [REDACTED]"
+    for secret in ("s3cr3t", "hunter2pw", "pa@ss", "pa/ss", "a" * 20):
+        assert secret not in status["sample_error"]
+        assert secret not in body
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "mail bob@example.com",
+        "git@github.com:o/r",
+        "https://registry.npmjs.org/@types/node",
+        "ssh://git@github.com/o/r.git",
+        "git://git@github.com/o/r.git",
+    ],
+)
+def test_passwordless_userinfo_lookalikes_are_preserved(
+    monkeypatch: pytest.MonkeyPatch, text: str
+) -> None:
+    # Script rules only: gptme-redact masks email-shaped text by design.
+    monkeypatch.setattr(soc, "_package_redact", None)
+    assert soc._redact(text) == text
+
+
+@pytest.mark.parametrize("bad_line", ["[]", "null", "42", '"text"', "9" * 5000])
+def test_last_productive_skips_non_object_records(
+    tmp_path: Path, bad_line: str
+) -> None:
+    write_records(tmp_path, [rec(40, "productive")])
+    rf = cfg_for(tmp_path).records_file
+    with rf.open("a") as f:
+        f.write(bad_line + "\n")
+    assert soc.last_productive_ts(rf, NOW) == NOW - timedelta(hours=40)
+
+
+def test_url_credential_scan_handles_colon_rich_input(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import time
+
+    # Times this script's own scans, not the optional package's patterns.
+    monkeypatch.setattr(soc, "_package_redact", None)
+    start = time.process_time()
+    for text in (
+        "a:" * 100_000,
+        "a." * 100_000 + ":",
+        "a:" * 100_000 + "@h",
+        "a://" * 100_000 + "@h",
+        "a." * 100_000 + ":x@h",
+    ):
+        soc._redact(text)
+    assert time.process_time() - start < 2.0
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        'https://bob:hunter2pw;password="beta@proxy.internal',
+        'https://bob:hunter2pw;password="beta@proxy.internal gamma"',
+        'bob:hunter2pw;password="beta@proxy.internal gamma"',
+    ],
+)
+def test_embedded_quoted_assignment_cannot_hide_url_credential(text: str) -> None:
+    redacted = soc._redact(text)
+    for secret in ("hunter2pw", "beta", "gamma"):
+        assert secret not in redacted
+
+
+@pytest.mark.parametrize("quote", ['"', "'"])
+def test_url_redaction_preserves_quoted_secret_boundaries(quote: str) -> None:
+    text = f"password:{quote}alpha@host beta{quote}"
+    redacted = soc._redact(text)
+    assert "alpha" not in redacted
+    assert "beta" not in redacted
+
+
+@pytest.mark.parametrize("with_package", [True, False])
+@pytest.mark.parametrize(
+    "text",
+    [
+        # A later "@" inside the password must not be taken for the host marker.
+        "error:password=P@sshunter2pw",
+        # A key only gptme-redact knows, opened before the URL-shaped token.
+        'MY_KEY:"abc@host hunter2pw"',
+        # Later quotes made this value ambiguous; dropping them must not trust it.
+        'password="alpha " hunter2pw x:y@host"',
+        # The space pushes "@host" out of the token holding the password.
+        'https://bob:hunter2pw;password="alpha "beta@proxy.internal',
+    ],
+)
+def test_nothing_after_a_url_credential_is_published(
+    monkeypatch: pytest.MonkeyPatch, text: str, with_package: bool
+) -> None:
+    if not with_package:
+        monkeypatch.setattr(soc, "_package_redact", None)
+    elif soc._package_redact is None:
+        pytest.skip("gptme-redact not installed")
+    redacted = soc._redact(f"proxy said {text} then failed")
+    assert redacted.startswith("proxy said ")
+    for secret in ("hunter2pw", "alpha", "beta", "then failed"):
+        assert secret not in redacted
+
+
+@pytest.mark.parametrize("reason", [["auth"], {"code": "auth"}])
+def test_unhashable_failure_reason_does_not_silence_outage(
+    tmp_path: Path, reason: object
+) -> None:
+    records = [rec(40, "productive")] + [
+        rec(h, "failed", "api_error_403") for h in (1, 2, 3, 4)
+    ]
+    malformed = rec(1, "failed", "auth")
+    malformed["failure_reason"] = reason
+    write_records(tmp_path, records + [malformed])
+    status = assess(tmp_path)
+    assert status["outage"] is True
+    assert status["auth_failures_in_window"] == 4
