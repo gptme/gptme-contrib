@@ -26,6 +26,7 @@ spec.loader.exec_module(self_merge_check)
 
 # Real (unpatched) helper, captured before the autouse fixture swaps it for a Mock.
 _REAL_MERGE_PERMISSION = self_merge_check.merge_permission.__wrapped__
+_REAL_FETCH_PR_FILE_SHAPES = self_merge_check._fetch_pr_file_shapes
 
 
 @pytest.fixture(autouse=True)
@@ -2776,13 +2777,22 @@ def test_gptme_core_modified_existing_module_is_not_new() -> None:
     assert reasons == []
 
 
+_UNSET_TOTALS = object()
+
+
 def _evaluate_gptme_core(
     files: list[dict[str, Any]],
     file_shapes: list[dict[str, Any]],
     *,
     title: str = "fix(reduce): cache result",
     body: str = "",
+    totals: dict[str, int] | None | object = _UNSET_TOTALS,
 ) -> Any:
+    if totals is _UNSET_TOTALS:
+        totals = {
+            "changed_files": len(files),
+            "additions": sum(int(s.get("additions") or 0) for s in file_shapes),
+        }
     pr_data = _make_clean_pr_data(
         title=title,
         body=body,
@@ -2813,6 +2823,11 @@ def _evaluate_gptme_core(
         ),
         patch.object(
             self_merge_check, "_fetch_pr_file_shapes", return_value=file_shapes
+        ),
+        patch.object(
+            self_merge_check,
+            "_fetch_pr_file_totals",
+            return_value=totals,
         ),
     ):
         return self_merge_check.evaluate_pr(
@@ -2855,6 +2870,261 @@ def test_evaluate_pr_gptme_core_cache_fix_is_eligible() -> None:
     )
     assert result.eligible, result.reasons
     assert result.category == "gptme-core-diff-shape-eligible"
+
+
+def test_evaluate_pr_gptme_core_unreadable_shapes_refuse_eligibility() -> None:
+    """A failed shape read must not fail open to gptme/gptme eligibility.
+
+    `_fetch_pr_file_shapes` returns [] on a timeout or non-zero `gh api` exit,
+    so `gptme_core_route_to_erik_reasons` had nothing to inspect and the PR was
+    eligible on diff shape even when it touched gptme/llm/.
+    """
+    files = [
+        {"path": "gptme/llm/models.py"},
+        {"path": "tests/test_models.py"},
+    ]
+    result = _evaluate_gptme_core(files, [])
+    assert not result.eligible
+    assert result.category is None
+    assert any("diff shape" in reason for reason in result.reasons), result.reasons
+
+
+def test_evaluate_pr_gptme_core_truncated_shapes_refuse_eligibility() -> None:
+    """A truncated paginated read must not drop a sensitive surface.
+
+    Only the test file survived the decode; gptme/llm/models.py is missing, so
+    the sensitive-surface detector never saw the path that should route to Erik.
+    """
+    files = [
+        {"path": "gptme/llm/models.py"},
+        {"path": "tests/test_models.py"},
+    ]
+    file_shapes = [
+        {
+            "path": "tests/test_models.py",
+            "status": "modified",
+            "patch": "@@ -1,1 +1,2 @@\n+x = 1\n",
+        },
+    ]
+    result = _evaluate_gptme_core(files, file_shapes)
+    assert not result.eligible
+    assert result.category is None
+    assert any("diff shape" in reason for reason in result.reasons), result.reasons
+
+
+def test_evaluate_pr_gptme_core_capped_listing_refuses_eligibility() -> None:
+    """GitHub caps `pulls/files` at 3000 entries, truncating `files` and the
+    shape read at the same point. Comparing them alone proves nothing, so the
+    independent changedFiles count must catch a capped listing."""
+    files = [
+        {"path": "gptme/util/reduce.py"},
+        {"path": "tests/test_reduce.py"},
+    ]
+    file_shapes = [
+        {
+            "path": "gptme/util/reduce.py",
+            "status": "modified",
+            "patch": "@@ -1,1 +1,2 @@\n+x = 1\n",
+            "additions": 1,
+        },
+        {
+            "path": "tests/test_reduce.py",
+            "status": "modified",
+            "patch": "@@ -1,1 +1,2 @@\n+y = 1\n",
+            "additions": 1,
+        },
+    ]
+    result = _evaluate_gptme_core(
+        files, file_shapes, totals={"changed_files": 3001, "additions": 2}
+    )
+    assert not result.eligible
+    assert result.category is None
+    assert any("diff shape" in reason for reason in result.reasons), result.reasons
+
+
+def test_evaluate_pr_gptme_core_capped_count_caught_by_additions_sum() -> None:
+    """Even if GitHub caps `changedFiles` at the same point as the listing, the
+    truncated shapes cannot account for every added line in the PR's own
+    `additions` total. The sum is the second, independent completeness signal."""
+    files = [
+        {"path": "gptme/util/reduce.py"},
+        {"path": "tests/test_reduce.py"},
+    ]
+    file_shapes = [
+        {
+            "path": "gptme/util/reduce.py",
+            "status": "modified",
+            "patch": "@@ -1,1 +1,2 @@\n+x = 1\n",
+            "additions": 1,
+        },
+        {
+            "path": "tests/test_reduce.py",
+            "status": "modified",
+            "patch": "@@ -1,1 +1,2 @@\n+y = 1\n",
+            "additions": 1,
+        },
+    ]
+    # Count agrees with the truncated listing, but the PR added 900 lines in
+    # the files that fell past the cap.
+    result = _evaluate_gptme_core(
+        files, file_shapes, totals={"changed_files": 2, "additions": 900}
+    )
+    assert not result.eligible
+    assert result.category is None
+    assert any("diff shape" in reason for reason in result.reasons), result.reasons
+
+
+def test_evaluate_pr_gptme_core_unknown_totals_refuses_eligibility() -> None:
+    """An unavailable changedFiles/additions read is an incomplete read."""
+    files = [{"path": "gptme/util/reduce.py"}]
+    file_shapes = [
+        {
+            "path": "gptme/util/reduce.py",
+            "status": "modified",
+            "patch": "@@ -1,1 +1,2 @@\n+x = 1\n",
+            "additions": 1,
+        }
+    ]
+    result = _evaluate_gptme_core(files, file_shapes, totals=None)
+    assert not result.eligible
+    assert result.category is None
+    assert any("diff shape" in reason for reason in result.reasons), result.reasons
+
+
+def test_gptme_core_shapes_cover_files_compares_independent_totals() -> None:
+    """Pin the helper directly, so the totals comparison cannot silently drop.
+
+    The `evaluate_pr` tests derive their totals from the same fixture, which
+    makes an eligible-path pass self-consistent by construction. Here the two
+    sides are supplied independently.
+    """
+    files = ["gptme/a.py", "gptme/b.py"]
+    shapes = [
+        {"path": "gptme/a.py", "additions": 3},
+        {"path": "./gptme/b.py", "additions": 2},
+    ]
+    cover = self_merge_check._gptme_core_shapes_cover_files
+    assert cover(shapes, files, {"changed_files": 2, "additions": 5})
+    # A truncated shape read that loses added lines must refuse even when the
+    # file count still matches.
+    assert not cover(shapes, files, {"changed_files": 2, "additions": 900})
+    assert not cover(shapes, files, {"changed_files": 3001, "additions": 5})
+    assert not cover(shapes, files, None)
+
+
+@pytest.mark.parametrize("bad", ["3", True, 2.5])
+def test_gptme_core_shapes_cover_files_rejects_malformed_additions(bad: object) -> None:
+    """A malformed per-shape `additions` is a completeness failure, not a
+    ValueError crashing evaluate_pr; a JSON bool must not sum as 0/1."""
+    cover = self_merge_check._gptme_core_shapes_cover_files
+    shapes = [{"path": "gptme/a.py", "additions": bad}]
+    assert not cover(shapes, ["gptme/a.py"], {"changed_files": 1, "additions": 3})
+
+
+def test_split_completeness_reasons_separates_never_waivable_refusals() -> None:
+    """Diff-shape completeness refusals are gate integrity, not category policy."""
+    reasons = [
+        "Touches sensitive/security/infra paths",
+        "Could not read the complete PR diff shape (0 shape(s) for 2 changed "
+        "file(s); GitHub reports {'changed_files': 2, 'additions': 5}); "
+        "gptme/gptme eligibility requires a complete read",
+    ]
+    completeness, policy = self_merge_check._split_completeness_reasons(reasons)
+    assert len(completeness) == 1 and "diff shape" in completeness[0]
+    assert policy == ["Touches sensitive/security/infra paths"]
+
+
+def test_evaluate_pr_gptme_core_completeness_refusal_survives_tier0_waiver() -> None:
+    """A tier-0 file set with an incomplete shape read still refuses.
+
+    merge_policy_tier_waiver's contract is path/category refusals only; a
+    tier-0 docs/tests PR whose shape read failed must route to human review,
+    or the fail-closed gptme/gptme guard would be silently bypassed by the
+    waiver once gptme/gptme enters the rollout list (gptme-contrib#2527).
+    """
+    mp = self_merge_check.merge_policy
+    files = [{"path": "docs/a.md"}, {"path": "tests/test_a.py"}]
+    changes = [mp.FileChange("docs/a.md", 10, 0), mp.FileChange("tests/test_a.py", 50)]
+    policy = {**mp.load_policy(mp.POLICY_PATH), "rollout": {"repos": ["gptme/gptme"]}}
+    with (
+        patch.object(mp, "load_policy", return_value=policy),
+        patch.object(self_merge_check, "fetch_pr_file_changes", return_value=changes),
+    ):
+        # Empty shapes: the shape read failed, though the file set is tier 0.
+        result = _evaluate_gptme_core(files, [])
+    assert not result.eligible
+    assert result.category is None
+    assert any("diff shape" in reason for reason in result.reasons), result.reasons
+
+
+@pytest.mark.parametrize("bad", [True, False])
+def test_fetch_pr_file_totals_rejects_bool_totals(bad: bool) -> None:
+    """JSON booleans are ints in Python; the type guard must still refuse."""
+    completed = subprocess.CompletedProcess(
+        args=[],
+        returncode=0,
+        stdout=f'{{"changed_files": {str(bad).lower()}, "additions": 1}}',
+    )
+    with patch.object(self_merge_check.subprocess, "run", return_value=completed):
+        assert self_merge_check._fetch_pr_file_totals("gptme/gptme", 999) is None
+
+
+@pytest.mark.parametrize(
+    ("path", "status", "additions"),
+    [
+        ("gptme/config/models.py", "modified", 900),
+        ("gptme/util/reduce.py", "modified", 900),
+        ("scripts/big.py", "added", 900),
+        ("gptme/util/reduce.py", "renamed", 3),
+        ("gptme/util/reduce.py", "modified", None),
+    ],
+)
+def test_evaluate_pr_gptme_core_omitted_patch_refuses_eligibility(
+    path: str, status: str, additions: int | None
+) -> None:
+    """GitHub omits `patch` for oversized diffs; the detectors then see nothing.
+
+    A complete file list is not a complete read: without the patch, new CLI
+    flags and config keys are invisible. An unknown addition count counts as
+    unread.
+    """
+    shape = {"path": path, "status": status, "patch": None, "additions": additions}
+    result = _evaluate_gptme_core([{"path": path}], [shape])
+    assert not result.eligible
+    assert result.category is None
+    assert any(
+        "omitted the patch" in reason and path in reason for reason in result.reasons
+    ), result.reasons
+
+
+@pytest.mark.parametrize(
+    ("path", "status", "additions"),
+    [
+        # Oversized lockfile diff: no patch-reading detector applies to it.
+        ("webui/package-lock.json", "modified", 900),
+        # Nothing was added, so there is nothing to read.
+        ("gptme/util/reduce.py", "removed", 0),
+        ("gptme/util/reduce.py", "renamed", 0),
+        ("tests/fixtures/__init__.py", "added", 0),
+    ],
+)
+def test_evaluate_pr_gptme_core_harmless_missing_patch_stays_eligible(
+    path: str, status: str, additions: int
+) -> None:
+    """A missing patch only refuses eligibility when it hides added source lines."""
+    shape = {"path": path, "status": status, "patch": None, "additions": additions}
+    result = _evaluate_gptme_core([{"path": path}], [shape])
+    assert result.category == "gptme-core-diff-shape-eligible", result.reasons
+
+
+def test_fetch_pr_file_shapes_requests_addition_counts() -> None:
+    """The omitted-patch check needs `additions` in the projected shape."""
+    completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="")
+    with patch.object(
+        self_merge_check.subprocess, "run", return_value=completed
+    ) as mock_run:
+        _REAL_FETCH_PR_FILE_SHAPES("gptme/gptme", 999)
+    assert "additions: .additions" in mock_run.call_args.args[0][-1]
 
 
 def test_evaluate_pr_gptme_core_new_hook_module_routes_to_erik() -> None:

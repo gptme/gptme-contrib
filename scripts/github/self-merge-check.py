@@ -2817,7 +2817,7 @@ def _fetch_pr_file_shapes(repo: str, number: int) -> list[dict[str, Any]]:
                 "--paginate",
                 "--jq",
                 ".[] | {path: .filename, previous_path: .previous_filename, "
-                "status: .status, patch: .patch}",
+                "status: .status, patch: .patch, additions: .additions}",
             ],
             capture_output=True,
             text=True,
@@ -2828,6 +2828,141 @@ def _fetch_pr_file_shapes(repo: str, number: int) -> list[dict[str, Any]]:
     if result.returncode != 0:
         return []
     return [doc for doc in _iter_json_documents(result.stdout) if isinstance(doc, dict)]
+
+
+def _fetch_pr_file_totals(repo: str, number: int) -> dict[str, int] | None:
+    """Independent PR totals for the diff-shape completeness check.
+
+    The `pulls/{number}/files` listing is capped at 3000 entries, so comparing
+    the shape read to `files` (same capped endpoint) cannot prove completeness.
+    The PR object's own `changedFiles` and `additions` are computed from the
+    full diff. Returns None when either total is unavailable; callers must
+    treat that as an incomplete read.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "gh",
+                "pr",
+                "view",
+                str(number),
+                "--repo",
+                repo,
+                "--json",
+                "changedFiles,additions",
+                "--jq",
+                "{changed_files: .changedFiles, additions: .additions}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        totals = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(totals, dict):
+        return None
+    # `type(...) is int`, not isinstance: JSON true/false decode to bool, which
+    # is an int subclass and would slip through as 0/1.
+    if not all(type(totals.get(key)) is int for key in ("changed_files", "additions")):
+        return None
+    return cast("dict[str, int]", totals)
+
+
+def _gptme_core_shapes_cover_files(
+    file_shapes: list[dict[str, Any]],
+    files: list[str],
+    totals: dict[str, int] | None,
+) -> bool:
+    """True when the shape read provably covers exactly the changed files.
+
+    `_fetch_pr_file_shapes` returns [] on a timeout or a non-zero `gh api`
+    exit, and a partially decoded paginated response truncates the list. The
+    per-file diff-shape detectors can only see the shapes they were given, so
+    an empty or short read would otherwise leave the sensitive-surface checks
+    with nothing to inspect and the PR eligible on diff shape (fail open).
+
+    `files` and `file_shapes` come from the same capped `pulls/files` listing,
+    so matching them proves nothing on its own: a PR over GitHub's 3000-file
+    cap truncates both at the same point. `totals` comes from the PR object
+    (`changedFiles`, `additions`), which is computed from the full diff. The
+    file count catches a capped listing; the added-line sum catches the case
+    where GitHub caps that count too, because the truncated shapes cannot
+    account for every added line. Unknown or mismatched totals refuse.
+
+    Residual gap, accepted: a capped tail made only of zero-addition entries
+    (pure deletions, content-free renames, empty files) contributes 0 to both
+    sides, so it stays undetectable from these totals. No API field proves that
+    class of completeness; the gate errs closed everywhere it can.
+    """
+    if not totals:
+        return False
+    shape_paths = {
+        str(shape.get("path", "")).replace("\\", "/").removeprefix("./")
+        for shape in file_shapes
+    }
+    changed = {path.replace("\\", "/").removeprefix("./") for path in files}
+    additions_values = [shape.get("additions") for shape in file_shapes]
+    if any(value is not None and type(value) is not int for value in additions_values):
+        # A malformed field means the shape read is not provably complete:
+        # fail closed instead of crashing evaluate_pr with a ValueError.
+        # `type(...) is int`, not isinstance: a JSON bool would sum as 0/1.
+        return False
+    shape_additions = sum(value or 0 for value in additions_values)
+    return (
+        totals["changed_files"] == len(files) == len(file_shapes)
+        and shape_paths == changed
+        and shape_additions == totals["additions"]
+    )
+
+
+# Reason prefixes marking a diff-shape completeness refusal. Unlike
+# path/category policy refusals, these must never be waived (tier-0 waiver
+# or operator approval): they exist so the patch-reading detectors cannot be
+# silently skipped on an incomplete read.
+GPTME_CORE_COMPLETENESS_REASON_PREFIXES = (
+    "Could not read the complete PR diff shape",
+    "GitHub omitted the patch for",
+)
+
+
+def _split_completeness_reasons(
+    reasons: list[str],
+) -> tuple[list[str], list[str]]:
+    """Split completeness refusals (never waivable) from policy refusals."""
+    completeness = [
+        reason
+        for reason in reasons
+        if reason.startswith(GPTME_CORE_COMPLETENESS_REASON_PREFIXES)
+    ]
+    policy = [reason for reason in reasons if reason not in completeness]
+    return completeness, policy
+
+
+def _gptme_core_unread_patches(file_shapes: list[dict[str, Any]]) -> list[str]:
+    """Paths whose added lines the patch-reading detectors need but cannot see.
+
+    GitHub omits `patch` for oversized diffs while still listing the file. Only
+    the CLI-flag (Python) and config-key (gptme/config/) detectors read patch
+    text, so an omitted lockfile or asset diff does not matter. `additions == 0`
+    (deletion, pure rename, empty file, binary) leaves nothing to read; an
+    unknown count does not.
+    """
+    unread = []
+    for shape in file_shapes:
+        path = str(shape.get("path", "")).replace("\\", "/").removeprefix("./")
+        if (
+            (path.endswith(".py") or path.startswith("gptme/config/"))
+            and not isinstance(shape.get("patch"), str)
+            and shape.get("additions") != 0
+        ):
+            unread.append(path)
+    return sorted(unread)
 
 
 def _pr_diff_proves_no_gitlinks(repo: str, number: int, file_count: int) -> bool:
@@ -4768,14 +4903,31 @@ def evaluate_pr(
             )
         else:
             file_shapes = _fetch_pr_file_shapes(repo, number)
-            shape_reasons = gptme_core_route_to_erik_reasons(
-                title, cast("str", pr.get("body") or ""), file_shapes
-            )
-            if shape_reasons:
+            totals = _fetch_pr_file_totals(repo, number)
+            if not _gptme_core_shapes_cover_files(file_shapes, files, totals):
                 result.category = None
-                category_reasons.extend(shape_reasons)
+                category_reasons.append(
+                    "Could not read the complete PR diff shape "
+                    f"({len(file_shapes)} shape(s) for {len(files)} changed "
+                    f"file(s); GitHub reports {totals}); gptme/gptme "
+                    "eligibility requires a complete read"
+                )
+            elif unread := _gptme_core_unread_patches(file_shapes):
+                result.category = None
+                category_reasons.append(
+                    "GitHub omitted the patch for "
+                    + ", ".join(unread)
+                    + "; the CLI-flag and config-key detectors cannot inspect it"
+                )
             else:
-                result.category = "gptme-core-diff-shape-eligible"
+                shape_reasons = gptme_core_route_to_erik_reasons(
+                    title, cast("str", pr.get("body") or ""), file_shapes
+                )
+                if shape_reasons:
+                    result.category = None
+                    category_reasons.extend(shape_reasons)
+                else:
+                    result.category = "gptme-core-diff-shape-eligible"
     elif repo == _GPTME_CONTRIB_REPO:
         # gptme/gptme-contrib: classify_category's category shape plus the
         # placement rule + spec-doc waiver (see contrib_classify_category's
@@ -4798,7 +4950,13 @@ def evaluate_pr(
 
     # ErikBjare/bob#1480: a tier-0 PR in a rollout repo of gptme_contrib_lib/merge_policy.toml
     # needs no category. Evaluated before operator approval so the tier is
-    # recorded even when Erik also approved the head.
+    # recorded even when Erik also approved the head. Diff-shape completeness
+    # refusals are not path/category policy and never waive: a tier-0 file set
+    # with an incomplete read still routes to human review, or the fail-closed
+    # gptme/gptme guard above could be silently bypassed by the waiver.
+    completeness_reasons, category_reasons = _split_completeness_reasons(
+        category_reasons
+    )
     category_reasons, tier_waiver, result.merge_tier = merge_policy_tier_waiver(
         category_reasons,
         repo=repo,
@@ -4810,10 +4968,18 @@ def evaluate_pr(
         result.warnings.append(tier_waiver)
         if result.merge_tier is not None:  # a waiver, not an unavailable policy
             result.category = "merge-policy-tier-0"
+    category_reasons = completeness_reasons + category_reasons
+    if completeness_reasons:
+        result.category = None
 
     # ErikBjare/bob#1471 phase 2/3: an operator approval of the head, or of an
     # earlier commit followed only by small review fixes, overrides
-    # path/category policy, never the sensitive-path or bot-config stop.
+    # path/category policy, never the sensitive-path or bot-config stop —
+    # and never a diff-shape completeness refusal, which is gate integrity,
+    # not policy.
+    completeness_reasons, category_reasons = _split_completeness_reasons(
+        category_reasons
+    )
     if category_reasons:
         category_reasons, category_waiver = operator_approval_category_waiver(
             category_reasons,
@@ -4825,8 +4991,9 @@ def evaluate_pr(
         )
         if category_waiver is not None:
             result.warnings.append(category_waiver)
-            if not category_reasons:
+            if not category_reasons and not completeness_reasons:
                 result.category = "operator-approved"
+    category_reasons = completeness_reasons + category_reasons
 
     # Erik 2026-11-24: a declared slice of a listed epic gets the placement /
     # category waiver without his per-PR approval; per-repo holds survive.
