@@ -271,6 +271,25 @@ def test_full_run_does_not_double_count(tmp_path: Path) -> None:
     assert stats.sessions_included == ["2025-10-02-one"]
 
 
+def test_legacy_state_preserves_archived_log_statistics(tmp_path: Path) -> None:
+    logs, state = tmp_path / "logs", tmp_path / "state.json"
+    _write_log(logs, "2025-10-02-amber")
+    _write_log(logs, "2025-10-02-zesty")
+    EffectivenessTracker(logs_dir=logs, state_file=state).analyze()
+    saved = json.loads(state.read_text())
+    del saved["processed_logs"]
+    state.write_text(json.dumps(saved))
+    (logs / "2025-10-02-amber").rename(tmp_path / "archived")
+    original = state.read_bytes()
+
+    tracker = EffectivenessTracker(logs_dir=logs, state_file=state)
+    with pytest.raises(ValueError, match="Restore archived logs"):
+        tracker.analyze()
+    assert state.read_bytes() == original
+    assert tracker.state.total_sessions == 2
+    assert tracker.state.lesson_stats["lessons/workflow/a.md"].total_inclusions == 2
+
+
 @pytest.mark.parametrize("legacy", [False, True], ids=["full", "legacy"])
 def test_rebuild_preserves_state_when_logs_unavailable(
     tmp_path: Path, legacy: bool
@@ -282,19 +301,23 @@ def test_rebuild_preserves_state_when_logs_unavailable(
         saved = json.loads(state.read_text())
         del saved["processed_logs"]
         state.write_text(json.dumps(saved))
+    if legacy:
+        # Legacy migration requires an explicit full rebuild.
+        with pytest.raises(ValueError, match="--full"):
+            EffectivenessTracker(logs_dir=logs, state_file=state).analyze()
     original = state.read_bytes()
     logs.rename(tmp_path / "offline-logs")
 
     tracker = EffectivenessTracker(logs_dir=logs, state_file=state)
     before = tracker.state.to_dict()
     with pytest.raises(FileNotFoundError, match="Cannot rebuild"):
-        tracker.analyze(incremental=legacy)
+        tracker.analyze(incremental=False)
     assert state.read_bytes() == original
     assert tracker.state.to_dict() == before
 
     # Once logs return, the same tracker can rebuild normally.
     (tmp_path / "offline-logs").rename(logs)
-    rebuilt = tracker.analyze(incremental=legacy)
+    rebuilt = tracker.analyze(incremental=False)
     assert rebuilt.processed_count == rebuilt.total_sessions == 1
     assert rebuilt.processed_logs == ["2025-10-02-zesty"]
 
@@ -315,6 +338,11 @@ def test_rebuild_resumes_exactly_once(
         state.write_text(json.dumps(saved))
 
     tracker = EffectivenessTracker(logs_dir=logs, state_file=state)
+    if legacy:
+        original = state.read_bytes()
+        with pytest.raises(ValueError, match="--full"):
+            tracker.analyze(limit=1)
+        assert state.read_bytes() == original
     if interrupted:
         process_log = tracker._process_log
 
@@ -325,9 +353,9 @@ def test_rebuild_resumes_exactly_once(
 
         monkeypatch.setattr(tracker, "_process_log", interrupt_after_checkpoint)
         with pytest.raises(RuntimeError, match="interrupted after first checkpoint"):
-            tracker.analyze(incremental=legacy, checkpoint_interval=1)
+            tracker.analyze(incremental=False, checkpoint_interval=1)
     else:
-        tracker.analyze(incremental=legacy, limit=1)
+        tracker.analyze(incremental=False, limit=1)
 
     partial = EffectivenessTracker(logs_dir=logs, state_file=state).state
     assert partial.processed_count == partial.total_sessions == 1
@@ -360,7 +388,12 @@ def test_legacy_state_rebuilds_without_skipping_earlier_log(tmp_path: Path) -> N
     state.write_text(json.dumps(legacy))
     _write_log(logs, new)
 
-    s = EffectivenessTracker(logs_dir=logs, state_file=state).analyze()
+    original = state.read_bytes()
+    tracker = EffectivenessTracker(logs_dir=logs, state_file=state)
+    with pytest.raises(ValueError, match="--full"):
+        tracker.analyze()
+    assert state.read_bytes() == original
+    s = tracker.analyze(incremental=False)
     assert s.processed_count == 2
     assert s.total_sessions == 2
     assert sorted(s.processed_logs) == [new, old]

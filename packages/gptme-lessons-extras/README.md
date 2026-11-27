@@ -334,6 +334,18 @@ For staleness analysis, use `similarity.calculate_recency_scores(lessons_dir, us
 The standalone `check-staleness.py` report script was removed; its fixed analytics/report
 paths and threshold rules are no longer maintained.
 
+### Effectiveness tracker state upgrades
+
+Incremental tracking now records exact processed log names rather than a name
+watermark. A legacy state with a watermark but no processed-name list is kept
+unchanged and analysis asks for an explicit `--full` rebuild. Back up that state
+and restore archived logs before rebuilding if their statistics must be retained:
+`--full` replaces totals using only available logs. A missing logs directory
+aborts a rebuild without overwriting state. A limited rebuild (`--full --limit N`)
+or one interrupted after a checkpoint can be resumed with an ordinary incremental
+run (omit `--full`); processed names prevent skipped or double-counted logs.
+`last_processed` remains the last visited name, not a completeness watermark.
+
 ## Notes
 
 - Import as `gptme_lessons_extras`. In source checkouts, a `src/lessons` symlink keeps the legacy

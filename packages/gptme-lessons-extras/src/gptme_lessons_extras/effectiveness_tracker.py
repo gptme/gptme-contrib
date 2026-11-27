@@ -288,16 +288,18 @@ class EffectivenessTracker:
         Returns:
             Updated TrackerState
         """
-        if not incremental or (
-            self.state.last_processed and not self.state.processed_logs
-        ):
+        if incremental and self.state.last_processed and not self.state.processed_logs:
+            # A watermark cannot identify exact membership, and some historical
+            # logs may be archived. Never discard their totals automatically.
+            raise ValueError(
+                "Legacy tracker state requires --full to rebuild from available logs. "
+                "Restore archived logs before rebuilding to retain their statistics."
+            )
+        if not incremental:
             if not self.logs_dir.is_dir():
                 raise FileNotFoundError(
                     f"Cannot rebuild statistics: logs directory unavailable: {self.logs_dir}"
                 )
-            # Legacy watermarks cannot identify which earlier-sorting logs were
-            # counted. Rebuild from available logs once, just like --full,
-            # rather than guessing membership or adding to the old counters.
             self.state = TrackerState()
         log_dirs = self._get_log_dirs(incremental=incremental)
 
