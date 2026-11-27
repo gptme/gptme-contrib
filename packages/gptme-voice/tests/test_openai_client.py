@@ -1384,6 +1384,45 @@ def test_send_typed_message_interrupts_an_active_reply() -> None:
     asyncio.run(_exercise())
 
 
+def test_send_typed_message_also_cancels_a_reply_that_starts_meanwhile() -> None:
+    """An injected result can start a new reply while the typed message waits
+    for the first cancel; that reply is cancelled too before the typed turn."""
+
+    async def _exercise() -> None:
+        fake_ws = _FakeWebSocket()
+
+        async def _fake_connect(*_args, **_kwargs):
+            return fake_ws
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "gptme_voice.realtime.openai_client.websockets.connect", _fake_connect
+            )
+            client = OpenAIRealtimeClient(api_key="test-key")
+            await client.connect()
+            await client._handle_event({"type": "session.updated"})
+            await client._handle_event({"type": "response.created"})
+            baseline = len(fake_ws.sent)
+            typed = asyncio.create_task(client.send_typed_message("stop"))
+            await asyncio.sleep(0.02)
+            done = {"type": "response.done", "response": {"status": "cancelled"}}
+            # The first reply ends, but a new one starts before we resume.
+            await client._handle_event(done)
+            await client._handle_event({"type": "response.created"})
+            await asyncio.sleep(0.02)
+            await client._handle_event(done)
+            assert await typed is True
+            assert [e["type"] for e in fake_ws.sent[baseline:]] == [
+                "response.cancel",
+                "response.cancel",
+                "conversation.item.create",
+                "response.create",
+            ]
+            await client.disconnect()
+
+    asyncio.run(_exercise())
+
+
 def test_send_text_message_times_out_if_session_never_becomes_ready() -> None:
     """A missing provider ready event must not pin the local handler forever."""
 

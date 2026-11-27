@@ -847,16 +847,22 @@ class OpenAIRealtimeClient:
         one is active. Returns True if a reply was interrupted.
         """
         interrupted = self._responding
-        if interrupted:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _TYPED_CANCEL_WAIT_SECONDS
+        # response.create is rejected until the provider confirms the cancel
+        # with response.done; don't trust our own flag for that. A response
+        # that starts meanwhile (e.g. for an injected lookup result) is
+        # superseded by the typed message too, so cancel until idle.
+        while self._responding:
             await self._send_event("response.cancel", {})
-            # response.create is rejected until the provider confirms the
-            # cancel with response.done; don't trust our own flag for that.
+            remaining = deadline - loop.time()
             try:
-                await asyncio.wait_for(
-                    self._response_idle.wait(), _TYPED_CANCEL_WAIT_SECONDS
-                )
+                if remaining <= 0:
+                    raise asyncio.TimeoutError
+                await asyncio.wait_for(self._response_idle.wait(), remaining)
             except asyncio.TimeoutError:
                 logger.warning("No response.done after cancel; sending anyway")
+                break
         await self.send_text_message(text)
         return interrupted
 
