@@ -745,3 +745,25 @@ def test_unloaded_conversation_gets_no_transcript_posts(
     monkeypatch.setattr("gptme_voice.realtime.server.GptmeToolBridge", _DummyToolBridge)
     asyncio.run(server.handle_browser_websocket(websocket))
     assert sinks == []
+
+
+def test_non_object_json_frames_are_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`null`, `[]`, `1`, `"commit"`: ignored like malformed JSON, call goes on."""
+    server = VoiceServer(enable_browser_transport=True)
+    frames = [
+        {"type": "websocket.receive", "text": text}
+        for text in ("null", "[]", "1", '"commit"')
+    ]
+    frames.append(
+        {
+            "type": "websocket.receive",
+            "text": json.dumps({"type": "text", "text": "hi"}),
+        }
+    )
+    frames.append({"type": "websocket.disconnect"})
+    fake_client = _FakeRealtimeClient()
+    seen = _run_browser_call(
+        monkeypatch, server, _DummyBrowserWebSocket(frames), fake_client
+    )
+    assert fake_client.sent_typed == ["hi"]
+    assert [(t.role, t.text) for t in seen["transcript"]] == [("user", "hi")]

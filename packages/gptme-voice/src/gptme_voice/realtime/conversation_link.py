@@ -144,12 +144,18 @@ async def fetch_conversation_context(
     log = conversation.get("log")
     chat_config = config.get("chat") if config is not None else None
     workspace = chat_config.get("workspace") if isinstance(chat_config, dict) else None
+    ws_path = (
+        os.path.expanduser(workspace)
+        if isinstance(workspace, str) and workspace
+        else None
+    )
+    absolute = ws_path is not None and os.path.isabs(ws_path)
     return ConversationContext(
         instructions=format_conversation_context(log if isinstance(log, list) else []),
-        workspace=os.path.abspath(os.path.expanduser(workspace))
-        if isinstance(workspace, str) and workspace
-        else None,
-        workspace_known=config is not None,
+        workspace=ws_path if absolute else None,
+        # A relative path would resolve against this sidecar's cwd, not the
+        # server's: treat it as unknown rather than guess.
+        workspace_known=config is not None and (absolute or ws_path is None),
     )
 
 

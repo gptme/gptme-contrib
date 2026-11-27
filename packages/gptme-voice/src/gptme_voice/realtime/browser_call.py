@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import json
+import shutil
 import tempfile
 import uuid
 from pathlib import Path
@@ -156,7 +157,7 @@ async def handle_browser_websocket(server: VoiceServer, websocket):
     live_sink: LiveTranscriptSink | None = None
     typed_lock = asyncio.Lock()
     typed_tasks: set[asyncio.Task[None]] = set()
-    unknown_workspace: tempfile.TemporaryDirectory[str] | None = None
+    unknown_workspace: str | None = None  # private dir when the workspace is unknown
     tool_workspace = server.workspace
 
     try:
@@ -179,10 +180,8 @@ async def handle_browser_websocket(server: VoiceServer, websocket):
         if not workspace_known:
             # Lookups must not run in (or read) the server's workspace on a
             # guess: give them an empty private directory instead.
-            unknown_workspace = tempfile.TemporaryDirectory(
-                prefix="gptme-voice-unknown-ws-"
-            )
-            tool_workspace = unknown_workspace.name
+            unknown_workspace = tempfile.mkdtemp(prefix="gptme-voice-unknown-ws-")
+            tool_workspace = unknown_workspace
         # A call about another workspace gets that workspace's project prompt
         # (or the default if unknown), and none of the server workspace's
         # digest or call history. Passed only when needed, so the common case
@@ -317,6 +316,8 @@ async def handle_browser_websocket(server: VoiceServer, websocket):
                     "Browser websocket: ignoring malformed JSON text frame"
                 )
                 continue
+            if not isinstance(data, dict):
+                continue  # valid JSON but not an object: ignore, like bad JSON
             if data.get("type") == "commit":
                 await realtime_client.commit_audio()
             elif data.get("type") == "text":
@@ -367,12 +368,13 @@ async def handle_browser_websocket(server: VoiceServer, websocket):
             await live_sink.close()
         if unknown_workspace is not None:
             if tool_bridge is not None and getattr(tool_bridge, "_pending_tasks", None):
-                # A lookup may still run in it; the OS temp cleanup removes it.
+                # A lookup may still run in it (mkdtemp has no finalizer, so it
+                # really stays); the OS temp cleanup removes it later.
                 _srv.logger.info(
-                    "Leaving %s for a lookup still running", unknown_workspace.name
+                    "Leaving %s for a lookup still running", unknown_workspace
                 )
             else:
-                unknown_workspace.cleanup()
+                shutil.rmtree(unknown_workspace, ignore_errors=True)
         if probe:
             _srv.logger.info(
                 "Probe call ended (%d turns); no call record", len(transcript)
