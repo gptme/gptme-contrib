@@ -37,8 +37,8 @@ class Entry:
     do: str
 
     @property
-    def key(self) -> tuple[str, str]:
-        return (self.date, self.title)
+    def key(self) -> tuple[str, str, str]:
+        return (self.date, self.title, self.action)
 
 
 def normalize_action(raw: str) -> str:
@@ -112,6 +112,7 @@ def run_git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
         ["git", "-C", str(repo), *args],
         capture_output=True,
         text=True,
+        encoding="utf-8",
         timeout=20,
     )
 
@@ -203,7 +204,12 @@ def main(argv: list[str] | None = None) -> int:
             entries_between(repo, args.old, args.new, path=args.path),
             min_action,
         )
-    except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+    except (
+        OSError,
+        RuntimeError,
+        subprocess.TimeoutExpired,
+        UnicodeDecodeError,
+    ) as exc:
         print(str(exc), file=sys.stderr)
         return 2
     if args.json:

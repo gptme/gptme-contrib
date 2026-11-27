@@ -196,6 +196,19 @@ def test_malformed_new_changelog_is_an_error_not_an_empty_result(repo: Path):
     assert mod.main([old, new, "--repo", str(repo)]) == 2
 
 
+def test_action_upgrade_is_emitted(repo: Path):
+    old_text = (
+        "## 2026-11-26 - hook\n\n" "- **Action:** optional\n" "- **Do:** Try it.\n"
+    )
+    new_text = (
+        "## 2026-11-26 - hook\n\n" "- **Action:** required\n" "- **Do:** Try it.\n"
+    )
+    old = commit(repo, "CHANGELOG.md", old_text)
+    new = commit(repo, "CHANGELOG.md", new_text)
+    added = mod.entries_between(repo, old, new)
+    assert [(e.title, e.action) for e in added] == [("hook", "required")]
+
+
 def test_malformed_old_changelog_is_skipped(repo: Path):
     old_text = (
         "## 2026-11-26 - typo\n\n"
