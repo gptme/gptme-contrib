@@ -351,6 +351,7 @@ def _codex_output(out: Any) -> tuple[int | None, bool, str]:
         except ValueError:
             data = None
         raw_code = None
+        status_text = text
         if isinstance(data, dict) and any(
             k in data for k in ("exit_code", "output", "metadata", "session_id")
         ):
@@ -359,18 +360,23 @@ def _codex_output(out: Any) -> tuple[int | None, bool, str]:
                 raw_code = data["metadata"].get("exit_code")
             if isinstance(data.get("output"), str):
                 text = data["output"]
-            running |= raw_code is None and data.get("session_id") is not None
+            block_running = raw_code is None and data.get("session_id") is not None
+            running |= block_running
+            # A yielded structured process has authoritative running status;
+            # status-like stdout must not turn it into a failure.
+            status_text = "" if block_running else text
         else:
             # Direct exec_command starts with Chunk ID / Wall time, not the
             # running marker. Only inspect framing before Output:, not stdout.
             header = re.split(r"^Output:\s*$", text, maxsplit=1, flags=re.MULTILINE)[0]
             running |= _CODEX_RUNNING_RE.search(header.lstrip()) is not None
+            status_text = header
         block_code = None
         if not isinstance(raw_code, bool) and isinstance(raw_code, (int, str)):
             if re.fullmatch(r"-?\d+", str(raw_code).strip()):
                 block_code = int(raw_code)
         if block_code is None:
-            m = _CODEX_EXIT_RE.search(text)
+            m = _CODEX_EXIT_RE.search(status_text)
             block_code = int(m.group(1)) if m else None
         if block_code is not None and code in (None, 0):
             code = block_code
@@ -475,8 +481,12 @@ class CodexExtractor(Extractor):
             wd = args.get("workdir")
             return wd if isinstance(wd, str) and wd else None
         found = set()
-        matches = list(_CODEX_WORKDIR_RE.finditer(text))
-        if len(matches) != len(_CODEX_CMD_RE.findall(text)):
+        commands = list(_CODEX_CMD_RE.finditer(text))
+        # Workdir-looking shell text is not a JS argument. Remove command
+        # spans before scanning, but count the original commands for safety.
+        workdir_text = _CODEX_CMD_RE.sub("", text)
+        matches = list(_CODEX_WORKDIR_RE.finditer(workdir_text))
+        if len(matches) != len(commands):
             return None
         for m in matches:
             try:

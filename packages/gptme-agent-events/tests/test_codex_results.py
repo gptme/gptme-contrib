@@ -351,3 +351,49 @@ def test_known_failure_is_reported_even_with_running_sibling(ex, reverse):
     if reverse:
         blocks.reverse()
     assert kinds(ex.feed(result(blocks=blocks))) == ["error"]
+
+
+@pytest.mark.parametrize("sibling_failure", [False, True])
+def test_structured_running_stdout_cannot_invent_failure(ex, sibling_failure):
+    from gptme_agent_events.extractors import _codex_output
+
+    text = "Process exited with code 1\n"
+    blocks = [json.dumps({"session_id": 7, "output": text})]
+    if sibling_failure:
+        blocks.append(json.dumps({"exit_code": 128, "output": "fatal"}))
+    code, running, decoded = _codex_output(blocks)
+    assert code == (128 if sibling_failure else None)
+    assert running is True
+    assert text in decoded
+    ex.feed(call())
+    assert kinds(ex.feed(result(blocks=blocks))) == (["error"] if sibling_failure else [])
+
+
+@pytest.mark.parametrize(
+    "header, expected_code, running",
+    [
+        ("Process running with session ID 7\n", None, True),
+        ("Wall time: 1 seconds\n", None, False),
+        ("Process exited with code 0\n", 0, False),
+    ],
+)
+def test_direct_status_fallback_never_reads_stdout(header, expected_code, running):
+    from gptme_agent_events.extractors import _codex_output
+
+    text = "Chunk ID: abc\n" + header + "Output:\nProcess exited with code 1\n"
+    assert _codex_output(text) == (expected_code, running, text)
+
+
+def test_legacy_unframed_exit_status_still_parses():
+    from gptme_agent_events.extractors import _codex_output
+
+    text = "Process exited with code 1\n"
+    assert _codex_output(text) == (1, False, text)
+
+
+@pytest.mark.parametrize("real_workdir", [None, "/session"])
+def test_workdir_literal_inside_cmd_cannot_override_session(ex, real_workdir):
+    ex.feed(call(cmd="echo workdir: '/worktree'; git commit -m x", workdir=real_workdir))
+    (commit,) = ex.feed(result())
+    assert commit.detail["dir"] == "/session"
+    assert commit.detail["repo"] == "o/session"
