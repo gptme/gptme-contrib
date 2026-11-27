@@ -199,13 +199,14 @@ def main(argv: list[str] | None = None) -> int:
         help="changelog path relative to the repo root",
     )
     parser.add_argument("--json", action="store_true", help="emit JSON")
-    parser.add_argument(
+    floor = parser.add_mutually_exclusive_group()
+    floor.add_argument(
         "--min-action",
         choices=ACTIONS[1:],
         default="recommended",
         help="lowest action class to print (default: recommended)",
     )
-    parser.add_argument(
+    floor.add_argument(
         "--all",
         action="store_true",
         help="include optional entries (same as --min-action optional)",

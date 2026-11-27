@@ -309,6 +309,13 @@ def test_resolve_repo_defaults_to_script_checkout():
     assert mod.resolve_repo(None) == REPO_ROOT
 
 
+def test_all_conflicts_with_min_action(capsys: pytest.CaptureFixture[str]):
+    with pytest.raises(SystemExit) as exc:
+        mod.main(["HEAD", "HEAD", "--min-action", "required", "--all"])
+    assert exc.value.code == 2
+    assert "not allowed with argument" in capsys.readouterr().err
+
+
 def test_cli_json_and_text(repo: Path):
     old = commit(repo, "CHANGELOG.md", SAMPLE)
     updated = SAMPLE.replace(
