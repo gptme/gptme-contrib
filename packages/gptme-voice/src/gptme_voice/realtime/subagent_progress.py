@@ -136,14 +136,9 @@ def seed_completions_from_timings(
             {
                 "task_id": f"prior:{task_id}",
                 "task": preview[:120],
-                "status": (
-                    "success"
-                    if record.get("response_delivered") is True
-                    and not record.get("cancelled")
-                    else completion_status_from_returncode(
-                        record.get("returncode"),
-                        cancelled=bool(record.get("cancelled")),
-                    )
+                "status": completion_status_from_returncode(
+                    record.get("returncode"),
+                    cancelled=bool(record.get("cancelled")),
                 ),
                 "returncode": (
                     record.get("returncode")
