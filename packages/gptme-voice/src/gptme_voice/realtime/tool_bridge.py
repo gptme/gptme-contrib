@@ -1336,21 +1336,29 @@ class GptmeToolBridge:
             return self.on_fulfill_planned_call(arguments)
 
         if name == "workspace_search":
+            filters = {
+                key: arguments[key]
+                for key in ("include_paths", "exclude_paths")
+                if arguments.get(key) is not None
+            }
             if self.rag is None or not self.rag.enabled:
+                self._log_workspace_search("", None, filters, 0.0, status="unavailable")
                 return {"error": "workspace_search is not enabled on this server."}
             query = arguments.get("query") or ""
             if not isinstance(query, str) or not query.strip():
+                self._log_workspace_search(
+                    query if isinstance(query, str) else "",
+                    None,
+                    filters,
+                    0.0,
+                    status="invalid_query",
+                )
                 return {"error": "No query provided"}
             n_results = arguments.get("n_results", 5)
             try:
                 n_results_int = int(n_results)
             except (TypeError, ValueError):
                 n_results_int = 5
-            filters = {
-                key: arguments[key]
-                for key in ("include_paths", "exclude_paths")
-                if arguments.get(key) is not None
-            }
             started = time.monotonic()
             try:
                 result = await self.rag.search(
@@ -1385,6 +1393,7 @@ class GptmeToolBridge:
         filters: Mapping[str, Any],
         elapsed_ms: float,
         error: BaseException | None = None,
+        status: str | None = None,
     ) -> None:
         """Log one receipt per workspace_search lookup.
 
@@ -1394,8 +1403,10 @@ class GptmeToolBridge:
         are exactly the fields an operator needs to correlate a call with the
         retrieval that answered it.
 
-        Every path emits exactly one receipt, including a failed lookup, so
-        "no receipt" unambiguously means the bridge never handled the call.
+        Every path emits exactly one receipt — success, a failed lookup
+        (``status=error``), an empty query (``status=invalid_query``) or a
+        disabled retriever (``status=unavailable``) — so "no receipt"
+        unambiguously means the bridge never handled the call.
         The fields are also attached as ``extra={"workspace_search": ...}`` so
         tests and log processors read typed values instead of the rendered
         string (a missing value renders as ``None`` and would pass a substring
@@ -1404,7 +1415,7 @@ class GptmeToolBridge:
         fields: dict[str, Any] = {
             "query": query,
             "filters": dict(filters),
-            "status": "error" if error is not None else None,
+            "status": "error" if error is not None else status,
             "backend": None,
             "mode": None,
             "selected_files": None,
@@ -1413,6 +1424,8 @@ class GptmeToolBridge:
         }
         if error is not None:
             fields["error"] = type(error).__name__
+        elif status is not None:
+            pass
         elif isinstance(result, Mapping):
             coverage = result.get("coverage")
             coverage = coverage if isinstance(coverage, Mapping) else {}

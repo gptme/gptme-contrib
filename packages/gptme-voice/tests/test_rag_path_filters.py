@@ -635,3 +635,36 @@ async def test_bridge_logs_a_receipt_for_a_failed_search(
     assert receipts[0]["status"] == "error"
     assert receipts[0]["error"] == "RuntimeError"
     assert receipts[0]["results"] is None
+
+
+@pytest.mark.asyncio
+async def test_bridge_logs_a_receipt_for_guard_paths(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A handled call that never reaches the retriever still leaves a receipt."""
+    import logging
+
+    from gptme_voice.realtime.tool_bridge import GptmeToolBridge
+
+    class DisabledRag:
+        enabled = False
+
+    disabled = GptmeToolBridge(workspace=str(tmp_path), rag=DisabledRag())  # type: ignore[arg-type]
+    with caplog.at_level(logging.INFO, logger="gptme_voice.realtime.tool_bridge"):
+        assert "error" in await disabled.handle_function_call(
+            "workspace_search", {"query": "standup brief"}
+        )
+
+    enabled = GptmeToolBridge(
+        workspace=str(tmp_path), rag=VoiceRag(str(tmp_path), enabled=True)
+    )
+    with caplog.at_level(logging.INFO, logger="gptme_voice.realtime.tool_bridge"):
+        assert "error" in await enabled.handle_function_call(
+            "workspace_search", {"query": "   "}
+        )
+
+    receipts = [
+        r.workspace_search for r in caplog.records if "workspace_search(" in r.message
+    ]
+    assert [r["status"] for r in receipts] == ["unavailable", "invalid_query"]
+    assert all(r["backend"] is None for r in receipts)
