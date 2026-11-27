@@ -247,6 +247,7 @@ class SmartRAGCache:
             "evictions": 0,
             "ttl_evictions": 0,
             "memory_evictions": 0,
+            "memory_rejections": 0,
             "total_size_bytes": 0,
         }
 
@@ -290,19 +291,17 @@ class SmartRAGCache:
             entry: Cache entry to store
         """
         with self.lock:
+            # Admission failure leaves existing values and their LRU order intact.
+            entry_size = entry.size_bytes()
+            if entry_size > self.max_memory_bytes:
+                self.stats["memory_rejections"] += 1
+                return
+
             # Remove existing entry if present
             if key in self.cache:
                 old_entry = self.cache[key]
                 self.stats["total_size_bytes"] -= old_entry.size_bytes()
                 del self.cache[key]
-
-            # Reject an oversized result before it can evict unrelated queries.
-            # An existing value for this key was removed above: it is superseded.
-            entry_size = entry.size_bytes()
-            if entry_size > self.max_memory_bytes:
-                self.stats["evictions"] += 1
-                self.stats["memory_evictions"] += 1
-                return
 
             # Add new entry
             self.cache[key] = entry

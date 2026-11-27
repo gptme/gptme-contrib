@@ -1,5 +1,6 @@
 """Unit tests for RAG caching system."""
 
+import sys
 import time
 from datetime import datetime, timedelta
 
@@ -242,10 +243,10 @@ class TestSmartRAGCache:
 
     def test_lru_eviction(self):
         """Test LRU eviction when memory limit exceeded."""
-        # Small cache: 1KB limit
+        # Each entry fits, but several entries exceed the 2KB limit.
         cache = SmartRAGCache(
             ttl_seconds=300,
-            max_memory_bytes=1024,
+            max_memory_bytes=2048,
         )
 
         # Add entries until memory limit exceeded
@@ -272,7 +273,8 @@ class TestSmartRAGCache:
         # Should have evicted some entries
         stats = cache.get_stats()
         assert stats["memory_evictions"] > 0
-        assert stats["entries"] < 10  # Not all 10 entries fit
+        assert stats["memory_rejections"] == 0
+        assert 0 < stats["entries"] < 10  # Some but not all entries fit
 
     def test_lru_ordering(self):
         """Test that least recently used entries are evicted first."""
@@ -530,14 +532,19 @@ def test_memory_limit_counts_cached_document_contents():
     big = "y" * 500_000
     for i in range(10):
         cache.put(CacheKey.from_search(f"q{i}"), _ttl_entry(content=big))
-    held = sum(len(c) for e in cache.cache.values() for c in e.document_contents)
-    assert held <= 1_000_000, f"cache holds {held} bytes of content, limit 1_000_000"
+    held = sum(e.size_bytes() for e in cache.cache.values())
+    content_size = sum(
+        sys.getsizeof(content) for e in cache.cache.values() for content in e.document_contents
+    )
+    assert content_size <= held
+    assert held == cache.get_stats()["total_size_bytes"]
+    assert held <= cache.max_memory_bytes
     assert cache.get_stats()["entries"] >= 1
 
 
 @pytest.mark.parametrize("replace_existing", [False, True])
 def test_oversized_entry_preserves_other_entries_and_size_accounting(replace_existing):
-    """Reject huge results without flushing warm queries or retaining stale replacements."""
+    """Rejected puts preserve existing values, LRU order, and size accounting."""
     cache = SmartRAGCache(ttl_seconds=60, max_memory_bytes=10_000)
     warm_key = CacheKey.from_search("warm")
     expired_key = CacheKey.from_search("expired")
@@ -549,21 +556,21 @@ def test_oversized_entry_preserves_other_entries_and_size_accounting(replace_exi
 
     cache.put(huge_key, _ttl_entry(content="z" * 50_000))
 
-    expected_keys = [expired_key] if replace_existing else [warm_key, expired_key]
-    assert list(cache.cache) == expected_keys
-    assert cache.get(huge_key) is None
-    if not replace_existing:
-        assert cache.get(warm_key) is warm
+    assert list(cache.cache) == [warm_key, expired_key]
+    assert cache.get(huge_key) is (warm if replace_existing else None)
+    assert cache.get(warm_key) is warm
     stats = cache.get_stats()
     assert stats["total_size_bytes"] == sum(e.size_bytes() for e in cache.cache.values())
-    assert stats["memory_evictions"] == 1
+    assert stats["memory_evictions"] == 0
+    assert stats["evictions"] == 0
+    assert stats["memory_rejections"] == 1
 
     # Expiry after rejection must subtract each retained entry exactly once.
     assert cache.get(expired_key) is None
     assert cache.get(expired_key) is None
     stats = cache.get_stats()
     assert stats["ttl_evictions"] == 1
-    assert stats["total_size_bytes"] == (0 if replace_existing else warm.size_bytes())
+    assert stats["total_size_bytes"] == warm.size_bytes()
     cache.clear()
     assert cache.get_stats()["total_size_bytes"] == 0
 
