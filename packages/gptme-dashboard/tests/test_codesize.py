@@ -762,3 +762,52 @@ def test_git_paths_keep_whitespace_in_history_and_churn(tmp_path: Path) -> None:
     assert report.largest_files[0].changes == 1
     assert report.history[-1].largest_file == path
     assert report.history[-1].source_lines == report.total_source_lines == 17
+
+
+def test_history_keeps_zero_samples_after_last_source_is_deleted(tmp_path: Path) -> None:
+    _init_repo(tmp_path)
+    now = datetime.now(timezone.utc)
+    _write(tmp_path, "src/a.py", 100)
+    _commit_all(tmp_path, date=(now - timedelta(days=21)).isoformat())
+    _git(tmp_path, "rm", "src/a.py")
+    _git(
+        tmp_path,
+        "commit",
+        "-qm",
+        "delete last source",
+        date=(now - timedelta(days=8)).isoformat(),
+    )
+
+    report = build_report(tmp_path, history_weeks=4)
+
+    assert [point.source_lines for point in report.history] == [100, 100, 0, 0]
+    assert report.total_source_lines == report.total_test_lines == 0
+    for point in report.history[-2:]:
+        assert point.test_lines == point.largest_file_lines == 0
+        assert point.largest_file == ""
+        assert point.threshold_counts == {"1500": 0, "3000": 0}
+        assert point.group_source_lines == {}
+
+
+def test_submodule_test_classification_uses_its_own_paths(tmp_path: Path) -> None:
+    meta = _metarepo(tmp_path)
+    _add_submodule(meta, tmp_path / "alpha-src", "tests/toolchain")
+    mounted = meta / "tests/toolchain"
+    _write(mounted, "tests/test_compiler.py", 7)
+    # A nested submodule's own paths must also ignore all ancestor mount names.
+    _add_submodule(mounted, tmp_path / "beta-src", "test/nested")
+    _commit_all(mounted, "add tests and nested tool")
+    _commit_all(meta, "mount toolchain")
+
+    report = build_report(meta, thresholds=(20, 40), history_weeks=4)
+
+    groups = {group.name: group for group in report.groups}
+    assert groups["tests/toolchain"].source_lines == 40
+    assert groups["tests/toolchain"].test_lines == 7
+    assert groups["tests/toolchain/test/nested"].source_lines == 20
+    assert groups["tests/toolchain/test/nested"].test_lines == 0
+    for entries in (report.largest_files, report.hotspots, report.over_threshold["40"]):
+        assert "tests/toolchain/src/mod.py" in {entry.path for entry in entries}
+    assert report.history[-1].source_lines == report.total_source_lines == 120
+    assert report.history[-1].test_lines == report.total_test_lines == 7
+    assert report.history[-1].threshold_counts == {"20": 4, "40": 2}

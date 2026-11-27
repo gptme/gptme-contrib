@@ -480,7 +480,12 @@ def build_report(
         if lines == 0:
             continue
         group, group_path = assign_group(rel, profile, overrides, submodules, shadowed)
-        is_test = _is_test_path(rel)
+        own_path = rel
+        for sub in sorted(submodules, key=len, reverse=True):
+            if rel.startswith(sub + "/"):
+                own_path = rel[len(sub) + 1 :]
+                break
+        is_test = _is_test_path(own_path)
         entry = groups.setdefault(group, GroupSize(name=group, path=group_path))
         group_paths.setdefault(group, set()).add(group_path)
         if is_test:
@@ -579,8 +584,8 @@ def _lines_at_commit(
     prefix: str = "",
     *,
     code_only: bool = False,
-) -> list[tuple[str, int]]:
-    """Line counts for every text source file at ``commit`` via one git grep.
+) -> list[tuple[str, int, bool]]:
+    """(workspace path, lines, is_test) for each source file via one git grep.
 
     With ``recurse``, follows each submodule pin recorded in that commit; pins that
     cannot be read are added to ``unreadable``.
@@ -588,7 +593,7 @@ def _lines_at_commit(
     suffixes = SOURCE_SUFFIXES - CONTENT_SUFFIXES if code_only else SOURCE_SUFFIXES
     patterns = [f":(icase)*{suffix}" for suffix in sorted(suffixes)]
     out = _git(root, "grep", "--no-color", "-z", "-c", "-I", "", commit, "--", *patterns)
-    rows: list[tuple[str, int]] = []
+    rows: list[tuple[str, int, bool]] = []
     marker = f"{commit}:"
     # -z leaves one NUL between the path and count. Only the count is line-delimited.
     for match in re.finditer(r"([^\0]+)\0([0-9]+)\n", out):
@@ -596,7 +601,8 @@ def _lines_at_commit(
         if label.startswith(marker):
             path = label[len(marker) :]
             if _is_source_path(path, code_only):
-                rows.append((prefix + path, int(count)))
+                # Classify before adding mount prefixes, including nested ones.
+                rows.append((prefix + path, int(count), _is_test_path(path)))
     if not recurse:
         return rows
     for entry in _git(root, "ls-tree", "-r", "-z", commit).split("\0"):
@@ -625,19 +631,17 @@ def _history(
 ) -> list[HistoryPoint]:
     points: list[HistoryPoint] = []
     previous_commit = ""
-    rows: list[tuple[str, int]] = []
+    rows: list[tuple[str, int, bool]] = []
     for week, commit in _weekly_commits(root, weeks):
         if commit != previous_commit:
             rows = _lines_at_commit(root, commit, recurse, unreadable, code_only=code_only)
             previous_commit = commit
-        if not rows:
-            continue
         source = test = 0
         threshold_counts = dict.fromkeys(map(str, thresholds), 0)
         group_source_lines: Counter[str] = Counter()
         largest_path, largest_lines = "", 0
-        for path, lines in rows:
-            if _is_test_path(path):
+        for path, lines, is_test in rows:
+            if is_test:
                 test += lines
             else:
                 source += lines
