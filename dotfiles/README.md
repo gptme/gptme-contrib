@@ -23,6 +23,13 @@ The dotfiles install global git hooks that apply to ALL repositories:
 - **Pre-commit integration**: Auto-stages files modified by formatters
 
 #### pre-push
+- **Brain-history guard**: Refuses a push whose local SHA descends from a
+  configured private brain root (Bob: `de85643adbc014d0e47fbd92a2367f8df498526c`)
+  unless the destination canonicalizes to `github.com/erikbjare/bob`. Linked
+  gptme/contrib worktrees share the brain object store; unrelated history still
+  pushes. Missing root objects are skipped. Fail closed on check errors.
+  Override (logged): `ALLOW_BRAIN_HISTORY_PUSH=1`. Tests may set
+  `BRAIN_HISTORY_ROOTS`. See ErikBjare/bob#1617.
 - **Mass-deletion guard**: Scans pushed commits, exempting history already tracked
   on configured non-destination remotes (an accident-prevention trust assumption,
   not protection against hostile local configuration). Existing branches use

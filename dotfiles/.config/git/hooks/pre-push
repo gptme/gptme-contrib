@@ -1,5 +1,6 @@
 #!/bin/bash
-# Pre-push hook: mass-deletion guard, force-reset guard, branch protection, worktree validation
+# Pre-push hook: brain-history guard, mass-deletion guard, force-reset guard,
+# branch protection, worktree validation
 #
 # Install globally:
 #   git config --global core.hooksPath ~/.config/git/hooks
@@ -137,6 +138,73 @@ done
 # This is the LAST line of defense before bad commits reach the remote.
 # Bypass: ALLOW_MASS_DELETE=1 git push ...
 ZERO="0000000000000000000000000000000000000000"
+
+# --- Brain-history ancestry guard ---
+# Refuse commits that descend from a private brain root when the destination is
+# not ErikBjare/bob. Linked gptme/contrib worktrees share the brain .git, so a
+# wrong remote name publishes private history (ErikBjare/bob#1617).
+# Fail closed on errors in this check. The only skip is ALLOW_BRAIN_HISTORY_PUSH=1
+# (logged). BRAIN_HISTORY_ROOTS may replace the default root list for tests and
+# is also logged. A root object missing from this object store is skipped: that
+# store has no brain history to leak.
+BRAIN_HISTORY_ALLOWED_CANON="github.com/erikbjare/bob"
+if [ -n "${ALLOW_BRAIN_HISTORY_PUSH:-}" ]; then
+    echo "⚠️  pre-push: ALLOW_BRAIN_HISTORY_PUSH is set — skipping brain-history ancestry check" >&2
+    echo "   remote=${PUSH_REMOTE_NAME:-?} url=${2:-?}" >&2
+else
+    if [ -n "${BRAIN_HISTORY_ROOTS:-}" ]; then
+        _BRAIN_ROOTS="$BRAIN_HISTORY_ROOTS"
+        echo "⚠️  pre-push: BRAIN_HISTORY_ROOTS override in effect" >&2
+    else
+        _BRAIN_ROOTS="de85643adbc014d0e47fbd92a2367f8df498526c"
+    fi
+    _dest_canon="$(_canonical_remote_url "${2:-}")" || {
+        echo "❌ Blocked: brain-history guard could not canonicalize remote URL: ${2:-}" >&2
+        echo "   remote=${PUSH_REMOTE_NAME:-?}" >&2
+        exit 1
+    }
+    if [ "$_dest_canon" != "$BRAIN_HISTORY_ALLOWED_CANON" ]; then
+        _remaining="$_BRAIN_ROOTS"
+        while [ -n "$_remaining" ]; do
+            _root="${_remaining%%,*}"
+            if [ "$_remaining" = "$_root" ]; then
+                _remaining=""
+            else
+                _remaining="${_remaining#*,}"
+            fi
+            _root="$(printf '%s' "$_root" | tr -d '[:space:]')"
+            [ -n "$_root" ] || continue
+            # Missing root: this object store does not contain that brain history.
+            if ! git cat-file -e "${_root}^{commit}" 2>/dev/null; then
+                continue
+            fi
+            for line in "${STDIN_LINES[@]}"; do
+                read -r local_ref local_sha remote_ref remote_sha <<< "$line"
+                [ "$local_sha" = "$ZERO" ] && continue
+                [ -n "$local_sha" ] || continue
+                if ! git cat-file -e "${local_sha}^{commit}" 2>/dev/null; then
+                    echo "❌ Blocked: brain-history guard cannot resolve ${local_sha} on ${local_ref}" >&2
+                    echo "   remote=${PUSH_REMOTE_NAME:-?} url=${2:-?} dest=${_dest_canon}" >&2
+                    exit 1
+                fi
+                _anc_rc=0
+                git merge-base --is-ancestor "$_root" "$local_sha" || _anc_rc=$?
+                if [ "$_anc_rc" -eq 0 ]; then
+                    echo "❌ Blocked: ${local_ref} (${local_sha}) descends from brain root ${_root}" >&2
+                    echo "   Destination ${_dest_canon} is not ${BRAIN_HISTORY_ALLOWED_CANON}." >&2
+                    echo "   Brain history may only be pushed to ErikBjare/bob (ErikBjare/bob#1617)." >&2
+                    echo "   remote=${PUSH_REMOTE_NAME:-?} url=${2:-?} dest_ref=${remote_ref}" >&2
+                    exit 1
+                elif [ "$_anc_rc" -ne 1 ]; then
+                    echo "❌ Blocked: brain-history ancestry check failed (exit ${_anc_rc})" >&2
+                    echo "   root=${_root} sha=${local_sha} ref=${local_ref}" >&2
+                    echo "   remote=${PUSH_REMOTE_NAME:-?} url=${2:-?} dest=${_dest_canon}" >&2
+                    exit 1
+                fi
+            done
+        done
+    fi
+fi
 
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
 _GUARD_SCRIPT=""
