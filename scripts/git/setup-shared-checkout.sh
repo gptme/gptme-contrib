@@ -57,10 +57,14 @@ else
 fi
 HOOK="$COMMON_DIR/hooks/pre-commit"
 
+# Escape a path for a double-quoted shell string (\ " $ ` are special there),
+# so a checkout path with shell metacharacters can't run code in the hook.
+dq_escape() { printf '%s' "$1" | sed 's/[\\"$`]/\\&/g'; }
+
 # Location of pre-commit-auto-stage as written into the hook.
 case "$AUTO_STAGE" in
-  "$HOME"/*) HOOK_TARGET="\$HOME/${AUTO_STAGE#"$HOME"/}" ;;
-  *) HOOK_TARGET="$AUTO_STAGE" ;;
+  "$HOME"/*) HOOK_TARGET="\$HOME/$(dq_escape "${AUTO_STAGE#"$HOME"/}")" ;;
+  *) HOOK_TARGET="$(dq_escape "$AUTO_STAGE")" ;;
 esac
 
 hook_body() {

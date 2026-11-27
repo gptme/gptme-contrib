@@ -175,6 +175,40 @@ def test_hook_path_is_home_relative_when_contrib_is_under_home(
     assert 'HOOK="$HOME/src/gptme-contrib/scripts/git/pre-commit-auto-stage"' in hook
 
 
+def test_hook_path_with_shell_metacharacters_is_escaped(
+    repo: Path, tmp_path: Path
+) -> None:
+    """A checkout path like `contrib$(touch pwned)` must not run code in the hook."""
+    contrib = tmp_path / 'odd $(touch pwned) `x` "q"' / "scripts" / "git"
+    contrib.mkdir(parents=True)
+    for name in (
+        "setup-shared-checkout.sh",
+        "pre-commit-auto-stage",
+        "git-safe-commit",
+    ):
+        shutil.copy2(SCRIPT.with_name(name), contrib / name)
+    env = {**os.environ, "HOME": str(tmp_path / "home"), **_ISOLATED}
+    result = subprocess.run(
+        ["bash", str(contrib / "setup-shared-checkout.sh"), str(repo)],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert result.returncode == 0, result.stderr
+    _git(repo, "commit", "-q", "--allow-empty", "-m", "init")
+    (repo / "mine.txt").write_text("mine\n")
+    (repo / "untracked-by-someone-else.txt").write_text("x\n")
+    commit = subprocess.run(
+        [str(contrib / "git-safe-commit"), "mine.txt", "-m", "mine"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert commit.returncode == 0, commit.stdout + commit.stderr
+    assert not (repo / "pwned").exists() and not (Path.cwd() / "pwned").exists()
+
+
 def test_hook_path_is_absolute_outside_home(repo: Path, tmp_path: Path) -> None:
     home = tmp_path / "elsewhere"
     home.mkdir()

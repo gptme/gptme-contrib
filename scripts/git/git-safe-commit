@@ -611,6 +611,8 @@ hook_allows_untracked_dirty_guard_relaxation() {
         target="$(sed -n 's/^HOOK="\(.*\)"$/\1/p' "$hook_path" | head -n 1)"
         # shellcheck disable=SC2016  # literal $HOME as written in the wrapper
         target="${target/#\$HOME/$HOME}"
+        # Undo the setup script's double-quote escaping (\\ \" \$ \`).
+        target="$(printf '%s' "$target" | sed 's/\\\([\\"$`]\)/\1/g')"
         if [ -n "$target" ] && [ "$target" != "$hook_path" ] && [ -f "$target" ] && \
            ! grep -Fq "Installed by gptme-contrib scripts/git/setup-shared-checkout.sh" "$target" 2>/dev/null; then
             hook_allows_untracked_dirty_guard_relaxation "$target"
