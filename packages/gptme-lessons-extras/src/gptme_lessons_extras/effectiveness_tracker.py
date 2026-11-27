@@ -213,26 +213,24 @@ class EffectivenessTracker:
 
         lessons_found: list[dict[str, str | list[str]]] = []
 
-        try:
-            with open(conv_file) as f:
-                for line in f:
-                    try:
-                        msg = json.loads(line)
-                        if msg.get("role") != "system":
-                            continue
-
-                        content = msg.get("content", "")
-                        if "# Relevant Lessons" not in content:
-                            continue
-
-                        # Parse lessons from this system message
-                        lessons = self._parse_lessons_from_content(content)
-                        lessons_found.extend(lessons)
-
-                    except json.JSONDecodeError:
+        # Let read failures propagate: unreadable is not a log with no lessons.
+        with open(conv_file) as f:
+            for line in f:
+                try:
+                    msg = json.loads(line)
+                    if msg.get("role") != "system":
                         continue
-        except OSError as e:
-            print(f"Warning: Could not read {conv_file}: {e}")
+
+                    content = msg.get("content", "")
+                    if "# Relevant Lessons" not in content:
+                        continue
+
+                    # Parse lessons from this system message
+                    lessons = self._parse_lessons_from_content(content)
+                    lessons_found.extend(lessons)
+
+                except json.JSONDecodeError:
+                    continue
 
         return lessons_found
 
@@ -300,16 +298,26 @@ class EffectivenessTracker:
                 raise FileNotFoundError(
                     f"Cannot rebuild statistics: logs directory unavailable: {self.logs_dir}"
                 )
-            self.state = TrackerState()
         log_dirs = self._get_log_dirs(incremental=incremental)
 
         if limit:
             log_dirs = log_dirs[:limit]
 
+        # Read the selected rebuild inputs before resetting or checkpointing:
+        # a later unreadable log must not destroy the previous statistics.
+        rebuilt_logs = None
+        if not incremental:
+            rebuilt_logs = [self._process_log(log_dir) for log_dir in log_dirs]
+            self.state = TrackerState()
+
         print(f"Processing {len(log_dirs)} log directories...")
 
         for i, log_dir in enumerate(log_dirs):
-            lessons = self._process_log(log_dir)
+            lessons = (
+                rebuilt_logs[i]
+                if rebuilt_logs is not None
+                else self._process_log(log_dir)
+            )
 
             if lessons:
                 self._update_stats(log_dir.name, lessons)
@@ -494,7 +502,7 @@ def main(
             limit=limit,
             incremental=not full,
         )
-    except (ValueError, FileNotFoundError) as e:
+    except (ValueError, OSError) as e:
         raise click.ClickException(str(e)) from e
 
     # Print summary report

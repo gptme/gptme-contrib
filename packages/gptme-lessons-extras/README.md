@@ -341,7 +341,9 @@ watermark. A legacy state with a watermark but no processed-name list is kept
 unchanged and analysis asks for an explicit `--full` rebuild. Back up that state
 and restore archived logs before rebuilding if their statistics must be retained:
 `--full` replaces totals using only available logs. A missing logs directory
-aborts a rebuild without overwriting state. A limited rebuild (`--full --limit N`)
+aborts a rebuild without overwriting state. Rebuilds read all selected logs before
+resetting or checkpointing totals; a read failure leaves the previous state intact.
+A limited rebuild (`--full --limit N`)
 or one interrupted after a checkpoint can be resumed with an ordinary incremental
 run (omit `--full`); processed names prevent skipped or double-counted logs.
 `last_processed` remains the last visited name, not a completeness watermark.

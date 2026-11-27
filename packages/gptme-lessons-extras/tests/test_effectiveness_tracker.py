@@ -321,6 +321,35 @@ def test_legacy_state_preserves_archived_log_statistics(tmp_path: Path) -> None:
     assert tracker.state.lesson_stats["lessons/workflow/a.md"].total_inclusions == 2
 
 
+@pytest.mark.parametrize("checkpoint_interval", [1, 100])
+def test_full_rebuild_preserves_state_on_unreadable_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, checkpoint_interval: int
+) -> None:
+    logs, state = tmp_path / "logs", tmp_path / "state.json"
+    for name in ["2025-10-02-amber", "2025-10-02-zesty"]:
+        _write_log(logs, name)
+    EffectivenessTracker(logs_dir=logs, state_file=state).analyze()
+    original = state.read_bytes()
+    tracker = EffectivenessTracker(logs_dir=logs, state_file=state)
+    before = tracker.state.to_dict()
+    original_open = open
+
+    def deny_zesty(file, *args, **kwargs):
+        if Path(file) == logs / "2025-10-02-zesty" / "conversation.jsonl":
+            raise PermissionError("temporarily unreadable")
+        return original_open(file, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr("builtins.open", deny_zesty)
+        with pytest.raises(PermissionError, match="temporarily unreadable"):
+            tracker.analyze(incremental=False, checkpoint_interval=checkpoint_interval)
+    assert state.read_bytes() == original
+    assert tracker.state.to_dict() == before
+    rebuilt = tracker.analyze(incremental=False)
+    assert rebuilt.total_sessions == rebuilt.processed_count == 2
+    assert rebuilt.lesson_stats["lessons/workflow/a.md"].total_inclusions == 2
+
+
 @pytest.mark.parametrize("legacy", [False, True], ids=["full", "legacy"])
 def test_rebuild_preserves_state_when_logs_unavailable(
     tmp_path: Path, legacy: bool
@@ -375,14 +404,13 @@ def test_rebuild_resumes_exactly_once(
             tracker.analyze(limit=1)
         assert state.read_bytes() == original
     if interrupted:
-        process_log = tracker._process_log
+        save_state = tracker._save_state
 
-        def interrupt_after_checkpoint(log_dir: Path) -> list:
-            if log_dir.name == names[1]:
-                raise RuntimeError("interrupted after first checkpoint")
-            return process_log(log_dir)
+        def interrupt_after_checkpoint() -> None:
+            save_state()
+            raise RuntimeError("interrupted after first checkpoint")
 
-        monkeypatch.setattr(tracker, "_process_log", interrupt_after_checkpoint)
+        monkeypatch.setattr(tracker, "_save_state", interrupt_after_checkpoint)
         with pytest.raises(RuntimeError, match="interrupted after first checkpoint"):
             tracker.analyze(incremental=False, checkpoint_interval=1)
     else:
