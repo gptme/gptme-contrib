@@ -74,6 +74,21 @@ def test_shrinking_lowers_baseline_and_never_raises_it(repo):
     assert read_baseline()["files"] == {"big.py": 12}
 
 
+@pytest.mark.parametrize("shrunk", [12, THRESHOLD - 1])
+def test_shrink_fails_until_the_lowered_baseline_is_staged(repo, capsys, shrunk):
+    baseline({"big.py": 15})
+    subprocess.run(["git", "add", ratchet.DEFAULT_BASELINE], check=True)
+    path = write("big.py", shrunk)
+    assert ratchet.main([path]) == 1
+    # A retry leaves the baseline file alone, but it is still not in the commit.
+    assert ratchet.main([path]) == 1
+    assert "staged copy is not lowered for big.py" in capsys.readouterr().err
+    # Commits that do not touch the shrunk file are unaffected.
+    assert ratchet.main([write("other.py", 1)]) == 0
+    subprocess.run(["git", "add", ratchet.DEFAULT_BASELINE], check=True)
+    assert ratchet.main([path]) == 0
+
+
 def test_shrinking_under_limit_drops_entry(repo):
     baseline({"big.py": 15})
     assert ratchet.main([write("big.py", THRESHOLD - 1)]) == 0
