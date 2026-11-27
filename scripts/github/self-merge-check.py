@@ -1137,23 +1137,21 @@ def _is_bot_author(author: str) -> bool:
 _AI_REVIEW_FINDING_MARKER = "<!-- bob-ai-review-finding -->"
 
 
-def _is_ai_review_thread(comments: list[dict[str, Any]]) -> bool:
-    """True when a review thread was opened by an automated reviewer.
+def _is_ai_review_thread(
+    comments: list[dict[str, Any]], expected_author: str | None
+) -> bool:
+    """Require both reviewer identity and the finding label on the root.
 
-    Without this, Bob's own AI review makes its PRs *less* mergeable: each
-    inline finding opens a thread attributed to Bob's user account, which
-    ``fetch_unresolved_human_threads`` then reports as unacknowledged human
-    review feedback and the self-merge gate blocks on. Observed live on
-    gptme/gptme-contrib#1383 — "4 unresolved human review thread(s) from:
-    TimeToBuildBob", where all four were the AI reviewer's own findings.
-
-    Detection is by explicit marker rather than by author login, because the
-    login is shared with Bob's genuine human-directed comments; only the
-    reviewer stamps this marker.
+    The reviewer's user account also posts genuine human-directed feedback,
+    so the account alone is insufficient. Comment text is not identity: if
+    the authenticated reviewer is unknown, no thread is exempted here.
     """
-    if not comments:
+    if not comments or not expected_author:
         return False
-    return _AI_REVIEW_FINDING_MARKER in (comments[0].get("body") or "")
+    root = comments[0]
+    if (root.get("author") or {}).get("login") != expected_author:
+        return False
+    return _AI_REVIEW_FINDING_MARKER in (root.get("body") or "")
 
 
 #: Severity rendered into an AI finding thread's root body as ``**P0**`` /
@@ -2038,6 +2036,8 @@ def fetch_unresolved_human_threads(
     repo: str,
     pr_number: int,
     review_data: tuple[list[dict[str, Any]], list[dict[str, Any]]] | None = _UNSET,  # type: ignore[assignment]
+    *,
+    expected_author: str | None = None,
 ) -> dict[str, Any]:
     """Count unresolved review threads from human (non-bot) reviewers.
 
@@ -2050,6 +2050,10 @@ def fetch_unresolved_human_threads(
     to avoid a duplicate GitHub API round-trip when the caller has already
     fetched this data.  Pass ``None`` explicitly to indicate the upstream fetch
     already failed — the helper will skip its own retry in that case.
+
+    *expected_author* is the AI reviewer's login (the authenticated user).
+    Only marker-bearing threads it authored are excluded as automated
+    findings; a marker-bearing thread by anyone else still counts and blocks.
     """
     if review_data is _UNSET:
         review_data = _fetch_greptile_review_data(repo, pr_number)
@@ -2071,7 +2075,7 @@ def fetch_unresolved_human_threads(
             continue
         # Automated review findings are not human feedback, even though they
         # are posted through a user account rather than a GitHub App.
-        if _is_ai_review_thread(comments):
+        if _is_ai_review_thread(comments, expected_author):
             continue
         total += 1
         if not thread.get("isResolved", False):
@@ -4617,7 +4621,7 @@ def evaluate_pr(
                 result.reasons.append(reason)
 
     human_threads = fetch_unresolved_human_threads(
-        repo, number, review_data=shared_review_data
+        repo, number, review_data=shared_review_data, expected_author=current_user
     )
     if human_threads["unresolved"] > 0:
         authors = ", ".join(human_threads["authors"]) or "unknown"
