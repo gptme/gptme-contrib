@@ -875,19 +875,22 @@ class GptmeToolBridge:
         if model:
             cmd += ["--model", model, "--tool-format", "tool"]
         transcript_tail = self._build_transcript_tail()
-        if transcript_tail is not None and not self._subagent_takes_transcript_flags:
-            transcript_tail_text, transcript_tail_turns = transcript_tail
-            augmented_task = (
-                f"Recent call transcript tail (last {transcript_tail_turns} turns):\n"
-                f"{transcript_tail_text}\n\nOriginal request:\n{augmented_task}"
-            )
-        elif transcript_tail is not None:
+        if transcript_tail is not None:
+            # The tail (often personal) goes through a private 0600 temp file,
+            # never argv, which other local users can read via /proc.
             transcript_tail_text, transcript_tail_turns = transcript_tail
             with tempfile.NamedTemporaryFile(
                 prefix="gptme-voice-transcript-", suffix=".txt", delete=False
             ) as tf:
                 transcript_tail_file = Path(tf.name)
                 tf.write(transcript_tail_text.encode("utf-8"))
+        if transcript_tail is not None and not self._subagent_takes_transcript_flags:
+            # gptme appends piped stdin to the prompt as a ```stdin block.
+            augmented_task = (
+                f"The recent call transcript (last {transcript_tail_turns} turns) "
+                f"is attached below as stdin.\n\nRequest:\n{augmented_task}"
+            )
+        elif transcript_tail is not None:
             cmd += [
                 "--transcript-tail-turns",
                 str(transcript_tail_turns),
@@ -903,16 +906,28 @@ class GptmeToolBridge:
             # window makes asyncio kill only the direct child, leaving the
             # wrapper script and gptme running. Shield the spawn and finish
             # tree cleanup before propagating cancellation to the caller.
+            tail_via_stdin = (
+                transcript_tail_file is not None
+                and not self._subagent_takes_transcript_flags
+            )
+            stdin_source = (
+                open(transcript_tail_file, "rb")  # noqa: SIM115 - closed below
+                if tail_via_stdin and transcript_tail_file is not None
+                else None
+            )
             spawn = asyncio.ensure_future(
                 _spawn_subagent(
                     *cmd,
-                    stdin=asyncio.subprocess.DEVNULL,
+                    stdin=stdin_source or asyncio.subprocess.DEVNULL,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     cwd=self.workspace,
                     start_new_session=True,
                 )
             )
+            if stdin_source is not None:
+                # Popen dups the descriptor into the child synchronously.
+                spawn.add_done_callback(lambda _f: stdin_source.close())
             try:
                 process = await asyncio.shield(spawn)
             except asyncio.CancelledError:
