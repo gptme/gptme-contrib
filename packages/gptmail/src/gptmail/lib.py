@@ -911,6 +911,38 @@ class AgentEmail:
         unique_id = str(uuid.uuid4())
         return f"<{unique_id}>"
 
+    def _preserve_edited_draft(self, content: str) -> Path | None:
+        """Save a draft edit that missed delivery as a new, sendable draft.
+
+        The delivered message id is already in ``sent/``, so ``send()`` refuses
+        the edited copy forever. Re-mint the ``Message-ID`` (and the matching
+        filename) so the edit is a real draft the user can send explicitly
+        instead of an unreachable file.
+
+        ``send()`` also refuses a reply whose original is already completed, and
+        the reply this edit belonged to has just been delivered. Drop its
+        ``In-Reply-To``/``References`` headers so the preserved edit is a
+        standalone message that sends without ``force``. Only the header block
+        is rewritten: a quoted ``Message-ID:`` line in the body is left alone.
+        """
+        message_id = self._generate_message_id()
+        header, separator, body = content.partition("\n\n")
+        header = re.sub(r"(?mi)^In-Reply-To:.*\n?", "", header)
+        header = re.sub(r"(?mi)^References:.*\n?", "", header)
+        header, replaced = re.subn(
+            r"(?mi)^Message-ID:.*$", f"Message-ID: {message_id}", header, count=1
+        )
+        if not replaced:
+            header = f"Message-ID: {message_id}\n{header}"
+        rewritten = header + separator + body
+        path = self.email_dir / "drafts" / self._format_filename(message_id)
+        try:
+            path.write_text(rewritten)
+        except OSError as e:
+            logger.warning("Failed to preserve the edited draft as %s: %s", path, e)
+            return None
+        return path
+
     def _format_filename(self, message_id: str) -> str:
         """Convert message ID to filename.
 
@@ -1035,23 +1067,36 @@ class AgentEmail:
         if not draft_path.exists() and not sent_path.exists():
             raise ValueError(f"Draft not found: {message_id}")
 
-        in_reply_to = ""
-        if draft_path.exists():
-            headers, _ = self._markdown_to_email(draft_path.read_text())
-            in_reply_to = headers.get("In-Reply-To", "").strip()
-        lock_key = f"reply:{in_reply_to.strip('<>')}" if in_reply_to else f"draft:{filename}"
-        digest = hashlib.sha256(lock_key.encode()).hexdigest()[:16]
-        lock_path = self.email_dir / ".send-locks" / f"{digest}.lock"
+        def lock_path(key: str) -> Path:
+            digest = hashlib.sha256(key.encode()).hexdigest()[:16]
+            return self.email_dir / ".send-locks" / f"{digest}.lock"
 
-        with FileLock(lock_path, timeout=SEND_LOCK_TIMEOUT):
+        # Lock the draft first and read In-Reply-To under that lock: a key read
+        # before locking can go stale if the draft is edited meanwhile, letting
+        # two senders of one draft take different reply locks. Order is always
+        # draft -> reply, so the nesting cannot deadlock.
+        # The draft-lock holder may wait out the reply lock before it sends, so a
+        # second sender of this draft has to be able to wait for both.
+        with FileLock(lock_path(f"draft:{filename}"), timeout=2 * SEND_LOCK_TIMEOUT):
             if sent_path.exists():
                 raise ValueError(f"Already sent: {message_id}")
-            if in_reply_to and not force and self._is_completed(in_reply_to):
-                raise ValueError(
-                    f"Original message {in_reply_to} is already replied to or marked "
-                    "no-reply-needed; refusing duplicate reply (use force to override)"
-                )
-            self._send_unlocked(message_id)
+            if not draft_path.exists():
+                raise ValueError(f"Draft not found: {message_id}")
+            # Draft editors do not take the send lock. Use this same snapshot
+            # for the lock key, delivery, sent archive, and reply bookkeeping.
+            content = draft_path.read_text()
+            headers, _ = self._markdown_to_email(content)
+            in_reply_to = headers.get("In-Reply-To", "").strip()
+            if not in_reply_to:
+                self._send_unlocked(message_id, content)
+                return
+            with FileLock(lock_path(f"reply:{in_reply_to.strip('<>')}"), timeout=SEND_LOCK_TIMEOUT):
+                if not force and self._is_completed(in_reply_to):
+                    raise ValueError(
+                        f"Original message {in_reply_to} is already replied to or marked "
+                        "no-reply-needed; refusing duplicate reply (use force to override)"
+                    )
+                self._send_unlocked(message_id, content)
 
     def _guard_email_outbound(self, text: str) -> None:
         """Apply existing secret policy without exposing scanner exception payloads."""
@@ -1062,8 +1107,8 @@ class AgentEmail:
         if not allowed:
             raise ValueError("Outbound redact gate blocked a secret")
 
-    def _send_unlocked(self, message_id: str) -> None:
-        """Deliver a draft and archive it; callers must hold the send lock."""
+    def _send_unlocked(self, message_id: str, content: str) -> None:
+        """Deliver the checked snapshot; callers must hold the send locks."""
         filename = self._format_filename(message_id)
         draft_path = self.email_dir / "drafts" / filename
         sent_path = self.email_dir / "sent" / filename
@@ -1071,8 +1116,6 @@ class AgentEmail:
         if not draft_path.exists():
             raise ValueError(f"Draft not found: {message_id}")
 
-        # Read content before moving
-        content = draft_path.read_text()
         self._guard_email_outbound(content)
 
         # Actually send via msmtp first
@@ -1267,15 +1310,25 @@ class AgentEmail:
                 if not self.rate_limiter.wait_if_needed(max_wait=60):
                     raise RuntimeError("Rate limit timeout - could not send within 60s")
 
-            # Send via msmtp
-            subprocess.run(
-                msmtp_cmd,
-                input=mime_bytes,
-                capture_output=True,
-                check=True,
-                timeout=30,
-            )
-            print(f"Email delivered via SMTP to {recipient} (from {sender}) as HTML")
+            # Stage the sent/ copy before delivery: publishing it afterwards is a
+            # bare rename that needs neither the draft file nor new disk space.
+            staged_path = sent_path.with_name(f".{uuid.uuid4().hex}.tmp")
+            try:
+                staged_path.write_text(content)
+                # Send via msmtp
+                subprocess.run(
+                    msmtp_cmd,
+                    input=mime_bytes,
+                    capture_output=True,
+                    check=True,
+                    timeout=30,
+                )
+                print(f"Email delivered via SMTP to {recipient} (from {sender}) as HTML")
+                # sent/ gets exactly what was delivered, even if the draft was
+                # edited, replaced or archived while msmtp ran.
+                staged_path.replace(sent_path)
+            finally:
+                staged_path.unlink(missing_ok=True)
         except subprocess.CalledProcessError as e:
             error_msg = e.stderr.decode() if e.stderr else str(e)
             print(f"Failed to send {message_id}: {error_msg}")
@@ -1287,8 +1340,72 @@ class AgentEmail:
             print(f"Error sending {message_id}: {e}")
             raise
 
-        # Move markdown file to sent folder (only after successful sending)
-        draft_path.rename(sent_path)
+        # The sent/ copy is published, so drop the draft, unless it was edited
+        # while sending: that edit was never delivered. archive() takes no send
+        # lock and may already have moved the draft.
+        #
+        # Move the file out of the way before comparing it. Reading the draft
+        # and then unlinking it leaves a window in which an editor's save is
+        # deleted unseen; a rename is atomic, so a concurrent write either lands
+        # before the move (the moved copy then differs and is put back) or after
+        # it (the editor creates a fresh drafts/ file). Only a write through a
+        # descriptor opened before the move can still slip past the comparison.
+        pending_path = draft_path.with_name(f".{uuid.uuid4().hex}.draft.tmp")
+        try:
+            draft_path.replace(pending_path)
+        except FileNotFoundError:
+            # archive() or another sender already moved it. A delivered message
+            # that the user archived is left in both sent/ and archive/: the
+            # archive copy is their own move, and deleting it would discard it.
+            pass
+        except OSError as e:
+            # Delivery already succeeded; preserve reply bookkeeping.
+            logger.warning("Failed to remove sent draft %s: %s", draft_path, e)
+        else:
+            try:
+                pending_content: str | None = pending_path.read_text(errors="replace")
+            except OSError as e:
+                pending_content = None
+                logger.warning("Failed to re-read draft %s: %s", draft_path, e)
+            if pending_content == content:
+                try:
+                    pending_path.unlink()
+                except OSError as e:
+                    # Delivery already succeeded; preserve reply bookkeeping.
+                    logger.warning("Failed to remove sent draft %s: %s", draft_path, e)
+            else:
+                logger.warning(
+                    "Draft %s changed during delivery; the delivered copy is in sent/",
+                    draft_path,
+                )
+                # Restoring the edit to drafts/<filename> would strand it: send()
+                # refuses any message id already in sent/. Publish it as a new
+                # draft with its own Message-ID so it can actually be sent.
+                preserved = (
+                    self._preserve_edited_draft(pending_content)
+                    if pending_content is not None
+                    else None
+                )
+                if preserved is not None:
+                    logger.warning("Unsent edit saved as draft %s", preserved.stem)
+                    try:
+                        pending_path.unlink()
+                    except OSError as e:
+                        logger.warning("Failed to remove moved draft %s: %s", pending_path, e)
+                elif draft_path.exists():
+                    # The editor already created a new drafts/ file; restoring
+                    # would overwrite that newer save. Keep both.
+                    logger.warning("Edited draft also at %s; kept both", pending_path)
+                else:
+                    try:
+                        pending_path.replace(draft_path)
+                    except OSError as e:
+                        logger.warning(
+                            "Failed to restore edited draft %s; it is at %s: %s",
+                            draft_path,
+                            pending_path,
+                            e,
+                        )
         self._record_local_send(sent_path)
 
         # Append send audit metadata so allowlist bypasses leave a forensic trace.

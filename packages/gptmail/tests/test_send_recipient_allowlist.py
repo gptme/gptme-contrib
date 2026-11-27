@@ -283,20 +283,20 @@ def test_send_audit_does_not_recreate_archived_message(
     monkeypatch.delenv("EMAIL_SEND_ALLOWLIST", raising=False)
     draft_id = agent.compose("erik@example.com", "Archive race", "Hello")
     filename = agent._format_filename(draft_id)
-    draft_path = tmp_path / "email" / "drafts" / filename
     sent_path = tmp_path / "email" / "sent" / filename
-    real_rename = Path.rename
+    real_replace = Path.replace
 
-    def archive_after_rename(path, target):
-        result = real_rename(path, target)
-        if path == draft_path and Path(target) == sent_path:
+    def archive_after_publish(path, target):
+        result = real_replace(path, target)
+        if Path(target) == sent_path:
             agent.archive(draft_id)
         return result
 
-    monkeypatch.setattr(Path, "rename", archive_after_rename)
+    monkeypatch.setattr(Path, "replace", archive_after_publish)
     monkeypatch.setattr(subprocess, "run", lambda *a, **kw: subprocess.CompletedProcess(a[0], 0))
     agent.send(draft_id)
     assert not sent_path.exists()
+    assert not (tmp_path / "email" / "drafts" / filename).exists()
     assert "Subject: Archive race" in agent.read_message(draft_id)
 
 
