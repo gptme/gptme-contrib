@@ -322,6 +322,8 @@ def _chunk_start(chunk: Document) -> int | None:
         return start
     match = re.search(r"#chunk\d+-(\d+)$", chunk.doc_id or "")
     return int(match.group(1)) if match else None
+
+
 def _is_tombstone(doc: Document) -> bool:
     """True for the content-less marker Document.from_file yields for an empty file."""
     return not doc.is_chunk and not (doc.content or "").strip()
