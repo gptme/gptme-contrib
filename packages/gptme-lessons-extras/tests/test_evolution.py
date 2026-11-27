@@ -1,5 +1,9 @@
 """Tests for the lesson evolution tracking module."""
 
+import os
+import subprocess
+import sys
+
 import pytest
 from gptme_lessons_extras.evolution import (
     EvolutionTracker,
@@ -351,3 +355,108 @@ def test_get_contributor_stats_excludes_refinements(tmp_path):
     assert stats["bob"]["lessons_created"] == 1
     # Refinement files should not create phantom entries
     assert len(stats) == 1
+
+
+def test_initialize_refuses_to_wipe_existing_history(tmp_path):
+    # #2362 E3: re-running `init` on a tracked lesson replaced its history.
+    from gptme_lessons_extras.evolution import EvolutionTracker
+
+    t = EvolutionTracker(history_dir=tmp_path / "hist")
+    t.initialize_lesson("bob-tools-git", "bob", "v1 body")
+    t.track_change("bob-tools-git", "alice", "tighten rule", "v2 body")
+
+    with pytest.raises(FileExistsError):
+        t.initialize_lesson("bob-tools-git", "bob", "v2 body")
+
+    h = t.load_history("bob-tools-git")
+    assert h is not None
+    assert [v.version for v in h.versions] == [1, 2]
+
+
+@pytest.mark.parametrize("target", ["history", "refinements"])
+def test_failed_write_keeps_previous_file(tmp_path, monkeypatch, target):
+    # #2362 E4: files were rewritten in place, so a failed write left invalid
+    # JSON and every later load raised.
+    from gptme_lessons_extras.evolution import EvolutionTracker
+
+    t = EvolutionTracker(history_dir=tmp_path / "hist")
+    t.initialize_lesson("bob-tools-git", "bob", "v1 body")
+    t.suggest_refinement("bob-tools-git", "alice", "clarity", "first")
+
+    def enospc(fd):
+        raise OSError(28, "No space left on device")
+
+    files_before = sorted((tmp_path / "hist").rglob("*"))
+    monkeypatch.setattr(os, "fsync", enospc)
+    with pytest.raises(OSError):
+        if target == "history":
+            t.track_change("bob-tools-git", "gordon", "add example", "v2 body")
+        else:
+            t.suggest_refinement("bob-tools-git", "gordon", "clarity", "second")
+    monkeypatch.undo()
+
+    h = t.load_history("bob-tools-git")
+    assert h is not None
+    assert [v.version for v in h.versions] == [1]
+    assert [r.suggestion for r in t.load_refinements("bob-tools-git")] == ["first"]
+    assert sorted((tmp_path / "hist").rglob("*")) == files_before  # no temp file
+
+
+_UMASK_CHILD = """
+import os, stat, sys
+from pathlib import Path
+from gptme_lessons_extras.evolution import EvolutionTracker
+
+hist = Path(sys.argv[1])
+os.umask(int(sys.argv[2], 8))
+t = EvolutionTracker(history_dir=hist)
+t.initialize_lesson("bob-tools-git", "bob", "v1 body")
+t.suggest_refinement("bob-tools-git", "alice", "clarity", "first")
+paths = [hist / "bob-tools-git.json", hist / "refinements" / "bob-tools-git.json"]
+print(" ".join(str(stat.S_IMODE(p.stat().st_mode)) for p in paths))
+for p in paths:
+    p.chmod(0o640)
+t.track_change("bob-tools-git", "alice", "tighten rule", "v2 body")
+t.update_refinement_status("bob-tools-git", 0, "accepted")
+print(" ".join(str(stat.S_IMODE(p.stat().st_mode)) for p in paths))
+"""
+
+
+@pytest.mark.parametrize(("umask", "new_mode"), [(0o077, 0o600), (0o002, 0o664)])
+def test_file_mode_follows_umask_then_survives_rewrite(tmp_path, umask, new_mode):
+    # New files get the umask default, as a plain open() would. A rewrite keeps
+    # the mode the file has: the temp file's 0600 must not replace it.
+    # The umask is process-wide, so it is set in a child process — mutating it
+    # here would expose every concurrent file creation in this process to the
+    # temporary mask.
+    out = subprocess.run(
+        [sys.executable, "-c", _UMASK_CHILD, str(tmp_path / "hist"), oct(umask)],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split("\n")
+    fresh = [int(m) for m in out[0].split()]
+    rewritten = [int(m) for m in out[1].split()]
+    assert fresh == [new_mode] * 2
+    assert rewritten == [0o640] * 2
+
+
+def test_writer_does_not_mutate_the_process_umask(tmp_path, monkeypatch):
+    # os.umask() is process-wide: setting it even briefly races with file
+    # creation in other threads, which would inherit the temporary mask. The
+    # writer probes a new file's mode through the kernel instead, so it must
+    # never call os.umask at all.
+    from gptme_lessons_extras.evolution import EvolutionTracker
+
+    calls = []
+
+    def _record(mask):
+        calls.append(mask)
+        return 0o022
+
+    monkeypatch.setattr(os, "umask", _record)
+    t = EvolutionTracker(history_dir=tmp_path / "hist")
+    t.initialize_lesson("bob-tools-git", "bob", "v1 body")
+    t.suggest_refinement("bob-tools-git", "alice", "clarity", "first")
+    t.track_change("bob-tools-git", "alice", "tighten rule", "v2 body")
+    assert calls == []

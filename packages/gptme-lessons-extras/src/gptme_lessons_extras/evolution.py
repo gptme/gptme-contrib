@@ -11,9 +11,14 @@ Tracks:
 """
 
 import json
+import os
+import stat
+import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+
+from bobutils.safe_write import safe_write
 
 
 @dataclass
@@ -146,7 +151,15 @@ class EvolutionTracker:
         origin_agent: str,
         content: str,
     ) -> LessonHistory:
-        """Initialize tracking for a new lesson."""
+        """Initialize tracking for a new lesson.
+
+        Raises FileExistsError if the lesson is already tracked: re-initialising
+        would replace its version history with a single v1.
+        """
+        if self._history_path(lesson_id).exists():
+            raise FileExistsError(
+                f"Lesson {lesson_id} is already tracked; use track_change to add a version"
+            )
         history = LessonHistory(
             lesson_id=lesson_id,
             origin_agent=origin_agent,
@@ -210,10 +223,7 @@ class EvolutionTracker:
 
     def _save_history(self, history: LessonHistory) -> None:
         """Save lesson history to disk."""
-        path = self._history_path(history.lesson_id)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w") as f:
-            json.dump(history.to_dict(), f, indent=2)
+        _write_json_atomic(self._history_path(history.lesson_id), history.to_dict())
 
     def suggest_refinement(
         self,
@@ -239,10 +249,9 @@ class EvolutionTracker:
         refinements.append(refinement)
 
         # Save
-        path = self._refinements_path(lesson_id)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w") as f:
-            json.dump([r.to_dict() for r in refinements], f, indent=2)
+        _write_json_atomic(
+            self._refinements_path(lesson_id), [r.to_dict() for r in refinements]
+        )
 
         return refinement
 
@@ -269,10 +278,9 @@ class EvolutionTracker:
 
         refinements[suggestion_index].status = new_status
 
-        path = self._refinements_path(lesson_id)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w") as f:
-            json.dump([r.to_dict() for r in refinements], f, indent=2)
+        _write_json_atomic(
+            self._refinements_path(lesson_id), [r.to_dict() for r in refinements]
+        )
 
     def compare_versions(
         self,
@@ -342,6 +350,39 @@ class EvolutionTracker:
         return stats
 
 
+def _new_file_mode(directory: Path) -> int:
+    """The mode a plain ``open()`` would give a new file in *directory*.
+
+    Probed through the kernel so the process umask applies without being read.
+    ``os.umask`` can only be *read* by setting it, and the umask is shared by
+    every thread: a file created elsewhere in the process between the set and
+    the restore would silently inherit the temporary mask.
+    """
+    fd, name = tempfile.mkstemp(dir=directory)
+    os.close(fd)
+    os.unlink(name)
+    fd = os.open(name, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
+    try:
+        return stat.S_IMODE(os.fstat(fd).st_mode)
+    finally:
+        os.close(fd)
+        os.unlink(name)
+
+
+def _write_json_atomic(path: Path, data: object) -> None:
+    """Write JSON via a temp file and rename, so a failed write (disk full,
+    crash) leaves the previous file intact instead of truncated JSON.
+
+    An existing file keeps its mode; a new one gets the umask default.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # safe_write keeps an existing file's mode, so the probe only decides the
+    # mode of a file that turns out not to exist — including one deleted
+    # between here and the write, which must not fall back to a world-readable
+    # default.
+    safe_write(path, json.dumps(data, indent=2), mode=_new_file_mode(path.parent))
+
+
 def main():
     """CLI interface for evolution tracking."""
     import sys
@@ -366,7 +407,11 @@ def main():
         lesson_id, agent_id, content_file = sys.argv[2:5]
         with open(content_file) as f:
             content = f.read()
-        history = tracker.initialize_lesson(lesson_id, agent_id, content)
+        try:
+            history = tracker.initialize_lesson(lesson_id, agent_id, content)
+        except FileExistsError as e:
+            print(f"Error: {e}")
+            sys.exit(1)
         print(f"Initialized tracking for {lesson_id}")
         latest = history.latest_version()
         if latest:
