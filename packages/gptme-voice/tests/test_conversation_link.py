@@ -69,6 +69,27 @@ def test_fetch_context_never_raises() -> None:
     assert ctx.instructions is None and ctx.workspace is None
 
 
+@pytest.mark.parametrize(
+    "log",
+    [{"role": "user"}, ["a bare string", {"role": "user", "content": "hi"}], "text"],
+)
+def test_fetch_context_tolerates_a_malformed_log(log: object) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/config"):
+            return httpx.Response(200, json={})
+        return httpx.Response(200, json={"log": log})
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
+            return await fetch_conversation_context("http://s", "k", "c", client=c)
+
+    ctx = asyncio.run(run())  # never raises
+    if isinstance(log, list):
+        assert ctx.instructions and "User: hi" in ctx.instructions
+    else:
+        assert ctx.instructions is None
+
+
 def test_fetch_context_tolerates_malformed_config() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/config"):

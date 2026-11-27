@@ -58,6 +58,8 @@ def format_conversation_context(messages: Sequence[dict[str, Any]]) -> str | Non
     """Render recent user/assistant messages as instructions for the voice model."""
     lines: list[str] = []
     for msg in messages:
+        if not isinstance(msg, dict):
+            continue
         role = msg.get("role")
         if role not in ("user", "assistant"):
             continue
@@ -128,10 +130,11 @@ async def fetch_conversation_context(
         logger.warning("Could not load conversation %s: %s", conversation_id, exc)
         return ConversationContext(instructions=None, workspace=None)
 
+    log = conversation.get("log")
     chat_config = config.get("chat")
     workspace = chat_config.get("workspace") if isinstance(chat_config, dict) else None
     return ConversationContext(
-        instructions=format_conversation_context(conversation.get("log") or []),
+        instructions=format_conversation_context(log if isinstance(log, list) else []),
         workspace=os.path.expanduser(workspace)
         if isinstance(workspace, str) and workspace
         else None,
