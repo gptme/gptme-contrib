@@ -404,3 +404,69 @@ def test_workdir_literal_inside_cmd_cannot_override_session(ex, real_workdir):
     (commit,) = ex.feed(result())
     assert commit.detail["dir"] == "/session"
     assert commit.detail["repo"] == "o/session"
+
+
+@pytest.mark.parametrize(
+    "workdir",
+    ["`/private`", "`/private/${name}`", "wt", "path.join(root, 'private')", "'/private' + suffix"],
+)
+def test_unresolved_js_workdir_cannot_borrow_public_session(ex, workdir):
+    ex.feed(record({"cwd": "/worktree"}, "turn_context"))
+    src = f"await tools.exec_command({{cmd: 'git commit -m x', workdir: {workdir}}});"
+    tool_events = ex.feed(
+        record({"type": "custom_tool_call", "name": "exec", "call_id": "c", "input": src})
+    )
+    events = ex.feed(result())
+    assert events == []
+    rows = []
+
+    def write(row):
+        rows.append(row.copy())
+        return True
+
+    pub = Publisher(
+        {"bob": "bob"}, write, visibility=FakeVisibility(token=""), clock=lambda: 1_000_000.0
+    )
+    for event in tool_events + events:
+        pub.handle(event)
+    assert pub.tick(flush=True) == 1
+    assert rows[-1]["milestone_url"] is None
+
+
+@pytest.mark.parametrize("workdir", ["/worktree", "../worktree"])
+def test_legacy_local_shell_uses_working_directory(ex, workdir):
+    ex.feed(
+        record(
+            {
+                "type": "local_shell_call",
+                "call_id": "c",
+                "action": {
+                    "type": "exec",
+                    "command": ["bash", "-lc", "git commit -m x"],
+                    "working_directory": workdir,
+                },
+            }
+        )
+    )
+    ex.feed(record({"cwd": "/another-turn"}, "turn_context"))
+    (commit,) = ex.feed(result())
+    assert commit.detail["dir"] == "/worktree"
+    assert commit.detail["repo"] == "o/public"
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    ["hook: Exit code: 1", "Process exited with code 1", "Process running with session ID 7"],
+)
+def test_raw_exec_stdout_block_cannot_invent_status(ex, stdout):
+    ex.feed(call())
+    (commit,) = ex.feed(
+        result(
+            blocks=[
+                "Script completed\nWall time 0.1 seconds\nOutput:\n",
+                stdout + "\n[main abc1234] x\n",
+            ]
+        )
+    )
+    assert commit.kind == "commit"
+    assert commit.detail["sha"] == "abc1234"

@@ -323,7 +323,10 @@ _CODEX_EXIT_RE = re.compile(
     r"(?:exited with code|exit_code[\"']?\s*:|Exit code:)\s*(-?\d+)", re.IGNORECASE
 )
 _CODEX_PATCH_PATH_RE = re.compile(r"^\*\*\* (?:Add|Update) File: (.+)$", re.MULTILINE)
-_CODEX_WORKDIR_RE = re.compile(r"""\bworkdir["']?\s*:\s*(["'])((?:\\.|(?!\1).)*)\1""", re.DOTALL)
+_CODEX_WORKDIR_KEY_RE = re.compile(r"""\bworkdir["']?\s*:""")
+_CODEX_WORKDIR_RE = re.compile(
+    r"""\bworkdir["']?\s*:\s*(["'])((?:\\.|(?!\1).)*)\1\s*(?=[,}])""", re.DOTALL
+)
 _CODEX_RUNNING_RE = re.compile(
     r"^(?:Script running with cell ID|Process running with session ID)\s+\w+\b",
     re.MULTILINE,
@@ -342,7 +345,7 @@ def _codex_output(out: Any) -> tuple[int | None, bool, str]:
     code: int | None = None
     running = False
     texts: list[str] = []
-    for block in blocks:
+    for index, block in enumerate(blocks):
         if isinstance(block, dict) and isinstance(block.get("text"), str):
             block = block["text"]
         text = block if isinstance(block, str) else json.dumps(block)
@@ -366,9 +369,13 @@ def _codex_output(out: Any) -> tuple[int | None, bool, str]:
             # status-like stdout must not turn it into a failure.
             status_text = "" if block_running else text
         else:
-            # Direct exec_command starts with Chunk ID / Wall time, not the
-            # running marker. Only inspect framing before Output:, not stdout.
-            header = re.split(r"^Output:\s*$", text, maxsplit=1, flags=re.MULTILINE)[0]
+            # Only the first raw block is tool framing. Later raw blocks are
+            # script stdout; structured sibling results above still carry status.
+            header = (
+                re.split(r"^Output:\s*$", text, maxsplit=1, flags=re.MULTILINE)[0]
+                if index == 0
+                else ""
+            )
             running |= _CODEX_RUNNING_RE.search(header.lstrip()) is not None
             status_text = header
         block_code = None
@@ -482,17 +489,20 @@ class CodexExtractor(Extractor):
         except ValueError:
             args = None
         if isinstance(args, dict):
-            wd = args.get("workdir")
+            wd = args.get("workdir", args.get("working_directory"))
             return wd if isinstance(wd, str) and wd else None
         found = set()
         commands = list(_CODEX_CMD_RE.finditer(text))
         # Workdir-looking shell text is not a JS argument. Remove command
         # spans before scanning, but count the original commands for safety.
         workdir_text = _CODEX_CMD_RE.sub("", text)
-        matches = list(_CODEX_WORKDIR_RE.finditer(workdir_text))
-        if not matches:
+        keys = list(_CODEX_WORKDIR_KEY_RE.finditer(workdir_text))
+        if not keys:
             return None
-        if len(matches) != len(commands):
+        matches = list(_CODEX_WORKDIR_RE.finditer(workdir_text))
+        # Expressions/templates are not statically known directories. Never
+        # treat an explicit but undecodable workdir as the session default.
+        if len(matches) != len(keys) or len(matches) != len(commands):
             return ""
         for m in matches:
             try:
