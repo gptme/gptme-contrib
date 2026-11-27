@@ -323,6 +323,73 @@ _CODEX_EXIT_RE = re.compile(
     r"(?:exited with code|exit_code[\"']?\s*:|Exit code:)\s*(-?\d+)", re.IGNORECASE
 )
 _CODEX_PATCH_PATH_RE = re.compile(r"^\*\*\* (?:Add|Update) File: (.+)$", re.MULTILINE)
+# Shorthand properties also supply a directory, but cannot be resolved here.
+_CODEX_WORKDIR_KEY_RE = re.compile(r"""\bworkdir["']?\s*(?=:|[,}])""")
+_CODEX_WORKDIR_RE = re.compile(
+    r"""\bworkdir["']?\s*:\s*(["'])((?:\\.|(?!\1).)*)\1\s*(?=[,}])""", re.DOTALL
+)
+_CODEX_RUNNING_RE = re.compile(
+    r"^(?:Script running with cell ID|Process running with session ID)\s+\w+\b",
+    re.MULTILINE,
+)
+_SHELL_WRAPPERS = {"bash", "sh", "zsh", "dash"}
+
+
+def _codex_output(out: Any) -> tuple[int | None, bool, str]:
+    """Decode status and stdout without hiding them inside an escaped JSON dump.
+
+    An exec cell may return several text blocks containing JSON.stringify'd
+    exec_command results. Any failure wins over sibling successes; any running
+    command makes the cell's landing unknown, even if a sibling has finished.
+    """
+    blocks = out if isinstance(out, list) else [out]
+    code: int | None = None
+    running = False
+    texts: list[str] = []
+    for index, block in enumerate(blocks):
+        if isinstance(block, dict) and isinstance(block.get("text"), str):
+            block = block["text"]
+        text = block if isinstance(block, str) else json.dumps(block)
+        try:
+            data = json.loads(text)
+        except ValueError:
+            data = None
+        raw_code = None
+        status_text = text
+        if isinstance(data, dict) and any(
+            k in data for k in ("exit_code", "output", "metadata", "session_id")
+        ):
+            raw_code = data.get("exit_code")
+            if raw_code is None and isinstance(data.get("metadata"), dict):
+                raw_code = data["metadata"].get("exit_code")
+            if isinstance(data.get("output"), str):
+                text = data["output"]
+            block_running = raw_code is None and data.get("session_id") is not None
+            running |= block_running
+            # Structured output is stdout, not fallback status framing. Keep
+            # legacy status-only dicts usable when they have no stdout field.
+            status_text = "" if block_running or "output" in data else text
+        else:
+            # Only the first raw block is tool framing. Later raw blocks are
+            # script stdout; structured sibling results above still carry status.
+            header = (
+                re.split(r"^Output:\s*$", text, maxsplit=1, flags=re.MULTILINE)[0]
+                if index == 0
+                else ""
+            )
+            running |= _CODEX_RUNNING_RE.search(header.lstrip()) is not None
+            status_text = header
+        block_code = None
+        if not isinstance(raw_code, bool) and isinstance(raw_code, (int, str)):
+            if re.fullmatch(r"-?\d+", str(raw_code).strip()):
+                block_code = int(raw_code)
+        if block_code is None:
+            m = _CODEX_EXIT_RE.search(status_text)
+            block_code = int(m.group(1)) if m else None
+        if block_code is not None and code in (None, 0):
+            code = block_code
+        texts.append(text)
+    return code, running, "\n".join(texts)
 
 
 class CodexExtractor(Extractor):
@@ -359,16 +426,38 @@ class CodexExtractor(Extractor):
             raw = payload.get("arguments", payload.get("input", payload.get("action")))
             text = raw if isinstance(raw, str) else json.dumps(raw)
             ev, _ = self._tool(ts, name, self._command(text), call_id)
+            workdir = self._workdir(text)
+            if call_id in self._pending and workdir == "":
+                # Mixed/partial workdirs cannot safely borrow the session repo.
+                # Keep the call for error reporting, but suppress its landings.
+                self._pending[call_id] = (name, [], None, None)
+            elif call_id in self._pending and workdir:
+                # Resolve relative tool workdirs against the turn, never this
+                # follower process. Preserve that directory for this call only.
+                if not os.path.isabs(workdir):
+                    workdir = (
+                        os.path.normpath(os.path.join(self.cwd, workdir)) if self.cwd else None
+                    )
+                if workdir:
+                    self._pending[call_id] = (*self._pending[call_id][:3], workdir)
+                else:
+                    # A relative tool directory without a turn cwd is unknown.
+                    self._pending[call_id] = (name, [], None, None)
             if name == "apply_patch":
                 m = _CODEX_PATCH_PATH_RE.search(text)
                 if m:
                     ev.detail["path"] = m.group(1).strip()
             return [ev]
         if ptype in ("function_call_output", "custom_tool_call_output") and call_id:
-            out = payload.get("output")
-            text = out if isinstance(out, str) else json.dumps(out)
-            m = _CODEX_EXIT_RE.search(text)
-            return self._result(ts, call_id, bool(m and int(m.group(1)) != 0), text)
+            code, running, text = _codex_output(payload.get("output"))
+            if code is not None and code != 0:
+                return self._result(ts, call_id, True, text)
+            if running:
+                # No success evidence yet. Continuations have new call ids;
+                # leave their eventual landings to reflogs, not guessed status.
+                self._pending.pop(call_id, None)
+                return []
+            return self._result(ts, call_id, code is not None and code != 0, text)
         return []
 
     @staticmethod
@@ -381,11 +470,57 @@ class CodexExtractor(Extractor):
         if isinstance(args, dict):
             cmd = args.get("cmd", args.get("command"))
             if isinstance(cmd, list):
-                return " ".join(str(c) for c in cmd)
+                argv = [str(c) for c in cmd]
+                # Legacy shell / local_shell_call: ["bash", "-lc", script].
+                if (
+                    len(argv) == 3
+                    and os.path.basename(argv[0]) in _SHELL_WRAPPERS
+                    and argv[1].startswith("-")
+                    and argv[1].endswith("c")
+                ):
+                    return argv[2]
+                return " ".join(argv)
             if isinstance(cmd, str):
                 return cmd
         found = [m.group(2) for m in _CODEX_CMD_RE.finditer(text)]
         return "\n".join(found) if found else None
+
+    @staticmethod
+    def _workdir(text: str) -> str | None:
+        """Return a shared workdir, None for default, or "" for ambiguous attribution."""
+        try:
+            args = json.loads(text)
+        except ValueError:
+            args = None
+        if isinstance(args, dict):
+            wd = args.get("workdir", args.get("working_directory"))
+            return wd if isinstance(wd, str) and wd else None
+        found = set()
+        commands = list(_CODEX_CMD_RE.finditer(text))
+        # Workdir-looking shell text is not a JS argument. Remove command
+        # spans before scanning, but count the original commands for safety.
+        workdir_text = _CODEX_CMD_RE.sub("", text)
+        keys = list(_CODEX_WORKDIR_KEY_RE.finditer(workdir_text))
+        if not keys:
+            return None
+        matches = list(_CODEX_WORKDIR_RE.finditer(workdir_text))
+        # Expressions/templates are not statically known directories. Never
+        # treat an explicit but undecodable workdir as the session default.
+        if len(matches) != len(keys) or len(matches) != len(commands):
+            return ""
+        for m in matches:
+            try:
+                wd = (
+                    json.loads('"' + m.group(2) + '"')
+                    if m.group(1) == '"'
+                    else re.sub(r"\\(['\\])", r"\1", m.group(2))
+                )
+            except ValueError:
+                return ""
+            found.add(wd)
+        if found == {""}:
+            return None  # An empty workdir uses the default, as in JSON args.
+        return found.pop() if len(found) == 1 else ""
 
 
 EXTRACTORS: dict[str, type[Extractor]] = {
