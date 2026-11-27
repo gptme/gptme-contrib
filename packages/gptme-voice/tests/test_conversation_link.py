@@ -5,14 +5,19 @@ import json
 import os
 from dataclasses import dataclass
 
+import gptme_voice.realtime.tool_bridge as tool_bridge_module
 import httpx
 import pytest
+from gptme_voice.realtime import conversation_link
 from gptme_voice.realtime.conversation_link import (
     CONTEXT_MAX_CHARS_PER_MESSAGE,
+    LOOKUP_MAX_TOOL_CALLS,
+    ConversationLookup,
     LiveTranscriptSink,
     fetch_conversation_context,
     format_conversation_context,
 )
+from gptme_voice.realtime.tool_bridge import GptmeToolBridge, ToolResult
 
 
 @dataclass
@@ -419,3 +424,217 @@ def test_sink_reposts_a_turn_the_provider_revised() -> None:
             }
         ],
     ]
+
+
+# --- lookups as conversation steps -------------------------------------------
+
+
+def _sse(*events: dict) -> bytes:
+    return b"".join(f"data: {json.dumps(e)}\n\n".encode() for e in events)
+
+
+class _LookupServer:
+    """A fake gptme-server: an SSE stream plus append/step/interrupt endpoints."""
+
+    def __init__(self, events: list[dict], *, hang: bool = False) -> None:
+        self.events = events
+        self.hang = hang
+        self.calls: list[tuple[str, dict]] = []
+        self.step_statuses: list[int] = []
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path.endswith("/events"):
+
+            async def body():
+                yield _sse(*self.events)
+                if self.hang:
+                    await asyncio.sleep(3600)
+
+            return httpx.Response(200, content=body())
+        payload = json.loads(request.content)
+        kind = path.rsplit("/", 1)[-1]
+        self.calls.append((kind, payload))
+        if kind == "step" and self.step_statuses:
+            return httpx.Response(self.step_statuses.pop(0), json={})
+        return httpx.Response(200, json={})
+
+    def lookup(self, client: httpx.AsyncClient, **kwargs) -> ConversationLookup:
+        return ConversationLookup(
+            server_url="http://server",
+            api_key="key",
+            conversation_id="conv-1",
+            client=client,
+            **kwargs,
+        )
+
+
+def _run_lookup(server: _LookupServer, task: str = "star count?", **kwargs):
+    async def run():
+        transport = httpx.MockTransport(server.handler)
+        async with httpx.AsyncClient(transport=transport) as c:
+            return await server.lookup(c, **kwargs)(task, mode="fast")
+
+    return asyncio.run(run())
+
+
+def _msg(role: str, content: str) -> dict:
+    return {"type": "message_added", "message": {"role": role, "content": content}}
+
+
+def test_lookup_runs_as_a_step_and_returns_the_last_assistant_reply() -> None:
+    server = _LookupServer(
+        [
+            {"type": "connected", "session_id": "s1", "generating": False},
+            _msg("assistant", "a spoken voice turn, not the answer"),
+            {"type": "generation_started"},
+            _msg("assistant", "Let me check.\n```shell\ngh api ...\n```"),
+            {"type": "tool_pending", "tool_id": "t1", "auto_confirm": True},
+            # The first generation ends; the tool runs; a continuation starts.
+            {"type": "generation_complete"},
+            {"type": "step_complete"},
+            {"type": "tool_executing", "tool_id": "t1"},
+            _msg("system", "Ran command: 4321"),
+            {"type": "tool_complete", "tool_id": "t1"},
+            {"type": "generation_started"},
+            _msg("assistant", "<think>\nreport it\n</think>\n\ngptme has 4321 stars."),
+            {"type": "generation_complete"},
+            {"type": "step_complete"},
+        ]
+    )
+    order: list[str] = []
+
+    async def before() -> None:
+        order.append(f"flush after {len(server.calls)} calls")
+
+    result = _run_lookup(server, before_lookup=before)
+
+    assert result.success and result.output == "gptme has 4321 stars."
+    assert order == ["flush after 0 calls"]
+    (append_kind, append), (step_kind, step) = server.calls
+    assert append_kind == "conv-1" and append["role"] == "user"
+    assert append["content"].startswith("[Voice call lookup] star count?")
+    assert step_kind == "step"
+    assert step == {"session_id": "s1", "auto_confirm": LOOKUP_MAX_TOOL_CALLS}
+
+
+def test_lookup_waits_for_a_running_reply_before_adding_to_the_chat() -> None:
+    server = _LookupServer(
+        [
+            {"type": "connected", "session_id": "s1", "generating": True},
+            {"type": "step_complete"},  # the user's own text reply finished
+            {"type": "generation_started"},
+            _msg("assistant", "done"),
+            {"type": "step_complete"},
+        ]
+    )
+    result = _run_lookup(server)
+    assert result.success and result.output == "done"
+    assert [k for k, _ in server.calls] == ["conv-1", "step"]
+
+
+def test_lookup_retries_a_busy_step(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(conversation_link, "LOOKUP_BUSY_RETRY_SECONDS", 0.01)
+    server = _LookupServer(
+        [
+            {"type": "connected", "session_id": "s1"},
+            {"type": "generation_started"},
+            _msg("assistant", "ok"),
+            {"type": "step_complete"},
+        ]
+    )
+    server.step_statuses = [409, 409, 200]
+    result = _run_lookup(server)
+    assert result.success
+    assert [k for k, _ in server.calls] == ["conv-1", "step", "step", "step"]
+
+
+@pytest.mark.parametrize(
+    ("event", "error"),
+    [
+        ({"type": "error", "error": "model refused"}, "model refused"),
+        ({"type": "tool_pending", "auto_confirm": False}, "more tool calls"),
+    ],
+)
+def test_lookup_failure_interrupts_the_step(event: dict, error: str) -> None:
+    server = _LookupServer(
+        [
+            {"type": "connected", "session_id": "s1"},
+            {"type": "generation_started"},
+            event,
+        ]
+    )
+    result = _run_lookup(server)
+    assert not result.success and error in (result.error or "")
+    assert server.calls[-1] == ("interrupt", {"session_id": "s1"})
+
+
+def test_lookup_timeout_interrupts_the_step() -> None:
+    server = _LookupServer(
+        [{"type": "connected", "session_id": "s1"}, {"type": "generation_started"}],
+        hang=True,
+    )
+    result = _run_lookup(server, timeouts={"fast": 0.2})
+    assert not result.success and "did not finish" in (result.error or "")
+    assert server.calls[-1] == ("interrupt", {"session_id": "s1"})
+
+
+def test_lookup_cancel_interrupts_the_step() -> None:
+    server = _LookupServer(
+        [{"type": "connected", "session_id": "s1"}, {"type": "generation_started"}],
+        hang=True,
+    )
+
+    async def run() -> None:
+        transport = httpx.MockTransport(server.handler)
+        async with httpx.AsyncClient(transport=transport) as c:
+            task = asyncio.create_task(server.lookup(c)("q", mode="fast"))
+            for _ in range(100):
+                if any(k == "step" for k, _ in server.calls):
+                    break
+                await asyncio.sleep(0.01)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    asyncio.run(run())
+    assert server.calls[-1] == ("interrupt", {"session_id": "s1"})
+
+
+def test_lookup_without_an_answer_fails() -> None:
+    server = _LookupServer(
+        [
+            {"type": "connected", "session_id": "s1"},
+            _msg("assistant", "a voice turn posted before the step started"),
+            {"type": "generation_started"},
+            {"type": "step_complete"},
+        ]
+    )
+    result = _run_lookup(server)
+    assert not result.success and "no answer" in (result.error or "")
+
+
+def test_execute_delegates_to_the_lookup_runner() -> None:
+    """With a lookup runner (webui calls), no gptme subprocess is spawned."""
+    seen: list[tuple] = []
+
+    async def _runner(task, *, mode, on_started, on_progress, on_completed):
+        seen.append((task, mode))
+        on_started(1.0)
+        return ToolResult(success=True, output="42")
+
+    async def _no_spawn(*args, **kwargs):
+        raise AssertionError("spawned a subprocess")
+
+    async def _exercise() -> None:
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(tool_bridge_module, "_spawn_subagent", _no_spawn)
+            bridge = GptmeToolBridge(workspace="/fake", lookup_runner=_runner)
+            started: list[float] = []
+            result = await bridge._execute(
+                "the answer", mode="smart", on_started=started.append
+            )
+        assert result.output == "42" and started == [1.0]
+
+    asyncio.run(_exercise())
+    assert seen == [("the answer", "smart")]

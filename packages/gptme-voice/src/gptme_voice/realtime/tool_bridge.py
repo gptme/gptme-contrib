@@ -304,8 +304,12 @@ class GptmeToolBridge:
         vision_bridge: "VisionSessionBridge | None" = None,
         rag: "VoiceRag | None" = None,
         on_cancel: Callable[[], Awaitable[None]] | None = None,
+        lookup_runner: Callable[..., Awaitable[ToolResult]] | None = None,
     ):
         self.gptme_path = os.environ.get("GPTME_VOICE_SUBAGENT_PATH") or gptme_path
+        # Runs lookups instead of a gptme subprocess, with _execute's signature
+        # (e.g. conversation_link.ConversationLookup for webui calls).
+        self.lookup_runner = lookup_runner
         # How the call's transcript tail reaches the subagent. "prompt" (the
         # default) inlines it into the task, which works for any subagent.
         # "flags" passes --transcript-tail-file/--transcript-tail-turns, which
@@ -704,6 +708,8 @@ class GptmeToolBridge:
                 pending.returncode = returncode
 
         model = self.model_fast if mode == "fast" else self.model_smart
+        if self.lookup_runner is not None:
+            model = "conversation"  # the conversation's own model runs it
 
         if pending is not None:
             pending.model = model
@@ -833,6 +839,14 @@ class GptmeToolBridge:
         on_completed: Callable[[int, float], None] | None = None,
     ) -> ToolResult:
         """Execute a gptme subagent and return the result."""
+        if self.lookup_runner is not None:
+            return await self.lookup_runner(
+                task,
+                mode=mode,
+                on_started=on_started,
+                on_progress=on_progress,
+                on_completed=on_completed,
+            )
         # gptme stages saves beside their destination and rejects shared-writable
         # parents such as /tmp. Keep the response in a private directory.
         response_directory = tempfile.TemporaryDirectory(prefix="gptme-voice-")

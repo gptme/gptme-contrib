@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import json
+import os
 import shutil
 import tempfile
 import uuid
@@ -27,6 +28,7 @@ import websockets
 from starlette.websockets import WebSocketDisconnect
 
 from . import server as _srv
+from .conversation_link import ConversationLookup
 
 if TYPE_CHECKING:
     from .conversation_link import LiveTranscriptSink
@@ -41,6 +43,15 @@ def _same_dir(a: str | None, b: str | None) -> bool:
         return Path(a).expanduser().resolve() == Path(b).expanduser().resolve()
     except OSError:
         return False
+
+
+def _lookups_in_conversation() -> bool:
+    """Whether webui calls run lookups as steps of their conversation.
+
+    ``GPTME_VOICE_LOOKUP_MODE=subagent`` keeps the separate gptme subprocess.
+    """
+    mode = os.environ.get("GPTME_VOICE_LOOKUP_MODE", "conversation")
+    return mode.strip().lower() != "subagent"
 
 
 def _is_probe_call(websocket) -> bool:
@@ -159,6 +170,7 @@ async def handle_browser_websocket(server: VoiceServer, websocket):
     typed_tasks: set[asyncio.Task[None]] = set()
     unknown_workspace: str | None = None  # private dir when the workspace is unknown
     same_workspace = True
+    lookup_runner: ConversationLookup | None = None
     tool_workspace = server.workspace
 
     try:
@@ -215,6 +227,13 @@ async def handle_browser_websocket(server: VoiceServer, websocket):
                 transcript=transcript,
                 call_metadata={"source": "webui", "provider": server.provider},
             )
+            if _lookups_in_conversation():
+                lookup_runner = ConversationLookup(
+                    server_url=server.gptme_server_url,
+                    api_key=server.gptme_server_key,
+                    conversation_id=conversation_id,
+                    before_lookup=live_sink.flush,
+                )
         body_adapter = server._body_adapter_for_websocket(
             websocket, transport="browser"
         )
@@ -277,6 +296,7 @@ async def handle_browser_websocket(server: VoiceServer, websocket):
             transcript_provider=lambda: transcript,
             body_adapter=body_adapter,
             rag=rag_for_ws,
+            lookup_runner=lookup_runner,
         )
         server._seed_bridge_from_prior_leg(tool_bridge, caller_id)
         realtime_client.on_function_call = tool_bridge.handle_function_call

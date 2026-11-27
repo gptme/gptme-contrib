@@ -6,7 +6,9 @@ with ``?conversation_id=<id>``. This module lets the call:
 - read the conversation (recent messages and workspace) so the realtime
   model knows what the user was doing, and
 - append transcript turns to that conversation while the call runs, so they
-  show up live in the webui next to typed messages.
+  show up live in the webui next to typed messages, and
+- run lookups as steps of that conversation (:class:`ConversationLookup`), so
+  they appear in the chat and use its workspace, model and tools.
 
 Both use the server's HTTP API with ``GPTME_VOICE_GPTME_SERVER_URL`` and
 ``GPTME_VOICE_GPTME_SERVER_KEY``, which the server sets when it starts the
@@ -16,14 +18,19 @@ sidecar.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
+import re
 import time
 import urllib.parse
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Set
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import httpx
+
+from .tool_bridge import ToolResult
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -357,3 +364,242 @@ class LiveTranscriptSink:
         finally:
             if self._owns_client and self._client is not None:
                 await self._client.aclose()
+
+
+# Lookups run as steps of the conversation itself (instead of a separate gptme
+# subprocess), so they show up in the chat and use its workspace, model and
+# tools. The step may run this many tools without a confirmation click.
+LOOKUP_MAX_TOOL_CALLS = 25
+LOOKUP_TIMEOUT_SECONDS = {"fast": 60.0, "smart": 120.0}
+LOOKUP_RESULT_MAX_CHARS = 4000
+LOOKUP_CONNECT_SECONDS = 10.0
+LOOKUP_BUSY_RETRY_SECONDS = 1.0
+_STEP_DONE_EVENTS = frozenset({"step_complete", "interrupted"})
+_LOOKUP_PREFIX = "[Voice call lookup] "
+_LOOKUP_SUFFIX = (
+    "\n\n(Asked by the voice assistant during the call: you are its lookup, "
+    "so use your own tools directly. Answer briefly in plain text; the voice "
+    "assistant reads your answer aloud.)"
+)
+
+
+# Reasoning blocks some models emit inline; never read aloud.
+_THINK_RE = re.compile(r"<think(?:ing)?>.*?(?:</think(?:ing)?>|$)", re.DOTALL)
+
+
+class _LookupFailed(Exception):
+    pass
+
+
+class ConversationLookup:
+    """Run a voice lookup as a step of the call's conversation.
+
+    Appends the request as a user message, takes a step with a tool budget,
+    waits on the conversation's event stream for the step to finish, and
+    returns the last assistant reply. Cancellation and timeouts interrupt the
+    step. Callable with the signature of ``GptmeToolBridge._execute``.
+    """
+
+    def __init__(
+        self,
+        *,
+        server_url: str,
+        api_key: str,
+        conversation_id: str,
+        before_lookup: Callable[[], Awaitable[object]] | None = None,
+        client: httpx.AsyncClient | None = None,
+        timeouts: Mapping[str, float] | None = None,
+    ) -> None:
+        self._server_url = server_url
+        self._conversation_id = conversation_id
+        self._headers = {"Authorization": f"Bearer {api_key}"}
+        self._before_lookup = before_lookup
+        self._client = client
+        self._timeouts = dict(timeouts or LOOKUP_TIMEOUT_SECONDS)
+
+    def _url(self, suffix: str = "") -> str:
+        return _conversation_url(self._server_url, self._conversation_id, suffix)
+
+    async def __call__(
+        self,
+        task: str,
+        mode: str = "fast",
+        on_started: Callable[[float], None] | None = None,
+        on_progress: Callable[[str, float], None] | None = None,
+        on_completed: Callable[[int, float], None] | None = None,
+    ) -> ToolResult:
+        timeout = self._timeouts.get(mode, max(self._timeouts.values()))
+        deadline = time.monotonic() + timeout
+        client = self._client or httpx.AsyncClient(
+            timeout=httpx.Timeout(10.0, read=None)
+        )
+        session_id: str | None = None
+        stepping = False
+        try:
+            async with client.stream(
+                "GET", self._url("/events"), headers=self._headers
+            ) as resp:
+                resp.raise_for_status()
+                events = _sse_events(resp.aiter_lines())
+                connected = await _next_event_of(
+                    events, {"connected"}, time.monotonic() + LOOKUP_CONNECT_SECONDS
+                )
+                session_id = str(connected.get("session_id") or "")
+                if not session_id:
+                    raise _LookupFailed("the server sent no session id")
+                if connected.get("generating"):
+                    # Let a running text reply finish before adding to the chat.
+                    await _next_event_of(events, _STEP_DONE_EVENTS, deadline)
+                if self._before_lookup is not None:
+                    # Post the caller's pending spoken turns first, so the chat
+                    # reads question, lookup, answer.
+                    await self._before_lookup()
+                await self._post(
+                    "",
+                    {"role": "user", "content": _LOOKUP_PREFIX + task + _LOOKUP_SUFFIX},
+                )
+                await self._start_step(session_id, deadline)
+                stepping = True
+                if on_started:
+                    on_started(time.monotonic())
+                answer = await self._await_answer(events, deadline, on_progress)
+                stepping = False
+        except asyncio.CancelledError:
+            if stepping and session_id:
+                await asyncio.shield(self._interrupt(session_id))
+            raise
+        except asyncio.TimeoutError:
+            if stepping and session_id:
+                await self._interrupt(session_id)
+            return ToolResult(
+                success=False,
+                output="",
+                error=f"the lookup in the chat did not finish within {timeout:.0f} s",
+            )
+        except (httpx.HTTPError, _LookupFailed, ValueError) as exc:
+            if stepping and session_id:
+                await self._interrupt(session_id)
+            logger.warning("Conversation lookup failed: %s", exc)
+            return ToolResult(success=False, output="", error=str(exc) or "failed")
+        finally:
+            if self._client is None:
+                await client.aclose()
+        if on_completed:
+            on_completed(0, time.monotonic())
+        if not answer:
+            return ToolResult(
+                success=False, output="", error="the chat agent gave no answer"
+            )
+        if len(answer) > LOOKUP_RESULT_MAX_CHARS:
+            answer = answer[:LOOKUP_RESULT_MAX_CHARS].rstrip() + " [...]"
+        return ToolResult(success=True, output=answer)
+
+    async def _post(self, suffix: str, payload: dict[str, Any]) -> httpx.Response:
+        client = self._client or httpx.AsyncClient(timeout=10)
+        try:
+            return await client.post(
+                self._url(suffix), json=payload, headers=self._headers
+            )
+        finally:
+            if self._client is None:
+                await client.aclose()
+
+    async def _start_step(self, session_id: str, deadline: float) -> None:
+        payload = {"session_id": session_id, "auto_confirm": LOOKUP_MAX_TOOL_CALLS}
+        while True:
+            resp = await self._post("/step", payload)
+            if resp.status_code != 409:
+                resp.raise_for_status()
+                return
+            # Another reply started between our check and the step.
+            if time.monotonic() + LOOKUP_BUSY_RETRY_SECONDS > deadline:
+                raise asyncio.TimeoutError
+            await asyncio.sleep(LOOKUP_BUSY_RETRY_SECONDS)
+
+    async def _await_answer(
+        self,
+        events: AsyncIterator[dict[str, Any]],
+        deadline: float,
+        on_progress: Callable[[str, float], None] | None,
+    ) -> str:
+        answer = ""
+        # Only messages the step generates count; anything added before it
+        # started (our request, a voice turn) is not the answer.
+        generating = False
+        # step_complete ends each generation. When a generation called tools,
+        # the server runs them and starts a continuation, so the lookup is
+        # done only after a generation that called none.
+        ran_tools = False
+        while True:
+            event = await _next_event_of(
+                events,
+                {
+                    "generation_started",
+                    "message_added",
+                    "error",
+                    "tool_pending",
+                    *_STEP_DONE_EVENTS,
+                },
+                deadline,
+            )
+            kind = event.get("type")
+            if kind == "generation_started":
+                generating = True
+                ran_tools = False
+            elif kind == "message_added":
+                message = event.get("message")
+                if not generating or not isinstance(message, dict):
+                    continue
+                content = _THINK_RE.sub("", str(message.get("content") or "")).strip()
+                if message.get("role") == "assistant" and content:
+                    answer = content
+                if content and on_progress:
+                    on_progress(content.splitlines()[0][:200], time.monotonic())
+            elif kind == "error":
+                raise _LookupFailed(str(event.get("error") or "the step failed"))
+            elif kind == "tool_pending":
+                # Every tool is announced; only one left for a click means the
+                # budget is used up (or the tool always needs confirmation).
+                if event.get("auto_confirm") is False:
+                    raise _LookupFailed(
+                        "the lookup needed more tool calls than allowed"
+                    )
+                ran_tools = True
+            elif kind == "step_complete" and ran_tools:
+                continue
+            else:
+                return answer
+
+    async def _interrupt(self, session_id: str) -> None:
+        try:
+            await self._post("/interrupt", {"session_id": session_id})
+        except httpx.HTTPError as exc:
+            logger.warning("Could not interrupt the lookup step: %s", exc)
+
+
+async def _sse_events(lines: AsyncIterator[str]) -> AsyncIterator[dict[str, Any]]:
+    async for line in lines:
+        if not line.startswith("data:"):
+            continue
+        try:
+            event = json.loads(line[5:].strip())
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict):
+            yield event
+
+
+async def _next_event_of(
+    events: AsyncIterator[dict[str, Any]], kinds: Set[str], deadline: float
+) -> dict[str, Any]:
+    """The next event whose type is in *kinds*; TimeoutError past *deadline*."""
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise asyncio.TimeoutError
+        try:
+            event = await asyncio.wait_for(events.__anext__(), remaining)
+        except StopAsyncIteration:
+            raise _LookupFailed("the event stream closed") from None
+        if event.get("type") in kinds:
+            return event
