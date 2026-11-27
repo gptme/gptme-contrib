@@ -15,9 +15,10 @@ Protocol:
   Client → Server: {"type": "vision_event", ...} / {"type": "vision_look_result", ...}
   Server → Client: {"type": "audio", "audio": "<base64>"}
   Server → Client: {"type": "audio_end"}
-  Server → Client: {"type": "sound_cue", "cue": "...", "sample_rate": 24000, "audio": "<base64>"}
+  Server → Client: {"type": "sound_cue", "cue": "...", "sample_rate": 8000, "audio": "<base64>"}
 """
 
+import array
 import asyncio
 import base64
 import functools
@@ -50,6 +51,8 @@ VISION_INTERVAL = float(os.environ.get("GPTME_VOICE_NODE_VISION_INTERVAL", "1.0"
 
 # --- Audio constants (must match server) ---
 SAMPLE_RATE = 24000
+# gptme-voice generates its sound cues at 8 kHz; the node upsamples them.
+CUE_SAMPLE_RATE = 8000
 CHUNK_SIZE = 1024
 CHANNELS = 1
 
@@ -164,6 +167,16 @@ def _with_vision_capability(server_url: str, enabled: bool) -> str:
     parsed = urlparse(server_url)
     query = f"{parsed.query}&vision=1" if parsed.query else "vision=1"
     return parsed._replace(query=query).geturl()
+
+
+def _upsample_cue(pcm: bytes) -> bytes:
+    """Linearly interpolate PCM16 mono from CUE_SAMPLE_RATE to SAMPLE_RATE."""
+    factor = SAMPLE_RATE // CUE_SAMPLE_RATE
+    samples = array.array("h", pcm)  # ValueError on a partial sample
+    out = array.array("h")
+    for current, following in zip(samples, samples[1:] + samples[-1:]):
+        out.extend(current + (following - current) * i // factor for i in range(factor))
+    return out.tobytes()
 
 
 class VoiceNode:
@@ -373,9 +386,11 @@ class VoiceNode:
         if not isinstance(audio, str):
             raise TypeError("sound_cue message must contain a string payload")
         sample_rate = data.get("sample_rate", SAMPLE_RATE)
-        if sample_rate != SAMPLE_RATE:
-            raise ValueError(f"sound_cue sample_rate {sample_rate!r} != {SAMPLE_RATE}")
+        if sample_rate not in (CUE_SAMPLE_RATE, SAMPLE_RATE):
+            raise ValueError(f"unsupported sound_cue sample_rate {sample_rate!r}")
         pcm = base64.b64decode(audio, validate=True)
+        if sample_rate == CUE_SAMPLE_RATE:
+            pcm = _upsample_cue(pcm)
         if not pcm:
             return
         was_playing = self._playing
