@@ -5,6 +5,7 @@ import json
 from dataclasses import dataclass
 
 import httpx
+import pytest
 from gptme_voice.realtime.conversation_link import (
     CONTEXT_MAX_CHARS_PER_MESSAGE,
     LiveTranscriptSink,
@@ -66,6 +67,56 @@ def test_fetch_context_never_raises() -> None:
 
     ctx = asyncio.run(run())
     assert ctx.instructions is None and ctx.workspace is None
+
+
+def test_fetch_context_tolerates_malformed_config() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/config"):
+            return httpx.Response(200, json={"chat": ["not", "a", "dict"]})
+        return httpx.Response(200, json={"log": [{"role": "user", "content": "hi"}]})
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
+            return await fetch_conversation_context("http://s", "k", "c", client=c)
+
+    ctx = asyncio.run(run())
+    assert ctx.workspace is None
+    assert ctx.instructions and "User: hi" in ctx.instructions
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [(500, "retry"), (503, "retry"), (429, "retry"), (408, "retry"), (403, "error")],
+)
+def test_sink_retries_transient_errors_and_gives_up_on_permanent(
+    status: int, expected: str
+) -> None:
+    responses = [status, 200]
+    posts: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        posts.append(json.loads(request.content))
+        return httpx.Response(responses.pop(0), json={})
+
+    transcript = [Turn("user", "hello")]
+
+    async def run() -> list[str]:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
+            sink = LiveTranscriptSink(
+                server_url="http://server",
+                api_key="key",
+                conversation_id="conv-1",
+                call_sid="webui-abc",
+                transcript=transcript,
+                client=c,
+            )
+            return [await sink.flush(), await sink.flush()]
+
+    first, second = asyncio.run(run())
+    assert first == expected
+    # A transient failure leaves the turn pending, so the next flush posts it.
+    assert second == "ok"
+    assert len(posts) == 2
 
 
 def test_sink_posts_each_turn_once_with_stable_ids_and_retries_409() -> None:

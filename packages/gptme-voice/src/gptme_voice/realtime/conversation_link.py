@@ -38,6 +38,7 @@ CONTEXT_MAX_CHARS = 6000
 # (xAI) re-send a completed transcript with more text shortly after the first.
 SETTLE_SECONDS = 1.2
 RETRY_SECONDS = 2.0
+_RETRY_STATUSES = frozenset({408, 409, 429})
 FINAL_FLUSH_ATTEMPTS = 5
 
 
@@ -126,7 +127,8 @@ async def fetch_conversation_context(
         logger.warning("Could not load conversation %s: %s", conversation_id, exc)
         return ConversationContext(instructions=None, workspace=None)
 
-    workspace = (config.get("chat") or {}).get("workspace")
+    chat_config = config.get("chat")
+    workspace = chat_config.get("workspace") if isinstance(chat_config, dict) else None
     return ConversationContext(
         instructions=format_conversation_context(conversation.get("log") or []),
         workspace=os.path.expanduser(workspace)
@@ -229,10 +231,17 @@ class LiveTranscriptSink:
             except httpx.HTTPError as exc:
                 logger.warning("Live transcript post failed: %s", exc)
                 return "retry"
-            if resp.status_code == 409:
-                # The text agent is generating; the server asks us to retry.
+            if resp.status_code in _RETRY_STATUSES or resp.status_code >= 500:
+                # 409: the text agent is generating and the server asks us to
+                # retry. 408/429/5xx: transient. Unposted turns stay pending.
+                if resp.status_code != 409:
+                    logger.warning(
+                        "Live transcript post failed (%d), will retry",
+                        resp.status_code,
+                    )
                 return "retry"
             if resp.status_code >= 400:
+                # Auth or a malformed request: retrying cannot help.
                 logger.warning(
                     "Live transcript post rejected (%d): %s",
                     resp.status_code,

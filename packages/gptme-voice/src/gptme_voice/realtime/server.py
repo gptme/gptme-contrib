@@ -30,6 +30,7 @@ from typing import Awaitable, Callable
 
 import click
 import uvicorn
+import websockets
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import FileResponse, PlainTextResponse
@@ -3920,6 +3921,14 @@ class VoiceServer:
         text = str(data.get("text") or "").strip()[:_MAX_TYPED_MESSAGE_CHARS]
         if not text:
             return
+        # Deliver first: a message the model never got must not be recorded in
+        # the conversation as if it had been part of the call, and a provider
+        # hiccup must not end the call (like the /local text path).
+        try:
+            await realtime_client.send_typed_message(text)
+        except (RuntimeError, websockets.ConnectionClosed) as exc:
+            logger.warning("Typed message not delivered to the provider: %s", exc)
+            return
         # A distinct item id keeps it from being merged with a speech partial.
         _append_transcript_turn(
             transcript,
@@ -3930,7 +3939,6 @@ class VoiceServer:
         )
         if live_sink is not None:
             live_sink.notify(immediate=True)
-        await realtime_client.send_typed_message(text)
         # Always drop queued playback: the provider may have finished streaming
         # a long reply that the browser is still playing (responding == False),
         # and the typed message supersedes it either way.

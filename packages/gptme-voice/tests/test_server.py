@@ -160,6 +160,7 @@ class _FakeRealtimeClient:
         self.on_function_call = None
         self.sent_typed: list[str] = []
         self.typed_interrupts = False
+        self.typed_error: Exception | None = None
 
     async def connect(self) -> None:
         return None
@@ -183,6 +184,8 @@ class _FakeRealtimeClient:
         self.sent_text.append(text)
 
     async def send_typed_message(self, text: str) -> bool:
+        if self.typed_error is not None:
+            raise self.typed_error
         self.sent_typed.append(text)
         return self.typed_interrupts
 
@@ -3313,6 +3316,31 @@ def test_browser_typed_message_during_a_reply_clears_playback(
     _run_browser_call(monkeypatch, server, websocket, fake_client)
 
     assert {"type": "clear"} in [json.loads(m) for m in websocket.text_messages]
+
+
+def test_browser_typed_message_not_delivered_is_not_recorded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A provider hiccup drops the message, not the call, and nothing is posted."""
+    server = VoiceServer(enable_browser_transport=True)
+    websocket = _DummyBrowserWebSocket(
+        [
+            {
+                "type": "websocket.receive",
+                "text": json.dumps({"type": "text", "text": "lost message"}),
+            },
+            {"type": "websocket.disconnect"},
+        ]
+    )
+    fake_client = _FakeRealtimeClient()
+    fake_client.typed_error = RuntimeError("Not connected to OpenAI Realtime API")
+
+    seen = _run_browser_call(monkeypatch, server, websocket, fake_client)
+
+    # The handler kept running to the normal disconnect and ended the call
+    # cleanly, with no turn for the undelivered message.
+    assert seen["transcript"] == []
+    assert {"type": "clear"} not in [json.loads(m) for m in websocket.text_messages]
 
 
 def test_probe_call_leaves_no_call_record(monkeypatch: pytest.MonkeyPatch) -> None:
