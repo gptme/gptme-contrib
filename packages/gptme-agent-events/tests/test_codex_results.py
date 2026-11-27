@@ -470,3 +470,18 @@ def test_raw_exec_stdout_block_cannot_invent_status(ex, stdout):
     )
     assert commit.kind == "commit"
     assert commit.detail["sha"] == "abc1234"
+
+
+@pytest.mark.parametrize("code", [0, 128])
+def test_relative_workdir_without_turn_cwd_suppresses_landing(code):
+    ex = CodexExtractor("rollout", agent="bob")
+    ex.feed(call(workdir="../worktree"))
+    assert kinds(ex.feed(result(code=code))) == (["error"] if code else [])
+
+
+@pytest.mark.parametrize("tool", ["exec", "exec_command"])
+def test_empty_workdir_uses_session_default(ex, tool):
+    ex.feed(call(workdir="", tool=tool))
+    (commit,) = ex.feed(result())
+    assert commit.detail["dir"] == "/session"
+    assert commit.detail["repo"] == "o/session"

@@ -439,6 +439,9 @@ class CodexExtractor(Extractor):
                     )
                 if workdir:
                     self._pending[call_id] = (*self._pending[call_id][:3], workdir)
+                else:
+                    # A relative tool directory without a turn cwd is unknown.
+                    self._pending[call_id] = (name, [], None, None)
             if name == "apply_patch":
                 m = _CODEX_PATCH_PATH_RE.search(text)
                 if m:
@@ -514,6 +517,8 @@ class CodexExtractor(Extractor):
             except ValueError:
                 return ""
             found.add(wd)
+        if found == {""}:
+            return None  # An empty workdir uses the default, as in JSON args.
         return found.pop() if len(found) == 1 else ""
 
 
