@@ -490,7 +490,7 @@ _PATTERNS: list[Pattern] = [
     # level; `\\?` only covered one.
     Pattern(
         re.compile(
-            r"\bAuthorization\\*['\"]?\s*[:=]\s*\\*['\"]?Basic\s+[A-Za-z0-9+/]{4,}={0,2}",
+            r"\bAuthorization\\*['\"]?\s*[:=]\s*\\*['\"]?Basic\s+(?:[A-Za-z0-9+]|\\?/){4,}={0,2}",
             re.IGNORECASE,
         ),
         Severity.CRITICAL,

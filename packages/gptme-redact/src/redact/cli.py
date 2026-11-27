@@ -317,9 +317,9 @@ def _write_atomic(path: Path, text: str) -> None:
         os.chmod(tmp, mode)
         try:
             os.replace(tmp, path)
-        except PermissionError:
-            # Sticky world-writable directory (e.g. /tmp) holding another
-            # user's file: replacing is EPERM, writing the file itself is not.
+        except OSError:
+            # Sticky world-writable directory (EPERM) or a bind-mounted file
+            # (EBUSY): replacing fails, writing the file itself does not.
             _write_in_place(path, data)
             Path(tmp).unlink(missing_ok=True)
             return

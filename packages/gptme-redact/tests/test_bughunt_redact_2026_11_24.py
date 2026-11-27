@@ -224,6 +224,16 @@ def test_doubly_json_escaped_http_basic_authorization_header_is_redacted() -> No
     assert b64 not in r.redacted
 
 
+def test_json_escaped_slash_in_basic_credential_leaves_no_tail() -> None:
+    # PHP json_encode and similar emit `/` as `\/`. The match must consume
+    # the escaped slash so the remainder of the credential is not left behind.
+    b64 = "dXNlcjpwYXNz/d29yZA=="
+    text = "Authorization: Basic " + b64.replace("/", "\\/")
+    r = redact(text, literals=[])
+    assert r.blocked
+    assert "d29yZA" not in r.redacted
+
+
 def test_out_to_dev_stdout_under_a_redirect_keeps_later_writes(tmp_path) -> None:
     import os
     from pathlib import Path
@@ -359,11 +369,33 @@ def test_out_falls_back_to_in_place_write_when_replace_is_denied(
     assert [p.name for p in tmp_path.iterdir()] == ["shared.txt"]
 
 
+def test_out_falls_back_to_in_place_write_when_replace_is_busy(
+    tmp_path, monkeypatch
+) -> None:
+    """A bind-mounted file raises EBUSY on replace; write the inode itself."""
+    import errno
+    import os
+
+    from redact.cli import _write_atomic
+
+    out = tmp_path / "mounted.txt"
+    out.write_text("old\n", encoding="utf-8")
+
+    def _deny(*a, **kw):
+        raise OSError(errno.EBUSY, "Device or resource busy")
+
+    monkeypatch.setattr(os, "replace", _deny)
+    _write_atomic(out, "new\n")
+    assert out.read_text(encoding="utf-8") == "new\n"
+    assert [p.name for p in tmp_path.iterdir()] == ["mounted.txt"]
+
+
 def test_out_in_place_fallback_restores_original_on_write_failure(
     tmp_path, monkeypatch
 ) -> None:
     """A disk-full write after truncate must not leave an empty --out file."""
     import builtins
+    import os
     import tempfile
     from pathlib import Path
 
@@ -383,7 +415,7 @@ def test_out_in_place_fallback_restores_original_on_write_failure(
 
     def _open(file, mode="r", *a, **kw):
         path = str(file)
-        if path == str(out) and "w" in str(mode):
+        if os.path.realpath(path) == os.path.realpath(out) and "w" in str(mode):
             writes["n"] += 1
             if writes["n"] == 1:
                 # Truncate as `"wb"` does, then fail the write.
