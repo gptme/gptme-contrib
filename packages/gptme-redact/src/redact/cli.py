@@ -283,7 +283,12 @@ def _write_atomic(path: Path, text: str) -> None:
     stream_fd = _stream_fd(path)
     if stream_fd is not None:
         while data:
-            data = data[os.write(stream_fd, data) :]
+            n = os.write(stream_fd, data)
+            # POSIX write() may return 0 on a non-blocking fd instead of
+            # EAGAIN. data[0:] is a no-op, so the loop would spin forever.
+            if n == 0:
+                raise OSError("write returned 0 bytes")
+            data = data[n:]
         return
     if existing is not None and not stat.S_ISREG(existing.st_mode):
         with open(path, "wb") as fh:

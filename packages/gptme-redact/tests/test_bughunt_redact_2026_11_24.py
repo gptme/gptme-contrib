@@ -235,6 +235,31 @@ def test_out_to_dev_stdout_under_a_redirect_keeps_later_writes(tmp_path) -> None
     assert target.read_text(encoding="utf-8") == "body\nfooter\n"
 
 
+def test_stream_write_raises_when_os_write_returns_zero(monkeypatch) -> None:
+    """A 0-byte write must fail closed, not spin forever on the residual."""
+    import os
+    from pathlib import Path
+
+    from redact.cli import _write_atomic
+
+    calls = {"n": 0}
+
+    def _zero(fd, data):
+        calls["n"] += 1
+        if calls["n"] > 5:
+            raise AssertionError("write loop did not terminate")
+        return 0
+
+    monkeypatch.setattr(os, "write", _zero)
+    try:
+        _write_atomic(Path("/dev/stdout"), "body\n")
+    except OSError as exc:
+        assert "0 bytes" in str(exc)
+    else:
+        raise AssertionError("expected OSError when os.write returns 0")
+    assert calls["n"] == 1
+
+
 def test_url_encoded_comma_joined_emails_are_both_redacted() -> None:
     r = redact("mailto:alice@x.com%2Cbob@y.org", literals=[])
     assert "alice" not in r.redacted
@@ -247,21 +272,35 @@ def test_dash_joined_emails_are_both_redacted() -> None:
     assert "bob@y.org" not in r.redacted
 
 
+def test_hyphenated_local_part_email_is_redacted() -> None:
+    # The lookbehind only forbids starting *inside* a local-part run. A hyphen
+    # in the local part is a legal character, so user-bob@example.com is one
+    # match starting at `u`, not a miss after the hyphen.
+    r = redact("contact user-bob@example.com and id-bob@corp.com", literals=[])
+    assert "user-bob@example.com" not in r.redacted
+    assert "id-bob@corp.com" not in r.redacted
+
+
 def test_cli_refuses_invalid_utf8_from_stdin(capsys, monkeypatch) -> None:
-    """The same bytes must not behave differently by how they were supplied.
+    """Production stdin has a buffer; invalid bytes are refused as UTF-8."""
 
-    `sys.stdin.read()` uses surrogateescape, so `0xff` arrived as "\\udcff",
-    matched no pattern and was reported as a clean artifact, while a file with
-    that byte was refused as invalid UTF-8.
-    """
-
-    class _SurrogateStdin(io.TextIOBase):
-        """What a POSIX stdin looks like: text read with surrogateescape."""
-
+    class _BufferedStdin(io.TextIOBase):
+        encoding = "utf-8"
         buffer = io.BytesIO(b"plain \xff text\n")
 
+    monkeypatch.setattr("sys.stdin", _BufferedStdin())
+    assert main(["--no-env-secrets", "-"]) == 2
+    assert "not valid UTF-8" in capsys.readouterr().err
+
+
+def test_cli_refuses_surrogateescape_stdin_without_a_buffer(
+    capsys, monkeypatch
+) -> None:
+    """A replaced stdin has no buffer; surrogateescape-decoded 0xff is refused."""
+
+    class _SurrogateStdin(io.TextIOBase):
         def read(self, *a):  # noqa: D102 - mirrors TextIOWrapper.read
-            return self.buffer.getvalue().decode("utf-8", "surrogateescape")
+            return b"plain \xff text\n".decode("utf-8", "surrogateescape")
 
     monkeypatch.setattr("sys.stdin", _SurrogateStdin())
     assert main(["--no-env-secrets", "-"]) == 2
