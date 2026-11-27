@@ -2926,3 +2926,84 @@ def test_read_resolves_stem_and_marks_it_read(workspace: Path) -> None:
     result = CliRunner().invoke(agent, ["read", stem])
     assert result.exit_code == 0, result.output
     assert _frontmatter(workspace / "messages" / "inbox" / name)["read"] is True
+
+
+@pytest.mark.parametrize("default_count", [1, 2])
+def test_prefix_ambiguity_spans_mailboxes(workspace: Path, default_count: int) -> None:
+    for i in range(default_count):
+        _write_local(workspace / "messages" / "inbox", f"shared-default-{i}.md", {})
+    _write_local(agent_cli._mailbox_root("ops") / "inbox", "shared-ops.md", {})
+    assert agent_cli._resolve_message("shared") is None
+    result = CliRunner().invoke(agent, ["ack", "shared"])
+    assert result.exit_code == 1
+    assert f"matches {default_count + 1} message(s)" in result.output
+    resolved = agent_cli._resolve_message("shared", mailbox="ops")
+    assert resolved is not None and resolved[1].name == "shared-ops.md"
+
+
+@pytest.mark.parametrize("reference", ["target", "target.md"])
+def test_exact_message_beats_other_mailbox_prefix(workspace: Path, reference: str) -> None:
+    _write_local(workspace / "messages" / "inbox", f"{reference}-followup.md", {})
+    inbox = agent_cli._mailbox_root("ops") / "inbox"
+    _write_local(inbox, "target.md", {})
+    assert agent_cli._resolve_message(reference) == ("ops", inbox / "target.md")
+
+
+@pytest.mark.parametrize("short_form", ["stem", "prefix"])
+def test_short_reply_keeps_canonical_parent(workspace: Path, short_form: str) -> None:
+    name = _seed_inbox(workspace, subject="threaded")
+    reference = name.removesuffix(".md") if short_form == "stem" else name.split("-bob-")[0]
+    result = CliRunner().invoke(agent, ["reply", reference, "thanks"])
+    assert result.exit_code == 0, result.output
+    assert _frontmatter(_only_outbox_msg(workspace))["in_reply_to"] == name
+    assert _frontmatter(workspace / "messages" / "inbox" / name)["replied"] is True
+    # Another spelling of the same id must not create a second reply.
+    again = CliRunner().invoke(agent, ["reply", name, "thanks again"])
+    assert again.exit_code == 0 and "already replied" in again.output
+    _only_outbox_msg(workspace)
+
+
+@pytest.mark.parametrize("has_exact", [False, True])
+def test_thread_root_does_not_guess_prefix(workspace: Path, has_exact: bool) -> None:
+    _write_local(workspace / "messages" / "outbox", "target-followup.md", {"subject": "wrong"})
+    if has_exact:
+        _write_local(workspace / "messages" / "inbox", "target.md", {"subject": "right"})
+    root = agent_cli._find_thread_root("target")
+    if has_exact:
+        assert root is not None and root[1]["subject"] == "right"
+    else:
+        assert root is None
+
+
+@pytest.mark.parametrize("reference", ["duplicate", "duplicate.md"])
+def test_duplicate_exact_ids_require_mailbox(workspace: Path, reference: str) -> None:
+    for mailbox in ("default", "ops"):
+        _write_local(agent_cli._mailbox_root(mailbox) / "inbox", "duplicate.md", {})
+    assert agent_cli._resolve_message(reference) is None
+    result = CliRunner().invoke(agent, ["ack", reference])
+    assert result.exit_code == 1 and "pass --mailbox" in result.output
+    assert agent_cli._resolve_message(reference, mailbox="ops") is not None
+
+
+def test_prefix_matches_are_literal_and_contained(workspace: Path) -> None:
+    inbox = workspace / "messages" / "inbox"
+    _write_local(inbox, "literal-other.md", {})
+    assert agent_cli._resolve_message("literal*") is None
+    _write_local(inbox, "literal*-target.md", {})
+    resolved = agent_cli._resolve_message("literal*")
+    assert resolved is not None and resolved[1].name == "literal*-target.md"
+    outside = workspace / "escape.md"
+    outside.write_text("outside")
+    (inbox / "escape-link.md").symlink_to(outside)
+    assert agent_cli._resolve_message("escape") is None
+
+
+def test_short_reply_preserves_wire_message_id(workspace: Path) -> None:
+    name = _seed_inbox(workspace, subject="wire")
+    path = workspace / "messages" / "inbox" / name
+    path.write_text(
+        path.read_text().replace("from: bob", "from: bob\nmessage_id: sender-original.md")
+    )
+    result = CliRunner().invoke(agent, ["reply", name.split("-bob-")[0], "thanks"])
+    assert result.exit_code == 0, result.output
+    assert _frontmatter(_only_outbox_msg(workspace))["in_reply_to"] == "sender-original.md"

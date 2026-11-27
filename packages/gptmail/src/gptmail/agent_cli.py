@@ -702,33 +702,26 @@ def _message_id_candidates(message_id: str) -> list[str]:
     return candidates
 
 
-def _unique_prefix_match(base: Path, message_id: str) -> str | None:
-    """Inbox filename starting with ``message_id``, only when exactly one does.
+def _prefix_matches(base: Path, message_id: str) -> list[Path]:
+    """Contained files starting with ``message_id``.
 
     Uses literal ``str.startswith`` rather than a glob so message ids carrying
     glob metacharacters cannot widen the match, and refuses ids containing a path
     separator (those are handled by the exact-candidate path, which is
-    containment-checked). Ambiguous prefixes resolve to nothing rather than to an
-    arbitrary sibling.
+    containment-checked). The caller checks uniqueness across all mailboxes.
     """
     if not message_id or os.sep in message_id or (os.altsep and os.altsep in message_id):
-        return None
+        return []
     try:
-        names = sorted(p.name for p in base.iterdir() if p.is_file())
+        matches = []
+        for entry in sorted(base.iterdir()):
+            if entry.name.startswith(message_id):
+                path = _within(base, entry.name)
+                if path is not None and path.is_file():
+                    matches.append(path)
+        return matches
     except OSError:
-        return None
-    matches = [name for name in names if name.startswith(message_id)]
-    return matches[0] if len(matches) == 1 else None
-
-
-def _ambiguous_prefix_count(base: Path, message_id: str) -> int:
-    """How many files in ``base`` share ``message_id`` as a literal prefix."""
-    if not message_id or os.sep in message_id or (os.altsep and os.altsep in message_id):
-        return 0
-    try:
-        return sum(1 for p in base.iterdir() if p.is_file() and p.name.startswith(message_id))
-    except OSError:
-        return 0
+        return []
 
 
 def _resolve_message(
@@ -736,20 +729,27 @@ def _resolve_message(
     *,
     folder: str = "inbox",
     mailbox: str | None = None,
+    allow_prefix: bool = True,
 ) -> tuple[str, Path] | None:
     mailboxes = [_normalize_mailbox(mailbox)] if mailbox is not None else _known_mailboxes()
-    for mailbox_name in mailboxes:
-        base = _mailbox_root(mailbox_name) / folder
-        for candidate in _message_id_candidates(message_id):
-            path = _within(base, candidate)
+    # Exhaust exact filenames (then stems) across the whole scope before trying
+    # prefixes. A prefix in default must not shadow an exact id in a named mailbox.
+    for candidate in _message_id_candidates(message_id):
+        matches = []
+        for mailbox_name in mailboxes:
+            path = _within(_mailbox_root(mailbox_name) / folder, candidate)
             if path is not None and path.is_file():
-                return mailbox_name, path
-        match = _unique_prefix_match(base, message_id)
-        if match is not None:
-            path = _within(base, match)
-            if path is not None and path.is_file():
-                return mailbox_name, path
-    return None
+                matches.append((mailbox_name, path))
+        if matches:
+            return matches[0] if len(matches) == 1 else None
+    if not allow_prefix:
+        return None
+    matches = [
+        (mailbox_name, path)
+        for mailbox_name in mailboxes
+        for path in _prefix_matches(_mailbox_root(mailbox_name) / folder, message_id)
+    ]
+    return matches[0] if len(matches) == 1 else None
 
 
 def _message_not_found_error(
@@ -766,14 +766,16 @@ def _message_not_found_error(
     wrong thread. Say the count instead.
     """
     mailboxes = [_normalize_mailbox(mailbox)] if mailbox is not None else _known_mailboxes()
-    for mailbox_name in mailboxes:
-        count = _ambiguous_prefix_count(_mailbox_root(mailbox_name) / folder, message_id)
-        if count > 1:
-            return (
-                f"Error: ambiguous message id: {message_id} matches {count} "
-                f"message(s) in {mailbox_name}/{folder}; pass a longer prefix or "
-                f"the full filename"
-            )
+    count = sum(
+        len(_prefix_matches(_mailbox_root(mailbox_name) / folder, message_id))
+        for mailbox_name in mailboxes
+    )
+    if count > 1:
+        return (
+            f"Error: ambiguous message id: {message_id} matches {count} "
+            f"message(s) in {', '.join(mailboxes)}/{folder}; pass --mailbox, a longer prefix or "
+            f"the full filename"
+        )
     return f"Error: message not found: {message_id}"
 
 
@@ -1089,7 +1091,7 @@ def _find_thread_root(thread: str) -> tuple[str, dict] | None:
     filename = thread.strip().strip("<>")
     for candidate in dict.fromkeys([filename, f"{_thread_key(filename)}.md"]):
         for folder in ("outbox", "inbox"):
-            resolved = _resolve_message(candidate, folder=folder)
+            resolved = _resolve_message(candidate, folder=folder, allow_prefix=False)
             if resolved is not None:
                 return resolved[0], meta_of(resolved[1]) or {}
     return None
@@ -1514,7 +1516,7 @@ def reply(message_id: str, content: str | None, mailbox: str | None) -> None:
             subject = f"Re: {subject}"
         # The inbox filename is local; receive-only peers retain the sender's
         # original ID in frontmatter for reply links across the wire.
-        parent_id = str(original.get("message_id") or message_id)
+        parent_id = str(original.get("message_id") or msg_path.name)
         reply_id = transport.send(recipient, subject, body, reply_to=parent_id)
         if _delivery_failed(reply_id, mailbox=mailbox_name):
             click.echo(
@@ -1523,7 +1525,7 @@ def reply(message_id: str, content: str | None, mailbox: str | None) -> None:
                 err=True,
             )
             sys.exit(1)
-        _track_sent(transport, reply_id, reply_to=message_id)
+        _track_sent(transport, reply_id, reply_to=parent_id)
         _mark_replied(msg_path)
     click.echo(f"Replied to {recipient}: {subject}")
 
