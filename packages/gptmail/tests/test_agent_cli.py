@@ -2904,3 +2904,25 @@ def test_reply_finds_message_by_stem(workspace: Path) -> None:
     result = CliRunner().invoke(agent, ["reply", stem, "thanks"])
     assert result.exit_code == 0, result.output
     assert "not found" not in result.output
+
+
+def test_ambiguous_prefix_error_names_the_candidate_count(workspace: Path) -> None:
+    """A bare 'not found' for a shared prefix hides the real cause."""
+    inbox = workspace / "messages" / "inbox"
+    for suffix in ("one", "two"):
+        (inbox / f"20260101-000000-000000-bob-dup-{suffix}.md").write_text(
+            f"---\nfrom: bob\nto: alice\nsubject: {suffix}\nread: false\n---\n\nhi\n"
+        )
+    result = CliRunner().invoke(agent, ["reply", "20260101-000000-000000-bob-dup", "hi"])
+    assert result.exit_code == 1
+    assert "ambiguous" in result.output
+    assert "matches 2 message(s)" in result.output
+
+
+def test_read_resolves_stem_and_marks_it_read(workspace: Path) -> None:
+    """`read` must pass the resolved filename to the transport, not the stem."""
+    name = _seed_inbox(workspace, subject="read-by-stem")
+    stem = name.removesuffix(".md")
+    result = CliRunner().invoke(agent, ["read", stem])
+    assert result.exit_code == 0, result.output
+    assert _frontmatter(workspace / "messages" / "inbox" / name)["read"] is True

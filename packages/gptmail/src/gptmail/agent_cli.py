@@ -721,6 +721,16 @@ def _unique_prefix_match(base: Path, message_id: str) -> str | None:
     return matches[0] if len(matches) == 1 else None
 
 
+def _ambiguous_prefix_count(base: Path, message_id: str) -> int:
+    """How many files in ``base`` share ``message_id`` as a literal prefix."""
+    if not message_id or os.sep in message_id or (os.altsep and os.altsep in message_id):
+        return 0
+    try:
+        return sum(1 for p in base.iterdir() if p.is_file() and p.name.startswith(message_id))
+    except OSError:
+        return 0
+
+
 def _resolve_message(
     message_id: str,
     *,
@@ -740,6 +750,31 @@ def _resolve_message(
             if path is not None and path.is_file():
                 return mailbox_name, path
     return None
+
+
+def _message_not_found_error(
+    message_id: str,
+    *,
+    folder: str = "inbox",
+    mailbox: str | None = None,
+) -> str:
+    """Error text for an unresolved id, naming ambiguity when that is the cause.
+
+    A bare "message not found" for a prefix that matched several files sends the
+    caller hunting for a longer stem with no idea how many candidates exist, and
+    the natural next move (pick one arbitrarily) is how a reply lands on the
+    wrong thread. Say the count instead.
+    """
+    mailboxes = [_normalize_mailbox(mailbox)] if mailbox is not None else _known_mailboxes()
+    for mailbox_name in mailboxes:
+        count = _ambiguous_prefix_count(_mailbox_root(mailbox_name) / folder, message_id)
+        if count > 1:
+            return (
+                f"Error: ambiguous message id: {message_id} matches {count} "
+                f"message(s) in {mailbox_name}/{folder}; pass a longer prefix or "
+                f"the full filename"
+            )
+    return f"Error: message not found: {message_id}"
 
 
 def _pending_for_mailboxes(
@@ -1398,12 +1433,14 @@ def read(message_id: str, thread: bool, mailbox: str | None) -> None:
     """Read a message (marks it read), optionally with its thread."""
     resolved = _resolve_message(message_id, folder="inbox", mailbox=mailbox)
     if resolved is None:
-        click.echo(f"Error: message not found: {message_id}", err=True)
+        click.echo(_message_not_found_error(message_id, mailbox=mailbox), err=True)
         sys.exit(1)
     mailbox_name, msg_path = resolved
     transport = _transport(mailbox=mailbox_name)
     try:
-        click.echo(transport.read(message_id, include_thread=thread))
+        # Pass the resolved filename: the caller's id may be a stem or a prefix
+        # that the transport's exact lookup would reject.
+        click.echo(transport.read(msg_path.name, include_thread=thread))
     except FileNotFoundError as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
@@ -1421,7 +1458,7 @@ def ack(message_id: str, mailbox: str | None) -> None:
     """
     resolved = _resolve_message(message_id, folder="inbox", mailbox=mailbox)
     if resolved is None:
-        click.echo(f"Error: message not found: {message_id}", err=True)
+        click.echo(_message_not_found_error(message_id, mailbox=mailbox), err=True)
         sys.exit(1)
     mailbox_name, msg_path = resolved
     transport = _transport(mailbox=mailbox_name)
@@ -1444,7 +1481,7 @@ def reply(message_id: str, content: str | None, mailbox: str | None) -> None:
     """Reply to an inbox message, threading via in_reply_to."""
     resolved = _resolve_message(message_id, folder="inbox", mailbox=mailbox)
     if resolved is None:
-        click.echo(f"Error: message not found: {message_id}", err=True)
+        click.echo(_message_not_found_error(message_id, mailbox=mailbox), err=True)
         sys.exit(1)
     mailbox_name, msg_path = resolved
     body = _read_body(content)
