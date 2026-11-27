@@ -272,6 +272,17 @@ def test_nonpersistent_replacement_serializes_collection_through_sweep(
     _check_serialized_replacement(indexer, tmp_path, monkeypatch, directory=False)
 
 
+def test_nonpersistent_indexers_share_replacement_lock(tmp_path, monkeypatch):
+    from gptme_rag.indexing.indexer import Indexer
+
+    first = Indexer(collection_name="shared-replacement-test", chunk_size=50, chunk_overlap=10)
+    second = Indexer(collection_name="shared-replacement-test", chunk_size=50, chunk_overlap=10)
+    try:
+        _check_serialized_replacement(first, tmp_path, monkeypatch, directory=False, peer=second)
+    finally:
+        first.reset_collection()
+
+
 def test_file_replacement_serializes_collection_through_sweep(indexer, tmp_path, monkeypatch):
     _check_serialized_replacement(indexer, tmp_path, monkeypatch, directory=False)
 
@@ -280,16 +291,17 @@ def test_directory_replacement_serializes_collection_through_sweep(indexer, tmp_
     _check_serialized_replacement(indexer, tmp_path, monkeypatch, directory=True)
 
 
-def _check_serialized_replacement(indexer, tmp_path, monkeypatch, directory):
+def _check_serialized_replacement(indexer, tmp_path, monkeypatch, directory, peer=None):
     """A delayed B replacement must not delete a newer writer's reused A ids."""
     f = tmp_path / "note.md"
     original = _words(200)
     f.write_text(original)
 
-    def reindex():
+    def reindex(writer=None):
+        writer = writer or indexer
         if directory:
-            return indexer.index_directory(tmp_path, glob_pattern="*.md")
-        return indexer.index_file(f)
+            return writer.index_directory(tmp_path, glob_pattern="*.md")
+        return writer.index_file(f)
 
     reindex()
     original_ids = set(_ids_for(indexer, f))
@@ -315,13 +327,15 @@ def _check_serialized_replacement(indexer, tmp_path, monkeypatch, directory):
 
     monkeypatch.setattr(indexer, "_snapshot_source_ids", paused_snapshot)
     monkeypatch.setattr(indexer, "collect_documents", observed_collect)
+    if peer is not None:
+        monkeypatch.setattr(peer, "collect_documents", observed_collect)
     f.write_text(original + " generation B")
     with ThreadPoolExecutor(max_workers=2) as pool:
         first = pool.submit(reindex)
         try:
             assert snapshotted.wait(10), "first writer never took its snapshot"
             f.write_text(original)
-            second = pool.submit(reindex)
+            second = pool.submit(reindex, peer)
             # On the broken path A completes while B is paused. The fixed path
             # must not even collect A until B has finished its replacement.
             interleaved = second_collected.wait(0.5)

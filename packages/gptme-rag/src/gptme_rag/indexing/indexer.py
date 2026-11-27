@@ -40,6 +40,10 @@ def _glob_match_path(path: str, pattern: str) -> bool:
 # Max entries per collection read/delete call.
 _PAGE_SIZE = 1000
 
+# Chroma's nonpersistent clients share the process-wide ephemeral system.
+# Their replacement operations need one lock even across Indexer instances.
+_EPHEMERAL_WRITER_LOCK = RLock()
+
 # HuggingFace namespaces used for sentence-transformer / embedding models.
 # Model names in these namespaces contain a slash but are NOT OpenRouter model names.
 # Used by _looks_like_openrouter_model() as a fallback heuristic for legacy
@@ -807,7 +811,10 @@ class Indexer:
     @contextmanager
     def _index_writer_lock(self):
         persist_dir = getattr(self, "persist_directory", None)
-        with self._writer_thread_lock:
+        thread_lock = (
+            self._writer_thread_lock if persist_dir is not None else _EPHEMERAL_WRITER_LOCK
+        )
+        with thread_lock:
             if persist_dir is None:
                 yield
                 return
