@@ -471,9 +471,18 @@ class LessonDiscovery:
         """
         duplicates = []
 
-        lesson_files = [
-            f for f in self.lessons_dir.rglob("*.md") if f.name not in NON_LESSON_FILES
-        ]
+        # Feature extraction preserves alias categories, but duplicate discovery
+        # must not compare a symlink target with itself or repeat its matches.
+        lesson_files = []
+        seen_targets = set()
+        for path in self.lessons_dir.rglob("*.md"):
+            if path.name in NON_LESSON_FILES:
+                continue
+            target = path.resolve()
+            if target in seen_targets:
+                continue
+            seen_targets.add(target)
+            lesson_files.append(path)
 
         for i, lesson_a in enumerate(lesson_files):
             features_a = self.extract_features(lesson_a)

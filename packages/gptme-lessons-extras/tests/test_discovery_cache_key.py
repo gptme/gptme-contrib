@@ -52,3 +52,24 @@ def test_duplicates_compares_every_file_pair_despite_shared_stems(tmp_path: Path
     pairs = [tuple(sorted((a, b))) for a, b, _ in duplicates]
     assert pairs.count(("commit", "rebase")) == 2
     assert pairs.count(("commit", "commit")) == 1
+
+
+def test_duplicates_compares_symlink_target_only_once(tmp_path: Path):
+    source = tmp_path / "git" / "commit.md"
+    alias = tmp_path / "workflow" / "commit.md"
+    other = tmp_path / "other" / "rebase.md"
+    for path in (source, alias, other):
+        path.parent.mkdir()
+    content = "---\nmatch:\n  keywords: [git]\n---\n# Identical lesson\n"
+    source.write_text(content)
+    other.write_text(content)
+    alias.symlink_to(source)
+    discovery = LessonDiscovery(lessons_dir=tmp_path)
+
+    duplicates = discovery.find_all_duplicates(threshold=0.95)
+
+    # The alias is not a second file: neither self-pairs nor repeated matches.
+    assert len(duplicates) == 1
+    a, b, similarity = duplicates[0]
+    assert {a, b} == {"commit", "rebase"}
+    assert similarity > 0.95
