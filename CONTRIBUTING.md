@@ -73,6 +73,11 @@ it. Package-specific Makefiles remain the test entry points.
 
 We aim to review PRs within a few days.
 
+If the change requires an existing agent to *do* something after bumping the
+gptme-contrib submodule (new hook, env var, config key, migration), add an
+entry to [`CHANGELOG.md`](./CHANGELOG.md). Code-only fixes do not need an
+entry. See that file for action classes and the entry format.
+
 ## Code Style
 
 - Follow PEP 8
