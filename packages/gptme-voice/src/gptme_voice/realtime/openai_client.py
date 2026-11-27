@@ -847,10 +847,9 @@ class OpenAIRealtimeClient:
         one is active. Returns True if a reply was interrupted.
         """
         await self.wait_until_ready()
-        interrupted = self._responding
         # Bounds the cancel handshake only, not session setup.
         deadline = asyncio.get_running_loop().time() + _TYPED_CANCEL_WAIT_SECONDS
-        await self._cancel_until_idle(deadline)
+        interrupted = await self._cancel_until_idle(deadline)
         logger.info("Sending typed message: %s...", text[:100])
         await self._send_event(
             "conversation.item.create",
@@ -865,20 +864,24 @@ class OpenAIRealtimeClient:
         # A reply can start while the item is sent (e.g. for an injected
         # lookup result); check again right before response.create, with no
         # await in between other than the send itself.
-        await self._cancel_until_idle(deadline)
+        interrupted = await self._cancel_until_idle(deadline) or interrupted
         await self._send_event("response.create", {})
         return interrupted
 
-    async def _cancel_until_idle(self, deadline: float) -> None:
+    async def _cancel_until_idle(self, deadline: float) -> bool:
         """Cancel active replies until the provider confirms none is running.
+
+        Returns True if a reply was cancelled.
 
         response.create is rejected until the provider confirms a cancel with
         response.done, so our own flag is not trusted for that. A reply that
         starts meanwhile is superseded by the typed message too.
         """
         loop = asyncio.get_running_loop()
+        cancelled = False
         while self._responding:
             await self._send_event("response.cancel", {})
+            cancelled = True
             remaining = deadline - loop.time()
             try:
                 if remaining <= 0:
@@ -890,6 +893,7 @@ class OpenAIRealtimeClient:
                 raise asyncio.TimeoutError(
                     "provider did not confirm cancelling the active reply"
                 ) from None
+        return cancelled
 
     async def wait_until_ready(self, timeout: float | None = None) -> None:
         """Wait until the provider has applied our session configuration.

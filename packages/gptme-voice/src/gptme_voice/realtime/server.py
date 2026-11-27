@@ -123,11 +123,16 @@ def _probe_reporting(websocket, on_ai_transcript, on_user_transcript):
         await on_ai_transcript(text)
         await _send({"type": "transcript", "role": "assistant", "text": text})
 
+    pending: set[asyncio.Task[None]] = set()
+
     def _user(text: str, item_id: str | None = None) -> None:
         on_user_transcript(text, item_id)
-        asyncio.ensure_future(
+        # Keep a reference until sent (a bare task can be garbage-collected).
+        task = asyncio.ensure_future(
             _send({"type": "transcript", "role": "user", "text": text})
         )
+        pending.add(task)
+        task.add_done_callback(pending.discard)
 
     def _wrap_result(inject):
         async def _on_result(text: str) -> None:

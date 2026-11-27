@@ -1491,7 +1491,8 @@ def test_send_typed_message_rechecks_right_before_response_create() -> None:
 
             client._send_event = _send_and_race  # type: ignore[method-assign]
             baseline = len(fake_ws.sent)
-            assert await client.send_typed_message("stop") is False
+            # A reply was interrupted (the one that started mid-send).
+            assert await client.send_typed_message("stop") is True
             assert [e["type"] for e in fake_ws.sent[baseline:]] == [
                 "conversation.item.create",
                 "response.cancel",
