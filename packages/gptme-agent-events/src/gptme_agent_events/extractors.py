@@ -323,7 +323,8 @@ _CODEX_EXIT_RE = re.compile(
     r"(?:exited with code|exit_code[\"']?\s*:|Exit code:)\s*(-?\d+)", re.IGNORECASE
 )
 _CODEX_PATCH_PATH_RE = re.compile(r"^\*\*\* (?:Add|Update) File: (.+)$", re.MULTILINE)
-_CODEX_WORKDIR_KEY_RE = re.compile(r"""\bworkdir["']?\s*:""")
+# Shorthand properties also supply a directory, but cannot be resolved here.
+_CODEX_WORKDIR_KEY_RE = re.compile(r"""\bworkdir["']?\s*(?=:|[,}])""")
 _CODEX_WORKDIR_RE = re.compile(
     r"""\bworkdir["']?\s*:\s*(["'])((?:\\.|(?!\1).)*)\1\s*(?=[,}])""", re.DOTALL
 )

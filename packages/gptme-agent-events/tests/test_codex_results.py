@@ -407,12 +407,23 @@ def test_workdir_literal_inside_cmd_cannot_override_session(ex, real_workdir):
 
 
 @pytest.mark.parametrize(
-    "workdir",
-    ["`/private`", "`/private/${name}`", "wt", "path.join(root, 'private')", "'/private' + suffix"],
+    "property_source",
+    [
+        "workdir: `/private`",
+        "workdir: `/private/${name}`",
+        "workdir: wt",
+        "workdir: path.join(root, 'private')",
+        "workdir: '/private' + suffix",
+        "workdir",
+        "workdir,",
+    ],
 )
-def test_unresolved_js_workdir_cannot_borrow_public_session(ex, workdir):
+def test_unresolved_js_workdir_cannot_borrow_public_session(ex, property_source):
     ex.feed(record({"cwd": "/worktree"}, "turn_context"))
-    src = f"await tools.exec_command({{cmd: 'git commit -m x', workdir: {workdir}}});"
+    src = (
+        "const workdir = '/private'; "
+        f"await tools.exec_command({{cmd: 'git commit -m x', {property_source}}});"
+    )
     tool_events = ex.feed(
         record({"type": "custom_tool_call", "name": "exec", "call_id": "c", "input": src})
     )
