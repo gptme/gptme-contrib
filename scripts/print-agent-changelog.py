@@ -78,23 +78,38 @@ def parse_entries(text: str) -> list[Entry]:
     return entries
 
 
-def git_show(repo: Path, rev: str, path: str) -> str:
-    result = subprocess.run(
-        ["git", "-C", str(repo), "show", f"{rev}:{path}"],
+def run_git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", "-C", str(repo), *args],
         capture_output=True,
         text=True,
         timeout=20,
     )
-    if result.returncode:
-        return ""
-    return result.stdout
+
+
+def git_show(repo: Path, rev: str, path: str, *, missing_ok: bool = False) -> str:
+    """Return *path* at *rev*.
+
+    Empty output means "nothing to adopt" to callers, so every failed lookup
+    raises. The one exception, with ``missing_ok``, is a valid revision that
+    does not contain the file.
+    """
+    result = run_git(repo, "show", f"{rev}:{path}")
+    if result.returncode == 0:
+        return result.stdout
+    if missing_ok:
+        listed = run_git(repo, "ls-tree", "--name-only", rev, "--", path)
+        if listed.returncode == 0 and not listed.stdout.strip():
+            return ""
+    raise RuntimeError(result.stderr.strip() or f"git show {rev}:{path} failed")
 
 
 def entries_between(
     repo: Path, old: str, new: str, *, path: str = CHANGELOG
 ) -> list[Entry]:
     new_entries = parse_entries(git_show(repo, new, path))
-    old_keys = {entry.key for entry in parse_entries(git_show(repo, old, path))}
+    old_text = git_show(repo, old, path, missing_ok=True)
+    old_keys = {entry.key for entry in parse_entries(old_text)}
     return [entry for entry in new_entries if entry.key not in old_keys]
 
 

@@ -126,6 +126,21 @@ def test_missing_changelog_at_old_treats_all_new_entries_as_added(repo: Path):
     assert {e.action for e in added} == {"required", "recommended"}
 
 
+@pytest.mark.parametrize(
+    ("old", "new", "path"),
+    [
+        ("HEAD", "no-such-rev", "CHANGELOG.md"),
+        ("no-such-rev", "HEAD", "CHANGELOG.md"),
+        ("HEAD", "HEAD", "TYPO.md"),
+    ],
+)
+def test_failed_lookup_is_an_error_not_an_empty_result(
+    repo: Path, old: str, new: str, path: str
+):
+    commit(repo, "CHANGELOG.md", SAMPLE)
+    assert mod.main([old, new, "--repo", str(repo), "--path", path]) == 2
+
+
 def test_cli_json_and_text(repo: Path):
     old = commit(repo, "CHANGELOG.md", SAMPLE)
     updated = SAMPLE.replace(
