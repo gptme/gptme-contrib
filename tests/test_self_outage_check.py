@@ -1014,7 +1014,7 @@ def test_package_redact_covers_posthog_aws_and_postgres() -> None:
     phx = "phx_" + "A1b2C3d4E5f6G7h8I9j0" + "_tail-Xy09"
     aws = "AKIA" + "0123456789ABCDEF"
     pg = "postgres://agent:supersecretpw@db.internal:5432/app"
-    out = soc._redact(f"keys {phx} {aws} {pg} oauth_not_allowed_for_organization")
+    out = soc._redact(f"oauth_not_allowed_for_organization keys {phx} {aws} {pg}")
     assert phx not in out
     assert aws not in out
     assert "supersecretpw" not in out
@@ -1452,7 +1452,7 @@ def test_url_embedded_credentials_redacted(tmp_path: Path, credential: str) -> N
     write_records(tmp_path, records)
     status = assess(tmp_path)
     body = soc._issue_body(cfg_for(tmp_path), status)
-    assert "[REDACTED]@" in status["sample_error"]
+    assert status["sample_error"] == "proxy auth failed for [REDACTED]"
     for secret in ("s3cr3t", "hunter2pw", "pa@ss", "pa/ss", "a" * 20):
         assert secret not in status["sample_error"]
         assert secret not in body
@@ -1468,7 +1468,11 @@ def test_url_embedded_credentials_redacted(tmp_path: Path, credential: str) -> N
         "git://git@github.com/o/r.git",
     ],
 )
-def test_passwordless_userinfo_lookalikes_are_preserved(text: str) -> None:
+def test_passwordless_userinfo_lookalikes_are_preserved(
+    monkeypatch: pytest.MonkeyPatch, text: str
+) -> None:
+    # Script rules only: gptme-redact masks email-shaped text by design.
+    monkeypatch.setattr(soc, "_package_redact", None)
     assert soc._redact(text) == text
 
 
@@ -1483,9 +1487,13 @@ def test_last_productive_skips_non_object_records(
     assert soc.last_productive_ts(rf, NOW) == NOW - timedelta(hours=40)
 
 
-def test_url_credential_scan_handles_colon_rich_input() -> None:
+def test_url_credential_scan_handles_colon_rich_input(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     import time
 
+    # Times this script's own scans, not the optional package's patterns.
+    monkeypatch.setattr(soc, "_package_redact", None)
     start = time.process_time()
     for text in (
         "a:" * 100_000,
@@ -1518,6 +1526,33 @@ def test_url_redaction_preserves_quoted_secret_boundaries(quote: str) -> None:
     redacted = soc._redact(text)
     assert "alpha" not in redacted
     assert "beta" not in redacted
+
+
+@pytest.mark.parametrize("with_package", [True, False])
+@pytest.mark.parametrize(
+    "text",
+    [
+        # A later "@" inside the password must not be taken for the host marker.
+        "error:password=P@sshunter2pw",
+        # A key only gptme-redact knows, opened before the URL-shaped token.
+        'MY_KEY:"abc@host hunter2pw"',
+        # Later quotes made this value ambiguous; dropping them must not trust it.
+        'password="alpha " hunter2pw x:y@host"',
+        # The space pushes "@host" out of the token holding the password.
+        'https://bob:hunter2pw;password="alpha "beta@proxy.internal',
+    ],
+)
+def test_nothing_after_a_url_credential_is_published(
+    monkeypatch: pytest.MonkeyPatch, text: str, with_package: bool
+) -> None:
+    if not with_package:
+        monkeypatch.setattr(soc, "_package_redact", None)
+    elif soc._package_redact is None:
+        pytest.skip("gptme-redact not installed")
+    redacted = soc._redact(f"proxy said {text} then failed")
+    assert redacted.startswith("proxy said ")
+    for secret in ("hunter2pw", "alpha", "beta", "then failed"):
+        assert secret not in redacted
 
 
 @pytest.mark.parametrize("reason", [["auth"], {"code": "auth"}])

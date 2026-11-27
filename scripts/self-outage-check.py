@@ -219,78 +219,68 @@ def _redact_ambiguous_quoted(text: str) -> str:
         pos = close + 1
 
 
-# Proxy errors may contain schemeless user:password@host values, including
-# unescaped @ and / inside the password. Match the last plausible host marker.
+# Proxy errors may carry user:password@host values, with or without a scheme,
+# and with unescaped @ or / inside the password.
 _USERINFO_HOST = re.compile(r"@[^\s@/:?#]")
+_URL_SCHEME = re.compile(r"""(?i)["'(<\[]*(https?|ftps?|ssh|git)://""")
 
 
-def _redact_url_credential_token(token: str) -> str:
-    at = -1
-    for match in _USERINFO_HOST.finditer(token):
-        at = match.start()
-    if at <= 0:
-        return token
-    colon = token.find(":", 0, at)
-    # Only recognized schemes disambiguate username://password from a URL.
-    # For unknown schemes, retain the first colon as the password boundary.
-    scheme = token[:colon].lower()
-    if (
-        colon != -1
-        and token.startswith("//", colon + 1)
-        and scheme in {"http", "https", "ssh", "git", "ftp", "ftps"}
-    ):
-        first_at = token.find("@", colon + 3)
-        user_colon = token.find(":", colon + 3, first_at)
-        if user_colon != -1:
-            colon = user_colon
-        else:
-            # Check the FIRST @ for path scopes, not a later @ in the path.
-            # Still redact through the last marker: raw @ and / in passwords
-            # are ambiguous, so sacrificing path detail is safer than leaking.
-            if "/" in token[colon + 3 : first_at] or scheme in {"ssh", "git"}:
-                return token
-            return token[: colon + 3] + "[REDACTED]" + token[at:]
-    if colon == -1 or colon + 1 == at:
-        return token
-    return token[: colon + 1] + "[REDACTED]" + token[at:]
+def _may_carry_url_credential(token: str) -> bool:
+    """True when a whitespace-delimited token may carry a URL credential.
+
+    Errs towards True: a false positive only costs diagnostic detail.
+    """
+    opened = _QUOTED_SECRET_OPEN.search(token)
+    if opened:
+        # ``user:pw;password="a b@host``: a quoted assignment glued onto a
+        # credential can push the ``@host`` past a space, out of this token.
+        before = token[: opened.start()]
+        if ":" in before and '"' not in before and "'" not in before:
+            return True
+    hosts = [m.start() for m in _USERINFO_HOST.finditer(token)]
+    if not hosts:
+        return False
+    scheme = _URL_SCHEME.match(token)
+    if scheme is None:
+        return ":" in token[: hosts[-1]]
+    authority = token[scheme.end() : token.find("@", scheme.end())]
+    if ":" in authority:
+        return True
+    # A "/" before the first @ is a path scope (npm's /@types). Otherwise the
+    # userinfo may be a bare token, except for an SSH/git username.
+    return "/" not in authority and scheme.group(1).lower() not in ("ssh", "git")
 
 
-def _redact_url_credentials(text: str) -> str:
-    """Scan whitespace-delimited tokens in linear time, without a password cap."""
-    return re.sub(r"\S+", lambda m: _redact_url_credential_token(m.group(0)), text)
+def _drop_from_url_credential(text: str) -> str:
+    """Drop everything from the first token that may carry a URL credential.
+
+    Nothing after it is kept: in free text the credential's end is a guess (a
+    raw ``@`` in the password, an enclosing ``key="..."``), and a wrong guess
+    publishes the tail. This runs before every other rule, so none of them can
+    first erase the ``@host`` marker it relies on.
+    """
+    for token in re.finditer(r"\S+", text):
+        if _may_carry_url_credential(token.group()):
+            head = text[: token.start()]
+            # A quoted secret opened earlier has lost its end: drop it too.
+            opened = _QUOTED_SECRET_OPEN.search(head)
+            if opened:
+                head = head[: opened.end()]
+            return head + "[REDACTED]"
+    return text
 
 
 def _redact(text: str) -> str:
     """Scrub credential-shaped substrings from text bound for outbound channels.
 
-    Script-specific extras (ambiguous quoted values) always run. gptme-redact
-    runs when installed; its ``[REDACTED:category]`` markers collapse to the
-    script's uniform ``[REDACTED]`` so issue bodies stay short. Local patterns
-    always run afterwards: they are the stdlib fallback and a broader last
-    net for short synthetic/truncated secrets the package's length floors miss.
+    Script-specific extras (URL credentials, ambiguous quoted values) always
+    run first. gptme-redact runs when installed; its ``[REDACTED:category]``
+    markers collapse to the script's uniform ``[REDACTED]`` so issue bodies
+    stay short. Local patterns always run afterwards: they are the stdlib
+    fallback and a broader last net for short synthetic/truncated secrets the
+    package's length floors miss.
     """
-    text = _redact_ambiguous_quoted(text)
-    # Scrub quoted assignments before URL scanning can remove their closing
-    # quote. Include the preceding token: an assignment can itself be inside
-    # a URL password, and replacing just its value would erase the @host.
-    for pat in _SECRET_PATTERNS:
-        if not pat.groups:
-            continue
-        chunks: list[str] = []
-        end = 0
-        for match in pat.finditer(text):
-            value = match.group(0)[len(match.group(1)) :]
-            if not value.startswith(('"', "'", '\\"', "\\'")):
-                continue
-            start = match.start()
-            while start > end and not text[start - 1].isspace():
-                start -= 1
-            prefix = match.group(1) if start == match.start() else ""
-            chunks.extend((text[end:start], prefix + "[REDACTED]"))
-            end = match.end()
-        chunks.append(text[end:])
-        text = "".join(chunks)
-    text = _redact_url_credentials(text)
+    text = _redact_ambiguous_quoted(_drop_from_url_credential(text))
     if _package_redact is not None:
         text = _PACKAGE_REDACT_MARKER.sub("[REDACTED]", _package_redact(text).redacted)
     for pat in _SECRET_PATTERNS:
