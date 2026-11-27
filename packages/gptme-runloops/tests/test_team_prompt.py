@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+import re
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -23,16 +24,22 @@ def test_team_prompt_fills_current_time(workspace: Path) -> None:
     passed ``agent_name``, so every coordinator prompt literally read
     ``**Current Time**: {timestamp}``.
     """
-    before = datetime.now().astimezone()
+    before = datetime.now(timezone.utc)
     prompt = TeamRun(workspace=workspace).generate_prompt()
-    after = datetime.now().astimezone()
+    after = datetime.now(timezone.utc)
 
     assert "{timestamp}" not in prompt
     assert "**Current Time**: " in prompt
 
     rendered = prompt.split("**Current Time**: ", 1)[1].splitlines()[0]
-    parsed = datetime.fromisoformat(rendered)
-    assert before <= parsed <= after
+    match = re.fullmatch(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}) UTC", rendered)
+    assert match, rendered
+
+    parsed = datetime.strptime(match.group(1), "%Y-%m-%d %H:%M").replace(
+        tzinfo=timezone.utc
+    )
+    # The rendered time is minute-resolution, so compare on whole minutes.
+    assert before.replace(second=0, microsecond=0) <= parsed <= after
 
 
 def test_team_prompt_fills_agent_name(workspace: Path) -> None:
