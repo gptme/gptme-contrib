@@ -57,8 +57,10 @@ UNKNOWN_DIR = Path("<unresolvable>")
 # Paths that mean "the whole tree" to add/checkout/restore/reset.
 _WHOLE_TREE = {".", "./", ":/", ":", "*"}
 _SEPARATOR_CHARS = set(";&|()")
-# Leading words that run the rest of the command as a program.
+# Leading words that run the rest of the command as a program, and shell
+# keywords that can precede a command (`if true; then git ...; fi`).
 _WRAPPERS = {"command", "builtin", "exec", "time", "nohup", "env", "sudo"}
+_KEYWORDS = {"if", "then", "elif", "else", "while", "until", "do", "!", "{"}
 
 
 def _git_dir_marker(start: Path) -> Path | None:
@@ -241,6 +243,8 @@ def _strip_wrappers(argv: list[str]) -> list[str]:
         word = argv[i]
         if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", word):
             i += 1
+        elif word in _KEYWORDS:
+            i += 1
         elif word in _WRAPPERS:
             i += 1
             while i < len(argv) and argv[i].startswith("-"):
@@ -381,8 +385,12 @@ def _classify(
             return "git reset --hard", False
         if "--soft" in longs or "--patch" in longs or "p" in shorts:
             return None, False
-        explicit = "--" in args
-        paths = positionals if explicit else positionals[1:]
+        if "--" in args:
+            # Before `--`: at most a commit. After it: the paths (maybe none,
+            # as in `reset HEAD --`, which resets the whole index).
+            paths = args[args.index("--") + 1 :]
+        else:
+            paths = positionals[1:]
         if _whole_tree(paths):
             return "git reset -- . (whole index)", False
         if paths:
