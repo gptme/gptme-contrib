@@ -214,6 +214,19 @@ def test_non_executable_hook_is_reported_and_repaired(
     assert os.access(hook, os.X_OK)
 
 
+def test_per_worktree_override_is_detected_and_fixed(
+    repo: Path, tmp_path: Path
+) -> None:
+    _git(repo, "config", "extensions.worktreeConfig", "true")
+    _git(repo, "config", "--worktree", "rebase.autoStash", "true")
+    check = _run(repo, "--check", home=tmp_path)
+    assert check.returncode == 1
+    assert "rebase.autoStash false (effective: true from worktree" in check.stdout
+    assert _run(repo, home=tmp_path).returncode == 0
+    assert _git(repo, "config", "--type=bool", "--get", "rebase.autoStash") == "false"
+    assert _run(repo, "--check", home=tmp_path).returncode == 0
+
+
 def test_rejects_non_repo(tmp_path: Path) -> None:
     result = _run(tmp_path, home=tmp_path)
     assert result.returncode == 2

@@ -18,7 +18,8 @@ Two scopes:
   pop a sibling's entry. ``stash list|show|create`` and ``stash apply <sha>``
   stay allowed.
 
-The command is tokenized like a shell would (``shlex``), split at ``;``,
+The command is tokenized like a shell would (quotes, escapes, comments,
+redirections and heredoc bodies handled), split at ``;``,
 ``&&``, ``||``, ``|``, ``&`` and parentheses, and every ``git`` invocation is
 parsed (global options, subcommand, arguments), so quoting, option clusters
 and separators without spaces don't change the outcome. ``cd``/``pushd`` are
@@ -44,7 +45,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -100,15 +100,116 @@ def is_shared_checkout(cwd: Path) -> bool:
     return result.stdout.strip() == "true"
 
 
+_HEREDOC_RE = re.compile(r"""(['"]?)([^\s;&|()<>'"]+)\1""")
+_OPERATORS = ("&&", "||", ";;", "|&", ";", "&", "|", "(", ")")
+
+
 def _tokens(command: str) -> list[str] | None:
-    lexer = shlex.shlex(
-        command.replace("\n", " ; "), posix=True, punctuation_chars=";&|()"
-    )
-    lexer.whitespace_split = True
-    try:
-        return list(lexer)
-    except ValueError:
-        return None
+    """Split *command* into words and operators, roughly like a POSIX shell.
+
+    Quotes and backslashes are removed, ``#`` comments dropped, newlines
+    become ``;``, redirections (and their targets) are left out of the words,
+    and heredoc bodies are skipped, so text inside a commit message or a
+    heredoc is never mistaken for a command. Returns None for unbalanced
+    quotes.
+    """
+    tokens: list[str] = []
+    word: list[str] = []
+    in_word = False
+    drop_next_word = False
+    heredocs: list[tuple[str, bool]] = []
+    i, n = 0, len(command)
+
+    def end_word() -> None:
+        nonlocal in_word, drop_next_word
+        if in_word:
+            if drop_next_word:
+                drop_next_word = False
+            else:
+                tokens.append("".join(word))
+        word.clear()
+        in_word = False
+
+    while i < n:
+        c = command[i]
+        if c == "\\" and i + 1 < n:
+            if command[i + 1] != "\n":  # \<newline> continues the line
+                word.append(command[i + 1])
+                in_word = True
+            i += 2
+        elif c == "'":
+            close = command.find("'", i + 1)
+            if close < 0:
+                return None
+            word.append(command[i + 1 : close])
+            in_word = True
+            i = close + 1
+        elif c == '"':
+            j, buf = i + 1, []
+            while j < n and command[j] != '"':
+                if command[j] == "\\" and j + 1 < n and command[j + 1] in '"\\$`\n':
+                    buf.append(command[j + 1])
+                    j += 2
+                else:
+                    buf.append(command[j])
+                    j += 1
+            if j >= n:
+                return None
+            word.append("".join(buf))
+            in_word = True
+            i = j + 1
+        elif c == "#" and not in_word:
+            newline = command.find("\n", i)
+            i = n if newline < 0 else newline
+        elif c == "\n":
+            end_word()
+            tokens.append(";")
+            i += 1
+            for delimiter, strip_tabs in heredocs:  # skip each body in turn
+                while i < n:
+                    newline = command.find("\n", i)
+                    end = n if newline < 0 else newline
+                    line = command[i:end]
+                    i = end + 1
+                    if (line.lstrip("\t") if strip_tabs else line) == delimiter:
+                        break
+            heredocs.clear()
+        elif c in " \t":
+            end_word()
+            i += 1
+        elif command.startswith("<<", i) and not command.startswith("<<<", i):
+            end_word()
+            i += 2
+            strip_tabs = i < n and command[i] == "-"
+            i += strip_tabs
+            while i < n and command[i] in " \t":
+                i += 1
+            m = _HEREDOC_RE.match(command, i)
+            if m is None:
+                return None
+            heredocs.append((m.group(2), strip_tabs))
+            i = m.end()
+        elif c in "<>" or command.startswith("&>", i):
+            # A redirection: drop a pending fd number and the target word.
+            if in_word and "".join(word).isdigit():
+                word.clear()
+                in_word = False
+            end_word()
+            i += 1
+            while i < n and command[i] in "<>&":
+                i += 1
+            drop_next_word = True
+        elif c in ";&|()":
+            end_word()
+            op = next(o for o in _OPERATORS if command.startswith(o, i))
+            tokens.append(op)
+            i += len(op)
+        else:
+            word.append(c)
+            in_word = True
+            i += 1
+    end_word()
+    return tokens
 
 
 def _is_separator(token: str) -> bool:
@@ -169,9 +270,10 @@ def _resolve(path: str, base: Path) -> Path:
 
 def _git_invocation(
     argv: list[str], dirs: list[Path]
-) -> tuple[list[Path], str | None, list[str]]:
-    """Target directories, subcommand and its arguments of a git argv."""
+) -> tuple[list[Path], str | None, list[str], tuple[str, ...]]:
+    """Target directories, subcommand, its arguments and ``-c`` settings."""
     c_paths: list[str] = []
+    configs: list[str] = []
     git_dir = work_tree = None
     i = 1
     while i < len(argv):
@@ -186,6 +288,8 @@ def _git_invocation(
             value = argv[i + 1] if i + 1 < len(argv) else ""
             if arg == "-C":
                 c_paths.append(value)
+            elif arg == "-c":
+                configs.append(value)
             elif arg == "--git-dir":
                 git_dir = value
             elif arg == "--work-tree":
@@ -214,7 +318,7 @@ def _git_invocation(
             targets.append(repo)
         if work_tree is not None:
             targets.append(_resolve(work_tree, repo))
-    return targets, sub, args
+    return targets, sub, args, tuple(configs)
 
 
 def _split_args(
@@ -251,7 +355,14 @@ def _whole_tree(paths: list[str]) -> bool:
     return any(path in _WHOLE_TREE for path in paths)
 
 
-def _classify(sub: str | None, args: list[str]) -> tuple[str | None, bool]:
+_AUTOSTASH_CONFIG_RE = re.compile(
+    r"^(?:rebase|merge)\.autostash(?:=(?:true|yes|on|1))?$", re.IGNORECASE
+)
+
+
+def _classify(
+    sub: str | None, args: list[str], configs: tuple[str, ...] = ()
+) -> tuple[str | None, bool]:
     """``(shared-checkout rule it breaks, whether it writes the stash stack)``."""
     if sub == "stash":
         op = args[0] if args else "push"
@@ -337,11 +448,14 @@ def _classify(sub: str | None, args: list[str]) -> tuple[str | None, bool]:
         if "--all" in longs or "a" in shorts:
             return "git commit -a (broad staging)", False
         return None, False
-    if sub in ("pull", "rebase"):
+    if sub in ("pull", "rebase", "merge"):
         longs, _p, _s = _split_args(args)
-        return (
-            "git pull/rebase --autostash" if "--autostash" in longs else None
-        ), False
+        autostash = "--autostash" in longs or any(
+            _AUTOSTASH_CONFIG_RE.match(c) for c in configs
+        )
+        if autostash and "--no-autostash" not in longs:
+            return "git pull/rebase/merge --autostash", False
+        return None, False
     return None, False
 
 
@@ -422,8 +536,8 @@ def detect(
             elif word == "popd":
                 dirs = list(dict.fromkeys(dirs + [UNKNOWN_DIR]))
             elif os.path.basename(word) == "git":
-                targets, sub, args = _git_invocation(argv, dirs)
-                rule, stack_write = _classify(sub, args)
+                targets, sub, args, configs = _git_invocation(argv, dirs)
+                rule, stack_write = _classify(sub, args, configs)
                 if rule or stack_write:
                     name = rule or "git stash"
                     if UNKNOWN_DIR in targets:

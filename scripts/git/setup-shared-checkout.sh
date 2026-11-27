@@ -81,18 +81,38 @@ EOF
 # key=value pairs (no associative arrays: macOS ships bash 3.2).
 WANT="safety.sharedCheckout=true pull.ff=only rebase.autoStash=false merge.autoStash=false"
 
+# Values are compared as git resolves them (--type=bool normalizes yes/on/1),
+# so a per-worktree override (extensions.worktreeConfig) or another scope
+# that wins is caught, not just the local file.
+effective() {
+  case "$2" in
+    true | false) git -C "$REPO" config --type=bool --get "$1" 2>/dev/null || true ;;
+    *) git -C "$REPO" config --get "$1" 2>/dev/null || true ;;
+  esac
+}
+
 missing=0
 for pair in $WANT; do
   key="${pair%%=*}"
   want="${pair#*=}"
-  have="$(git -C "$REPO" config --local --get "$key" || true)"
+  have="$(effective "$key" "$want")"
   if [ "$have" != "$want" ]; then
-    missing=1
     if [ "$CHECK" = 1 ]; then
-      echo "missing: git config $key $want (have: ${have:-unset})"
-    else
-      git -C "$REPO" config --local "$key" "$want"
+      missing=1
+      origin="$(git -C "$REPO" config --show-scope --get "$key" 2>/dev/null | cut -f1 || true)"
+      echo "missing: git config $key $want (effective: ${have:-unset}${origin:+ from $origin config})"
+      continue
+    fi
+    git -C "$REPO" config --local "$key" "$want"
+    if [ "$(effective "$key" "$want")" != "$want" ] &&
+      [ -n "$(git -C "$REPO" config --worktree --get "$key" 2>/dev/null || true)" ]; then
+      git -C "$REPO" config --worktree "$key" "$want"
+    fi
+    if [ "$(effective "$key" "$want")" = "$want" ]; then
       echo "set: git config $key $want"
+    else
+      missing=1
+      echo "warning: git config $key is still overridden (effective: $(effective "$key" "$want"))" >&2
     fi
   fi
 done
