@@ -80,7 +80,13 @@ _CLEAN_RE = re.compile(
     _GIT + r"clean(?=[^;&|\n]*\s-[A-Za-z]*f)(?=[^;&|\n]*\s-[A-Za-z]*d)"
 )
 _CHECKOUT_ALL_RE = re.compile(_GIT + r"checkout\s+--\s+\." + _END)
-_RESTORE_ALL_RE = re.compile(_GIT + r"restore(?:\s+--\S+)*\s+\." + _END)
+# Options (incl. -S/-W/-s <tree>) then an optional `--` separator, then `.`.
+_RESTORE_ALL_RE = re.compile(
+    _GIT
+    + r"restore(?:\s+(?:-s\s+\S+|--source[=\s]\S+|--?[A-Za-z][\w-]*))*"
+    + r"(?:\s+--)?\s+\."
+    + _END
+)
 # Broad staging sweeps other sessions' changes into your commit.
 _ADD_ALL_RE = re.compile(
     _GIT + r"add(?:\s+-[a-zA-Z]+)*\s+(?:-A|--all|\.|:/)(?:\s|$|[;&|)])"
@@ -102,30 +108,40 @@ SHARED_CHECKOUT_RULES: dict[str, re.Pattern[str]] = {
     "git commit -a (broad staging)": _COMMIT_ALL_RE,
 }
 
-_LEADING_CD_RE = re.compile(r"^\s*cd\s+(?P<path>'[^']*'|\"[^\"]*\"|[^\s;&|]+)\s*&&")
+_LEADING_CD_RE = re.compile(
+    r"^\s*cd\s+(?P<path>'[^']*'|\"[^\"]*\"|[^\s;&|]+)\s*(?P<sep>&&|;|\n)"
+)
 
 
-def effective_cwd(command: str, cwd: Path) -> Path:
-    """Where *command* runs: *cwd*, or the target of a single leading ``cd``.
+def effective_cwds(command: str, cwd: Path) -> list[Path]:
+    """Where *command* may run: *cwd* and/or the target of a leading ``cd``.
 
     Only one unambiguous leading ``cd`` is trusted; anything else keeps *cwd*
     (fail closed: a second ``cd`` could hop back into the guarded checkout).
+    ``cd X && ...`` runs in X only. ``cd X; ...`` (or a newline) runs the rest
+    even when the cd fails, so both X and *cwd* are checked.
     """
     if len(re.findall(r"(?:^|[;&|()\s])cd\s", command)) != 1:
-        return cwd
+        return [cwd]
     match = _LEADING_CD_RE.match(command)
     if match is None:
-        return cwd
+        return [cwd]
     target = match.group("path").strip("'\"")
     if not target or target.startswith("-") or "$" in target or "`" in target:
-        return cwd
+        return [cwd]
     candidate = Path(os.path.expanduser(target))
     if not candidate.is_absolute():
         candidate = cwd / candidate
     try:
-        return candidate.resolve()
+        candidate = candidate.resolve()
     except OSError:
-        return cwd
+        return [cwd]
+    return [candidate] if match.group("sep") == "&&" else [candidate, cwd]
+
+
+def effective_cwd(command: str, cwd: Path) -> Path:
+    """The first directory from :func:`effective_cwds` (kept for callers)."""
+    return effective_cwds(command, cwd)[0]
 
 
 def _git_dir_marker(start: Path) -> Path | None:
@@ -193,9 +209,10 @@ def detect(
 
     The two predicates are injectable for tests and other runtimes.
     """
-    run_dir = effective_cwd(command, cwd)
+    run_dirs = effective_cwds(command, cwd)
     for name, pattern in SHARED_CHECKOUT_RULES.items():
-        for target in _target_dirs(command, pattern, run_dir):
+        targets = [t for d in run_dirs for t in _target_dirs(command, pattern, d)]
+        for target in targets:
             if shared_checkout(target):
                 return (
                     f"Blocked `{name}` in a shared checkout ({target}): other "
@@ -206,7 +223,10 @@ def detect(
                     "and do experiments that need reset/clean in a separate "
                     "worktree."
                 )
-    for target in _target_dirs(command, _STASH_STACK_RE, run_dir):
+    stash_targets = [
+        t for d in run_dirs for t in _target_dirs(command, _STASH_STACK_RE, d)
+    ]
+    for target in stash_targets:
         if stash_stack_shared(target):
             return (
                 f"Blocked `git stash` in a repo with linked worktrees ({target}): "

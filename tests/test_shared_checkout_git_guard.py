@@ -66,6 +66,10 @@ def detect(command: str, cwd: Path = SHARED, *, worktrees: bool = False):
         "git -c color.ui=never add -A",
         "git --git-dir=.git --work-tree=. clean -fd",
         "git --no-pager -c x=y -p restore .",
+        "git restore -- .",
+        "git restore --staged -- .",
+        "git restore --source=HEAD~1 --worktree -- .",
+        "git restore -s HEAD .",
     ],
 )
 def test_shared_checkout_denies_tree_wide_operations(command):
@@ -87,6 +91,8 @@ def test_shared_checkout_denies_tree_wide_operations(command):
         "git reset --soft HEAD~1",
         "git pull --ff-only",
         "git restore path/to/file.py",
+        "git restore -- path/to/file.py",
+        "git restore --staged -- ./file.py",
         "git checkout -- path/to/file.py",
         "git clean -n",
         "git log --oneline -5",
@@ -115,6 +121,14 @@ def test_work_tree_option_targets_that_tree():
     assert detect(f"git --work-tree={SHARED} clean -fd", cwd=OTHER) is not None
     assert detect(f"git --work-tree {SHARED} reset --hard", cwd=OTHER) is not None
     assert detect(f"git --work-tree={OTHER} reset --hard", cwd=SHARED) is None
+
+
+def test_cd_with_semicolon_checks_both_directories():
+    # `cd X; cmd` runs cmd in X, or in cwd if the cd fails: check both.
+    assert detect(f"cd {SHARED}; git reset --hard", cwd=OTHER) is not None
+    assert detect(f"cd {OTHER}; git reset --hard", cwd=SHARED) is not None
+    assert detect(f"cd {SHARED}\ngit add -A", cwd=OTHER) is not None
+    assert detect(f"cd {OTHER}; git reset --hard", cwd=OTHER) is None
 
 
 def test_single_leading_cd_moves_the_target():
