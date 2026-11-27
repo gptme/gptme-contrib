@@ -374,6 +374,16 @@ _PATTERNS: list[Pattern] = [
         Severity.CRITICAL,
         "groq_api_key",
     ),
+    # PostHog personal API keys: "phx_" + url-safe payload (token_urlsafe, so
+    # the char class includes "_-"). Full account-scoped API access; no other
+    # pattern matches the prefix. Project keys ("phc_") are public-by-design
+    # (client-side capture) and are excluded the same way Stripe pk_live_ is.
+    # Lookbehind so an identifier containing phx_ cannot match.
+    Pattern(
+        re.compile(r"(?<![A-Za-z0-9_])phx_[A-Za-z0-9_-]{20,}"),
+        Severity.CRITICAL,
+        "posthog_personal_api_key",
+    ),
     # Replicate API tokens carry the distinctive "r8_" prefix + ~37 base62 chars.
     # No other pattern matches the r8_ prefix; leak grants full inference/billing.
     Pattern(

@@ -1005,6 +1005,40 @@ def test_compound_secret_keys_redacted() -> None:
     )
 
 
+def test_package_redact_covers_posthog_aws_and_postgres() -> None:
+    # Operator session eff3: local patterns missed AKIA and postgres userinfo;
+    # gptme-redact missed phx_ personal keys. Routing _redact through the
+    # package closes both gaps. Classification codes must still survive.
+    if soc._package_redact is None:
+        pytest.skip("gptme-redact not installed")
+    phx = "phx_" + "A1b2C3d4E5f6G7h8I9j0" + "_tail-Xy09"
+    aws = "AKIA" + "0123456789ABCDEF"
+    pg = "postgres://agent:supersecretpw@db.internal:5432/app"
+    out = soc._redact(f"keys {phx} {aws} {pg} oauth_not_allowed_for_organization")
+    assert phx not in out
+    assert aws not in out
+    assert "supersecretpw" not in out
+    assert "oauth_not_allowed_for_organization" in out
+    assert "[REDACTED]" in out
+
+
+def test_stdlib_fallback_still_redacts_without_package(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Soft-import contract: detector stays stdlib-only when gptme-redact is
+    # absent. Local patterns are the publication net in that case.
+    monkeypatch.setattr(soc, "_package_redact", None)
+    jwt = (
+        "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0."
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPA"
+    )
+    out = soc._redact(f"Invalid JWT: {jwt}")
+    assert out == "Invalid JWT: [REDACTED]"
+    # AKIA coverage is the package's job; fallback must not pretend it has it.
+    aws = "AKIA" + "0123456789ABCDEF"
+    assert aws in soc._redact(f"id={aws}")
+
+
 def test_deeply_nested_structured_403_does_not_crash_assess(tmp_path: Path) -> None:
     # Regression (contrib#2038 review, fp 39d8ac08fea2): a recursive
     # _is_structured_403() hit RecursionError on nesting that json.loads and
