@@ -1,6 +1,6 @@
 [project]
 name = "gptmail"
-version = "0.2.0"
+version = "0.2.1"
 description = "Email automation for gptme agents with shared communication utilities"
 authors = [
     {name = "gptme contributors", email = "gptme@superuserlabs.org"}
@@ -50,11 +50,11 @@ bridge = [
 # Outbound scanner for `gptmail agent send` (require_scanner=True fails closed
 # without it). The distribution is `gptme-redact` (import name `redact`); never
 # name bare `redact`, which on PyPI is an unrelated config-template renderer.
-# Resolves from the workspace now; from PyPI once `gptme-redact` is published.
+# 0.1.3 is the first release with the prose false-block fixes (#2232, #2260).
 # The scanner needs Python 3.11 (its regexes use 3.11 syntax); on 3.10 the extra
 # is a no-op and `gptmail agent doctor` reports the scanner missing.
 secrets = [
-    "gptme-redact>=0.1; python_version >= '3.11'",
+    "gptme-redact>=0.1.3; python_version >= '3.11'",
 ]
 test = [
     "gptme-redact>=0.1; python_version >= '3.11'",

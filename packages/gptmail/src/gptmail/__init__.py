@@ -7,7 +7,7 @@ including CLI tools, background watchers, and shared communication utilities.
 
 from pathlib import Path
 
-__version__ = "0.1.0"
+__version__ = "0.2.1"
 __all__ = ["__version__"]
 
 # Package root directory

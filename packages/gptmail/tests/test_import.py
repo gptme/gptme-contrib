@@ -3,9 +3,17 @@
 
 def test_package_import():
     """Test that gptmail package can be imported."""
+    import re
+    from pathlib import Path
+
     import gptmail
 
-    assert gptmail.__version__ == "0.1.0"
+    # Compare with this package's pyproject.toml rather than installed metadata,
+    # so a release bump cannot leave it stale and a stale install cannot mask it.
+    pyproject = (Path(__file__).parents[1] / "pyproject.toml").read_text()
+    match = re.search(r'^version = "([^"]+)"', pyproject, re.MULTILINE)
+    assert match is not None
+    assert gptmail.__version__ == match.group(1)
 
 
 def test_submodule_imports():
