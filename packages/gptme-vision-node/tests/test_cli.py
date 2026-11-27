@@ -421,3 +421,71 @@ def test_cli_camera_that_never_opens_exits_naming_source(monkeypatch, command):
 
     assert result.exit_code == 1, result.output
     assert "failed to open capture source: 'rtsp://typo/stream'" in result.output
+
+
+def test_cli_reenroll_legacy_gallery_into_separate_path(tmp_path):
+    """The documented v2 upgrade preserves v1 and uses one new gallery throughout."""
+    from gptme_vision_node.place import HistogramEmbedder, PlaceRecognizer
+
+    legacy_path = tmp_path / "places.json"
+    legacy = PlaceRecognizer(HistogramEmbedder(v_bins=0))
+    legacy.enroll("old-room", scene_frame(11))
+    legacy.save(legacy_path)
+    original = legacy_path.read_bytes()
+    runner = CliRunner()
+    kitchen = _write_scene(tmp_path / "kitchen.png", 101)
+    office = _write_scene(tmp_path / "office.png", 202)
+
+    blocked = runner.invoke(
+        cli.main,
+        [
+            "enroll",
+            "--place",
+            "kitchen",
+            "--source",
+            str(kitchen),
+            "--gallery",
+            str(legacy_path),
+            "--no-wifi",
+        ],
+    )
+    assert blocked.exit_code == 1
+    assert "embedder mismatch" in blocked.output
+    assert legacy_path.read_bytes() == original
+
+    new_path = tmp_path / "places-v2.json"
+    for name, image in (("kitchen", kitchen), ("office", office)):
+        result = runner.invoke(
+            cli.main,
+            [
+                "enroll",
+                "--place",
+                name,
+                "--source",
+                str(image),
+                "--gallery",
+                str(new_path),
+                "--no-wifi",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+
+    result = runner.invoke(
+        cli.main,
+        [
+            "whereami",
+            "--source",
+            str(kitchen),
+            "--gallery",
+            str(new_path),
+            "--no-wifi",
+            "--json",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)[0]["place"] == "kitchen"
+    assert set(PlaceRecognizer.from_file(new_path).places) == {"kitchen", "office"}
+    assert legacy_path.read_bytes() == original
+    assert set(
+        PlaceRecognizer.from_file(legacy_path, HistogramEmbedder(v_bins=0)).places
+    ) == {"old-room"}

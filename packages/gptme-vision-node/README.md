@@ -68,8 +68,22 @@ skip it.
 The visual embedding includes a brightness histogram (embedder id
 `histogram-h24-s8-val8-grid2-v2`). Galleries enrolled with the earlier
 hue/saturation-only `-v1` embedder fail to load with an "embedder mismatch"
-error; re-enroll your places. To keep using an old gallery from Python, pass
-`HistogramEmbedder(v_bins=0)`.
+error. The old samples cannot be converted: their embeddings did not record
+brightness, and the gallery does not store the original images. Re-enroll into
+an **unused gallery path**; `enroll` appends to existing galleries and will not
+overwrite an incompatible one. This keeps the old gallery intact:
+
+```bash
+# Choose a different filename if places-v2.json already exists.
+gptme-vision-node enroll --place kitchen --source camera:0 --gallery ~/.config/gptme-vision-node/places-v2.json
+gptme-vision-node enroll --place office --source camera:0 --gallery ~/.config/gptme-vision-node/places-v2.json
+gptme-vision-node whereami --source camera:0 --gallery ~/.config/gptme-vision-node/places-v2.json --json
+```
+
+Use the same `--gallery` path for subsequent enrollments and recognition; the
+default `places.json` is unchanged. To keep using an old gallery from Python,
+pass `HistogramEmbedder(v_bins=0)` to `PlaceRecognizer.from_file`. Saving that
+legacy recognizer does **not** convert it to v2.
 
 ### Vision LLM settings (`look`)
 
