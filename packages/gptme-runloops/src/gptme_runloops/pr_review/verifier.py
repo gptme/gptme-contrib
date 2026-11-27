@@ -26,6 +26,7 @@ measurable and reversible.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import warnings
@@ -131,12 +132,17 @@ def _build_verifier_prompt(finding: ReviewFinding, diff: str) -> str:
         "evidence": finding.evidence,
     }
 
+    # Both payloads derive from the untrusted PR: the diff text, and a finding
+    # produced by a model that read it. Fence them so gptme's pre-model @path/URL
+    # discovery treats them as inert text rather than including local files or
+    # fetching URLs named inside the diff. json.dumps keeps each payload on a
+    # single line, so an embedded triple backtick cannot close the fence early.
     return "\n\n".join(
         [
             _VERIFIER_INSTRUCTIONS,
             "---",
-            f"Finding to evaluate (JSON):\n{json.dumps(finding_payload)}",
-            f"Full diff context (JSON string):\n{json.dumps(diff)}",
+            f"Finding to evaluate (JSON):\n```json\n{json.dumps(finding_payload)}\n```",
+            f"Full diff context (JSON string):\n```json\n{json.dumps(diff)}\n```",
         ]
     )
 
@@ -154,6 +160,9 @@ def _invoke_verifier_model(prompt: str, model: str | None, checkout: Path) -> st
         capture_output=True,
         text=True,
         timeout=120,  # verifier calls are shorter than full reviews
+        # The prompt embeds an untrusted PR diff. Never let gptme expand @paths
+        # or fetch URLs found in it on the reviewing host.
+        env={**os.environ, "GPTME_DISABLE_PATH_INCLUDE": "1"},
     )
     if result.returncode not in (0, 1):
         stderr_snip = result.stderr[:500] if result.stderr else "(no stderr)"

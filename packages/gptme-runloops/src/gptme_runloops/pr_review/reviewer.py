@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import subprocess
 from datetime import datetime, timezone
@@ -261,6 +262,9 @@ def _invoke_model(prompt: str, model: str | None, checkout: Path) -> str:
         capture_output=True,
         text=True,
         timeout=300,
+        # Stage 1 already fences the diff; disabling path/URL expansion is
+        # defense in depth against an unexpected fence escape.
+        env={**os.environ, "GPTME_DISABLE_PATH_INCLUDE": "1"},
     )
     # gptme exits 0 on success; non-zero indicates an error (not just "no findings")
     if result.returncode not in (0, 1):
