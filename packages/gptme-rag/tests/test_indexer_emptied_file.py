@@ -246,6 +246,32 @@ def test_sweep_refreshes_a_stale_collection_handle(indexer, tmp_path, monkeypatc
     assert not (stale_ids & remaining), f"stale chunks survived the retried sweep: {remaining}"
 
 
+def test_snapshot_refreshes_a_stale_collection_handle(indexer, tmp_path, monkeypatch):
+    """A reset by another indexer must not make the next directory reindex fail."""
+    from gptme_rag.indexing.indexer import Indexer
+
+    f = tmp_path / "note.md"
+    f.write_text(_words(200))
+    indexer.index_file(f)
+    other = Indexer(
+        persist_directory=indexer.persist_directory,
+        collection_name=indexer.collection_name,
+        enable_persist=True,
+    )
+    other.reset_collection()
+
+    assert indexer.index_directory(tmp_path, glob_pattern="*.md") == 1
+    assert _ids_for(indexer, f)
+
+
+def test_nonpersistent_replacement_serializes_collection_through_sweep(
+    indexer, tmp_path, monkeypatch
+):
+    # Exercise the no-file-lock branch without changing the real Chroma backend.
+    monkeypatch.setattr(indexer, "persist_directory", None)
+    _check_serialized_replacement(indexer, tmp_path, monkeypatch, directory=False)
+
+
 def test_file_replacement_serializes_collection_through_sweep(indexer, tmp_path, monkeypatch):
     _check_serialized_replacement(indexer, tmp_path, monkeypatch, directory=False)
 

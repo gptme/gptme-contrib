@@ -807,10 +807,10 @@ class Indexer:
     @contextmanager
     def _index_writer_lock(self):
         persist_dir = getattr(self, "persist_directory", None)
-        if persist_dir is None:
-            yield
-            return
         with self._writer_thread_lock:
+            if persist_dir is None:
+                yield
+                return
             if getattr(self._writer_lock_state, "held", False):
                 yield
                 return
@@ -1260,7 +1260,13 @@ class Indexer:
         snapshot: dict[str, set[str]] = {}
         for source in sources:
             with self._index_writer_lock():
-                snapshot[source] = set(self._iter_ids(where={"source": source}))
+                try:
+                    snapshot[source] = set(self._iter_ids(where={"source": source}))
+                except NotFoundError:
+                    # Another indexer may have reset the collection since this
+                    # instance last used it. Restart the scan on its new handle.
+                    self._refresh_collection()
+                    snapshot[source] = set(self._iter_ids(where={"source": source}))
         return snapshot
 
     def _delete_ids(self, ids: list[str]) -> None:
