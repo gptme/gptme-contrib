@@ -588,13 +588,50 @@ async def test_bridge_logs_a_correlatable_search_receipt(
         )
 
     assert result["status"] == "ok"
-    receipts = [r.message for r in caplog.records if "workspace_search(" in r.message]
+    receipts = [
+        r.workspace_search for r in caplog.records if "workspace_search(" in r.message
+    ]
     assert len(receipts) == 1
     receipt = receipts[0]
-    assert "Delivered the release" in receipt
-    assert "status=ok" in receipt
-    assert "backend=lexical" in receipt
-    assert "mode=filtered" in receipt
-    assert "selected=1" in receipt
-    assert "results=1" in receipt
-    assert "elapsed=" in receipt
+    assert receipt["query"] == "Delivered the release"
+    assert receipt["filters"] == {
+        "include_paths": ["state/standup-brief.json"],
+        "exclude_paths": ["journal/"],
+    }
+    assert receipt["status"] == "ok"
+    assert receipt["backend"] == "lexical"
+    assert receipt["mode"] == "filtered"
+    assert receipt["selected_files"] == 1
+    assert receipt["results"] == 1
+    assert receipt["elapsed_ms"] >= 0
+
+
+@pytest.mark.asyncio
+async def test_bridge_logs_a_receipt_for_a_failed_search(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A failed lookup must be distinguishable from a lookup that never ran."""
+    import logging
+
+    from gptme_voice.realtime.tool_bridge import GptmeToolBridge
+
+    class FailingRag:
+        enabled = True
+
+        async def search(self, *args: object, **kwargs: object) -> dict:
+            raise RuntimeError("index unavailable")
+
+    bridge = GptmeToolBridge(workspace=str(tmp_path), rag=FailingRag())  # type: ignore[arg-type]
+    with caplog.at_level(logging.INFO, logger="gptme_voice.realtime.tool_bridge"):
+        with pytest.raises(RuntimeError, match="index unavailable"):
+            await bridge.handle_function_call(
+                "workspace_search", {"query": "standup brief"}
+            )
+
+    receipts = [
+        r.workspace_search for r in caplog.records if "workspace_search(" in r.message
+    ]
+    assert len(receipts) == 1
+    assert receipts[0]["status"] == "error"
+    assert receipts[0]["error"] == "RuntimeError"
+    assert receipts[0]["results"] is None

@@ -1352,9 +1352,22 @@ class GptmeToolBridge:
                 if arguments.get(key) is not None
             }
             started = time.monotonic()
-            result = await self.rag.search(
-                query.strip(), n_results=n_results_int, **filters
-            )
+            try:
+                result = await self.rag.search(
+                    query.strip(), n_results=n_results_int, **filters
+                )
+            except Exception as exc:
+                # A failed lookup must still leave a receipt: otherwise the
+                # absence of a line cannot be told apart from a lookup that
+                # never ran, which is the correlation gap this log closes.
+                self._log_workspace_search(
+                    query.strip(),
+                    None,
+                    filters,
+                    (time.monotonic() - started) * 1000.0,
+                    error=exc,
+                )
+                raise
             self._log_workspace_search(
                 query.strip(), result, filters, (time.monotonic() - started) * 1000.0
             )
@@ -1367,7 +1380,11 @@ class GptmeToolBridge:
 
     @staticmethod
     def _log_workspace_search(
-        query: str, result: object, filters: Mapping[str, Any], elapsed_ms: float
+        query: str,
+        result: object,
+        filters: Mapping[str, Any],
+        elapsed_ms: float,
+        error: BaseException | None = None,
     ) -> None:
         """Log one receipt per workspace_search lookup.
 
@@ -1376,29 +1393,49 @@ class GptmeToolBridge:
         recency fallback, or a bounded corpus from an ungranted selector. Those
         are exactly the fields an operator needs to correlate a call with the
         retrieval that answered it.
+
+        Every path emits exactly one receipt, including a failed lookup, so
+        "no receipt" unambiguously means the bridge never handled the call.
+        The fields are also attached as ``extra={"workspace_search": ...}`` so
+        tests and log processors read typed values instead of the rendered
+        string (a missing value renders as ``None`` and would pass a substring
+        assertion).
         """
-        if not isinstance(result, Mapping):
-            logger.info(
-                "workspace_search(%r) filters=%s returned %s in %.0fms",
-                query,
-                dict(filters),
-                type(result).__name__,
-                elapsed_ms,
-            )
-            return
-        coverage = result.get("coverage")
-        coverage = coverage if isinstance(coverage, Mapping) else {}
+        fields: dict[str, Any] = {
+            "query": query,
+            "filters": dict(filters),
+            "status": "error" if error is not None else None,
+            "backend": None,
+            "mode": None,
+            "selected_files": None,
+            "results": None,
+            "elapsed_ms": round(elapsed_ms, 1),
+        }
+        if error is not None:
+            fields["error"] = type(error).__name__
+        elif isinstance(result, Mapping):
+            coverage = result.get("coverage")
+            coverage = coverage if isinstance(coverage, Mapping) else {}
+            fields["status"] = result.get("status")
+            fields["backend"] = result.get("backend")
+            fields["mode"] = coverage.get("mode")
+            fields["selected_files"] = coverage.get("selected_files")
+            fields["results"] = len(result.get("results") or [])
+        else:
+            fields["status"] = "ok"
+            fields["result_type"] = type(result).__name__
         logger.info(
             "workspace_search(%r) filters=%s status=%s backend=%s mode=%s "
-            "selected=%s results=%d elapsed=%.0fms",
+            "selected=%s results=%s elapsed=%.0fms",
             query,
-            dict(filters),
-            result.get("status"),
-            result.get("backend"),
-            coverage.get("mode"),
-            coverage.get("selected_files"),
-            len(result.get("results") or []),
+            fields["filters"],
+            fields["status"],
+            fields["backend"],
+            fields["mode"],
+            fields["selected_files"],
+            fields["results"],
             elapsed_ms,
+            extra={"workspace_search": fields},
         )
 
     @staticmethod
