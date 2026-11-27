@@ -38,8 +38,18 @@ import sys
 from pathlib import Path
 from typing import Any, Mapping
 
-# A git invocation, optionally with -C <dir> (captured) before the subcommand.
-_GIT = r"(?:^|[;&|()\s])git(?:\s+-C\s+(?P<c>\S+))?\s+"
+# A git invocation with any global options before the subcommand (captured as
+# "opts": -C <dir>, -c k=v, --no-pager, --git-dir/--work-tree[=]<path>, ...).
+# Agents add -c and --no-pager routinely; without them in the prefix every rule
+# would miss `git --no-pager reset --hard`.
+_GIT_OPT = (
+    r"(?:-[Cc]\s+\S+"
+    r"|--(?:git-dir|work-tree|namespace|exec-path|config-env)(?:=|\s+)\S+"
+    r"|--[a-z][a-z-]*(?:=\S+)?"
+    r"|-[pP])"
+)
+_GIT = r"(?:^|[;&|()\s])git(?P<opts>(?:\s+" + _GIT_OPT + r")*)\s+"
+_TARGET_OPT_RE = re.compile(r"(?:-C\s+|--work-tree(?:=|\s+))(?P<path>\S+)")
 _END = r"(?:\s|$|[;&|)])"
 
 # Every stash subcommand except the read-only ones rewrites tree and/or stack.
@@ -158,15 +168,17 @@ def is_shared_checkout(cwd: Path) -> bool:
 
 
 def _target_dirs(command: str, pattern: re.Pattern[str], cwd: Path) -> list[Path]:
-    """Directories each matching git invocation runs in (honouring ``-C``)."""
+    """Directories each matching git invocation acts on.
+
+    Honours ``-C`` (repeated ones chain, as in git) and ``--work-tree``.
+    """
     dirs = []
     for match in pattern.finditer(command):
-        c = match.group("c")
-        if c:
-            c_path = Path(os.path.expanduser(c.strip("'\"")))
-            dirs.append(c_path if c_path.is_absolute() else cwd / c_path)
-        else:
-            dirs.append(cwd)
+        target = cwd
+        for opt in _TARGET_OPT_RE.finditer(match.group("opts") or ""):
+            path = Path(os.path.expanduser(opt.group("path").strip("'\"")))
+            target = path if path.is_absolute() else target / path
+        dirs.append(target)
     return dirs
 
 

@@ -60,6 +60,12 @@ def detect(command: str, cwd: Path = SHARED, *, worktrees: bool = False):
         "git commit -am wip",
         "git status && git stash",
         "echo hi; git add -A && git commit -m x",
+        # Global options before the subcommand must not hide it.
+        "git -c core.pager=cat stash",
+        "git --no-pager reset --hard",
+        "git -c color.ui=never add -A",
+        "git --git-dir=.git --work-tree=. clean -fd",
+        "git --no-pager -c x=y -p restore .",
     ],
 )
 def test_shared_checkout_denies_tree_wide_operations(command):
@@ -84,6 +90,8 @@ def test_shared_checkout_denies_tree_wide_operations(command):
         "git checkout -- path/to/file.py",
         "git clean -n",
         "git log --oneline -5",
+        "git --no-pager log -1",
+        "git -c core.pager=cat diff",
     ],
 )
 def test_shared_checkout_allows_scoped_operations(command):
@@ -98,6 +106,15 @@ def test_unmarked_repo_is_not_guarded():
 def test_git_dash_c_targets_the_named_repo():
     assert detect(f"git -C {SHARED} reset --hard", cwd=OTHER) is not None
     assert detect(f"git -C {OTHER} reset --hard", cwd=SHARED) is None
+    assert detect(f"git --no-pager -C {SHARED} stash", cwd=OTHER) is not None
+    # Repeated -C chain, as in git: /repo then shared.
+    assert detect("git -C /repo -C shared add -A", cwd=OTHER) is not None
+
+
+def test_work_tree_option_targets_that_tree():
+    assert detect(f"git --work-tree={SHARED} clean -fd", cwd=OTHER) is not None
+    assert detect(f"git --work-tree {SHARED} reset --hard", cwd=OTHER) is not None
+    assert detect(f"git --work-tree={OTHER} reset --hard", cwd=SHARED) is None
 
 
 def test_single_leading_cd_moves_the_target():

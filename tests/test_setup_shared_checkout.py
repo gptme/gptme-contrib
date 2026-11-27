@@ -66,17 +66,43 @@ def test_check_reports_missing_then_setup_fixes_everything(
     assert "ok:" in after.stdout
 
 
-def test_hook_commits_without_stashing_unstaged_changes(
+@pytest.mark.skipif(
+    shutil.which("prek") is None and shutil.which("pre-commit") is None,
+    reason="needs prek or pre-commit to run a hook",
+)
+def test_hook_runs_hooks_without_stashing_unstaged_changes(
     repo: Path, tmp_path: Path
 ) -> None:
+    """While hooks run, another session's unstaged edit stays in the tree.
+
+    A plain `prek install` / `pre-commit install` hook stashes unstaged changes
+    around the run; the probe hook below would then not see the edit.
+    """
+    (repo / ".pre-commit-config.yaml").write_text(
+        "repos:\n"
+        "  - repo: local\n"
+        "    hooks:\n"
+        "      - id: sees-unstaged-edit\n"
+        "        name: sees unstaged edit\n"
+        "        entry: sh -c 'grep -q other-session-edit shared.txt && touch hook-saw-edit'\n"
+        "        language: system\n"
+        "        pass_filenames: false\n"
+        "        always_run: true\n"
+    )
+    (repo / "shared.txt").write_text("committed\n")
+    _git(repo, "add", ".pre-commit-config.yaml", "shared.txt")
+    _git(repo, "commit", "-q", "--no-verify", "-m", "init")
     assert _run(repo, home=tmp_path).returncode == 0
-    (repo / "a.txt").write_text("a\n")
-    (repo / "b.txt").write_text("b\n")
-    _git(repo, "add", "a.txt")
-    _git(repo, "commit", "-q", "-m", "a")
-    # The other session's untracked work is untouched by the hook.
-    assert (repo / "b.txt").read_text() == "b\n"
+
+    (repo / "shared.txt").write_text("committed\nother-session-edit\n")  # unstaged
+    (repo / "mine.txt").write_text("mine\n")
+    _git(repo, "add", "mine.txt")
+    _git(repo, "commit", "-q", "-m", "mine")
+
+    assert (repo / "hook-saw-edit").exists(), "hooks ran on a stashed tree"
+    assert "other-session-edit" in (repo / "shared.txt").read_text()
     assert _git(repo, "stash", "list") == ""
+    assert _git(repo, "show", "--name-only", "--format=", "HEAD") == "mine.txt"
 
 
 def test_existing_hook_is_kept_and_rerun_is_idempotent(
