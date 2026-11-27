@@ -100,8 +100,17 @@ done
 if [ "$HOOKS_PATH_SET" = 1 ]; then
   echo "warning: core.hooksPath is set; install the pre-commit hook there by hand" >&2
   missing=1
-elif [ -f "$HOOK" ] && [ "$(cat "$HOOK")" = "$(hook_body)" ]; then
+elif [ -f "$HOOK" ] && [ "$(cat "$HOOK")" = "$(hook_body)" ] && [ -x "$HOOK" ]; then
   :
+elif [ -f "$HOOK" ] && [ "$(cat "$HOOK")" = "$(hook_body)" ]; then
+  # Git ignores a hook without the executable bit.
+  if [ "$CHECK" = 1 ]; then
+    echo "missing: executable bit on $HOOK"
+    missing=1
+  else
+    chmod +x "$HOOK"
+    echo "fixed: made $HOOK executable"
+  fi
 elif [ "$CHECK" = 1 ]; then
   echo "missing: $HOOK (non-stashing pre-commit hook)"
   missing=1

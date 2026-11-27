@@ -202,6 +202,18 @@ def test_hooks_path_makes_setup_fail_loudly(repo: Path, tmp_path: Path) -> None:
     assert _git(repo, "config", "--bool", "safety.sharedCheckout") == "true"
 
 
+def test_non_executable_hook_is_reported_and_repaired(
+    repo: Path, tmp_path: Path
+) -> None:
+    assert _run(repo, home=tmp_path).returncode == 0
+    hook = repo / ".git" / "hooks" / "pre-commit"
+    hook.chmod(0o644)
+    check = _run(repo, "--check", home=tmp_path)
+    assert check.returncode == 1 and "executable bit" in check.stdout
+    assert _run(repo, home=tmp_path).returncode == 0
+    assert os.access(hook, os.X_OK)
+
+
 def test_rejects_non_repo(tmp_path: Path) -> None:
     result = _run(tmp_path, home=tmp_path)
     assert result.returncode == 2

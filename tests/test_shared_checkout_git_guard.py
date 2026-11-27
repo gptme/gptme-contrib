@@ -61,6 +61,10 @@ def detect(command: str, cwd: Path = SHARED, *, worktrees: bool = False):
         "git add -u",
         "git add --update",
         "git add -- .",
+        "git add -Av",
+        "git add -uv",
+        "git add -vA",
+        'git add "."',
         "git add --chmod=+x -A",
         "git add -v --ignore-errors .",
         "git checkout -- .",
@@ -131,6 +135,9 @@ def test_shared_checkout_denies_tree_wide_operations(command):
         "git add -u path/to/file.py",
         "git add --chmod=+x script.sh",
         "git add -- path/to/file.py",
+        "git add -v path/to/file.py",
+        "git add -uv path/to/file.py",
+        "git add -p",
         "git log --oneline -5",
         "git --no-pager log -1",
         "git -c core.pager=cat diff",
@@ -169,6 +176,21 @@ def test_quoted_option_paths_with_spaces():
     assert check(f'git --work-tree="{spaced}" add -A') is not None
     assert check(f'git -C "{spaced}" status') is None
     assert detect(f'git -C "{SHARED}" reset --hard', cwd=OTHER) is not None
+
+
+def test_git_dir_option_targets_that_repo():
+    assert detect(f"git --git-dir={SHARED}/.git stash drop", cwd=OTHER) is not None
+    assert detect(f"git --git-dir {SHARED}/.git reset --hard", cwd=OTHER) is not None
+    assert detect(f"git --git-dir={OTHER}/.git reset --hard", cwd=SHARED) is None
+
+
+def test_failed_cd_then_semicolon_checks_cwd_too():
+    # If the cd fails, `git status` is skipped but the reset still runs in cwd.
+    assert (
+        detect("cd /does-not-exist && git status; git reset --hard", cwd=SHARED)
+        is not None
+    )
+    assert detect(f"cd {OTHER} && git status && git reset --hard", cwd=SHARED) is None
 
 
 def test_work_tree_option_targets_that_tree():

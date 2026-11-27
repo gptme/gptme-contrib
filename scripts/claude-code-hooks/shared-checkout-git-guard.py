@@ -34,6 +34,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -56,7 +57,11 @@ _GIT_OPT = (
     + r"|-[pP])"
 )
 _GIT = r"(?:^|[;&|()\s])git(?P<opts>(?:\s+" + _GIT_OPT + r")*)\s+"
-_TARGET_OPT_RE = re.compile(r"(?:-C\s+|--work-tree(?:=|\s+))(?P<path>" + _VALUE + r")")
+# -C, --work-tree and --git-dir all name the repository acted on (the
+# predicates find a repo from inside its .git directory too).
+_TARGET_OPT_RE = re.compile(
+    r"(?:-C\s+|--(?:work-tree|git-dir)(?:=|\s+))(?P<path>" + _VALUE + r")"
+)
 _END = r"(?:\s|$|[;&|)])"
 
 # Stack writes (for repos with linked worktrees): also allow ``create`` (no
@@ -109,16 +114,45 @@ _RESTORE_ALL_RE = re.compile(
     + _END
 )
 # Broad staging sweeps other sessions' changes into your commit.
-_ADD_ALL_RE = re.compile(
-    _GIT
-    + r"add(?:\s+(?:-[a-zA-Z]+|--[a-z][a-z-]*(?:=\S+)?))*(?:\s+--)?\s+(?:"
-    + r"(?:-A|--all|\.|:/)(?:\s|$|[;&|)])"
-    # -u/--update without a pathspec stages every tracked modification
-    + r"|(?:-u|--update)(?:\s+-[a-zA-Z-]+)*\s*(?:$|[;&|)\n]))"
-)
+# `git add` with its arguments up to the next shell separator; whether it is
+# broad is decided on the tokens (see _add_is_broad), since option clusters
+# like -Av or --chmod=+x -A defeat a regex.
+_ADD_RE = re.compile(_GIT + r"add(?P<args>(?:\s+[^;&|\n]*)?)(?:$|[;&|\n])")
+
+
+def _add_is_broad(args: str) -> bool:
+    """Whether `git add <args>` stages the whole tree."""
+    try:
+        tokens = shlex.split(args)
+    except ValueError:
+        return True  # unbalanced quotes: fail closed
+    flags: list[str] = []
+    paths: list[str] = []
+    after_dashdash = False
+    for token in tokens:
+        if after_dashdash or not token.startswith("-") or token == "-":
+            paths.append(token)
+        elif token == "--":
+            after_dashdash = True
+        else:
+            flags.append(token)
+    short = "".join(f[1:] for f in flags if not f.startswith("--"))
+    if "--all" in flags or "A" in short:
+        return True
+    if any(path in (".", "./", ":/", ":") for path in paths):
+        return True
+    update = "--update" in flags or "u" in short
+    return update and not paths
+
+
 _COMMIT_ALL_RE = re.compile(
     _GIT + r"commit\b[^;&|\n]*\s(?:-[a-zA-Z]*a[a-zA-Z]*|--all)" + _END
 )
+
+# Rules whose regex only finds the invocation; this decides if it is risky.
+_RULE_FILTERS: dict[re.Pattern[str], Any] = {
+    _ADD_RE: lambda m: _add_is_broad(m.group("args")),
+}
 
 SHARED_CHECKOUT_RULES: dict[str, re.Pattern[str]] = {
     # Same allowances as the stack rule: list/show/create, and
@@ -132,7 +166,7 @@ SHARED_CHECKOUT_RULES: dict[str, re.Pattern[str]] = {
     "git checkout .": _CHECKOUT_ALL_RE,
     "git checkout/switch -f": _CHECKOUT_FORCE_RE,
     "git restore .": _RESTORE_ALL_RE,
-    "git add -A / -u / . (broad staging)": _ADD_ALL_RE,
+    "git add -A / -u / . (broad staging)": _ADD_RE,
     "git commit -a (broad staging)": _COMMIT_ALL_RE,
 }
 
@@ -176,7 +210,15 @@ def effective_cwds(command: str, cwd: Path) -> list[Path]:
     if not targets:
         return [cwd]
     match = _LEADING_CD_RE.match(command)
-    if len(targets) == 1 and match is not None and match.group("sep") == "&&":
+    # `cd X && a; b` runs b in cwd if the cd failed: the shortcut only holds
+    # when every later command is chained with && as well.
+    rest = command[match.end() :] if match is not None else ""
+    if (
+        len(targets) == 1
+        and match is not None
+        and match.group("sep") == "&&"
+        and not re.search(r";|\n|\|\|", rest)
+    ):
         if _unresolvable(match.group("path")):
             return [UNKNOWN_DIR]
         only = _resolve_cd_target(match.group("path"), cwd)
@@ -263,7 +305,10 @@ def _target_dirs(command: str, pattern: re.Pattern[str], cwd: Path) -> list[Path
     Honours ``-C`` (repeated ones chain, as in git) and ``--work-tree``.
     """
     dirs = []
+    keep = _RULE_FILTERS.get(pattern)
     for match in pattern.finditer(command):
+        if keep is not None and not keep(match):
+            continue
         target = cwd
         for opt in _TARGET_OPT_RE.finditer(match.group("opts") or ""):
             raw = opt.group("path").strip("'\"")
