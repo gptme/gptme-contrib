@@ -1515,6 +1515,48 @@ def test_successful_execute_does_not_kill_same_group_descendant(
 
 
 @pytest.mark.skipif(not Path("/proc").exists(), reason="needs /proc")
+def test_delivers_response_before_exit_and_kills_descendants(tmp_path: Path) -> None:
+    pid_file = tmp_path / "grandchild.pid"
+    script = tmp_path / "fake-subagent.sh"
+    script.write_text(
+        "#!/bin/sh\n"
+        "for task do :; done\n"
+        f'sleep 30 &\nprintf "%s" "$!" > {pid_file}\n'
+        'printf "%s" "The answer is ready." > "${task##* to the file: }"\n'
+        "wait\n"
+    )
+    script.chmod(0o755)
+
+    async def _exercise() -> None:
+        bridge = GptmeToolBridge(
+            workspace=str(tmp_path), gptme_path=str(script), timeout=20
+        )
+        dispatch = await bridge.handle_function_call(
+            "subagent", {"task": "quick lookup", "mode": "fast"}
+        )
+        pending = bridge._pending_tasks[dispatch["task_id"]].task
+        await asyncio.wait_for(pending, timeout=3)
+        (record,) = bridge.get_timings()
+        assert record["returncode"] == -signal.SIGKILL
+        assert record["response_delivered"] is True
+        completion = bridge._recent_completions[-1]
+        assert completion["status"] == "success"
+        assert completion["output_preview"] == "The answer is ready."
+        resumed = GptmeToolBridge(workspace=str(tmp_path))
+        resumed.seed_prior_leg_status([record])
+        assert resumed._recent_completions[-1]["status"] == "success"
+        assert resumed._recent_completions[-1]["returncode"] == -signal.SIGKILL
+
+    asyncio.run(_exercise())
+    grandchild = int(pid_file.read_text())
+    for _ in range(40):
+        if not _pid_alive(grandchild):
+            break
+        time.sleep(0.01)
+    assert not _pid_alive(grandchild), "early delivery left a live descendant"
+
+
+@pytest.mark.skipif(not Path("/proc").exists(), reason="needs /proc")
 def test_cancel_kills_subagent_descendants(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1701,7 +1743,7 @@ def test_cancel_during_spawn_bounds_escaped_descendant_pipe_drain(
     pid_file = tmp_path / "escaped.pid"
     script = tmp_path / "fake-subagent.sh"
     script.write_text(
-        "#!/bin/sh\n" f"setsid sh -c 'echo $$ > {pid_file}; exec sleep 30' &\nwait\n"
+        f"#!/bin/sh\nsetsid sh -c 'echo $$ > {pid_file}; exec sleep 30' &\nwait\n"
     )
     script.chmod(0o755)
     monkeypatch.delenv("GPTME_VOICE_SUBAGENT_PATH", raising=False)

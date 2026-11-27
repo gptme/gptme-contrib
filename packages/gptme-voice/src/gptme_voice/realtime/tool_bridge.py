@@ -123,6 +123,7 @@ _CUE_CALLBACK_TIMEOUT_SECONDS = 1.0
 # asyncio task (and its _pending_tasks entry) alive indefinitely.
 _RESULT_DELIVERY_TIMEOUT_SECONDS = 10.0
 _CANCEL_PIPE_DRAIN_TIMEOUT_SECONDS = 1.0
+_RESPONSE_POLL_SECONDS = 0.1
 _DEFAULT_TRANSCRIPT_TAIL_TURNS = 8
 _DEFAULT_TRANSCRIPT_TAIL_CHARS = 1_600
 
@@ -249,6 +250,7 @@ class ToolResult:
     success: bool
     output: str
     error: str | None = None
+    response_delivered: bool = False
 
 
 @dataclass
@@ -272,6 +274,7 @@ class PendingTask:
     completed_at: float | None = None
     returncode: int | None = None
     cancel_requested: bool = False
+    response_delivered: bool = False
 
 
 class GptmeToolBridge:
@@ -611,6 +614,7 @@ class GptmeToolBridge:
             "model": entry.model,
             "task_preview": description,
             "returncode": entry.returncode,
+            "response_delivered": entry.response_delivered,
             "timings": dict(timings),
         }
         return record
@@ -751,6 +755,7 @@ class GptmeToolBridge:
             response_text = f"Subagent error: {result.error or 'Unknown error'}"
 
         if pending is not None:
+            pending.response_delivered = result.response_delivered
             self._log_timing_summary(task_id, pending)
 
         logger.info(f"Task {task_id} complete: {response_text[:100]}...")
@@ -879,6 +884,7 @@ class GptmeToolBridge:
 
         process: _SubagentProcess | None = None
         completed_successfully = False
+        process_closed = False
         try:
             # The child exists before the pipes are connected. A cancel in that
             # window makes asyncio kill only the direct child, leaving the
@@ -933,9 +939,46 @@ class GptmeToolBridge:
                     if line:
                         stderr_lines.append(line)
 
+            async def _wait_for_response_or_exit() -> str | None:
+                readers = (
+                    asyncio.create_task(_read_stdout()),
+                    asyncio.create_task(_read_stderr()),
+                    asyncio.create_task(process.wait()),
+                )
+                drained = asyncio.gather(*readers)
+                previous = ""
+                try:
+                    while not drained.done():
+                        done, _ = await asyncio.wait(
+                            (drained,), timeout=_RESPONSE_POLL_SECONDS
+                        )
+                        if done:
+                            break
+                        try:
+                            candidate = response_file.read_text(encoding="utf-8")
+                        except (FileNotFoundError, UnicodeDecodeError):
+                            # The file may not exist yet or may be mid-write.
+                            candidate = ""
+                        if (
+                            candidate == previous
+                            and candidate.strip()
+                            and process.returncode in (None, 0)
+                        ):
+                            return candidate.strip()
+                        previous = candidate
+                    await drained
+                    return None
+                finally:
+                    for reader in readers:
+                        if not reader.done():
+                            reader.cancel()
+                    # Consume cancellation/errors from the aggregate without
+                    # suppressing cancellation of this coroutine itself.
+                    await asyncio.gather(drained, *readers, return_exceptions=True)
+
             try:
-                await asyncio.wait_for(
-                    asyncio.gather(_read_stdout(), _read_stderr(), process.wait()),
+                early_response = await asyncio.wait_for(
+                    _wait_for_response_or_exit(),
                     timeout=(
                         self.timeout
                         if _TIMEOUT_BINARY_AVAILABLE
@@ -972,8 +1015,10 @@ class GptmeToolBridge:
             stdout_text = "\n".join(stdout_lines).strip()
             stderr_text = "\n".join(stderr_lines).strip()
 
+            if early_response is not None:
+                output = early_response
             # Read the response file if it exists
-            if response_file.exists():
+            elif response_file.exists():
                 output = response_file.read_text().strip()
                 if output:
                     logger.info(
@@ -997,6 +1042,15 @@ class GptmeToolBridge:
                     output[:_MAX_OUTPUT_LEN]
                     + f"\n... (truncated, {len(output)} total chars)"
                 )
+
+            if early_response is not None:
+                # The answer is ready; do not wait for the model's closing turn.
+                # Reap first so the timing record contains the real exit status.
+                process.close()
+                process_closed = True
+                if on_completed and process.returncode is not None:
+                    on_completed(process.returncode, time.monotonic())
+                return ToolResult(success=True, output=output, response_delivered=True)
 
             if on_completed and process.returncode is not None:
                 on_completed(process.returncode, time.monotonic())
@@ -1057,7 +1111,7 @@ class GptmeToolBridge:
             logger.error(f"Subagent error: {e}")
             return ToolResult(success=False, output="", error=str(e))
         finally:
-            if process is not None:
+            if process is not None and not process_closed:
                 process.close(kill_tree=not completed_successfully)
             response_directory.cleanup()
             if transcript_tail_file is not None:
