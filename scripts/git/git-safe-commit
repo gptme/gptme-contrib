@@ -1314,6 +1314,7 @@ case "$LOCK_TIMEOUT" in
         ;;
 esac
 
+command -v flock >/dev/null 2>&1 || { echo "git-safe-commit: flock not found (macOS: brew install flock; Linux: util-linux)" >&2; exit 1; }
 exec 9>"$LOCKFILE"
 if ! flock --timeout "$LOCK_TIMEOUT" 9; then
     report_commit_lock_timeout "$LOCKFILE" "$LOCK_TIMEOUT"

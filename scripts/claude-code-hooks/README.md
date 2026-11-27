@@ -266,3 +266,34 @@ echo '{"hook_event_name":"PreToolUse","session_id":"test","tool_name":"Bash","to
 - [gptme docs: Lessons](https://gptme.org/docs/lessons.html) — lesson system overview
 - [gptme-agent-template](https://github.com/gptme/gptme-agent-template) — workspace
   template that uses this hook
+
+## `shared-checkout-git-guard.py` — Deny git commands that lose other sessions' work
+
+A PreToolUse hook for the Bash tool. In a checkout marked with
+`git config safety.sharedCheckout true` (see `scripts/git/setup-shared-checkout.sh`)
+it denies whole-tree operations (`stash`, `reset --hard`, whole-index `reset`,
+`--autostash`, `clean -fd`, `checkout -- .`, `restore .`) and broad staging
+(`add -A`/`.`/`--all`, `commit -a`). In any repo with linked worktrees it denies
+writes to the shared stash stack (`stash list|show|create` and
+`stash apply <sha>` stay allowed). It honours `git -C <dir>` and one leading
+`cd <dir> &&`, and fails open on malformed input.
+
+Register it in `~/.claude/settings.json` (user-level, so it covers every repo;
+unmarked repos are unaffected apart from the stash-stack rule):
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [{
+      "matcher": "Bash",
+      "hooks": [{
+        "type": "command",
+        "command": "python3 /path/to/gptme-contrib/scripts/claude-code-hooks/shared-checkout-git-guard.py"
+      }]
+    }]
+  }
+}
+```
+
+The matcher, `detect(command, cwd)`, is a pure function, so other runtimes can
+reuse it. Lesson: `lessons/workflow/shared-checkout-git-safety.md`.

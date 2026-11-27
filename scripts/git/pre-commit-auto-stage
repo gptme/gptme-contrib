@@ -54,6 +54,7 @@ LOCKFILE="$GIT_DIR/commit.lock"
 LOCK_TIMEOUT="${PRECOMMIT_LOCK_TIMEOUT:-60}"
 
 if [ "${GIT_SAFE_COMMIT_LOCK_HELD:-0}" != "1" ]; then
+  command -v flock >/dev/null 2>&1 || { echo "pre-commit-auto-stage: flock not found (macOS: brew install flock; Linux: util-linux)" >&2; exit 1; }
   exec 9>"$LOCKFILE"
   if ! flock --timeout "$LOCK_TIMEOUT" 9; then
     echo -e "${RED}✗ Another commit or pre-commit run is already in progress${NC}" >&2
