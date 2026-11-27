@@ -5,9 +5,9 @@ A file under the threshold (default 2,000 lines) always passes. A file at or
 over it passes only if it is listed in the checked-in baseline and has not grown
 past its recorded size. When a listed file shrinks, the hook lowers its entry
 (or drops it once the file is back under the threshold); the baseline never
-goes up on its own. A commit that shrinks a listed file fails until the lowered
-baseline is staged with it. Growing an oversized file on purpose, or renaming one,
-means editing the baseline by hand, where review can see it.
+goes up on its own. A commit that shrinks or deletes a listed file fails until
+the lowered baseline is staged with it. Growing an oversized file on purpose, or
+renaming one, means editing the baseline by hand, where review can see it.
 
 The baseline (default ``file-size-baseline.json`` in the repo root)::
 
@@ -209,21 +209,25 @@ def check(paths: list[str], baseline_path: Path, default_threshold: int) -> int:
 
     # Index membership distinguishes deletions (including git rm --cached)
     # from tracked files merely omitted by a sparse checkout.
-    if files:
-        tracked = set(tracked_files())
-        for rel in list(files):
-            if rel not in tracked:
-                del files[rel]
-                changed = True
+    staged = staged_entries(baseline_path)
+    tracked = set(tracked_files()) if files or staged else set()
+    for rel in list(files):
+        if rel not in tracked:
+            del files[rel]
+            changed = True
 
     if changed and baseline_path.exists():
         save_baseline(baseline_path, data)
         print(f"Lowered entries in {baseline_path}; stage it with this commit.")
     # Rewriting the file is not enough to stop a commit: in a shared checkout a
     # retry sees the already-lowered, unstaged baseline, changes nothing, and
-    # would land the shrink without it. CI then fails on every later PR.
-    staged = staged_entries(baseline_path)
-    stale = [rel for rel, lines in sizes.items() if lines < staged.get(rel, 0)]
+    # would land the shrink or deletion without it. CI then fails on every later
+    # PR.
+    stale = [
+        rel
+        for rel, allowed in staged.items()
+        if rel not in tracked or sizes.get(rel, allowed) < allowed
+    ]
     if stale:
         errors.append(
             f"{baseline_path}: the staged copy is not lowered for "
