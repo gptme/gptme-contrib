@@ -1200,6 +1200,28 @@ def test_groq_api_key_redacted_and_blocked():
     assert any(f.category == "groq_api_key" for f in result.findings)
 
 
+def test_posthog_personal_api_key_redacted_and_blocked():
+    # Personal keys are phx_ + url-safe payload. No generic sk-/pk- pattern
+    # matches the prefix, so a live key would otherwise leak in full. Bob's
+    # POSTHOG_API_KEY is this class (revoked 2026-11-27, ErikBjare/bob#1605).
+    phx = "phx_" + "A1b2C3d4E5f6G7h8I9j0" + "_tail-Xy09"
+    result = redact(f"Authorization: Bearer {phx}")
+    assert phx not in result.redacted
+    assert phx[-8:] not in result.redacted
+    assert "[REDACTED:posthog_personal_api_key]" in result.redacted
+    assert result.blocked is True
+    assert any(f.category == "posthog_personal_api_key" for f in result.findings)
+
+
+def test_posthog_project_key_not_treated_as_personal():
+    # phc_ project keys are public-by-design (frontend capture), like Stripe
+    # pk_live_. The personal-key pattern must not swallow them.
+    phc = "phc_" + "A1b2C3d4E5f6G7h8I9j0" + "public"
+    result = redact(f"posthog.init('{phc}')")
+    assert phc in result.redacted
+    assert not any(f.category == "posthog_personal_api_key" for f in result.findings)
+
+
 def test_replicate_api_key_redacted_and_blocked():
     # Replicate tokens use the "r8_" prefix; no other pattern matches it.
     r8 = "r8_" + "A1b2C3d4E5" * 4  # 40 base62 chars after r8_
@@ -1236,6 +1258,10 @@ _B62 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
         ("replicate_api_key", "r8_" + (_B62 * 2)[:40]),
         # base64url providers — the "_"/"-" in the tail is exactly what broke the
         # anthropic_key pattern, so put both chars in the vulnerable tail position.
+        (
+            "posthog_personal_api_key",
+            "phx_" + _B62[:32] + "_tail-Xy",
+        ),
         ("gitlab_token", "glpat-" + _B62[:32] + "_tail-Xy"),
         ("pypi_token", "pypi-" + _B62[:24] + "_tail-Xy"),
         ("sendgrid_api_key", "SG." + _B62[:22] + "." + _B62[:43]),

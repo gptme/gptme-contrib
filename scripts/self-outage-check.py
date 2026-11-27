@@ -51,9 +51,25 @@ import re
 import subprocess
 import sys
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
+
+# Optional: gptme-redact supplies vendor prefixes this script never had (AWS
+# AKIA, postgres userinfo, PostHog phx_). Soft-import so the detector stays
+# runnable as pure stdlib+gh during an auth outage — a PEP 723 / uv install
+# step would be a new failure mode on the exact path this script exists to
+# cover. When the package is present, _redact uses it first; local patterns
+# remain a broader GitHub-publication net (shorter prefixes, opaque tokens).
+_package_redact: Callable[..., Any] | None
+try:
+    from redact import redact as _package_redact
+except ImportError:
+    _package_redact = None
+
+_PACKAGE_REDACT_MARKER = re.compile(r"\[REDACTED:[A-Za-z0-9_:.-]+\]")
 
 # Failure reasons that are a 403/billing problem (subscription payment past due
 # or org-level access disabled, e.g. `oauth_not_allowed_for_organization`),
@@ -204,8 +220,17 @@ def _redact_ambiguous_quoted(text: str) -> str:
 
 
 def _redact(text: str) -> str:
-    """Scrub credential-shaped substrings from text bound for outbound channels."""
+    """Scrub credential-shaped substrings from text bound for outbound channels.
+
+    Script-specific extras (ambiguous quoted values) always run. gptme-redact
+    runs when installed; its ``[REDACTED:category]`` markers collapse to the
+    script's uniform ``[REDACTED]`` so issue bodies stay short. Local patterns
+    always run afterwards: they are the stdlib fallback and a broader last
+    net for short synthetic/truncated secrets the package's length floors miss.
+    """
     text = _redact_ambiguous_quoted(text)
+    if _package_redact is not None:
+        text = _PACKAGE_REDACT_MARKER.sub("[REDACTED]", _package_redact(text).redacted)
     for pat in _SECRET_PATTERNS:
         if pat.groups:
             text = pat.sub(lambda m: m.group(1) + "[REDACTED]", text)
