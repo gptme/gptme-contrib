@@ -1368,29 +1368,134 @@ class GptmeToolBridge:
             return self.on_fulfill_planned_call(arguments)
 
         if name == "workspace_search":
+            filters = {
+                key: arguments[key]
+                for key in ("include_paths", "exclude_paths")
+                if arguments.get(key) is not None
+            }
             if self.rag is None or not self.rag.enabled:
+                self._log_workspace_search(None, filters, 0.0, status="unavailable")
                 return {"error": "workspace_search is not enabled on this server."}
             query = arguments.get("query") or ""
             if not isinstance(query, str) or not query.strip():
+                self._log_workspace_search(
+                    None,
+                    filters,
+                    0.0,
+                    status="invalid_query",
+                )
                 return {"error": "No query provided"}
             n_results = arguments.get("n_results", 5)
             try:
                 n_results_int = int(n_results)
             except (TypeError, ValueError):
                 n_results_int = 5
-            filters = {
-                key: arguments[key]
-                for key in ("include_paths", "exclude_paths")
-                if arguments.get(key) is not None
-            }
-            return await self.rag.search(
-                query.strip(), n_results=n_results_int, **filters
+            started = time.monotonic()
+            try:
+                result = await self.rag.search(
+                    query.strip(), n_results=n_results_int, **filters
+                )
+            except asyncio.CancelledError:
+                # Cancellation is a BaseException, so the handler below never
+                # sees it: an interrupted lookup must still leave a receipt.
+                self._log_workspace_search(
+                    None,
+                    filters,
+                    (time.monotonic() - started) * 1000.0,
+                    status="cancelled",
+                )
+                raise
+            except Exception as exc:
+                # A failed lookup must still leave a receipt: otherwise the
+                # absence of a line cannot be told apart from a lookup that
+                # never ran, which is the correlation gap this log closes.
+                self._log_workspace_search(
+                    None,
+                    filters,
+                    (time.monotonic() - started) * 1000.0,
+                    error=exc,
+                )
+                raise
+            self._log_workspace_search(
+                result, filters, (time.monotonic() - started) * 1000.0
             )
+            return result
 
         if name.startswith("body_"):
             return await self._handle_body_call(name, arguments)
 
         return {"error": f"Unknown function: {name}"}
+
+    @staticmethod
+    def _log_workspace_search(
+        result: object,
+        filters: Mapping[str, Any],
+        elapsed_ms: float,
+        error: BaseException | None = None,
+        status: str | None = None,
+    ) -> None:
+        """Log one receipt per workspace_search lookup.
+
+        The service log otherwise shows only the requested arguments, so after a
+        call there is no way to tell a real filtered lookup from a silent
+        recency fallback, or a bounded corpus from an ungranted selector. Those
+        are exactly the fields an operator needs to correlate a call with the
+        retrieval that answered it.
+
+        Every path emits exactly one receipt — success, a failed lookup
+        (``status=error``), a cancelled one (``status=cancelled``), an empty
+        query (``status=invalid_query``) or a disabled retriever
+        (``status=unavailable``) — so "no receipt" unambiguously means the
+        bridge never handled the call.
+        The fields are also attached as ``extra={"workspace_search": ...}`` so
+        tests and log processors read typed values instead of the rendered
+        string (a missing value renders as ``None`` and would pass a substring
+        assertion).
+        """
+        # Keep user text and workspace paths out of the receipt, including its
+        # structured payload. Correlate with the existing request log instead.
+        fields: dict[str, Any] = {
+            f"{key}_count": len(value) if isinstance(value, list | tuple) else None
+            for key, value in filters.items()
+        }
+        fields.update(
+            {
+                "status": "error" if error is not None else status,
+                "backend": None,
+                "mode": None,
+                "selected_files": None,
+                "results": None,
+                "elapsed_ms": round(elapsed_ms, 1),
+            }
+        )
+        if error is not None:
+            fields["error"] = type(error).__name__
+        elif status is not None:
+            pass
+        elif isinstance(result, Mapping):
+            coverage = result.get("coverage")
+            coverage = coverage if isinstance(coverage, Mapping) else {}
+            fields["status"] = result.get("status") or "unknown"
+            fields["backend"] = result.get("backend")
+            fields["mode"] = coverage.get("mode")
+            fields["selected_files"] = coverage.get("selected_files")
+            fields["results"] = len(result.get("results") or [])
+        else:
+            fields["status"] = "ok"
+            fields["result_type"] = type(result).__name__
+        logger.info(
+            "workspace_search() include_paths_count=%s exclude_paths_count=%s "
+            "status=%s backend=%s mode=%s selected=%s results=%s elapsed=%.0fms",
+            fields.get("include_paths_count", 0),
+            fields.get("exclude_paths_count", 0),
+            fields["status"],
+            fields["backend"],
+            fields["mode"],
+            fields["selected_files"],
+            fields["results"],
+            elapsed_ms,
+            extra={"workspace_search": fields},
+        )
 
     @staticmethod
     def _clamp(value: float, limit: float) -> float:

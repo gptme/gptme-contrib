@@ -562,3 +562,165 @@ async def test_journal_glob_does_not_spend_the_reservation_twice(
     )
     sources = [r["source"] for r in result["results"]]
     assert "scripts/voice/brief.py" in sources
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("lexical")
+async def test_bridge_logs_a_correlatable_search_receipt(
+    corpus: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A call's lookup must be identifiable from the service log afterwards."""
+    import logging
+
+    from gptme_voice.realtime.tool_bridge import GptmeToolBridge
+
+    bridge = GptmeToolBridge(
+        workspace=str(corpus), rag=VoiceRag(str(corpus), enabled=True)
+    )
+    with caplog.at_level(logging.INFO, logger="gptme_voice.realtime.tool_bridge"):
+        result = await bridge.handle_function_call(
+            "workspace_search",
+            {
+                "query": "Delivered the release",
+                "include_paths": ["state/standup-brief.json"],
+                "exclude_paths": ["journal/"],
+            },
+        )
+
+    assert result["status"] == "ok"
+    receipts = [
+        r.workspace_search for r in caplog.records if "workspace_search(" in r.message
+    ]
+    assert len(receipts) == 1
+    receipt = receipts[0]
+    assert "query" not in receipt
+    assert "filters" not in receipt
+    assert receipt["include_paths_count"] == 1
+    assert receipt["exclude_paths_count"] == 1
+    logged = " ".join(
+        r.getMessage() for r in caplog.records if hasattr(r, "workspace_search")
+    )
+    assert "Delivered the release" not in logged
+    assert "state/standup-brief.json" not in logged
+    assert "journal/" not in logged
+    assert receipt["status"] == "ok"
+    assert receipt["backend"] == "lexical"
+    assert receipt["mode"] == "filtered"
+    assert receipt["selected_files"] == 1
+    assert receipt["results"] == 1
+    assert receipt["elapsed_ms"] >= 0
+
+
+@pytest.mark.asyncio
+async def test_bridge_logs_a_receipt_for_a_failed_search(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A failed lookup must be distinguishable from a lookup that never ran."""
+    import logging
+
+    from gptme_voice.realtime.tool_bridge import GptmeToolBridge
+
+    class FailingRag:
+        enabled = True
+
+        async def search(self, *args: object, **kwargs: object) -> dict:
+            raise RuntimeError("index unavailable")
+
+    bridge = GptmeToolBridge(workspace=str(tmp_path), rag=FailingRag())  # type: ignore[arg-type]
+    with caplog.at_level(logging.INFO, logger="gptme_voice.realtime.tool_bridge"):
+        with pytest.raises(RuntimeError, match="index unavailable"):
+            await bridge.handle_function_call(
+                "workspace_search", {"query": "standup brief"}
+            )
+
+    receipts = [
+        r.workspace_search for r in caplog.records if "workspace_search(" in r.message
+    ]
+    assert len(receipts) == 1
+    assert receipts[0]["status"] == "error"
+    assert receipts[0]["error"] == "RuntimeError"
+    assert receipts[0]["results"] is None
+
+
+@pytest.mark.asyncio
+async def test_bridge_logs_a_receipt_for_guard_paths(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A handled call that never reaches the retriever still leaves a receipt."""
+    import logging
+
+    from gptme_voice.realtime.tool_bridge import GptmeToolBridge
+
+    class DisabledRag:
+        enabled = False
+
+    disabled = GptmeToolBridge(workspace=str(tmp_path), rag=DisabledRag())  # type: ignore[arg-type]
+    with caplog.at_level(logging.INFO, logger="gptme_voice.realtime.tool_bridge"):
+        assert "error" in await disabled.handle_function_call(
+            "workspace_search", {"query": "standup brief"}
+        )
+
+    enabled = GptmeToolBridge(
+        workspace=str(tmp_path), rag=VoiceRag(str(tmp_path), enabled=True)
+    )
+    with caplog.at_level(logging.INFO, logger="gptme_voice.realtime.tool_bridge"):
+        assert "error" in await enabled.handle_function_call(
+            "workspace_search", {"query": "   "}
+        )
+
+    receipts = [
+        r.workspace_search for r in caplog.records if "workspace_search(" in r.message
+    ]
+    assert [r["status"] for r in receipts] == ["unavailable", "invalid_query"]
+    assert all(r["backend"] is None for r in receipts)
+
+
+@pytest.mark.asyncio
+async def test_bridge_logs_a_receipt_for_a_cancelled_search(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Cancellation is a BaseException, so it needs its own receipt."""
+    import asyncio
+    import logging
+
+    from gptme_voice.realtime.tool_bridge import GptmeToolBridge
+
+    class SlowRag:
+        enabled = True
+
+        async def search(self, *args: object, **kwargs: object) -> dict:
+            await asyncio.sleep(60)
+            return {}
+
+    bridge = GptmeToolBridge(workspace=str(tmp_path), rag=SlowRag())  # type: ignore[arg-type]
+    with caplog.at_level(logging.INFO, logger="gptme_voice.realtime.tool_bridge"):
+        task = asyncio.create_task(
+            bridge.handle_function_call("workspace_search", {"query": "standup brief"})
+        )
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    receipts = [
+        r.workspace_search for r in caplog.records if "workspace_search(" in r.message
+    ]
+    assert [r["status"] for r in receipts] == ["cancelled"]
+
+
+@pytest.mark.parametrize("result", [{}, {"status": None}, []])
+def test_search_receipt_has_explicit_status_for_unexpected_payloads(
+    result: object, caplog: pytest.LogCaptureFixture
+) -> None:
+    import logging
+
+    from gptme_voice.realtime.tool_bridge import GptmeToolBridge
+
+    with caplog.at_level(logging.INFO, logger="gptme_voice.realtime.tool_bridge"):
+        GptmeToolBridge._log_workspace_search(result, {}, 1.0)
+
+    receipts = [
+        r.workspace_search for r in caplog.records if hasattr(r, "workspace_search")
+    ]
+    assert len(receipts) == 1
+    assert receipts[0]["status"] == ("unknown" if isinstance(result, dict) else "ok")
