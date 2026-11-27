@@ -489,10 +489,13 @@ def main(
         return
 
     # Run analysis
-    tracker.analyze(
-        limit=limit,
-        incremental=not full,
-    )
+    try:
+        tracker.analyze(
+            limit=limit,
+            incremental=not full,
+        )
+    except (ValueError, FileNotFoundError) as e:
+        raise click.ClickException(str(e)) from e
 
     # Print summary report
     print()

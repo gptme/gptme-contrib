@@ -5,10 +5,12 @@ import tempfile
 from pathlib import Path
 
 import pytest
+from click.testing import CliRunner
 from gptme_lessons_extras.effectiveness_tracker import (
     EffectivenessTracker,
     LessonStats,
     TrackerState,
+    main,
 )
 
 
@@ -238,6 +240,35 @@ def _write_log(logs: Path, name: str, lesson: str = "lessons/workflow/a.md") -> 
     (d / "conversation.jsonl").write_text(
         json.dumps({"role": "system", "content": content}) + "\n"
     )
+
+
+@pytest.mark.parametrize("missing_logs", [False, True], ids=["legacy", "missing-logs"])
+def test_cli_reports_rebuild_errors_cleanly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, missing_logs: bool
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    logs, state = tmp_path / "logs", tmp_path / "state.json"
+    _write_log(logs, "2025-10-02-zesty")
+    EffectivenessTracker(logs_dir=logs, state_file=state).analyze()
+    saved = json.loads(state.read_text())
+    del saved["processed_logs"]
+    state.write_text(json.dumps(saved))
+    original = state.read_bytes()
+
+    args = ["--state-file", str(state)]
+    if missing_logs:
+        # The default logs path is not validated by Click's --logs-dir option.
+        args.append("--full")
+        expected = "Cannot rebuild statistics: logs directory unavailable"
+    else:
+        args.extend(["--logs-dir", str(logs)])
+        expected = "Legacy tracker state requires --full"
+    result = CliRunner().invoke(main, args)
+
+    assert result.exit_code == 1
+    assert f"Error: {expected}" in result.output
+    assert isinstance(result.exception, SystemExit)
+    assert state.read_bytes() == original
 
 
 def test_incremental_processes_log_whose_name_sorts_earlier(tmp_path: Path) -> None:
