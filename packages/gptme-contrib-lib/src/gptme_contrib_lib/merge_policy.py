@@ -106,6 +106,20 @@ def rollout_repos(policy: dict[str, Any]) -> frozenset[str]:
     return frozenset((policy.get("rollout") or {}).get("repos") or [])
 
 
+def epic_issues(policy: dict[str, Any]) -> frozenset[str]:
+    """Lowercased ``owner/repo#N`` epic tracking issues Erik set direction on."""
+    return frozenset(
+        str(ref).lower() for ref in (policy.get("epics") or {}).get("issues") or []
+    )
+
+
+def epic_repos(policy: dict[str, Any]) -> frozenset[str]:
+    """Lowercased repos whose PRs may claim an epic's category waiver."""
+    return frozenset(
+        str(repo).lower() for repo in (policy.get("epics") or {}).get("repos") or []
+    )
+
+
 def file_class(
     change: FileChange, policy: dict[str, Any], classifier: PathClassifier
 ) -> str:

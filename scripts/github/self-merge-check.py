@@ -3006,6 +3006,13 @@ def gptme_core_route_to_erik_reasons(
 # a new one / one colliding with a package that already implements this?
 _GPTME_CONTRIB_REPO = "gptme/gptme-contrib"
 
+# Categories a category waiver can assign to a gptme-contrib PR. Each one clears
+# a placement/category refusal, which is the precondition that otherwise routes
+# the PR through the agent-literal detector — so the hold is re-checked for them.
+_CONTRIB_WAIVED_CATEGORIES = frozenset(
+    {"epic-slice", "operator-approved", "merge-policy-tier-0"}
+)
+
 # Bare word literals, not substrings — "erik" must not fire on a variable
 # named "erikson_score" (custom, not \b: \w treats "_" as a word char, so a
 # plain \b boundary would MISS "BOB_SPECIFIC_WEIGHT" — snake_case identifiers
@@ -4039,6 +4046,115 @@ def operator_approval_category_waiver(
     return remaining, warning
 
 
+# Category refusals an epic declaration may waive: placement and taste calls
+# that Erik makes once for the epic, not per slice. An allowlist, so a reason
+# added later (or one this list does not name, such as new CLI surface,
+# config/default changes, state/ writes, agent literals or the feature size
+# cap) stays a refusal until someone decides otherwise.
+_EPIC_WAIVABLE_REASON_PREFIXES = (
+    "Files not in any allowed self-merge category:",
+    "New top-level directory (",
+    "New packages/<name>/ (",
+    "New module basename collides",
+    "New module under gptme/ (",
+    "New docs page under docs/ (",
+    "feat: title with no #issue reference",
+)
+
+# A deliberate declaration line, not any mention: "unrelated to #2310" must not
+# claim the epic. Accepts owner/repo#N, a same-repo #N, or the issue URL.
+_EPIC_MARKER_RE = re.compile(
+    r"(?im)^[ \t]*epic:[ \t]*"
+    r"(?:https://github\.com/(?P<url_repo>[\w.-]+/[\w.-]+)/issues/(?P<url_num>\d+)"
+    r"|(?P<repo>[\w.-]+/[\w.-]+)?#(?P<num>\d+))"
+    r"[ \t]*\.?[ \t]*\r?$"
+)
+
+
+def declared_epics(body: str, repo: str) -> list[str]:
+    """Lowercased ``owner/repo#N`` refs from the PR body's ``Epic:`` lines."""
+    refs: list[str] = []
+    for match in _EPIC_MARKER_RE.finditer(body or ""):
+        ref_repo = match.group("url_repo") or match.group("repo") or repo
+        number = match.group("url_num") or match.group("num")
+        refs.append(f"{ref_repo}#{number}".lower())
+    return refs
+
+
+def _epic_issue_is_open(ref: str) -> bool:
+    """True only for a readable, OPEN issue (not a PR). Any failure is False."""
+    owner_repo, number = ref.split("#", 1)
+    raw = run_gh_checked(
+        [
+            "api",
+            f"repos/{owner_repo}/issues/{number}",
+            "--jq",
+            "{state, is_pr: (.pull_request != null)}",
+        ]
+    )
+    if raw is None:
+        return False
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return False
+    return (
+        isinstance(data, dict)
+        and data.get("state") == "open"
+        and data.get("is_pr") is False
+    )
+
+
+def epic_category_waiver(
+    reasons: list[str], *, repo: str, body: str
+) -> tuple[list[str], str | None]:
+    """Drop placement/category refusals for a slice of an epic Erik set direction on.
+
+    Erik, 2026-11-24: slices of such an epic merge through the gate without
+    his per-PR approval, and the per-repo holds still apply. The epic must be
+    listed in ``[epics].issues`` of gptme_contrib_lib/merge_policy.toml (a file
+    only a human merge can change), the PR's repo in ``[epics].repos``, the PR
+    body must declare it on an ``Epic:`` line, and the issue must be open.
+    Only reasons matching ``_EPIC_WAIVABLE_REASON_PREFIXES`` are dropped; the
+    AI-review score, CI, threads and every other gate are untouched. Any
+    unreadable input fails closed. Returns the remaining reasons and a warning
+    naming the waiver, or the input unchanged and None.
+    """
+    waivable = [r for r in reasons if r.startswith(_EPIC_WAIVABLE_REASON_PREFIXES)]
+    if not waivable:
+        return reasons, None
+    declared = declared_epics(body, repo)
+    if not declared:
+        return reasons, None
+    try:
+        policy = merge_policy.load_policy()
+    except (OSError, ValueError):
+        return reasons, None
+    if repo.lower() not in merge_policy.epic_repos(policy):
+        return reasons, None
+    repos = merge_policy.epic_repos(policy)
+    listed = merge_policy.epic_issues(policy)
+    # The epic's own repo must be listed too, not just the PR's.
+    epic = next(
+        (
+            ref
+            for ref in declared
+            if ref in listed
+            and ref.split("#", 1)[0] in repos
+            and _epic_issue_is_open(ref)
+        ),
+        None,
+    )
+    if epic is None:
+        return reasons, None
+    remaining = [r for r in reasons if r not in waivable]
+    warning = (
+        f"Path/category policy waived: slice of epic {epic} "
+        f"({len(waivable)} reason(s) overridden, merge_policy.toml [epics])"
+    )
+    return remaining, warning
+
+
 def fetch_pr_file_changes(
     repo: str, number: int
 ) -> list[merge_policy.FileChange] | None:
@@ -4711,6 +4827,36 @@ def evaluate_pr(
             result.warnings.append(category_waiver)
             if not category_reasons:
                 result.category = "operator-approved"
+
+    # Erik 2026-11-24: a declared slice of a listed epic gets the placement /
+    # category waiver without his per-PR approval; per-repo holds survive.
+    if category_reasons:
+        category_reasons, epic_waiver = epic_category_waiver(
+            category_reasons, repo=repo, body=cast("str", pr.get("body") or "")
+        )
+        if epic_waiver is not None:
+            result.warnings.append(epic_waiver)
+            if not category_reasons:
+                result.category = "epic-slice"
+
+    # Every waiver above clears a placement/category refusal, and that refusal
+    # is what kept a contrib PR out of the agent-literal detector (computed
+    # above only when the cheap path checks left a category). Re-run it for a
+    # waived contrib PR so a declaration cannot smuggle agent-name literals
+    # past a hold that is deliberately retained.
+    if (
+        repo == _GPTME_CONTRIB_REPO
+        and result.category in _CONTRIB_WAIVED_CATEGORIES
+        # No point fetching patch text for a PR that is already refused: the
+        # hold can only add a reason, never make an ineligible PR eligible.
+        and not category_reasons
+        and not result.reasons
+    ):
+        file_shapes = _fetch_contrib_pr_file_shapes(repo, number)
+        agent_literal_reasons = contrib_agent_literal_reasons(file_shapes)
+        if agent_literal_reasons:
+            category_reasons = [*agent_literal_reasons]
+            result.category = None
     result.reasons.extend(category_reasons)
 
     review_decision = pr.get("reviewDecision")

@@ -271,6 +271,7 @@ def test_policy_human_merge_stop_survives_all_category_waivers(
     monkeypatch.setattr(
         smc, "operator_approval_category_waiver", lambda *a, **k: ([], "approved")
     )
+    monkeypatch.setattr(smc, "epic_category_waiver", lambda *a, **k: ([], "epic slice"))
     result = smc.evaluate_pr(
         "gptme/gptme-contrib", 1, workspace_repos=["gptme/gptme-contrib"]
     )
