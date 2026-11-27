@@ -123,12 +123,34 @@ def test_existing_hook_is_kept_and_rerun_is_idempotent(
     assert len(list(hooks.glob("pre-commit.bak.*"))) == 1
 
 
-def test_hook_path_is_home_relative_when_contrib_is_under_home(repo: Path) -> None:
-    contrib_home = SCRIPT.parents[3]
-    assert _run(repo, home=contrib_home).returncode == 0
+def test_hook_path_is_home_relative_when_contrib_is_under_home(
+    repo: Path, tmp_path: Path
+) -> None:
+    # A copy of the scripts under a temporary HOME, independent of where this
+    # checkout lives (CI may clone to /src, whose parent is /).
+    home = tmp_path / "home"
+    scripts = home / "src" / "gptme-contrib" / "scripts" / "git"
+    scripts.mkdir(parents=True)
+    for name in ("setup-shared-checkout.sh", "pre-commit-auto-stage"):
+        shutil.copy2(SCRIPT.with_name(name), scripts / name)
+    env = {**os.environ, "HOME": str(home), "GIT_CONFIG_GLOBAL": os.devnull}
+    result = subprocess.run(
+        ["bash", str(scripts / "setup-shared-checkout.sh"), str(repo)],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert result.returncode == 0, result.stderr
     hook = (repo / ".git" / "hooks" / "pre-commit").read_text()
-    relative = SCRIPT.with_name("pre-commit-auto-stage").relative_to(contrib_home)
-    assert f'HOOK="$HOME/{relative}"' in hook
+    assert 'HOOK="$HOME/src/gptme-contrib/scripts/git/pre-commit-auto-stage"' in hook
+
+
+def test_hook_path_is_absolute_outside_home(repo: Path, tmp_path: Path) -> None:
+    home = tmp_path / "elsewhere"
+    home.mkdir()
+    assert _run(repo, home=home).returncode == 0
+    hook = (repo / ".git" / "hooks" / "pre-commit").read_text()
+    assert f'HOOK="{SCRIPT.with_name("pre-commit-auto-stage")}"' in hook
 
 
 def test_installs_into_the_common_dir_from_a_linked_worktree(

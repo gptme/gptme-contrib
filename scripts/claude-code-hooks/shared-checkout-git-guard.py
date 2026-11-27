@@ -10,7 +10,8 @@ Two scopes:
 * **Shared checkouts** (opt-in per repo with ``git config safety.sharedCheckout
   true``; ``scripts/git/setup-shared-checkout.sh`` sets it): deny whole-tree
   operations (stash, ``reset --hard``, bare/whole-index ``reset``,
-  ``--autostash``, ``clean -fd``, ``checkout -- .``, ``restore .``) and broad
+  ``--autostash``, ``clean -fd``, ``checkout .``, forced ``checkout``/``switch``,
+  ``restore .``) and broad
   staging (``add -A``/``.``/``--all``, ``commit -a``).
 * **Any repo with linked worktrees**: deny writes to the stash stack, because
   all worktrees of a repo share one ``refs/stash`` and "stash, check, pop" can
@@ -79,7 +80,17 @@ _AUTOSTASH_RE = re.compile(_GIT + r"(?:pull|rebase)\b[^;&|\n]*\s--autostash" + _
 _CLEAN_RE = re.compile(
     _GIT + r"clean(?=[^;&|\n]*\s-[A-Za-z]*f)(?=[^;&|\n]*\s-[A-Za-z]*d)"
 )
-_CHECKOUT_ALL_RE = re.compile(_GIT + r"checkout\s+--\s+\." + _END)
+# `checkout [-f|-q] [HEAD|@[~^n]] [--] .` reverts every tracked file.
+_CHECKOUT_ALL_RE = re.compile(
+    _GIT
+    + r"checkout(?:\s+(?:-f|--force|-q|--quiet))*"
+    + r"(?:\s+(?:HEAD|@)(?:[~^]\d*)*)?(?:\s+--)?\s+\."
+    + _END
+)
+# A forced switch throws away local modifications to every tracked file.
+_CHECKOUT_FORCE_RE = re.compile(
+    _GIT + r"(?:checkout|switch)\b[^;&|\n]*\s(?:-f|--force|--discard-changes)" + _END
+)
 # Options (incl. -S/-W/-s <tree>) then an optional `--` separator, then `.`.
 _RESTORE_ALL_RE = re.compile(
     _GIT
@@ -102,7 +113,8 @@ SHARED_CHECKOUT_RULES: dict[str, re.Pattern[str]] = {
     "git reset -- . (whole index)": _RESET_ALL_RE,
     "git pull/rebase --autostash": _AUTOSTASH_RE,
     "git clean -fd": _CLEAN_RE,
-    "git checkout -- .": _CHECKOUT_ALL_RE,
+    "git checkout .": _CHECKOUT_ALL_RE,
+    "git checkout/switch -f": _CHECKOUT_FORCE_RE,
     "git restore .": _RESTORE_ALL_RE,
     "git add -A / . (broad staging)": _ADD_ALL_RE,
     "git commit -a (broad staging)": _COMMIT_ALL_RE,
