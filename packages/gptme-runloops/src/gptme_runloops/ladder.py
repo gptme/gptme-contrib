@@ -128,6 +128,9 @@ def run_ladder(
 
     ``LadderResult.filed`` contains exactly the items returned by the host,
     including when dedupe rejects candidates from anywhere in a batch.
+    Returned items must form a subset of the offered batch, matched by equality
+    with each offered occurrence used at most once; otherwise ``ValueError`` is
+    raised just as for an oversized return. Items need not be hashable.
     """
     if deficit < 0:
         raise ValueError(f"deficit must be >= 0, got {deficit}")
@@ -155,12 +158,21 @@ def run_ladder(
         while offset < len(items) and result.remaining > 0:
             take = items[offset : offset + result.remaining]
             offset += len(take)
+            offered = list(take)
             filed = list(file_items(rung.name, take))
             if len(filed) > len(take):
                 raise ValueError(
                     f"file_items for {rung.name!r} returned {len(filed)} items, "
                     f"expected at most {len(take)}"
                 )
+            for item in filed:
+                try:
+                    offered.remove(item)
+                except ValueError:
+                    raise ValueError(
+                        f"file_items for {rung.name!r} must return a subset "
+                        "of the offered batch"
+                    ) from None
             rung_filed += len(filed)
             if filed:
                 if result.produced_by is None:

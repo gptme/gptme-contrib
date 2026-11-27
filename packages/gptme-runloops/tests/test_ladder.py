@@ -222,6 +222,32 @@ def test_file_items_returning_too_many_items_raises():
         run_ladder([_rung("own-prs", ["a"])], 1, lambda _n, _i: ["a", "b"])
 
 
+@pytest.mark.parametrize("returned", [["invented"], ["a", "a"], [{"id": "invented"}]])
+def test_file_items_must_return_a_subset_of_the_offered_batch(returned):
+    calls: list[str] = []
+    with pytest.raises(ValueError, match="file_items.*subset"):
+        run_ladder(
+            [
+                _rung("own-prs", ["a", {"id": "b"}], calls=calls),
+                _rung("heavy", ["fallback"], calls=calls),
+            ],
+            2,
+            lambda _name, _items: returned,
+        )
+    assert calls == ["own-prs"]
+
+
+def test_valid_reordered_unhashable_subset_keeps_host_order():
+    candidates = [{"id": "a"}, {"id": "b"}, {"id": "c"}]
+    res = run_ladder(
+        [_rung("own-prs", candidates)],
+        3,
+        lambda _name, items: [dict(items[2]), dict(items[0])],
+    )
+    assert res.filed == [{"id": "c"}, {"id": "a"}]
+    assert res.remaining == 1
+
+
 def test_negative_deficit_and_duplicate_names_raise():
     with pytest.raises(ValueError, match="deficit"):
         run_ladder([], -1, _file_all)
