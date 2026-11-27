@@ -1494,6 +1494,80 @@ def test_cc_dropout_withheld_has_effective_epsilon(hook, monkeypatch, tmp_path):
     ), "effective_epsilon missing from withheld record in CC hook"
 
 
+@pytest.mark.parametrize(
+    ("session_id", "filename"),
+    [
+        ("../escaped", "___escaped.jsonl"),
+        ("nested/session", "nested_session.jsonl"),
+        (r"..\escaped", "___escaped.jsonl"),
+        (r"C:\logs\escaped", "C__logs_escaped.jsonl"),
+        ("session:with spaces", "session_with_spaces.jsonl"),
+        ("session_123-abc", "session_123-abc.jsonl"),
+        (
+            "85d684d2-d473-4bc3-9db8-0c9b1d3040be",
+            "85d684d2-d473-4bc3-9db8-0c9b1d3040be.jsonl",
+        ),
+    ],
+)
+def test_cc_dropout_log_session_filename(
+    hook, monkeypatch, tmp_path, session_id, filename
+):
+    """Use the hook's per-session filename convention and retain raw log identity."""
+    log_dir = tmp_path / "dropout"
+    monkeypatch.setenv("LESSON_DROPOUT_LOG_DIR", str(log_dir))
+    hook._policy_manifest_cache = {
+        "version": 1,
+        "validated_core": [],
+        "exempt": [],
+        "holdout_population": [],
+    }
+    for assignment_id in ("assignment-1", "assignment-2"):
+        hook._log_dropout(
+            session_id,
+            0.5,
+            [],
+            tmp_path,
+            kept=[],
+            event_type="UserPromptSubmit",
+            assignment_id=assignment_id,
+        )
+
+    assert list(tmp_path.iterdir()) == [log_dir]
+    assert list(log_dir.iterdir()) == [log_dir / filename]
+    records = [
+        json.loads(line) for line in (log_dir / filename).read_text().splitlines()
+    ]
+    assert [row["assignment_id"] for row in records] == ["assignment-1", "assignment-2"]
+    for row in records:
+        assert row["session_id"] == session_id
+        assert row["epsilon"] == 0.5
+        assert row["policy_version"] == 1
+        assert row["event"] == "UserPromptSubmit"
+        assert row["withheld"] == row["matched"] == []
+
+
+@pytest.mark.parametrize("configured_dir", [False, True])
+def test_cc_dropout_log_absolute_session_stays_in_log_dir(
+    hook, monkeypatch, tmp_path, configured_dir
+):
+    """Absolute identities cannot replace either the default or configured root."""
+    log_dir = (
+        tmp_path / "dropout" if configured_dir else tmp_path / "state/lesson-dropout"
+    )
+    if configured_dir:
+        monkeypatch.setenv("LESSON_DROPOUT_LOG_DIR", str(log_dir))
+    else:
+        monkeypatch.delenv("LESSON_DROPOUT_LOG_DIR", raising=False)
+    hook._policy_manifest_cache = {"version": 1}
+    outside = tmp_path / "absolute-target"
+    hook._log_dropout(str(outside), 0.5, [], tmp_path, kept=[])
+
+    assert not outside.with_suffix(".jsonl").exists()
+    logs = list(log_dir.glob("*.jsonl"))
+    assert len(logs) == 1
+    assert json.loads(logs[0].read_text())["session_id"] == str(outside)
+
+
 # --- format_lessons: SKILL.md pointer-injection on PreToolUse ---
 
 
