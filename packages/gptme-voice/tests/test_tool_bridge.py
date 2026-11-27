@@ -483,7 +483,8 @@ def test_execute_inlines_transcript_tail_unless_flags_declared(
 
         async def _fake_create_subprocess_exec(*args, **kwargs):
             captured["args"] = args
-            captured["stdin"] = kwargs["stdin"].read().decode()
+            with kwargs["stdin"] as stdin:  # the real spawn closes it too
+                captured["stdin"] = stdin.read().decode()
             return _FakeProcess(returncode=0)
 
         with pytest.MonkeyPatch.context() as mp:
@@ -511,8 +512,8 @@ def test_execute_inlines_transcript_tail_unless_flags_declared(
         args = tuple(captured["args"])
         assert not any(str(a).startswith("--transcript-tail") for a in args)
         prompt = args[-1]
-        assert "(last 1 turns) is attached below as stdin" in prompt
-        assert "Request:\nstar count of gptme" in prompt
+        assert prompt.startswith("Request:\nstar count of gptme")
+        assert "(last 1 turns) is attached below as stdin, for context only" in prompt
         # The transcript itself never reaches argv (readable via /proc).
         assert not any("look up the star count" in str(a) for a in args)
         assert captured["stdin"] == "User: look up the star count"
