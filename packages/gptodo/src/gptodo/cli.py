@@ -3284,12 +3284,19 @@ def _resolve_agent_name(repo_root: Path, override: str | None) -> str:
 @cli.command("claim")
 @click.argument("task_id")
 @click.option("--agent", "agent_override", default=None, help="Agent name to record as owner.")
-def claim(task_id: str, agent_override: str | None):
+@click.option(
+    "--force",
+    "-f",
+    is_flag=True,
+    help="Take over an active task that another agent owns.",
+)
+def claim(task_id: str, agent_override: str | None, force: bool):
     """Claim a task for the current agent.
 
     Sets ``state: active`` (for backlog/todo), records ``assigned_to`` and
     ``assigned_at``, and refuses to claim waiting / ready_for_review /
-    draft / someday / terminal tasks.
+    draft / someday / terminal tasks. An active task owned by a different
+    agent is refused unless ``--force`` is given.
 
     Agent name resolution: --agent flag, then GPTODO_AGENT_NAME env var,
     then [agent].name from gptme.toml (lowercased), else "agent".
@@ -3297,6 +3304,7 @@ def claim(task_id: str, agent_override: str | None):
     Examples:
         gptodo claim my-task
         gptodo claim my-task --agent bob
+        gptodo claim my-task --agent bob --force  # take over from another owner
     """
     console = Console()
     repo_root = find_repo_root(Path.cwd())
@@ -3329,12 +3337,19 @@ def claim(task_id: str, agent_override: str | None):
                 f"Refusing to claim {task.id}: state is '{current_state}'. "
                 "Release from draft, resolve the blocker, or revive from someday/expired before claiming."
             )
+        owner = post.metadata.get("assigned_to")
+        same_owner = isinstance(owner, str) and owner.strip().lower() == agent.lower()
         if (
             current_state == "active"
-            and post.metadata.get("assigned_to") == agent
+            and same_owner
             and post.metadata.get("assigned_at") is not None
         ):
             return []
+        if current_state == "active" and owner and not same_owner and not force:
+            raise TransitionError(
+                f"Refusing to claim {task.id}: it is active and owned by '{owner}'. "
+                "Use --force to take it over."
+            )
         return [
             ("set", "state", "active"),
             ("set", "assigned_to", agent),
@@ -4201,7 +4216,7 @@ def stale(
         gptodo stale                              # Active tasks unchanged for 30+ days
         gptodo stale --days 60                    # Active tasks unchanged for 60+ days
         gptodo stale --state all                  # All tasks regardless of state
-        gptodo stale --state paused               # Only paused stale tasks
+        gptodo stale --state waiting              # Only waiting stale tasks
         gptodo stale --json                       # Machine-readable output
         gptodo stale --jsonl                      # One task per line (LLM-friendly)
         gptodo stale --exclude-pool frontier      # Skip frontier-pool tasks

@@ -499,8 +499,28 @@ def test_fresh_claim_same_state_reassignment(tmp_path, monkeypatch):
         original(path, patch={"assigned_to": "other", "assigned_at": "2026-01-02"})
         return original(*args, **kwargs)
 
+    # The guard reads fresh state: a concurrent owner change is not stolen back.
     with patch("gptodo.lifecycle.mutate_task", side_effect=mutate):
         result = CliRunner().invoke(cli, ["claim", "task", "--agent", "bob"])
+    assert result.exit_code != 0, result.output
+    assert "owned by 'other'" in result.output
+    assert frontmatter.load(path).metadata["assigned_to"] == "other"
+
+
+def test_fresh_claim_same_state_forced_reassignment(tmp_path, monkeypatch):
+    import gptodo.lifecycle as lifecycle
+    from unittest.mock import patch
+
+    path = write_task(tmp_path, state="active", assigned_to="bob", assigned_at="2026-01-01")
+    monkeypatch.chdir(tmp_path)
+    original = lifecycle.mutate_task
+
+    def mutate(*args, **kwargs):
+        original(path, patch={"assigned_to": "other", "assigned_at": "2026-01-02"})
+        return original(*args, **kwargs)
+
+    with patch("gptodo.lifecycle.mutate_task", side_effect=mutate):
+        result = CliRunner().invoke(cli, ["claim", "task", "--agent", "bob", "--force"])
     assert result.exit_code == 0, result.output
     assert frontmatter.load(path).metadata["assigned_to"] == "bob"
     assert frontmatter.load(path).metadata["assigned_at"] != "2026-01-01"

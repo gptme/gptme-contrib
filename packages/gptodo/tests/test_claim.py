@@ -95,7 +95,7 @@ def test_claim_active_already_owned_is_noop(workspace: Path) -> None:
 
 
 def test_claim_active_reassigns_owner(workspace: Path) -> None:
-    """Reassignment updates owner and bumps assigned_at."""
+    """Forced reassignment updates owner and bumps assigned_at."""
     path = write_task(
         workspace,
         "active-task",
@@ -105,7 +105,7 @@ def test_claim_active_reassigns_owner(workspace: Path) -> None:
         assigned_at="2026-04-25T12:00:00+00:00",
     )
 
-    result = CliRunner().invoke(cli, ["claim", "active-task", "--agent", "erik"])
+    result = CliRunner().invoke(cli, ["claim", "active-task", "--agent", "erik", "--force"])
 
     assert result.exit_code == 0
     meta = load_meta(path)
@@ -114,6 +114,52 @@ def test_claim_active_reassigns_owner(workspace: Path) -> None:
     # Timestamp was bumped (no longer the original).
     bumped = str(meta["assigned_at"])
     assert not (bumped.startswith("2026-04-25") and "12:00:00" in bumped)
+
+
+def test_claim_active_owned_by_other_refuses(workspace: Path) -> None:
+    """Without --force, claiming another agent's active task must not steal it."""
+    path = write_task(
+        workspace,
+        "active-task",
+        state="active",
+        created="2026-04-26T00:00:00+00:00",
+        assigned_to="alice",
+        assigned_at="2026-04-25T12:00:00+00:00",
+    )
+
+    result = CliRunner().invoke(cli, ["claim", "active-task", "--agent", "bobby"])
+
+    assert result.exit_code != 0
+    assert "owned by 'alice'" in result.output
+    meta = load_meta(path)
+    assert meta["assigned_to"] == "alice"
+    assert str(meta["assigned_at"]).startswith("2026-04-25")
+
+
+@pytest.mark.parametrize("source", ["config", "flag", "env"])
+def test_claim_same_owner_different_case_is_noop(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, source: str
+) -> None:
+    path = write_task(
+        workspace,
+        "case-task",
+        state="active",
+        created="2026-04-26T00:00:00+00:00",
+        assigned_to="Bob" if source == "config" else "bob",
+        assigned_at="2026-04-25T12:00:00+00:00",
+    )
+    original = path.read_bytes()
+    args = ["claim", "case-task"]
+    if source == "flag":
+        args.extend(["--agent", "Bob"])
+    elif source == "env":
+        monkeypatch.setenv("GPTODO_AGENT_NAME", "Bob")
+
+    result = CliRunner().invoke(cli, args)
+
+    assert result.exit_code == 0, result.output
+    assert "Already claimed" in result.output
+    assert path.read_bytes() == original
 
 
 def test_claim_waiting_task_refuses(workspace: Path) -> None:
