@@ -402,8 +402,14 @@ def test_fetch_category_usage_inlines_saved_category_rules():
     )
 
 
-def test_fetch_category_usage_uses_empty_rules_fallback():
-    """When no classes are saved, categorize(events, []) should still produce a valid query."""
+def test_fetch_category_usage_inlines_defaults_when_settings_fail(caplog):
+    """A failed settings fetch queries with default rules, not an empty list.
+
+    Production code can only reach an empty rule set when aw_client is missing
+    (``_AW_DEFAULT_CLASSES`` empty), so an empty ``categorize(events, [])`` query
+    is not the "no saved classes" outcome and must not be pinned as one.
+    """
+    import logging
     from unittest.mock import MagicMock, patch
 
     timeperiod = (
@@ -417,9 +423,10 @@ def test_fetch_category_usage_uses_empty_rules_fallback():
         return []
 
     with (
+        caplog.at_level(logging.WARNING, logger="gptme_activity_summary.aw_data"),
         patch(
-            "gptme_activity_summary.aw_data._fetch_category_rules",
-            return_value=[],
+            "gptme_activity_summary.aw_data.urlopen",
+            side_effect=OSError("connection refused"),
         ),
         patch("gptme_activity_summary.aw_data._run_aw_query", side_effect=fake_run),
     ):
@@ -429,7 +436,12 @@ def test_fetch_category_usage_uses_empty_rules_fallback():
         )
 
     query_text = "\n".join(captured["query"])
-    assert "events = categorize(events, []);" in query_text
+    assert "categorize(events, []);" not in query_text
+    assert "categorize(events, [[" in query_text
+    assert any(
+        "substituting default ActivityWatch categories" in record.getMessage()
+        for record in caplog.records
+    )
 
 
 @pytest.mark.skipif(_get_client() is None, reason="aw-client not installed")

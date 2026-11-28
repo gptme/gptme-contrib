@@ -250,7 +250,10 @@ def _fetch_category_rules() -> list[list[Any]]:
         with urlopen(settings_url, timeout=AW_TIMEOUT) as response:
             payload = json.load(response)
     except Exception as e:
-        logger.debug("AW category settings fetch failed: %s", e)
+        logger.warning(
+            "AW category settings fetch failed (%s); substituting default ActivityWatch categories",
+            e,
+        )
         return _default_category_rules()
 
     if not isinstance(payload, list):
@@ -371,13 +374,15 @@ def _fetch_category_usage(
     """Fetch time per category using AW's saved categorization rules.
 
     Uses AW's built-in ``categorize()`` function with rules loaded from the
-    ActivityWatch settings API. Returns an empty list only if the query fails.
+    ActivityWatch settings API. When the server has no saved classes, or the
+    settings fetch fails, the rules fall back to aw-webui's defaults (see
+    ``_fetch_category_rules``), so this never queries with an empty rule set.
+    Returns an empty list only if the query fails.
 
-    When no categories are configured, AW assigns all events to ["Uncategorized"],
-    so this returns [CategoryUsage(["Uncategorized"], total_duration)] rather than [].
-    Use the meaningful_categories filter (top_level != "Uncategorized") to detect this case.
-
-    The $category field in results is a list like ["Coding", "Python"] or ["Uncategorized"].
+    The $category field in results is a list like ["Coding", "Python"] or
+    ["Uncategorized"]. Events no rule matched still come back as ["Uncategorized"];
+    the meaningful_categories filter (top_level != "Uncategorized") is used by the
+    display layer to decide whether a category section is worth showing.
     """
     category_rules = json.dumps(_fetch_category_rules())
     if afk_bucket:
@@ -502,8 +507,9 @@ def fetch_aw_activity(start: date, end: date, hostname: str | None = None) -> AW
         activity.top_domains = _fetch_browser_domains(client, web_bucket, afk_bucket, timeperiod)
 
     # Fetch category breakdown (always fetched; conditionality is in the display layer —
-    # when the user has no rules, AW returns all events as ["Uncategorized"] which is
-    # suppressed by the meaningful_categories filter in format_aw_activity_for_prompt)
+    # unmatched events come back as ["Uncategorized"], and a breakdown with no named
+    # category is suppressed by the meaningful_categories filter in
+    # format_aw_activity_for_prompt)
     activity.categories = _fetch_category_usage(client, window_bucket, afk_bucket, timeperiod)
 
     return activity
@@ -514,10 +520,11 @@ def format_aw_activity_for_prompt(activity: AWActivity) -> str:
 
     Returns empty string if AW was unavailable and preserves source coverage for empty periods.
 
-    When categories are available (user has configured AW categorization rules),
-    the category breakdown is shown first as a high-level summary, followed by
-    the per-app breakdown for detail. Category percentages are relative to
-    total categorized time (sum of all category durations), not total_active_seconds.
+    When categorization produced named categories (from the user's saved rules or
+    aw-webui's defaults), the category breakdown is shown first as a high-level
+    summary, followed by the per-app breakdown for detail. Category percentages
+    are relative to total categorized time (sum of all category durations), not
+    total_active_seconds.
     """
     if not activity.available or (
         not activity.top_apps and not activity.warnings and activity.hostname is None
@@ -539,10 +546,10 @@ def format_aw_activity_for_prompt(activity: AWActivity) -> str:
     lines.append(f"- **{time_label}**: {total_h:.1f}h ({activity.total_active_seconds:.0f}s)")
     lines.append("")
 
-    # Show category breakdown only when user has actual category rules configured.
-    # When no rules exist, AW returns all events as ["Uncategorized"], which would
-    # produce a meaningless "Uncategorized: 100%" section — suppress that case.
-    # Note: meaningful_categories is used only as a gate (has the user configured rules?).
+    # Show the category breakdown only when categorization produced a named category.
+    # Unmatched events come back as ["Uncategorized"]; if that is all there is, a
+    # "Uncategorized: 100%" section says nothing — suppress it.
+    # Note: meaningful_categories is used only as a gate (did any rule match?).
     # The display loop below uses activity.categories (all categories, including Uncategorized)
     # so that when real rules are configured, the "Uncategorized" remainder is still shown.
     meaningful_categories = [c for c in activity.categories if c.top_level != "Uncategorized"]
