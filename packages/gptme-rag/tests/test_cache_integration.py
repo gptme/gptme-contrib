@@ -243,7 +243,7 @@ def test_cache_memory_limit(temp_indexer):
     ]
     indexer.add_documents(docs)
 
-    # Perform searches - cache should evict entries to stay under limit
+    # Each result exceeds the budget and should be rejected before admission.
     for i in range(10):
         indexer.search(f"Document {i}", n_results=1)
 
@@ -251,4 +251,6 @@ def test_cache_memory_limit(temp_indexer):
     stats = indexer.cache.stats
     # Check total_size_bytes instead of memory_usage_mb
     assert stats["total_size_bytes"] <= 1024
-    assert stats["evictions"] > 0  # Some evictions should have occurred
+    assert stats["memory_rejections"] == 10
+    assert stats["evictions"] == 0
+    assert not indexer.cache.cache

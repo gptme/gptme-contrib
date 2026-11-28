@@ -186,14 +186,22 @@ class CacheEntry:
         Returns:
             Approximate size in bytes
         """
-        # Rough estimate: IDs + scores + metadata
+        # Rough estimate: contents + metadata + IDs + scores. The cached
+        # document contents dominate, so they must count toward the budget.
         return (
-            sum(sys.getsizeof(doc_id) for doc_id in self.document_ids)
+            sum(sys.getsizeof(content) for content in self.document_contents)
+            + sum(
+                sys.getsizeof(meta)
+                + sum(sys.getsizeof(k) + sys.getsizeof(v) for k, v in meta.items())
+                for meta in self.document_metadatas
+                if meta
+            )
+            + sum(sys.getsizeof(doc_id) for doc_id in self.document_ids)
             + sys.getsizeof(self.distances)
             + sys.getsizeof(self.created_at)
             + sys.getsizeof(self.last_accessed)
             + sys.getsizeof(self.workspace_mtime)
-            + 200  # Metadata overhead
+            + 200  # Fixed per-entry overhead
         )
 
 
@@ -239,6 +247,7 @@ class SmartRAGCache:
             "evictions": 0,
             "ttl_evictions": 0,
             "memory_evictions": 0,
+            "memory_rejections": 0,
             "total_size_bytes": 0,
         }
 
@@ -282,6 +291,12 @@ class SmartRAGCache:
             entry: Cache entry to store
         """
         with self.lock:
+            # Admission failure leaves existing values and their LRU order intact.
+            entry_size = entry.size_bytes()
+            if entry_size > self.max_memory_bytes:
+                self.stats["memory_rejections"] += 1
+                return
+
             # Remove existing entry if present
             if key in self.cache:
                 old_entry = self.cache[key]
@@ -290,10 +305,10 @@ class SmartRAGCache:
 
             # Add new entry
             self.cache[key] = entry
-            self.stats["total_size_bytes"] += entry.size_bytes()
+            self.stats["total_size_bytes"] += entry_size
 
-            # Evict old entries if over memory limit
-            while self.stats["total_size_bytes"] > self.max_memory_bytes and len(self.cache) > 1:
+            # Evict old entries if over memory limit.
+            while self.stats["total_size_bytes"] > self.max_memory_bytes and self.cache:
                 # Remove least recently used (FIFO from OrderedDict)
                 old_key, old_entry = self.cache.popitem(last=False)
                 self.stats["total_size_bytes"] -= old_entry.size_bytes()
