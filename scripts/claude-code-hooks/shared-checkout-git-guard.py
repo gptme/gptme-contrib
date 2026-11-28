@@ -76,6 +76,13 @@ def _git_dir_marker(start: Path) -> Path | None:
     return None
 
 
+def _existing(path: Path) -> Path:
+    """*path*, or its nearest existing parent (a `cd` target not created yet)."""
+    while not path.exists() and path != path.parent:
+        path = path.parent
+    return path
+
+
 def shares_stash_stack(cwd: Path) -> bool:
     """True when *cwd* is in a repo whose ``refs/stash`` other worktrees share."""
     dot_git = _git_dir_marker(cwd)
@@ -96,7 +103,14 @@ def is_shared_checkout(cwd: Path) -> bool:
         return False
     try:
         result = subprocess.run(
-            ["git", "-C", str(cwd), "config", "--bool", "safety.sharedCheckout"],
+            [
+                "git",
+                "-C",
+                str(_existing(cwd)),
+                "config",
+                "--bool",
+                "safety.sharedCheckout",
+            ],
             capture_output=True,
             text=True,
             timeout=5,
@@ -121,7 +135,15 @@ def autostash_enabled(cwd: Path, subcommand: str) -> bool:
     for key in keys:
         try:
             result = subprocess.run(
-                ["git", "-C", str(cwd), "config", "--type=bool", "--get", key],
+                [
+                    "git",
+                    "-C",
+                    str(_existing(cwd)),
+                    "config",
+                    "--type=bool",
+                    "--get",
+                    key,
+                ],
                 capture_output=True,
                 text=True,
                 timeout=5,
@@ -137,14 +159,88 @@ _HEREDOC_RE = re.compile(r"""(['"]?)([^\s;&|()<>'"]+)\1""")
 _OPERATORS = ("&&", "||", ";;", "|&", ";", "&", "|", "(", ")")
 
 
+def _substitution_end(command: str, start: int) -> int | None:
+    """Index just past the command substitution starting at *start*.
+
+    *start* is at a backtick or at the ``$`` of ``$(``. Returns None when it
+    is not closed.
+    """
+    n = len(command)
+    if command[start] == "`":
+        j = start + 1
+        while j < n:
+            if command[j] == "\\":
+                j += 2
+            elif command[j] == "`":
+                return j + 1
+            else:
+                j += 1
+        return None
+    depth, j = 0, start + 1
+    heredocs: list[tuple[str, bool]] = []  # bodies start after this line
+    while j < n:
+        c = command[j]
+        if c == "\\":
+            j += 2
+            continue
+        if c == "\n" and heredocs:
+            # Skip each body: a commit message's ")" must not end the
+            # substitution early.
+            j += 1
+            for delimiter, strip_tabs in heredocs:
+                while j < n:
+                    newline = command.find("\n", j)
+                    end = n if newline < 0 else newline
+                    line = command[j:end]
+                    j = end + 1
+                    if (line.lstrip("\t") if strip_tabs else line) == delimiter:
+                        break
+            heredocs.clear()
+            continue
+        if command.startswith("<<", j) and not command.startswith("<<<", j):
+            k = j + 2
+            strip_tabs = k < n and command[k] == "-"
+            k += strip_tabs
+            while k < n and command[k] in " \t":
+                k += 1
+            m = _HEREDOC_RE.match(command, k)
+            if m is None:
+                return None
+            heredocs.append((m.group(2), strip_tabs))
+            j = m.end()
+            continue
+        if c == "'":
+            close = command.find("'", j + 1)
+            if close < 0:
+                return None
+            j = close + 1
+            continue
+        if c == '"':
+            j += 1
+            while j < n and command[j] != '"':
+                j += 2 if command[j] == "\\" else 1
+            if j >= n:
+                return None
+        elif c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return j + 1
+        j += 1
+    return None
+
+
 def _tokens(command: str) -> list[str] | None:
     """Split *command* into words and operators, roughly like a POSIX shell.
 
     Quotes and backslashes are removed, ``#`` comments dropped, newlines
     become ``;``, redirections (and their targets) are left out of the words,
     and heredoc bodies are skipped, so text inside a commit message or a
-    heredoc is never mistaken for a command. Returns None for unbalanced
-    quotes.
+    heredoc is never mistaken for a command. A command substitution
+    (``$(...)`` or backticks) stays inside its word, which then cannot be
+    resolved, and its own command is added as a subshell before the command
+    that contains it. Returns None for unbalanced quotes.
     """
     tokens: list[str] = []
     word: list[str] = []
@@ -152,6 +248,22 @@ def _tokens(command: str) -> list[str] | None:
     drop_next_word = False
     heredocs: list[tuple[str, bool]] = []
     i, n = 0, len(command)
+    cmd_start = 0  # where the current command's tokens begin
+
+    def substitute(start: int) -> int | None:
+        """Queue the substitution at *start* as a subshell; return its end."""
+        nonlocal cmd_start
+        end = _substitution_end(command, start)
+        if end is None:
+            return None
+        inner_start = start + 1 if command[start] == "`" else start + 2
+        inner = _tokens(command[inner_start : end - 1])
+        if inner is None:
+            return None
+        subshell = ["(", *inner, ")", "&&"]
+        tokens[cmd_start:cmd_start] = subshell
+        cmd_start += len(subshell)
+        return end
 
     def end_word() -> None:
         nonlocal in_word, drop_next_word
@@ -183,6 +295,12 @@ def _tokens(command: str) -> list[str] | None:
                 if command[j] == "\\" and j + 1 < n and command[j + 1] in '"\\$`\n':
                     buf.append(command[j + 1])
                     j += 2
+                elif command[j] == "`" or command.startswith("$(", j):
+                    end = substitute(j)
+                    if end is None:
+                        return None
+                    buf.append(command[j:end])
+                    j = end
                 else:
                     buf.append(command[j])
                     j += 1
@@ -191,12 +309,20 @@ def _tokens(command: str) -> list[str] | None:
             word.append("".join(buf))
             in_word = True
             i = j + 1
+        elif c == "`" or command.startswith("$(", i):
+            end = substitute(i)
+            if end is None:
+                return None
+            word.append(command[i:end])
+            in_word = True
+            i = end
         elif c == "#" and not in_word:
             newline = command.find("\n", i)
             i = n if newline < 0 else newline
         elif c == "\n":
             end_word()
             tokens.append(";")
+            cmd_start = len(tokens)
             i += 1
             for delimiter, strip_tabs in heredocs:  # skip each body in turn
                 while i < n:
@@ -236,6 +362,7 @@ def _tokens(command: str) -> list[str] | None:
             end_word()
             op = next(o for o in _OPERATORS if command.startswith(o, i))
             tokens.append(op)
+            cmd_start = len(tokens)
             i += len(op)
         else:
             word.append(c)
@@ -334,9 +461,15 @@ def _resolve(path: str, base: Path) -> Path:
 
 
 def _git_invocation(
-    argv: list[str], dirs: list[Path], env: Mapping[str, str] | None = None
+    argv: list[str],
+    dirs: list[Path],
+    env: Mapping[str, str] | None = None,
+    seen: set[Path] | None = None,
 ) -> tuple[list[Path], str | None, list[str], tuple[str, ...]]:
-    """Target directories, subcommand, its arguments and ``-c`` settings."""
+    """Target directories, subcommand, its arguments and ``-c`` settings.
+
+    Each known directory a ``-C`` chain passes through is added to *seen*.
+    """
     c_paths: list[str] = []
     configs: list[str] = []
     # GIT_DIR / GIT_WORK_TREE act like --git-dir / --work-tree (which win).
@@ -377,6 +510,8 @@ def _git_invocation(
         repo = base
         for c_path in c_paths:  # -C options chain, as in git
             repo = _resolve(c_path, repo)
+            if seen is not None and repo != UNKNOWN_DIR:
+                seen.add(repo)
         # --git-dir picks the repository (the predicates find a repo from
         # inside its .git too); --work-tree only adds the tree it touches.
         if git_dir is not None:
@@ -522,7 +657,9 @@ def _classify(
         longs, paths, shorts = _split_args(
             args, "", ("--chmod", "--pathspec-from-file")
         )
-        if "--all" in longs or "A" in shorts or _whole_tree(paths, base):
+        if (("--all" in longs or "A" in shorts) and not paths) or _whole_tree(
+            paths, base
+        ):
             return "git add -A / -u / . (broad staging)", False
         if ("--update" in longs or "u" in shorts) and not paths:
             return "git add -A / -u / . (broad staging)", False
@@ -628,6 +765,9 @@ def detect(
     scopes: list[tuple[list[Path], list[Path]]] = []
     exported: dict[str, str] = {}  # `export GIT_DIR=...` for later commands
     dir_stack: list[list[Path]] = []  # pushd/popd
+    # Every known directory the command passes through: an unresolvable
+    # path reached from any of them may be inside it.
+    seen: set[Path] = {cwd}
     for kind, argv, separator in _split_commands(tokens):
         if kind == "(":  # a subshell: its cd's end with it
             scopes.append((list(dirs), list(fallback)))
@@ -651,6 +791,7 @@ def detect(
                 rest = [a for a in argv[1:] if not a.startswith("-") or a == "-"]
                 cd_target = rest[0] if rest else "~"
                 new = list(dict.fromkeys(_resolve(cd_target, d) for d in dirs))
+                seen.update(d for d in new if d != UNKNOWN_DIR)
                 if separator == "&&":
                     fallback = list(dict.fromkeys(fallback + dirs))
                     dirs = new
@@ -660,7 +801,7 @@ def detect(
                 dirs = dir_stack.pop() if dir_stack else dirs + [UNKNOWN_DIR]
             elif os.path.basename(word) == "git":
                 targets, sub, args, configs = _git_invocation(
-                    argv, dirs, {**exported, **env}
+                    argv, dirs, {**exported, **env}, seen
                 )
                 base = next((t for t in targets if t != UNKNOWN_DIR), None)
                 rule, stack_write = _classify(sub, args, configs, base)
@@ -679,9 +820,13 @@ def detect(
                 if rule or stack_write:
                     name = rule or "git stash"
                     if UNKNOWN_DIR in targets:
-                        # Fail closed where the guard applies; an unmarked
-                        # repo keeps its contract (`cd "$X"` idioms work).
-                        if shared_checkout(cwd) or stash_stack_shared(cwd):
+                        # Fail closed where the guard applies (from any
+                        # directory it was reached from); an unmarked repo
+                        # keeps its contract (`cd "$X"` idioms work).
+                        if any(
+                            shared_checkout(d) or stash_stack_shared(d)
+                            for d in sorted(seen)
+                        ):
                             return _unknown_reason(name)
                         targets = [t for t in targets if t != UNKNOWN_DIR]
                     if rule:

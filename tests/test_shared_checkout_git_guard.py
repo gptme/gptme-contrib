@@ -516,3 +516,56 @@ def test_hook_output_and_non_bash_passthrough(tmp_path):
         ).returncode
         == 0
     )
+
+
+def test_unknown_dir_reached_from_a_guarded_repo_fails_closed():
+    """`cd <shared> && cd "$SUB"` from an unmarked cwd may still be inside the
+    shared checkout, so it fails closed like a `cd "$SUB"` from inside it."""
+    for command in (
+        f'cd {SHARED} && cd "$SUB" && git reset --hard',
+        f'git -C {SHARED} -C "$SUB" reset --hard',
+    ):
+        reason = detect(command, cwd=OTHER)
+        assert reason is not None and "literal path" in reason, command
+    assert detect(f'cd {OTHER}/x && cd "$SUB" && git reset --hard', cwd=OTHER) is None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git -C $(git rev-parse --show-toplevel) reset --hard",
+        "git -C `git rev-parse --show-toplevel` clean -fd",
+        'echo "$(git stash)"',
+        "echo `git stash pop`",
+        "x=$(git reset --hard); echo $x",
+    ],
+)
+def test_command_substitution_is_one_word_and_its_command_is_checked(command):
+    assert detect(command, cwd=SHARED) is not None
+
+
+def test_heredoc_commit_message_in_a_substitution_is_text():
+    command = (
+        "git commit -m \"$(cat <<'EOF'\nfix: thing\n\n"
+        '1) never git reset --hard or git stash here\n2) unbalanced (\nEOF\n)" '
+        "-- a.py && git push"
+    )
+    assert detect(command, cwd=SHARED) is None
+
+
+def test_add_all_with_pathspecs_is_scoped():
+    assert detect("git add -A src/my_feature/", cwd=SHARED) is None
+    assert detect("git add --all -- docs/x.md", cwd=SHARED) is None
+    assert detect("git add -A", cwd=SHARED) is not None
+    assert detect("git add -A .", cwd=SHARED) is not None
+
+
+def test_not_yet_created_directory_uses_its_parent_repo(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    assert guard.is_shared_checkout(repo / "sub") is False
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "safety.sharedCheckout", "true"], check=True
+    )
+    assert guard.is_shared_checkout(repo / "sub" / "deeper") is True
