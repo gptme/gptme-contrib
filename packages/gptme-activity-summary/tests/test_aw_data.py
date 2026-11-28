@@ -356,8 +356,8 @@ def test_fetch_category_rules_reads_aw_settings_classes():
     assert result == [[["Coding"], {"type": "regex", "regex": "nvim"}]]
 
 
-def test_fetch_category_rules_returns_empty_when_setting_missing():
-    """Null or missing classes settings should degrade to an empty rule list."""
+def test_fetch_category_rules_uses_defaults_when_setting_is_null():
+    """A null classes setting falls back to aw-webui's defaults, not no rules."""
     from unittest.mock import patch
 
     with patch(
@@ -366,7 +366,8 @@ def test_fetch_category_rules_returns_empty_when_setting_missing():
     ):
         result = _fetch_category_rules()
 
-    assert result == []
+    assert result, "null settings should resolve to default classes"
+    assert all(isinstance(name, list) and rule.get("type") for name, rule in result)
 
 
 def test_fetch_category_usage_inlines_saved_category_rules():
@@ -451,3 +452,47 @@ def test_get_client_custom_server():
         assert client is not None
     finally:
         aw_data.AW_SERVER = original_server
+
+
+def test_fetch_category_rules_falls_back_to_defaults_on_fetch_error():
+    """A failed settings fetch uses aw-webui's defaults, not an empty rule set."""
+    from unittest.mock import patch
+
+    with patch(
+        "gptme_activity_summary.aw_data.urlopen",
+        side_effect=OSError("connection refused"),
+    ):
+        rules = _fetch_category_rules()
+
+    assert rules, "expected default classes, not an empty list"
+    for name, rule in rules:
+        assert isinstance(name, list) and name
+        assert isinstance(rule, dict) and rule.get("type")
+
+
+def test_fetch_category_rules_falls_back_to_defaults_when_none_saved():
+    """An empty/absent ``classes`` setting resolves like aw-webui does."""
+    from unittest.mock import patch
+
+    with patch(
+        "gptme_activity_summary.aw_data.urlopen",
+        return_value=nullcontext(BytesIO(json.dumps([]).encode())),
+    ):
+        rules = _fetch_category_rules()
+
+    assert rules
+    assert ["Uncategorized"] not in [name for name, _rule in rules]
+
+
+def test_fetch_category_rules_prefers_saved_classes_over_defaults():
+    """Saved classes still win, so configured servers are unaffected."""
+    from unittest.mock import patch
+
+    payload = [{"name": ["Coding"], "rule": {"type": "regex", "regex": "nvim"}}]
+    with patch(
+        "gptme_activity_summary.aw_data.urlopen",
+        return_value=nullcontext(BytesIO(json.dumps(payload).encode())),
+    ):
+        rules = _fetch_category_rules()
+
+    assert rules == [[["Coding"], {"type": "regex", "regex": "nvim"}]]

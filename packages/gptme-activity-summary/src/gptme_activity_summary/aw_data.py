@@ -15,6 +15,11 @@ from typing import Any, cast
 from urllib.parse import urlsplit
 from urllib.request import urlopen
 
+try:  # aw-client has shipped these defaults for a long time; stay defensive
+    from aw_client.classes import default_classes as _AW_DEFAULT_CLASSES
+except Exception:  # pragma: no cover - only without a usable aw-client
+    _AW_DEFAULT_CLASSES = []
+
 logger = logging.getLogger(__name__)
 
 AW_SERVER = os.environ.get("AW_SERVER", "http://localhost:5600")
@@ -212,6 +217,15 @@ def _run_aw_query(
     return None
 
 
+def _default_category_rules() -> list[list[Any]]:
+    """Return aw-client's default category rules in ``categorize()`` shape.
+
+    aw-webui and aw-mcp use these defaults when a server has no saved classes.
+    Copying the name lists keeps callers from mutating the module-level constant.
+    """
+    return [[list(name), rule] for name, rule in _AW_DEFAULT_CLASSES]
+
+
 def _fetch_category_rules() -> list[list[Any]]:
     """Fetch category rules from the ActivityWatch settings API.
 
@@ -221,25 +235,26 @@ def _fetch_category_rules() -> list[list[Any]]:
     categories into the ``[category_path, rule]`` shape expected by
     ``categorize(...)``.
 
-    Returns an empty list when no classes are saved or the settings endpoint is
-    unavailable. That fallback still produces a valid ``categorize(events, [])``
-    query, which yields ``["Uncategorized"]`` instead of a server-side parse
-    error.
+    When no classes are saved, or the settings endpoint is unavailable, fall
+    back to ``aw_client.classes.default_classes`` — the same defaults aw-webui
+    and aw-mcp use. Returning an empty list instead would silently label every
+    event ``Uncategorized`` for users who never opened the category editor,
+    which is a different answer than the rest of the ActivityWatch stack gives.
     """
     server = _parse_aw_server()
     if server is None:
-        logger.warning("Invalid AW_SERVER URL; ActivityWatch categories are unavailable")
-        return []
+        logger.warning("Invalid AW_SERVER URL; using default ActivityWatch categories")
+        return _default_category_rules()
     settings_url = f"{server[3]}/api/0/settings/classes"
     try:
         with urlopen(settings_url, timeout=AW_TIMEOUT) as response:
             payload = json.load(response)
     except Exception as e:
         logger.debug("AW category settings fetch failed: %s", e)
-        return []
+        return _default_category_rules()
 
     if not isinstance(payload, list):
-        return []
+        return _default_category_rules()
 
     rules: list[list[Any]] = []
     for category in payload:
@@ -252,7 +267,7 @@ def _fetch_category_rules() -> list[list[Any]]:
         if rule.get("type") is None:
             continue
         rules.append([name, rule])
-    return rules
+    return rules or _default_category_rules()
 
 
 def _fetch_app_usage(
