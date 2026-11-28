@@ -217,7 +217,9 @@ _PATTERNS: list[Pattern] = [
     # emails for 3 days, 2026-10-23..26). Real API keys appear after whitespace,
     # punctuation, or an assignment character (`=`/`:`) — never after a letter.
     Pattern(
-        re.compile(r"(?<![A-Za-z])(?:sk|pk)-[A-Za-z0-9_-]{24,64}"),
+        # Unbounded: a 64-char cap left the tail of longer keys (e.g.
+        # sk-ant-sid01-…) visible after the redaction marker.
+        re.compile(r"(?<![A-Za-z])(?:sk|pk)-[A-Za-z0-9_-]{24,}"),
         Severity.CRITICAL,
         "openai_key",
     ),
@@ -424,11 +426,12 @@ _PATTERNS: list[Pattern] = [
     ),
     # PostgreSQL connection strings — the password is embedded in the URL between
     # the username and the @host. Leak grants full database access. The
-    # `postgres(ql)?://` prefix is distinctive; the pattern requires a password
+    # `postgres(ql)?://` prefix is distinctive (an optional SQLAlchemy driver
+    # suffix such as `+psycopg2` is allowed); the pattern requires a password
     # segment (`:password@`) so passwordless URLs are not matched.
     Pattern(
         re.compile(
-            r"postgres(?:ql)?://[A-Za-z0-9._~!$&'()*+,;=%-]+:[^@\s]+@"
+            r"postgres(?:ql)?(?:\+[A-Za-z0-9_]+)?://[A-Za-z0-9._~!$&'()*+,;=%-]+:[^@\s]+@"
             r"(?:\[[A-Za-z0-9:.%_-]+\]|[a-zA-Z0-9_.-]+)?"
             r"(?::[0-9]+)?(?:/[a-zA-Z0-9_-]*)?"
         ),
@@ -452,8 +455,10 @@ _PATTERNS: list[Pattern] = [
     # Telegram bot tokens — `{bot_id}:{hash}` where bot_id is 8–10 digits and
     # hash is ~35 base64url chars (HMAC-SHA256). The colon separator and the
     # digit prefix make this shape distinctive; no other pattern matches it.
+    # A digit lookbehind (not ``\b``) so the Bot API URL form
+    # ``https://api.telegram.org/bot<id>:<hash>/`` is caught too.
     Pattern(
-        re.compile(r"\b\d{8,10}:[A-Za-z0-9_-]{30,40}\b"),
+        re.compile(r"(?<!\d)\d{8,10}:[A-Za-z0-9_-]{30,40}\b"),
         Severity.CRITICAL,
         "telegram_bot_token",
     ),
@@ -461,7 +466,8 @@ _PATTERNS: list[Pattern] = [
         re.compile(
             r"-----BEGIN (?P<key_label>(?:RSA |EC |OPENSSH |DSA |PGP |ENCRYPTED )?PRIVATE KEY(?: BLOCK)?)-----"
             r".*?"
-            r"-----END (?P=key_label)-----",
+            # Truncated tool output may lack the END line; mask to EOF then.
+            r"(?:-----END (?P=key_label)-----|\Z)",
             re.DOTALL,
         ),
         Severity.CRITICAL,
@@ -474,6 +480,21 @@ _PATTERNS: list[Pattern] = [
         ),
         Severity.CRITICAL,
         "bearer_header",
+    ),
+    # HTTP Basic auth: base64("user:password"), the sibling of the Bearer form.
+    # The header name is usually quoted, and JSON/YAML use `:` or `=`, so the
+    # raw HTTP-wire form alone misses `headers={"Authorization": "Basic ..."}`.
+    # The quotes may be backslash-escaped: nested JSON tool output renders the
+    # header as `\"Authorization\": \"Basic ...\"`, and a second nesting puts
+    # three backslashes before each quote (`2**level - 1`). `\\*` covers every
+    # level; `\\?` only covered one.
+    Pattern(
+        re.compile(
+            r"\bAuthorization\\*['\"]?\s*[:=]\s*\\*['\"]?Basic\s+(?:[A-Za-z0-9+]|\\?/){4,}={0,2}",
+            re.IGNORECASE,
+        ),
+        Severity.CRITICAL,
+        "basic_auth_header",
     ),
     # JWT (JSON Web Token) — header.payload.signature in base64url. The header
     # and payload are base64url-encoded JSON objects, which may include JSON
@@ -515,7 +536,16 @@ _PATTERNS: list[Pattern] = [
     ),
     # MEDIUM — contextual info that shouldn't be public.
     Pattern(
-        re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"),
+        # The lookbehind anchors matches to the start of a local-part run.
+        # Without it every offset of a long @-less run (hex dump, id string)
+        # rescans the run to its end: quadratic time on a single blob.
+        # The lookbehind also forbids a match starting right after a previous
+        # address (``a@x.com%2Cb@y.org``, ``a@x.com-b@y.org``), so the repeat
+        # group extends one match over such joined addresses instead.
+        re.compile(
+            r"(?<![A-Za-z0-9._%+-])"
+            r"(?:[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})+"
+        ),
         Severity.MEDIUM,
         "email",
     ),
@@ -607,7 +637,11 @@ _PATTERNS: list[Pattern] = [
             # A closing mapping-key quote followed by ':' permits JSON's
             # multiline whitespace. Line-based assignments keep horizontal
             # padding so an empty value cannot consume the next setting.
-            r"(?P<sep>['\"][ \t\r\n]*:[ \t\r\n]*|['\"]?[ \t]*[:=][ \t]*)"
+            # `:=` (Go) is a separator too; otherwise the `=` was captured as a
+            # short HIGH value and the secret leaked. `=>` is deliberately not
+            # included: it makes ordinary arrow functions and PHP foreach loops
+            # (``key => key.trim()``) a CRITICAL fail-closed block.
+            r"(?P<sep>['\"][ \t\r\n]*:[ \t\r\n]*|['\"]?[ \t]*(?::=|[:=])[ \t]*)"
             # Quoted values include punctuation/spaces and escaped delimiters.
             # Prefer a complete quoted value, including embedded newlines.
             # Truncated snippets end at a line boundary or EOF instead of a
@@ -860,7 +894,8 @@ def _mask_preview(
     if "key" in category or "token" in category:
         return "****"
     if category == "email":
-        parts = sample.split("@", 1)
+        # rsplit: a joined match (``a@x.com%2Cb@y.org``) must not leak ``b``.
+        parts = sample.rsplit("@", 1)
         return "****@" + parts[1] if len(parts) == 2 else "****"
     if len(sample) <= 8:
         return "****"

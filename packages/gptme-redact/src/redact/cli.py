@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import re
+import stat
 import sys
-from typing import BinaryIO
+import tempfile
+from pathlib import Path
 
 from . import (
     DEFAULT_ALLOWLIST,
@@ -78,24 +82,34 @@ def _build_parser() -> argparse.ArgumentParser:
     return ap
 
 
-def _read_input(path: str) -> str:
-    """Read the input without newline translation.
+def _read_input(file: str) -> str | None:
+    """The input text, or None (after an error message) when decoding fails.
 
-    Text-mode reads turn ``\r\n`` into ``\n``, which rewrites non-secret bytes
-    of the artifact. Read files with ``newline=""``, and decode real stdin from
-    its byte buffer for the same reason.
+    Newline bytes are preserved. stdin is decoded strictly with its declared
+    encoding. `sys.stdin.read()` uses `errors="surrogateescape"`, so an invalid
+    byte survives as a lone surrogate
+    (`0xff` -> "\\udcff") and passed every pattern, while the same bytes from a
+    file were refused; the same payload must not behave differently by how it
+    was supplied.
     """
-    if path != "-":
-        with open(path, encoding="utf-8", newline="") as fh:
+    try:
+        if file == "-":
+            buf = getattr(sys.stdin, "buffer", None)
+            if buf is not None:
+                return bytes(buf.read()).decode(sys.stdin.encoding or "utf-8")
+            # A replaced stdin (tests) has no buffer; round-trip the text back
+            # through the bytes surrogateescape produced.
+            return sys.stdin.read().encode("utf-8", "surrogateescape").decode("utf-8")
+        # Preserve non-secret newline bytes, as on the current base.
+        with open(file, encoding="utf-8", newline="") as fh:
             return fh.read()
-    buffer: BinaryIO | None = getattr(sys.stdin, "buffer", None)
-    if buffer is None:  # an in-memory replacement such as io.StringIO
-        return sys.stdin.read()
-    # Same encoding and error handler a text-mode read would use; only the
-    # newline translation is skipped.
-    return buffer.read().decode(
-        sys.stdin.encoding or "utf-8", sys.stdin.errors or "strict"
-    )
+    except UnicodeDecodeError:
+        # UTF-16 with a BOM (or other binary) does not decode at all.
+        print(
+            "error: input is not valid UTF-8 (binary or UTF-16?); refusing artifact",
+            file=sys.stderr,
+        )
+        return None
 
 
 def _refuse(result: Result, reason: str, args: argparse.Namespace) -> int:
@@ -124,6 +138,17 @@ def _main_redact(argv: list[str] | None = None) -> int:
         return 1
 
     text = _read_input(args.file)
+    if text is None:
+        return 2
+    if "\x00" in text:
+        # BOM-less UTF-16 of ASCII decodes as "valid" UTF-8 with a NUL between
+        # every character, which splits every secret past all patterns. Refuse
+        # rather than report a NUL-interleaved (or binary) artifact as clean.
+        print(
+            "error: input contains NUL bytes (binary or UTF-16?); refusing artifact",
+            file=sys.stderr,
+        )
+        return 2
     literals = (
         collect_secret_literals(args.literal)
         if not args.no_env_secrets
@@ -188,12 +213,119 @@ def _main_redact(argv: list[str] | None = None) -> int:
             return 2
         out = result.redacted
         if args.out:
-            with open(args.out, "w", encoding="utf-8", newline="") as fh:
-                fh.write(out)
+            _write_atomic(Path(args.out), out)
         else:
             sys.stdout.write(out)
 
     return 2 if result.blocked else 0
+
+
+def _stream_fd(path: Path) -> int | None:
+    """The inherited fd *path* names, when it is a process stream.
+
+    ``/dev/stdout`` is a symlink into ``/proc/self/fd``. Opening it for writing
+    truncates the redirect target and uses a fresh file offset, so a caller
+    that later writes to its own fd (``{ redact --out /dev/stdout f; echo ok; }
+    > report``) overwrites or orphans what we wrote. Writing to the inherited
+    fd keeps one shared offset and never truncates.
+    """
+    raw = os.fspath(path)
+    fixed = {"/dev/stdin": 0, "/dev/stdout": 1, "/dev/stderr": 2}
+    if raw in fixed:
+        return fixed[raw]
+    match = re.fullmatch(r"/(?:dev|proc/self)/fd/(\d+)", raw)
+    return int(match.group(1)) if match else None
+
+
+def _write_in_place(path: Path, data: bytes) -> None:
+    """Write *data* to *path* without a sibling rename.
+
+    Used when mkstemp or os.replace cannot run (read-only directory, sticky
+    dir holding another user's file). ``open(path, "wb")`` truncates first, so
+    a later write error would destroy the original; keep a copy and restore it.
+    """
+    try:
+        original = path.read_bytes()
+    except FileNotFoundError:
+        original = None
+    try:
+        with open(path, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+    except BaseException:
+        if original is not None:
+            try:
+                with open(path, "wb") as fh:
+                    fh.write(original)
+                    fh.flush()
+            except OSError:
+                pass
+        raise
+
+
+def _write_atomic(path: Path, text: str) -> None:
+    """Write *text* to *path* via a sibling temp file and rename.
+
+    ``open(path, "w")`` truncates before encoding, so an encode or disk error
+    would destroy the existing file (e.g. ``redact - --out f < f``).
+    """
+    data = text.encode("utf-8")
+    # A device, FIFO or /dev/stdout cannot be replaced by a rename: swapping
+    # /dev/null for a regular file would capture every later write to it.
+    # Write through such targets, as open(path, "w") always did.
+    try:
+        existing = os.stat(path)
+    except FileNotFoundError:
+        existing = None
+    # os.stat follows symlinks, so `/dev/stdout` redirected to a regular file
+    # looks regular. Renaming there would swap a new inode in at the redirect
+    # target while the shell's fd 1 keeps the old one, losing later writes.
+    stream_fd = _stream_fd(path)
+    if stream_fd is not None:
+        while data:
+            n = os.write(stream_fd, data)
+            # POSIX write() may return 0 on a non-blocking fd instead of
+            # EAGAIN. data[0:] is a no-op, so the loop would spin forever.
+            if n == 0:
+                raise OSError("write returned 0 bytes")
+            data = data[n:]
+        return
+    if existing is not None and not stat.S_ISREG(existing.st_mode):
+        with open(path, "wb") as fh:
+            fh.write(data)
+        return
+    # Replace the symlink's target, not the link, and keep the file's mode
+    # (a new file gets the mode open() would give it, not mkstemp's 0600).
+    path = Path(os.path.realpath(path))
+    try:
+        mode = stat.S_IMODE(path.stat().st_mode)
+    except FileNotFoundError:
+        umask = os.umask(0)
+        os.umask(umask)
+        mode = 0o666 & ~umask
+    try:
+        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    except OSError:
+        # A writable file inside a non-writable directory: the atomic path
+        # needs a temp file beside the target, the in-place write it replaced
+        # did not, so keep the in-place write as the fallback.
+        _write_in_place(path, data)
+        return
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        os.chmod(tmp, mode)
+        try:
+            os.replace(tmp, path)
+        except OSError:
+            # Sticky world-writable directory (EPERM) or a bind-mounted file
+            # (EBUSY): replacing fails, writing the file itself does not.
+            _write_in_place(path, data)
+            Path(tmp).unlink(missing_ok=True)
+            return
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 def print_report(result: Result) -> None:
@@ -254,6 +386,8 @@ def _main_sanitize_doc(argv: list[str] | None = None) -> int:
         return 1
 
     text = _read_input(args.file)
+    if text is None:
+        return 2
     result = scan_document(text, block_severity=block_sev)
 
     if args.json:
