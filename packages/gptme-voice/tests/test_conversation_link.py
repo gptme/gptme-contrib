@@ -711,8 +711,20 @@ def test_lookup_busy_chat_does_not_interrupt_the_other_reply(
     monkeypatch.setattr(conversation_link, "LOOKUP_BUSY_RETRY_SECONDS", 0.05)
     server = _LookupServer([{"type": "connected", "session_id": "s1"}], hang=True)
     server.step_statuses = [409] * 100
-    result = _run_lookup(server, timeouts={"fast": 0.2})
-    assert not result.success
+    completed: list[int] = []
+
+    async def run():
+        transport = httpx.MockTransport(server.handler)
+        async with httpx.AsyncClient(transport=transport) as c:
+            lookup = server.lookup(c, timeouts={"fast": 0.2})
+            return await lookup(
+                "q", mode="fast", on_completed=lambda rc, _t: completed.append(rc)
+            )
+
+    result = asyncio.run(run())
+    # Busy is not a timeout: no timeout cue, and nothing to interrupt.
+    assert not result.success and "busy" in (result.error or "")
+    assert completed == []
     assert all(kind != "interrupt" for kind, _ in server.calls)
 
 
@@ -781,6 +793,29 @@ def test_lookup_budgets_follow_the_subprocess_env_vars() -> None:
         "fast": float(tool_bridge._FAST_MODE_BUDGET_SECONDS),
         "smart": float(tool_bridge._SMART_MODE_BUDGET_SECONDS),
     }
+
+
+def test_lookup_retries_posting_the_spoken_turns_while_the_chat_is_busy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(conversation_link, "LOOKUP_BUSY_RETRY_SECONDS", 0.01)
+    server = _LookupServer(
+        [
+            {"type": "connected", "session_id": "s1"},
+            {"type": "generation_started"},
+            _msg("assistant", "ok"),
+            {"type": "step_complete"},
+        ]
+    )
+    flushes: list[str] = []
+
+    async def before() -> str:
+        flushes.append(f"after {len(server.calls)} calls")
+        return "retry" if len(flushes) < 3 else "ok"
+
+    result = _run_lookup(server, before_lookup=before)
+    assert result.success
+    assert flushes == ["after 0 calls"] * 3  # all before the request is added
 
 
 def test_execute_delegates_to_the_lookup_runner() -> None:

@@ -434,8 +434,11 @@ class _EventPump:
         await asyncio.gather(self._task, return_exceptions=True)
 
 
-class _ChatBusy(asyncio.TimeoutError):
+class _ChatBusy(_LookupFailed):
     """Another reply kept the chat busy until the deadline; no step started."""
+
+    def __init__(self) -> None:
+        super().__init__("the chat stayed busy with another reply, so no lookup ran")
 
 
 class ConversationLookup:
@@ -500,8 +503,12 @@ class ConversationLookup:
                         await _next_event_of(events, _REPLY_DONE_EVENTS, deadline)
                     if self._before_lookup is not None:
                         # Post the caller's pending spoken turns first, so the
-                        # chat reads question, lookup, answer.
-                        await self._before_lookup()
+                        # chat reads question, lookup, answer; "retry" means
+                        # the chat is busy, so try again until it is posted.
+                        while await self._before_lookup() == "retry":
+                            if time.monotonic() + LOOKUP_BUSY_RETRY_SECONDS > deadline:
+                                raise _ChatBusy
+                            await asyncio.sleep(LOOKUP_BUSY_RETRY_SECONDS)
                     request = _LOOKUP_PREFIX + task + _LOOKUP_SUFFIX
                     appended = await self._post(
                         "", {"role": "user", "content": request}
