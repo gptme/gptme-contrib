@@ -139,8 +139,18 @@ def test_email_still_matched_after_long_local_part_run() -> None:
 SECRET = "Zq9xVb7mN3kL2pR8"
 
 
-def test_php_ruby_hash_rocket_password_is_redacted() -> None:
-    _contained(f"'password' => '{SECRET}',", SECRET)
+def test_arrow_function_is_not_a_secret_assignment() -> None:
+    # `=>` must not be a separator: JS arrow functions and PHP foreach loops
+    # are ordinary code, not credential assignments.
+    for source in (
+        "items.map(key => key.trim())",
+        "foreach ($headers as $key => $headerValue)",
+    ):
+        r = redact(source, literals=[])
+        assert not r.blocked, (
+            source,
+            [(f.category, str(f.severity)) for f in r.findings],
+        )
 
 
 def test_go_short_var_decl_token_is_redacted() -> None:

@@ -637,9 +637,11 @@ _PATTERNS: list[Pattern] = [
             # A closing mapping-key quote followed by ':' permits JSON's
             # multiline whitespace. Line-based assignments keep horizontal
             # padding so an empty value cannot consume the next setting.
-            # `=>` (PHP/Ruby hashes) and `:=` (Go) are separators too; otherwise
-            # the `>`/`=` was captured as a short HIGH value and the secret leaked.
-            r"(?P<sep>['\"][ \t\r\n]*:[ \t\r\n]*|['\"]?[ \t]*(?:=>|:=|[:=])[ \t]*)"
+            # `:=` (Go) is a separator too; otherwise the `=` was captured as a
+            # short HIGH value and the secret leaked. `=>` is deliberately not
+            # included: it makes ordinary arrow functions and PHP foreach loops
+            # (``key => key.trim()``) a CRITICAL fail-closed block.
+            r"(?P<sep>['\"][ \t\r\n]*:[ \t\r\n]*|['\"]?[ \t]*(?::=|[:=])[ \t]*)"
             # Quoted values include punctuation/spaces and escaped delimiters.
             # Prefer a complete quoted value, including embedded newlines.
             # Truncated snippets end at a line boundary or EOF instead of a
