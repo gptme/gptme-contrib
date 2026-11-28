@@ -366,7 +366,8 @@ def check(
     stale = [
         rel
         for rel, allowed in staged.items()
-        if rel not in tracked or sizes.get(rel, allowed) < allowed
+        if rel not in tracked
+        or (rel in sizes and (rel not in files or files[rel] < allowed))
     ]
     if stale:
         errors.append(

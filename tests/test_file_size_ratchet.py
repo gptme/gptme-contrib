@@ -363,12 +363,16 @@ def test_budget_without_a_resolvable_base_fails_on_growth(repo, capsys):
 
 def test_budget_does_not_lower_the_baseline_above_the_base_size(repo, capsys):
     # The base has 12 lines while the baseline is stale at 15; trimming to 14
-    # is growth relative to the base, so the baseline must not be rewritten.
+    # is growth relative to the base, so the baseline must not be rewritten --
+    # and, with the baseline staged as in a real repo, must not fail the stale
+    # check for an entry the run did not lower.
     baseline({"big.py": 15})
+    subprocess.run(["git", "add", ratchet.DEFAULT_BASELINE], check=True)
     write("big.py", 12)
     commit()
     assert ratchet.main([*BUDGET, write("big.py", 14)]) == 0
     assert read_baseline()["files"] == {"big.py": 15}
+    assert "staged copy is not lowered" not in capsys.readouterr().err
 
 
 def test_budget_still_fails_new_oversized_files(repo, capsys):
