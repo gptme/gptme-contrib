@@ -545,3 +545,43 @@ def test_full_rebuild_refuses_missing_counted_log_directory(tmp_path: Path) -> N
         tracker.analyze(incremental=False)
     assert state.read_bytes() == original
     assert tracker.state.to_dict() == before
+
+
+def test_legacy_state_migrates_past_stray_directory(tmp_path: Path) -> None:
+    # The old tracker counted a directory without a conversation file as a
+    # zero-lesson log, so a stray directory below the legacy watermark cannot
+    # hold statistics. It must not block the one-time migration.
+    logs, state = tmp_path / "logs", tmp_path / "state.json"
+    _write_log(logs, "2025-10-02-zesty")
+    EffectivenessTracker(logs_dir=logs, state_file=state).analyze()
+    legacy = json.loads(state.read_text())
+    del legacy["processed_logs"]
+    state.write_text(json.dumps(legacy))
+    (logs / "2025-10-02-amber-aborted").mkdir()
+
+    tracker = EffectivenessTracker(logs_dir=logs, state_file=state)
+    with pytest.raises(ValueError, match="--full"):
+        tracker.analyze()
+
+    s = tracker.analyze(incremental=False)
+    assert s.processed_count == s.total_sessions == 1
+    assert s.processed_logs == ["2025-10-02-zesty"]
+    assert s.lesson_stats["lessons/workflow/a.md"].total_inclusions == 1
+
+    # The skipped directory was not recorded, so a conversation written later
+    # is still picked up instead of being treated as processed.
+    (logs / "2025-10-02-amber-aborted" / "conversation.jsonl").write_text(
+        json.dumps(
+            {
+                "role": "system",
+                "content": (
+                    "# Relevant Lessons\n\n## Lesson A\n"
+                    "*Path: lessons/workflow/a.md*\n*Matched by: keyword:git*\n"
+                ),
+            }
+        )
+        + "\n"
+    )
+    s = EffectivenessTracker(logs_dir=logs, state_file=state).analyze()
+    assert s.processed_count == s.total_sessions == 2
+    assert sorted(s.processed_logs) == ["2025-10-02-amber-aborted", "2025-10-02-zesty"]

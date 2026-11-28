@@ -316,9 +316,6 @@ class EffectivenessTracker:
         # Logs that earlier runs counted must still be readable before a rebuild
         # discards their totals. Never rebuild silently from a partial archive.
         previous_members = set(self.state.processed_logs)
-        legacy_watermark = (
-            self.state.last_processed if not self.state.processed_logs else None
-        )
         if not incremental:
             available = {d.name for d in log_dirs}
             missing = sorted(previous_members - available)
@@ -332,11 +329,17 @@ class EffectivenessTracker:
                 )
 
         def _require_conversation(log_dir: Path) -> bool:
-            if log_dir.name in previous_members:
-                return True
-            # A legacy watermark implies the log was visited; its conversation
-            # file is required so a rebuild cannot silently drop its statistics.
-            return legacy_watermark is not None and log_dir.name <= legacy_watermark
+            # Only logs this tracker counted have a proven conversation file: it
+            # was readable when their statistics were recorded, so its absence
+            # now means statistics would be lost.
+            #
+            # Legacy membership is inferred from a name watermark, and the old
+            # tracker counted a directory whose conversation file never existed
+            # (an aborted session) as a zero-lesson log. Requiring the file for
+            # every name at or below that watermark protects no statistics and
+            # would block migration forever on one stray directory, so those are
+            # skipped like pending logs and retried if the file ever appears.
+            return log_dir.name in previous_members
 
         if limit:
             log_dirs = log_dirs[:limit]
