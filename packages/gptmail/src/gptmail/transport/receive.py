@@ -5,7 +5,10 @@ on stdin and the receiver validates it and publishes it under
 ``messages/inbox/`` — nothing else. Because the whole transport is one command,
 an operator can pin a sender's key with a forced command in ``authorized_keys``::
 
-    command="gptmail agent receive",restrict ssh-ed25519 AAAA... alice
+    command="gptmail agent receive --expect-sender alice",restrict ssh-ed25519 AAAA... alice
+
+Always include ``--expect-sender``: without it the sender binding below is not
+enforced and the key can post as any peer.
 
 The sender then never needs a login shell on the recipient, and the recipient's
 safety tier no longer depends on the least trusted sibling that can message it.
@@ -195,8 +198,7 @@ def validate_message(
 
     if expected_sender and sender != expected_sender.strip().lower():
         raise ReceiveError(
-            f"refused: this key is bound to sender {expected_sender!r}, "
-            f"message claims {sender!r}"
+            f"refused: this key is bound to sender {expected_sender!r}, message claims {sender!r}"
         )
     if self_name and recipient != self_name.strip().lower():
         raise ReceiveError(f"refused: message is addressed to {recipient!r}, not {self_name!r}")
@@ -266,7 +268,6 @@ def mailbox_inbox(messages_dir: Path, mailbox: str) -> Path:
         return messages_dir / "inbox"
     if not _MAILBOX_NAME.fullmatch(name):
         raise ReceiveError(
-            f"refused: invalid mailbox name {mailbox!r}; use lowercase letters, "
-            "digits, '-' or '_'"
+            f"refused: invalid mailbox name {mailbox!r}; use lowercase letters, digits, '-' or '_'"
         )
     return messages_dir / "mailboxes" / name / "inbox"

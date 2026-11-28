@@ -64,6 +64,7 @@ from typing import Any, Dict, NamedTuple, Tuple
 import markdown
 
 from gptmail.communication_utils.outbound_redact import guard_outbound
+from gptmail.communication_utils.private_io import open_private, write_private_text
 from gptmail.communication_utils.rate_limiting.limiters import RateLimiter
 from gptmail.communication_utils.state.locks import FileLock, LockError
 from gptmail.communication_utils.state.tracking import ConversationTracker, MessageState
@@ -162,7 +163,135 @@ _SYNC_HEADERS = (
     "In-Reply-To",
     "References",
     "Content-Type",
+    # The receiving MTA's verdicts (see _receiver_auth_results). Kept so the
+    # agent and get_unreplied_emails can see a forged From that failed SPF/DMARC.
+    "Authentication-Results",
 )
+
+# Headers added to _SYNC_HEADERS after mail had already been stored. A copy
+# written by an older version lacks them, so their absence there is no conflict.
+_LATE_SYNC_HEADERS = (
+    "Reply-To",
+    "Cc",
+    "Bcc",
+    *_ENVELOPE_RECIPIENT_HEADERS,
+    "Authentication-Results",
+)
+
+
+def _same_stored_message(stored: str, incoming: str) -> bool:
+    """Whether ``incoming`` is the message already stored as ``stored``.
+
+    True when they are equal, or differ only by ``_LATE_SYNC_HEADERS`` that
+    ``stored`` lacks entirely. A late header present in both must match.
+    """
+    if stored == incoming:
+        return True
+    stored_head, stored_sep, stored_body = stored.partition("\n\n")
+    head, sep, body = incoming.partition("\n\n")
+    # Without a separator the header block cannot be told apart from the body.
+    if not (stored_sep and sep) or body != stored_body:
+        return False
+    present = {line.partition(":")[0].lower() for line in stored_head.split("\n")}
+    absent = {name.lower() for name in _LATE_SYNC_HEADERS} - present
+    kept = [line for line in head.split("\n") if line.partition(":")[0].lower() not in absent]
+    return "\n".join(kept) == stored_head
+
+
+_AUTH_RESULT_RE = re.compile(r"^\s*(spf|dkim|dmarc)\s*=\s*([a-z]+)(?=\s|$)", re.IGNORECASE)
+
+
+def _authentication_clauses(value: str) -> list[str]:
+    """Split result clauses, ignoring RFC comments and quoted property values.
+
+    A semicolon inside either is data, not a new method. Comments can nest and
+    both comments and quoted strings allow backslash-escaped delimiters.
+    """
+    clauses = []
+    current: list[str] = []
+    depth = 0
+    quoted = False
+    escaped = False
+    for char in value:
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\" and (depth or quoted):
+            escaped = True
+        elif depth:
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+        elif quoted:
+            if char == '"':
+                quoted = False
+        elif char == "(":
+            depth = 1
+            current.append(" ")
+        elif char == '"':
+            quoted = True
+            current.append(" ")
+        elif char == ";":
+            clauses.append("".join(current))
+            current = []
+        else:
+            current.append(char)
+    clauses.append("".join(current))
+    return clauses
+
+
+def _authserv_id(auth_results: str) -> str:
+    """Return the lowercased authserv-id, or "" when the value omits it."""
+    first = _authentication_clauses(auth_results)[0]
+    if _AUTH_RESULT_RE.match(first):
+        return ""
+    words = first.split()
+    return words[0].lower() if words else ""
+
+
+def _receiver_auth_results(values: list[str]) -> list[str]:
+    """Select the receiving MTA's ``Authentication-Results`` instances.
+
+    ``values`` is in header order. The receiver prepends its headers, so these
+    are the topmost instance and any other one carrying the same authserv-id.
+    """
+    if not values:
+        return []
+    receiver = _authserv_id(values[0])
+    return [values[0], *(v for v in values[1:] if _authserv_id(v) == receiver)]
+
+
+def _authentication_verdicts(auth_results: str) -> dict[str, set[str]]:
+    verdicts: dict[str, set[str]] = {}
+    for clause in _authentication_clauses(auth_results):
+        # An authserv-id clause never matches: it cannot contain "=".
+        match = _AUTH_RESULT_RE.match(clause)
+        if match:
+            method, result = match.groups()
+            verdicts.setdefault(method.lower(), set()).add(result.lower())
+    return verdicts
+
+
+def authentication_failed(*auth_results: str) -> bool:
+    """Whether ``Authentication-Results`` shows a forged/unauthenticated From.
+
+    Takes every instance of the header, topmost first. True when any of the
+    receiving MTA's instances reports ``dmarc=fail``, or reports
+    ``spf=fail/softfail`` while the topmost one lacks ``dmarc=pass``. Only the
+    topmost can excuse a failure (for example SPF after forwarding), because a
+    lower instance may be sender-supplied. A bare DKIM pass does not establish
+    alignment with From. This is a negative filter, not proof that the sender is
+    authenticated.
+    """
+    verdicts = [_authentication_verdicts(v) for v in _receiver_auth_results(list(auth_results))]
+    if not verdicts:
+        return False
+    if any("fail" in v.get("dmarc", set()) for v in verdicts):
+        return True
+    spf_failed = any({"fail", "softfail"} & v.get("spf", set()) for v in verdicts)
+    return spf_failed and "pass" not in verdicts[0].get("dmarc", set())
+
 
 _HEADER_LINE_BREAK_RE = re.compile(r"[\r\n]+")
 
@@ -644,13 +773,17 @@ class AgentEmail:
                     if role in (None, "cc"):
                         continue
 
-                    # Extract email from "Name <email>" format
-                    sender = from_line
-                    if "<" in from_line and ">" in from_line:
-                        start = from_line.find("<")
-                        end = from_line.find(">", start)
-                        if start != -1 and end != -1:
-                            sender = from_line[start + 1 : end].strip()
+                    # Trust the RFC 5322 addr-spec, never text inside the display
+                    # name: '"Erik <erik@x.com>" <mallory@evil.com>' is mallory.
+                    # Require exactly one mailbox even on Python versions whose
+                    # parseaddr silently picks the first of several addresses.
+                    # Never fall back to raw header text for allowlist matching.
+                    addresses = getaddresses([from_line])
+                    if len(addresses) != 1:
+                        continue
+                    sender = addresses[0][1]
+                    if sender.count("@") != 1 or not all(sender.split("@")):
+                        continue
 
                     # Skip if already completed (replied or marked as no reply needed)
                     if self._is_completed(message_id):
@@ -658,6 +791,17 @@ class AgentEmail:
 
                     # Skip if not from allowlisted sender
                     if not self._is_allowlisted_sender(sender):
+                        continue
+
+                    # An allowlisted From that failed SPF/DMARC at the receiving
+                    # MTA is a forgery candidate, not a trusted auto-reply.
+                    header_block = content.split("\n\n", 1)[0]
+                    auth_results = [
+                        value
+                        for key, value in self._header_fields(header_block)
+                        if key == "Authentication-Results"
+                    ]
+                    if authentication_failed(*auth_results):
                         continue
 
                     # Skip notification-type emails that don't need replies
@@ -985,6 +1129,38 @@ class AgentEmail:
         filename = message_id.strip("<>").replace("@", "_at_").replace("/", "_")
         return f"{filename}.md"
 
+    _MESSAGE_FOLDERS = ("inbox", "sent", "archive", "drafts")
+
+    def _message_folder_of(self, filename: str) -> str | None:
+        """Return the local folder already holding ``filename``, if any.
+
+        Stored mail is keyed only by the (sender-chosen) Message-ID, and
+        ``read_message``/thread views search every folder. A second message
+        reusing a known Message-ID — or one that maps to the same filename —
+        must not be stored next to the original, or it shadows it.
+        """
+        for folder in self._MESSAGE_FOLDERS:
+            if (self.email_dir / folder / filename).exists():
+                return folder
+        return None
+
+    def _message_store_lock(self) -> FileLock:
+        """Lock making "is this filename taken?" atomic with writing or moving it."""
+        return FileLock(self.locks_dir / "message_store.lock")
+
+    def _conflicts_with_stored(self, filename: str, content: str) -> bool:
+        """Whether storing ``content`` would shadow a different stored message.
+
+        A copy in any message folder may overlap (All Mail/Inbox) only when it
+        is the same stored message.
+        """
+        originals = (self.email_dir / folder / filename for folder in self._MESSAGE_FOLDERS)
+        return any(
+            not _same_stored_message(path.read_text(), content)
+            for path in originals
+            if path.is_file()
+        )
+
     def compose(
         self,
         to: str,
@@ -1068,7 +1244,7 @@ class AgentEmail:
         # Save to drafts
         filename = self._format_filename(message_id)
         draft_path = self.email_dir / "drafts" / filename
-        draft_path.write_text(message)
+        write_private_text(draft_path, message)
 
         return message_id
 
@@ -1482,10 +1658,21 @@ class AgentEmail:
             raise ValueError("Message-ID header missing")
         message_id = match.group(1)
 
-        # Save markdown version to inbox
+        # Save markdown version to inbox. Refuse a Message-ID that already
+        # names a stored message: overwriting it (or shadowing a sent/archived
+        # copy) would substitute attacker-chosen content into the thread.
         filename = self._format_filename(message_id)
-        inbox_path = self.email_dir / "inbox" / filename
-        inbox_path.write_text(message_data)
+        with self._message_store_lock():
+            existing = self._message_folder_of(filename)
+            if existing is not None:
+                # Delivery retries are idempotent, without rewriting or
+                # resurrecting a message already moved out of inbox. Different
+                # content is refused.
+                stored = (self.email_dir / existing / filename).read_bytes()
+                if stored == message_data.encode("utf-8"):
+                    return message_id
+                raise ValueError(f"Message {message_id} already exists in {existing}")
+            write_private_text(self.email_dir / "inbox" / filename, message_data)
 
         return message_id
 
@@ -1504,12 +1691,32 @@ class AgentEmail:
             self.email_dir / "drafts" / filename,
         ]
 
-        for source_path in source_paths:
-            if source_path.exists():
-                archive_path = self.email_dir / "archive" / filename
-                source_path.rename(archive_path)
-                print(f"Message {message_id} archived")
-                return
+        with self._message_store_lock():
+            for source_path in source_paths:
+                if source_path.exists():
+                    archive_path = self.email_dir / "archive" / filename
+                    if archive_path.exists():
+                        archived = archive_path.read_bytes()
+                        source = source_path.read_bytes()
+                        archived_text = archived.decode("utf-8", errors="surrogateescape")
+                        source_text = source.decode("utf-8", errors="surrogateescape")
+                        if archived == source or _same_stored_message(source_text, archived_text):
+                            # All Mail and Inbox can hold the same stored message;
+                            # the archived copy has everything the source has.
+                            source_path.unlink()
+                            print(f"Message {message_id} archived (copy already present)")
+                            return
+                        if not _same_stored_message(archived_text, source_text):
+                            # rename() would silently replace the archived original.
+                            raise ValueError(
+                                f"Message {message_id} already exists in archive; "
+                                "refusing to overwrite"
+                            )
+                        # The source only adds headers the archived copy predates,
+                        # so replacing it loses nothing and keeps the verdicts.
+                    source_path.replace(archive_path)
+                    print(f"Message {message_id} archived")
+                    return
 
         raise ValueError(f"Message not found: {message_id}")
 
@@ -1836,9 +2043,22 @@ class AgentEmail:
         Returns:
             Dict of parsed headers
         """
-        headers = {}
+        headers: dict[str, str] = {}
+        for key, value in self._header_fields(headers_text):
+            # The receiving MTA prepends its verdict. A later, sender-added
+            # duplicate must not override it.
+            if key != "Authentication-Results" or key not in headers:
+                headers[key] = value
+        return headers
+
+    def _header_fields(self, headers_text: str) -> list[tuple[str, str]]:
+        """Parse unfolded ``(name, value)`` pairs in order, keeping duplicates.
+
+        ``Authentication-Results`` is returned with canonical casing.
+        """
+        fields: list[tuple[str, str]] = []
         current_key = None
-        current_value = []
+        current_value: list[str] = []
 
         for line in headers_text.split("\n"):
             if not line:
@@ -1853,7 +2073,7 @@ class AgentEmail:
             # Save previous header if any. Empty current_value is a valid
             # empty-value header (e.g. "X-GitHub-Labels:") and must be stored.
             if current_key:
-                headers[current_key] = " ".join(current_value)
+                fields.append((current_key, " ".join(current_value)))
                 current_value = []
 
             # Parse new header — partition on ":" handles both "Key: value" and
@@ -1863,6 +2083,8 @@ class AgentEmail:
             # that do not strip (e.g. _send_unlocked Message-ID/References).
             if ":" in line:
                 current_key, _, value = line.partition(":")
+                if current_key.lower() == "authentication-results":
+                    current_key = "Authentication-Results"
                 current_value = [value.lstrip()] if value.strip() else []
             else:
                 print(f"Warning: Invalid header line: {line}", file=sys.stderr)
@@ -1870,9 +2092,9 @@ class AgentEmail:
 
         # Save last header (including empty-value)
         if current_key:
-            headers[current_key] = " ".join(current_value)
+            fields.append((current_key, " ".join(current_value)))
 
-        return headers
+        return fields
 
     def _validate_msmtp_config(self) -> bool:
         """Check if msmtp is properly configured and available.
@@ -2222,7 +2444,7 @@ class AgentEmail:
         state_path = self._get_sync_state_path(folder)
         temp_path = state_path.with_name(f".{state_path.name}.{uuid.uuid4().hex}.tmp")
         try:
-            with open(temp_path, "w") as f:
+            with os.fdopen(open_private(temp_path), "w") as f:
                 json.dump({"processed_files": sorted(processed_files)}, f)
             os.replace(temp_path, state_path)
         except OSError as e:
@@ -2342,8 +2564,15 @@ class AgentEmail:
                     # transport-stripped BCC remains attributable after import.
                     headers = []
                     for key in _SYNC_HEADERS:
-                        if key in email_msg:
-                            headers.append(f"{key}: {_single_line_header(email_msg[key])}")
+                        if key not in email_msg:
+                            continue
+                        if key == "Authentication-Results":
+                            values = _receiver_auth_results(
+                                [_single_line_header(v) for v in email_msg.get_all(key, [])]
+                            )
+                        else:
+                            values = [_single_line_header(email_msg[key])]
+                        headers.extend(f"{key}: {value}" for value in values)
 
                     # Handle multipart messages
                     if email_msg.is_multipart():
@@ -2398,9 +2627,21 @@ class AgentEmail:
                     # Ensure the directory exists
                     save_dir.mkdir(parents=True, exist_ok=True)
 
-                    # Save the file
                     md_path = save_dir / filename
-                    md_path.write_text(content)
+                    with self._message_store_lock():
+                        # Checked here, not from the preload: receive() or another
+                        # folder's sync may have stored this filename since.
+                        if md_path.exists():
+                            skipped += 1
+                            processed_files.add(maildir_filename)
+                            continue
+                        if self._conflicts_with_stored(filename, content):
+                            skipped += 1
+                            processed_files.add(maildir_filename)
+                            print(f"Skipping conflicting Message-ID: {message_id[:50]}...")
+                            continue
+
+                        write_private_text(md_path, content)
                     success += 1
 
                     # Track successful sync for incremental optimization
@@ -2503,7 +2744,7 @@ class AgentEmail:
 
                 # Write to maildir cur/ directory (for read messages)
                 dest_file = dest_maildir / "cur" / filename
-                dest_file.write_text(content)
+                write_private_text(dest_file, content)
 
                 success += 1
 
@@ -2594,13 +2835,15 @@ class AgentEmail:
                     filename = self._format_filename(message_id)
                     dest_file = dest_dir / filename
 
-                    # Skip if already exists
-                    if dest_file.exists():
-                        skipped += 1
-                        continue
+                    with self._message_store_lock():
+                        # Skip if already exists, or if it would shadow a
+                        # different message held in another folder.
+                        if dest_file.exists() or self._conflicts_with_stored(filename, content):
+                            skipped += 1
+                            continue
 
-                    # Write to markdown storage
-                    dest_file.write_text(content)
+                        # Write to markdown storage
+                        write_private_text(dest_file, content)
                     success += 1
 
                 except Exception as e:
