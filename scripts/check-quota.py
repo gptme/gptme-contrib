@@ -231,15 +231,37 @@ def _load_cached_claude_usage() -> tuple[dict[str, object], int] | None:
     return data, age_seconds
 
 
-def _load_codex_main_pacing() -> tuple[float, int, float, int] | None:
-    """Read the codex usage cache main tier.
+def _codex_capture_time_is_fresh(data: dict[str, object]) -> bool:
+    """True when the snapshot's capture time is absent (legacy) or fresh.
 
-    Returns (5h_util, 5h_reset_s, weekly_util, weekly_reset_s) from the scraped
-    /status snapshot, or None when the cache is missing, malformed, or stale
-    (>CODEX_USAGE_MAX_AGE_SECONDS). The scraper (check-codex-usage.sh) already
-    normalizes codex's "% left" to utilization (1 - left/100). gpt-5.4 and
-    gpt-5.5 share this main (non-Spark) Codex pool, so the same numbers apply to
-    both models.
+    File mtime alone cannot tell a live snapshot from a copy or restore: copying
+    an old cache renews its mtime. When the scraper records ``_captured_at`` the
+    capture time is authoritative, so a stale, future-dated or unparseable value
+    makes the whole snapshot untrustworthy — for pacing as much as for credits.
+    An absent value means a legacy cache; the file-age check in
+    ``_load_codex_usage_cache`` is then the only freshness signal.
+    """
+    captured_at = data.get("_captured_at")
+    if captured_at is None:
+        return True
+    if not isinstance(captured_at, str):
+        return False
+    try:
+        captured = datetime.fromisoformat(captured_at)
+        age = (datetime.now(timezone.utc) - captured).total_seconds()
+    except (ValueError, TypeError):
+        return False
+    return 0 <= age <= CODEX_USAGE_MAX_AGE_SECONDS
+
+
+def _load_codex_usage_cache() -> dict[str, object] | None:
+    """Read the scraped codex /status snapshot once.
+
+    Returns None when the cache is missing, malformed, or stale
+    (>CODEX_USAGE_MAX_AGE_SECONDS by file age, or by ``_captured_at`` when the
+    scraper recorded one). Pacing and credits are both derived from the returned
+    dict, so one quota row never mixes two snapshots of the file and a stale
+    gauge can never open the pool just because its file mtime looks fresh.
     """
     age = _file_age_seconds(CODEX_USAGE_CACHE_FILE)
     if age is None or age > CODEX_USAGE_MAX_AGE_SECONDS:
@@ -248,22 +270,58 @@ def _load_codex_main_pacing() -> tuple[float, int, float, int] | None:
         data = json.loads(CODEX_USAGE_CACHE_FILE.read_text())
     except (OSError, json.JSONDecodeError):
         return None
-    main = data.get("main") if isinstance(data, dict) else None
+    if not isinstance(data, dict):
+        return None
+    if not _codex_capture_time_is_fresh(data):
+        return None
+    return data
+
+
+def _codex_main_pacing(
+    data: dict[str, object],
+) -> tuple[tuple[float, int] | None, tuple[float, int]] | None:
+    """Return ((5h_util, 5h_reset_s) | None, (weekly_util, weekly_reset_s)).
+
+    None when the snapshot has no usable weekly section. The 5h section is
+    optional: current /status output only shows the weekly limit, so the scraper
+    writes "five_hour": null. The scraper (check-codex-usage.sh) already
+    normalizes codex's "% left" to utilization (1 - left/100). All non-Spark
+    Codex models share this main pool.
+    """
+    main = data.get("main")
     if not isinstance(main, dict):
         return None
-    five_hour = main.get("five_hour")
-    weekly = main.get("weekly")
-    if not isinstance(five_hour, dict) or not isinstance(weekly, dict):
+
+    def window(key: str) -> tuple[float, int] | None:
+        section = main.get(key)
+        if not isinstance(section, dict):
+            return None
+        try:
+            return float(section["utilization"]), int(section["resets_in_seconds"])
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    weekly = window("weekly")
+    if weekly is None:
         return None
-    try:
-        return (
-            float(five_hour["utilization"]),
-            int(five_hour["resets_in_seconds"]),
-            float(weekly["utilization"]),
-            int(weekly["resets_in_seconds"]),
-        )
-    except (KeyError, TypeError, ValueError):
+    return window("five_hour"), weekly
+
+
+def _codex_credits(data: dict[str, object]) -> int | None:
+    """Purchased credit balance from the codex usage snapshot (None = unknown).
+
+    When the weekly plan allowance is spent, Codex keeps serving against this
+    balance (codex /status: "Weekly limit: 0% left ... Credits: N credits"), so
+    a weekly-exhausted pool with credits left is NOT a hard stop. An absent
+    value is unknown, NOT zero. Snapshot freshness is enforced once in
+    ``_load_codex_usage_cache`` for pacing and credits alike, so a stale or
+    copied snapshot cannot vouch for a balance. Negative balances count as
+    exhausted, just like zero.
+    """
+    credits = data.get("credits")
+    if isinstance(credits, bool) or not isinstance(credits, int):
         return None
+    return credits
 
 
 def _shared_codex_pool_quota(backend: str, model: str) -> BackendQuota | None:
@@ -281,26 +339,43 @@ def _shared_codex_pool_quota(backend: str, model: str) -> BackendQuota | None:
     deprioritizes a near-exhausted pool instead of only discovering exhaustion
     reactively via crash-loop / 429 clusters.
     """
-    pacing = _load_codex_main_pacing()
+    data = _load_codex_usage_cache()
+    if data is None:
+        return None
+    pacing = _codex_main_pacing(data)
     if pacing is None:
         return None
-    fh_util, fh_reset, wk_util, wk_reset = pacing
-    target, gap, pacing_status = _combine_pacing(
-        [
-            (fh_util, fh_reset, 18000),
-            (wk_util, wk_reset, 604800),
-        ]
-    )
-    util = max(fh_util, wk_util)
-    available = util < 0.98
-    if fh_util >= wk_util:
-        reset = fh_reset
-        reason = f"5h: {fh_util:.0%}, 7d: {wk_util:.0%}"
+    fh, (wk_util, wk_reset) = pacing
+    axes = [(wk_util, wk_reset, 604800)]
+    if fh is not None:
+        axes.insert(0, (fh[0], fh[1], 18000))
+    target, gap, pacing_status = _combine_pacing(axes)
+    if fh is not None and fh[0] >= wk_util:
+        util, reset = fh
+        reason = f"5h: {fh[0]:.0%}, 7d: {wk_util:.0%}"
     else:
-        reset = wk_reset
-        reason = f"7d: {wk_util:.0%}, 5h: {fh_util:.0%}"
+        util, reset = wk_util, wk_reset
+        fh_label = f"5h: {fh[0]:.0%}" if fh is not None else "no 5h data"
+        reason = f"7d: {wk_util:.0%}, {fh_label}"
+    credits = _codex_credits(data)
+    # Weekly exhaustion is a hard stop ONLY with no credit balance left. Codex
+    # keeps serving past the plan allowance against purchased credits, and the
+    # gptme openai-subscription route shares this pool — so blocking both on the
+    # weekly gauge alone starves the fleet of a working model for days. An
+    # exhausted 5h window still blocks: credits only lift the weekly cap here.
+    on_credits = (
+        wk_util >= 0.98
+        and (fh is None or fh[0] < 0.98)
+        and credits is not None
+        and credits > 0
+    )
+    available = util < 0.98 or on_credits
     if not available:
         reason = f"BLOCKED — {reason}"
+        if credits is not None and credits <= 0:
+            reason += " — no credits remaining"
+    elif on_credits:
+        reason += f" | on credits: {credits:,} remaining"
     return BackendQuota(
         backend=backend,
         model=model,
@@ -314,6 +389,10 @@ def _shared_codex_pool_quota(backend: str, model: str) -> BackendQuota | None:
         pacing_target=target,
         pacing_gap=gap,
         pacing_status=("blocked" if not available else pacing_status),
+        metadata={
+            "credits": credits,
+            "on_credits": on_credits,
+        },
     )
 
 
