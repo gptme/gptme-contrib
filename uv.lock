@@ -665,7 +665,7 @@ name = "build"
 version = "1.5.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "colorama", marker = "(python_full_version >= '3.15' and os_name == 'nt') or (os_name == 'nt' and sys_platform != 'darwin')" },
+    { name = "colorama", marker = "os_name == 'nt'" },
     { name = "packaging" },
     { name = "pyproject-hooks" },
 ]
@@ -1548,7 +1548,7 @@ provides-extras = ["oauth", "bridge", "secrets", "test"]
 [[package]]
 name = "gptme"
 version = "0.35.1"
-source = { git = "https://github.com/gptme/gptme.git?branch=master#496f22ed771df2154336cd9dd11f7d8c378a4414" }
+source = { git = "https://github.com/gptme/gptme.git?branch=master#a2bea36f651562c2747d9cea9ed3c96d6f3dbbfa" }
 dependencies = [
     { name = "anthropic" },
     { name = "click" },
