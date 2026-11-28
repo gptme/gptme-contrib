@@ -1,4 +1,4 @@
-"""Peer-host contract for gptme_review.writer (writer-port slices 2a–2d, 3a, 3b)."""
+"""Peer-host contract for gptme_review.writer (writer-port slices 2a–2d, 3a, 3b; 3c in test_review_main_peer.py)."""
 
 from __future__ import annotations
 
