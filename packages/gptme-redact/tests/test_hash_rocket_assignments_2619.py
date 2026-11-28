@@ -28,6 +28,9 @@ def _redacted(text: str) -> str:
         ":password => '" + SECRET + "'",  # Ruby symbol key
         ":api_key => '" + SECRET + "'",  # Ruby snake_case symbol
         ":password=>'" + SECRET + "'",  # no surrounding whitespace
+        "password => '" + SECRET + "'",  # bare identifier key, quoted value
+        "password=>'" + SECRET + "'",  # bare identifier, no whitespace
+        "db_password => '" + SECRET + "'",  # bare snake_case key
     ],
 )
 def test_hash_rocket_secret_is_redacted(text: str) -> None:
@@ -59,6 +62,8 @@ def test_truncated_hash_rocket_secret_is_redacted(text: str) -> None:
         "foreach ($data as $key => $headerValue) {}",  # PHP foreach
         "'password' => $hash",  # variable value: not statically a secret
         "'name' => 'Bob'",  # non-secret key
+        "items.map(key => 'x')",  # arrow function with a string body
+        "key => 'x'",  # bare `key` is not treated as a secret-named key
     ],
 )
 def test_arrow_functions_and_non_secrets_do_not_fire(text: str) -> None:
