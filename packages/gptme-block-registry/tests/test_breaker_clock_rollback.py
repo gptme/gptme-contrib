@@ -140,3 +140,36 @@ def test_abandoned_probe_verdict_cannot_settle_its_replacement(
         verdict=PRODUCTIVE,
         verdict_started_at=now[0],
     ) == (False, "CLOSED")
+
+
+def test_replacement_granted_exactly_at_abandoned_grant_stays_stale(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A second rollback that lands the re-grant exactly on the abandoned grant
+    must not let the old epoch's verdict through: the identity comparison is
+    strict, so equality does not reject it on its own."""
+    now = [100_000.0]
+    monkeypatch.setattr(time, "time", lambda: now[0])
+    sf = tmp_path / "breaker.json"
+    decide_respawn(state_file=sf, slot="bob", verdict=AUTH_DEATH, threshold=1)
+    now[0] += DEFAULT_COOLDOWN
+    grant = now[0]
+    assert decide_respawn(state_file=sf, slot="bob") == (False, "HALF_OPEN")
+    # First rollback: the in-flight probe looks timed out, so it is abandoned
+    # and a replacement is granted below the abandoned grant.
+    now[0] = 0.0
+    assert decide_respawn(state_file=sf, slot="bob") == (True, "HALF_OPEN")
+    now[0] = DEFAULT_PROBE_TIMEOUT
+    assert decide_respawn(state_file=sf, slot="bob") == (False, "HALF_OPEN")
+    # Second rollback, then the clock jumps straight back to the original
+    # grant: the re-grant lands exactly on the abandoned grant.
+    now[0] = 0.0
+    assert decide_respawn(state_file=sf, slot="bob") == (True, "HALF_OPEN")
+    now[0] = grant
+    assert decide_respawn(state_file=sf, slot="bob") == (False, "HALF_OPEN")
+    # The abandoned probe's verdict is stamped at exactly the new identity, so
+    # the strict identity check alone would accept it.
+    _, state = decide_respawn(
+        state_file=sf, slot="bob", verdict=PRODUCTIVE, verdict_started_at=grant
+    )
+    assert state == "HALF_OPEN", "an equal-stamp verdict must not settle the probe"
