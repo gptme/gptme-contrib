@@ -38,7 +38,8 @@ def test_client_and_settings_use_same_server_address(monkeypatch, server, expect
         "gptme_activity_summary.aw_data.urlopen",
         return_value=nullcontext(BytesIO(b"[]")),
     ) as open_url:
-        assert aw_data._fetch_category_rules() == []
+        # No saved classes -> aw-webui's defaults, not an empty rule set.
+        assert aw_data._fetch_category_rules()
     open_url.assert_called_once_with(settings_url, timeout=aw_data.AW_TIMEOUT)
 
 
@@ -77,7 +78,8 @@ def test_invalid_server_never_creates_client_or_fetches_settings(monkeypatch, ca
         urlopen as open_url,
     ):
         assert aw_data._get_client() is None
-        assert aw_data._fetch_category_rules() == []
+        # Still no fetch; the defaults are used without touching the network.
+        assert aw_data._fetch_category_rules()
 
     create_client.assert_not_called()
     open_url.assert_not_called()
