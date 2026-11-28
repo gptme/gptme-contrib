@@ -338,7 +338,11 @@ class LiveTranscriptSink:
         """Flush everything (retrying briefly) and release the HTTP client."""
         self._closed = True
         if self._timer is not None and not self._timer.done():
-            self._timer.cancel()
+            if not self._flushing:
+                self._timer.cancel()
+            # A POST in flight runs to completion, so its turns are marked
+            # posted (or kept for the final flush) instead of lost.
+            await asyncio.gather(self._timer, return_exceptions=True)
         try:
             for attempt in range(FINAL_FLUSH_ATTEMPTS):
                 if await self.flush() != "retry":

@@ -258,6 +258,42 @@ def test_immediate_flush_holds_an_unsettled_speech_turn_and_keeps_order() -> Non
     ]
 
 
+def test_close_lets_an_in_flight_post_finish() -> None:
+    """Closing while the timer's POST is in flight must not cancel it: the
+    turn is posted exactly once, not lost or sent again by the final flush."""
+    posts: list[list[dict]] = []
+    sent: list[int] = []
+    started = asyncio.Event()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(1)
+        started.set()
+        await asyncio.sleep(0.2)
+        posts.append(json.loads(request.content)["turns"])
+        return httpx.Response(200, json={})
+
+    transcript: list[Turn] = []
+
+    async def run() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
+            sink = LiveTranscriptSink(
+                server_url="http://server",
+                api_key="key",
+                conversation_id="conv-1",
+                call_sid="webui-abc",
+                transcript=transcript,
+                client=c,
+            )
+            transcript.append(Turn("user", "typed: hi"))
+            sink.notify(immediate=True)
+            await asyncio.wait_for(started.wait(), 1)
+            await sink.close()
+
+    asyncio.run(run())
+    assert posts == [[{"role": "user", "text": "typed: hi", "turn_id": "webui-abc:0"}]]
+    assert len(sent) == 1  # not cancelled and sent again
+
+
 def test_settle_window_holds_even_when_configured_tiny() -> None:
     sink = LiveTranscriptSink(
         server_url="http://server",

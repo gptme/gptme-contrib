@@ -327,7 +327,10 @@ def test_conversation_bound_call_end_is_not_promoted_again(
     async def _on_call_end(caller_id, source, transcript, metadata, **kwargs):
         ended.append(metadata)
 
-    async def _build(*, caller_id: str, handoff_id: str | None) -> str:
+    callers: list[str | None] = []
+
+    async def _build(*, caller_id: str | None, handoff_id: str | None) -> str:
+        callers.append(caller_id)
         return "You are Bob."
 
     websocket = _DummyBrowserWebSocket([{"type": "websocket.disconnect"}])
@@ -345,6 +348,8 @@ def test_conversation_bound_call_end_is_not_promoted_again(
     monkeypatch.setattr("gptme_voice.realtime.server.GptmeToolBridge", _DummyToolBridge)
     asyncio.run(server.handle_browser_websocket(websocket))
     assert ended and ended[0].get("transcript_posted_live") == "1"
+    # The conversation already holds the earlier calls' turns: no resume.
+    assert callers == [None]
 
     posted: list[str] = []
     monkeypatch.setattr(

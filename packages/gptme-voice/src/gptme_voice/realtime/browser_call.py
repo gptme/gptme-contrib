@@ -197,8 +197,12 @@ async def handle_browser_websocket(server: VoiceServer, websocket):
                 ),
             }
         )
+        # A loaded conversation already holds earlier calls' live-posted
+        # turns: resuming the last call as well would give the model each
+        # of them twice.
+        resume_caller = None if context is not None and context.loaded else caller_id
         instructions = await server._build_session_instructions(
-            caller_id=caller_id, handoff_id=handoff_id, **other_workspace
+            caller_id=resume_caller, handoff_id=handoff_id, **other_workspace
         )
         if context is not None and context.loaded and conversation_id:
             if context.instructions:
