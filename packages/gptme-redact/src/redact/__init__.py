@@ -641,7 +641,7 @@ _PATTERNS: list[Pattern] = [
             # short HIGH value and the secret leaked. `=>` is deliberately not
             # included: it makes ordinary arrow functions and PHP foreach loops
             # (``key => key.trim()``) a CRITICAL fail-closed block.
-            r"(?P<sep>['\"][ \t\r\n]*:[ \t\r\n]*|['\"]?[ \t]*(?::=|[:=])[ \t]*)"
+            r"(?P<sep>['\"][ \t\r\n]*:[ \t\r\n]*|['\"]?[ \t]*(?::=|[:=](?!>))[ \t]*)"
             # Quoted values include punctuation/spaces and escaped delimiters.
             # Prefer a complete quoted value, including embedded newlines.
             # Truncated snippets end at a line boundary or EOF instead of a
@@ -665,6 +665,47 @@ _PATTERNS: list[Pattern] = [
             # punctuation (``["TOKEN=abc", …]``) still closes the word.
             r"|[^\s'\"]+(?:['\"]+(?![,;)\]}])[^\s'\"]+)*)))"
             r"(?(quote)(?:(?P=quote)|(?=[\r\n]|\Z)))",
+            re.IGNORECASE,
+        ),
+        Severity.CRITICAL,
+        "secret_assignment",
+        value_only=True,
+    ),
+    # PHP/Ruby hash-rocket assignment: a QUOTED key (PHP ``'password' =>``) or a
+    # Ruby symbol key (``:password =>``) followed by ``=>`` and a QUOTED value.
+    # Both sides must be literals: that is what keeps ordinary arrow functions
+    # and ``foreach`` loops (``key => key.trim()``, ``$key => $headerValue``)
+    # from matching. A bare identifier key (``password => 'x'``) is deliberately
+    # NOT matched: it is valid JavaScript (an arrow function returning a string)
+    # but invalid PHP/Ruby hash syntax, so matching it would re-introduce the
+    # arrow false positives this split exists to avoid. The literal words
+    # ``key``/``keys`` are excluded from both key forms because ``['key' => 'x']``
+    # is an ordinary array entry, not a credential. This is split out of the main
+    # ``secret_assignment`` separator, which deliberately omits ``=>`` because
+    # the generic name+separator shape over-fires on arrow functions
+    # (gptme/gptme-contrib#2619). Accepted trade-off: an unquoted hash-rocket
+    # value (``password=>hunter2``, ``'password' => $hash``) is not matched — the
+    # generic separator no longer reaches ``=>``, and the shape is otherwise
+    # indistinguishable from an arrow function or a plain foreach loop.
+    # The value may be truncated by tool output, exactly like the catch-all
+    # above: a complete quoted value is preferred, but an unterminated one ends
+    # at a line boundary or EOF instead of failing open (review P1, #2625).
+    # The truncated branch stops at a raw newline (a trailing backslash keeps
+    # the backslash but not the break) so it cannot swallow a whole document.
+    Pattern(
+        re.compile(
+            r"(?P<key>"
+            r"['\"](?!keys?['\"])"
+            r"(?:[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)*_)?"
+            r"(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)['\"]"
+            r"|:(?!keys?\b)"
+            r"(?:[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)*_)?"
+            r"(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)\b)"
+            r"[ \t]*=>[ \t]*"
+            r"(?P<quote>['\"])(?P<value>"
+            r"(?:(?:\\[\s\S]|(?!(?P=quote))[^\\])+(?=(?P=quote))"
+            r"|(?:\\[^\r\n]|\\(?=[\r\n]|\Z)|(?!(?P=quote))[^\\\r\n])+)"
+            r")(?:(?P=quote)|(?=[\r\n]|\Z))",
             re.IGNORECASE,
         ),
         Severity.CRITICAL,
