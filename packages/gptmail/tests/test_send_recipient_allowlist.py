@@ -71,6 +71,28 @@ def test_plus_tag_stripped(agent: AgentEmail, monkeypatch: pytest.MonkeyPatch):
     assert agent._is_allowlisted_recipient("erik+newsletter@example.com")
 
 
+@pytest.mark.parametrize(
+    "recipient",
+    [
+        "--logfile=/tmp/x@example.com",
+        "-C/tmp/evil@example.com",
+        "Name <--passwordeval=id#@example.com>",
+    ],
+)
+@pytest.mark.parametrize("allowlist", ["example.com", "*"])
+def test_option_shaped_recipient_blocked(
+    agent: AgentEmail, monkeypatch: pytest.MonkeyPatch, recipient: str, allowlist: str
+):
+    """An address starting with ``-`` would be parsed by msmtp as an option."""
+    monkeypatch.setenv("EMAIL_SEND_ALLOWLIST", allowlist)
+    assert not agent._is_allowlisted_recipient(recipient)
+
+
+@pytest.mark.parametrize("recipient", ["", "alice@example.com, -C /tmp/x", "ok@example.com, <>"])
+def test_wildcard_does_not_bypass_recipient_validation(agent: AgentEmail, recipient: str):
+    assert not agent._is_allowlisted_recipient(recipient, env_allowlist="*")
+
+
 # ---------------------------------------------------------------------------
 # Integration: send() blocks non-allowlisted recipient
 # ---------------------------------------------------------------------------

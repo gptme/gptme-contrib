@@ -3,6 +3,7 @@
 import subprocess
 import sys
 from email import policy
+from email._parseaddr import AddressList
 from email.parser import BytesParser
 from types import SimpleNamespace
 
@@ -61,12 +62,49 @@ def test_clean_payload_delivered_once_and_archived(recording_send, body):
     agent.send("fixture")
     assert len(calls) == 1
     command, kwargs = calls[0]
-    assert command == ["msmtp", "recipient@example.com"]
+    # "--" ends option parsing so the recipient can never be read as an msmtp option
+    assert command == ["msmtp", "--", "recipient@example.com"]
     message = BytesParser(policy=policy.default).parsebytes(kwargs["input"])
     assert str(message["Subject"]) == "Clean"
     assert "Hello" in str(kwargs["input"])
     assert not draft.exists()
     assert (agent.email_dir / "sent/fixture.md").exists()
+
+
+@pytest.mark.parametrize("legacy_parser", [False, True])
+@pytest.mark.parametrize("body", ["Hello", "<html><body>Hello</body></html>"])
+@pytest.mark.parametrize(
+    "recipient",
+    [
+        "a@example.com, b@example.com",
+        "A <a@example.com>, B <b@example.com>",
+        "Åsa <a@example.com>, B <b@example.com>",
+    ],
+)
+def test_all_validated_recipients_reach_msmtp(
+    recording_send, monkeypatch, recipient, body, legacy_parser
+):
+    """The visible To header names exactly the mailboxes msmtp delivers to."""
+    agent, draft, calls = recording_send
+    monkeypatch.setenv("EMAIL_SEND_ALLOWLIST", "example.com")
+    if legacy_parser:
+        # Pre-CVE-2023-27043 behaviour: parseaddr keeps only the first mailbox.
+        def getaddresses(values):
+            return AddressList(", ".join(values)).addresslist
+
+        def parseaddr(value):
+            return (AddressList(value).addresslist or [("", "")])[0]
+
+        monkeypatch.setattr("gptmail.lib.getaddresses", getaddresses)
+        monkeypatch.setattr("gptmail.lib.parseaddr", parseaddr)
+    draft.write_text(f"To: {recipient}\nSubject: Clean\n\n{body}", encoding="utf-8")
+    agent.send("fixture")
+    assert len(calls) == 1
+    command, kwargs = calls[0]
+    assert command == ["msmtp", "--", "a@example.com", "b@example.com"]
+    message = BytesParser(policy=policy.default).parsebytes(kwargs["input"])
+    assert [a.addr_spec for a in message["To"].addresses] == command[2:]
+    assert not draft.exists()
 
 
 def test_forbidden_recipient_remains_zero_delivery(recording_send):

@@ -112,7 +112,7 @@ def _is_html(text: str) -> bool:
 
 
 def _format_address_header(value: str) -> str:
-    """Build an RFC 5322-valid address-header value from a ``Name <addr>`` string.
+    """Build an RFC 5322-valid address-header value from ``Name <addr>`` entries.
 
     A raw ``"Recipient Name <recipient@example.com>"`` assigned directly to an email
     header is mishandled by Python's serializer when the display name is
@@ -121,20 +121,20 @@ def _format_address_header(value: str) -> str:
     ``To: =?utf-8?b?...?=``) — which makes the message undeliverable while still
     being accepted by the SMTP envelope.
 
-    This splits into ``(display-name, addr-spec)`` and re-joins with
+    This splits each mailbox into ``(display-name, addr-spec)`` and re-joins with
     :func:`email.utils.formataddr`, which RFC2047-encodes only the name and keeps
-    ``<addr>`` intact. Returns the address unchanged when there is no display
-    name.
+    ``<addr>`` intact. A mailbox without a display name stays a bare address.
+
+    Parses with :func:`email.utils.getaddresses`, as the send path does for the
+    msmtp recipients, so the header names every mailbox that gets delivery.
     """
-    name, addr = parseaddr(value)
-    if not addr:
-        # parseaddr couldn't find an addr-spec; return input untouched so the
-        # caller's downstream handling/fallbacks still apply.
+    mailboxes = getaddresses([value])
+    if not mailboxes or not all(addr for _, addr in mailboxes):
+        # Unparseable: return input untouched so the caller's downstream
+        # handling still applies.
         return value
-    if not name:
-        return addr
     # formataddr handles RFC2047 encoding of a non-ASCII name itself.
-    return formataddr((name, addr))
+    return ", ".join(formataddr((name, addr)) if name else addr for name, addr in mailboxes)
 
 
 # Envelope headers that survive BCC stripping. Gmail's IMAP copy of a blind
@@ -644,13 +644,17 @@ class AgentEmail:
                     if role in (None, "cc"):
                         continue
 
-                    # Extract email from "Name <email>" format
-                    sender = from_line
-                    if "<" in from_line and ">" in from_line:
-                        start = from_line.find("<")
-                        end = from_line.find(">", start)
-                        if start != -1 and end != -1:
-                            sender = from_line[start + 1 : end].strip()
+                    # Trust the RFC 5322 addr-spec, never text inside the display
+                    # name: '"Erik <erik@x.com>" <mallory@evil.com>' is mallory.
+                    # Require exactly one mailbox even on Python versions whose
+                    # parseaddr silently picks the first of several addresses.
+                    # Never fall back to raw header text for allowlist matching.
+                    addresses = getaddresses([from_line])
+                    if len(addresses) != 1:
+                        continue
+                    sender = addresses[0][1]
+                    if sender.count("@") != 1 or not all(sender.split("@")):
+                        continue
 
                     # Skip if already completed (replied or marked as no reply needed)
                     if self._is_completed(message_id):
@@ -789,6 +793,19 @@ class AgentEmail:
         Returns:
             True if the recipient is in the allowlist, False otherwise.
         """
+        # Validate before the wildcard shortcut: it bypasses trust policy, not
+        # recipient syntax or the prohibition on option-shaped addresses.
+        if not recipient:
+            return False
+        addresses = [addr for _, addr in getaddresses([recipient])]
+        # msmtp splits comma-separated recipients. Reject ambiguous quoted
+        # commas and empty/unparseable elements rather than discarding them.
+        # Leading "-" would be an msmtp option without our argv terminator.
+        if not addresses or any(
+            not addr or "," in addr or addr.startswith("-") for addr in addresses
+        ):
+            return False
+
         if env_allowlist is None:
             env_allowlist = os.getenv("EMAIL_SEND_ALLOWLIST", "")
         if env_allowlist == "*":
@@ -806,19 +823,7 @@ class AgentEmail:
             if self.own_email:
                 allowlisted.append(self.own_email.lower())
 
-        if not recipient:
-            return False
-
-        # msmtp delivers to every comma-separated address in its recipient
-        # argument, so each address in a list must be allowlisted on its own.
-        # Unparseable input fails closed.
-        addresses = [addr for _, addr in getaddresses([recipient])]
-        # A quoted address can retain a comma that msmtp subsequently splits
-        # into multiple envelope recipients. Do not authorize that ambiguity,
-        # or silently discard empty/unparseable list elements.
-        if not addresses or any(not addr or "," in addr for addr in addresses):
-            return False
-
+        # Every address in a list must be allowlisted on its own.
         allowed_lower = [allowed.lower() for allowed in allowlisted]
 
         def _allowed(address: str) -> bool:
@@ -1319,15 +1324,14 @@ class AgentEmail:
             _, sender_email = parseaddr(sender)
             account = self._get_msmtp_account_for_address(sender_email or sender)
 
-            # Build msmtp command
-            _, recipient_email = parseaddr(recipient)
-            if not recipient_email:
-                recipient_email = recipient  # Fallback if parsing fails
-
+            # Deliver every mailbox validated above, not parseaddr's first
+            # mailbox on older Python or an unparsed fallback on newer Python.
+            recipient_emails = [addr for _, addr in getaddresses([recipient])]
             msmtp_cmd = ["msmtp"]
             if account:
                 msmtp_cmd.extend(["-a", account])
-            msmtp_cmd.append(recipient_email)
+            # "--" ends option parsing: the recipient is never an msmtp option.
+            msmtp_cmd.extend(["--", *recipient_emails])
 
             # Check rate limit before sending
             if not self.rate_limiter.can_proceed():
