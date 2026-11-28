@@ -106,3 +106,37 @@ def test_recovery_watermark_does_not_disable_failures_after_rollback(
         )
     assert result == (True, "OPEN")
     assert json.loads(sf.read_text())["bob"]["failure_count"] == 3
+
+
+def test_abandoned_probe_verdict_cannot_settle_its_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rollback longer than probe_timeout re-grants the probe; the abandoned
+    attempt's verdict must stay stale even after the wall clock catches up."""
+    now = [100_000.0]
+    monkeypatch.setattr(time, "time", lambda: now[0])
+    sf = tmp_path / "breaker.json"
+    decide_respawn(state_file=sf, slot="bob", verdict=AUTH_DEATH, threshold=1)
+    now[0] += DEFAULT_COOLDOWN
+    grant = now[0]
+    assert decide_respawn(state_file=sf, slot="bob") == (False, "HALF_OPEN")
+    # Clock correction far below the grant: the probe looks timed out.
+    now[0] = 0.0
+    assert decide_respawn(state_file=sf, slot="bob") == (True, "HALF_OPEN")
+    now[0] = DEFAULT_PROBE_TIMEOUT
+    assert decide_respawn(state_file=sf, slot="bob") == (False, "HALF_OPEN")
+    assert json.loads(sf.read_text())["bob"]["probe_abandoned_at"] == grant
+    # Clock catches back up past the abandoned grant. Its late verdict must
+    # not close the breaker in place of the replacement probe.
+    now[0] = grant + 1
+    _, state = decide_respawn(
+        state_file=sf, slot="bob", verdict=PRODUCTIVE, verdict_started_at=grant
+    )
+    assert state == "HALF_OPEN", "the abandoned probe's verdict must not close it"
+    # The current probe's own verdict still settles it.
+    assert decide_respawn(
+        state_file=sf,
+        slot="bob",
+        verdict=PRODUCTIVE,
+        verdict_started_at=now[0],
+    ) == (False, "CLOSED")
