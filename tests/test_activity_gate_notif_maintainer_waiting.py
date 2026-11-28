@@ -18,6 +18,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / "scripts" / "github" / "activity-gate.sh"
 
@@ -191,6 +193,10 @@ if argv[0] == "api":
         print(apply_jq({"state": subject_state}, jq_expr))
         sys.exit(0)
     if "/pulls/" in endpoint and endpoint.endswith(str(notif_number)):
+        lookup_log = os.environ.get("TEST_PULLS_LOOKUP_LOG")
+        if lookup_log:
+            with open(lookup_log, "a") as fh:
+                fh.write(endpoint + "\n")
         pr = {"head": {"sha": head_sha}}
         print(apply_jq(pr, jq_expr))
         sys.exit(0)
@@ -461,6 +467,27 @@ def test_human_merge_marker_suppresses_author_notification() -> None:
         result = _run_gate(tmp, state_dir, waiting_body=PM_HUMAN_MERGE_BODY)
         assert result.returncode in (0, 1), result.stderr
         assert _emitted_notifications(result.stdout) == [], result.stdout
+
+
+@pytest.mark.parametrize("comment_count", [1, 700])
+@pytest.mark.parametrize("marker", [False, True])
+def test_head_lookup_only_for_head_scoped_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, comment_count: int, marker: bool
+) -> None:
+    log = tmp_path / "pulls-lookups.log"
+    monkeypatch.setenv("TEST_PULLS_LOOKUP_LOG", str(log))
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    result = _run_gate(
+        tmp_path,
+        state_dir,
+        comment_count=comment_count,
+        waiting_body=PM_HUMAN_MERGE_BODY if marker else None,
+    )
+    assert result.returncode in (0, 1), result.stderr
+    assert _emitted_notifications(result.stdout) == [], result.stdout
+    lookups = log.read_text().splitlines() if log.exists() else []
+    assert lookups == [f"repos/{NOTIF_REPO}/pulls/{NOTIF_NUMBER}"] * int(marker)
 
 
 def test_human_merge_marker_reopens_on_human_comment() -> None:
