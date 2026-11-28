@@ -406,3 +406,14 @@ def test_budget_base_env_measures_a_pr_merge_commit(repo, monkeypatch):
     assert ratchet.main([*BUDGET, path]) == 0  # vs HEAD: no growth
     monkeypatch.setenv("FILE_SIZE_RATCHET_BASE", "HEAD^1")
     assert ratchet.main([*BUDGET, path]) == 1  # vs the base tip: +4
+
+
+def test_budget_unresolved_base_does_not_lower_a_stale_baseline(repo, capsys):
+    # No commit: HEAD does not resolve, so the budget falls back to the
+    # baseline. Baseline 15 with a real base of 12 and current 14 is growth
+    # relative to the base; lowering the baseline to 14 would hide it.
+    baseline({"big.py": 15})
+    assert ratchet.main([*BUDGET, write("big.py", 14)]) == 0
+    assert read_baseline()["files"] == {"big.py": 15}
+    captured = capsys.readouterr()
+    assert "leaving the entry unchanged" in captured.out

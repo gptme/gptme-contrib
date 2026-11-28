@@ -339,8 +339,21 @@ def check(
             else:
                 errors.append(f"{rel}: {grew} and may only shrink.")
         elif lines < allowed:
-            files[rel] = lines
-            changed = True
+            if growth == "budget":
+                # base_rev is None here. The baseline can be stale (above the
+                # file's size at the real base), so lowering it would let a
+                # file that grew relative to the base pass unseen: baseline 15,
+                # base 12, current 14 reads as a shrink against 15. Leave the
+                # entry unchanged and say so; only --growth=error may lower it.
+                warn(
+                    rel,
+                    f"{lines} lines is below the {allowed}-line baseline, but the "
+                    "growth base could not be resolved; leaving the entry "
+                    "unchanged so a stale baseline cannot hide growth.",
+                )
+            else:
+                files[rel] = lines
+                changed = True
 
     if growth == "off":
         for error in errors:
