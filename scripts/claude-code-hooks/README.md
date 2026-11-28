@@ -266,3 +266,46 @@ echo '{"hook_event_name":"PreToolUse","session_id":"test","tool_name":"Bash","to
 - [gptme docs: Lessons](https://gptme.org/docs/lessons.html) — lesson system overview
 - [gptme-agent-template](https://github.com/gptme/gptme-agent-template) — workspace
   template that uses this hook
+
+## `shared-checkout-git-guard.py` — Deny git commands that lose other sessions' work
+
+A PreToolUse hook for the Bash tool. In a checkout marked with
+`git config safety.sharedCheckout true` (see `scripts/git/setup-shared-checkout.sh`)
+it denies whole-tree operations (stash writes, `reset --hard`, a `reset`
+without paths, `--autostash`, forced `clean`, `checkout`/`restore` of `.`,
+forced `checkout`/`switch`) and broad staging (`add -A`/`-u`/`.`, `commit -a`).
+In any repo with linked worktrees it denies writes to the shared stash stack
+(`stash list|show|create` and `stash apply <sha>` stay allowed).
+
+The command is tokenized like a shell would: quotes, escapes, `#` comments,
+redirections and heredoc bodies are handled, and it is split at `;`, `&&`,
+`||`, `|`, `&` and newlines. `cd`/`pushd` are followed in order (a `cd` inside
+a subshell stays there), and each git invocation is parsed: `-C` chains,
+`--git-dir` picks the repository, `--work-tree` adds the tree it touches.
+
+It **fails closed** on what it can't judge: a destructive command in a
+directory given by a variable (`cd "$DIR"`), or a command that doesn't
+tokenize (unbalanced quotes) and mentions a destructive git subcommand. Only
+the hook wrapper itself fails open (malformed hook JSON never breaks the Bash
+tool). It guards against common mistakes, not a determined bypass: git hidden
+behind another program (`bash -c`, `xargs`, aliases) is out of scope.
+
+Register it in `~/.claude/settings.json` (user-level, so it covers every repo;
+unmarked repos are unaffected apart from the stash-stack rule):
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [{
+      "matcher": "Bash",
+      "hooks": [{
+        "type": "command",
+        "command": "python3 /path/to/gptme-contrib/scripts/claude-code-hooks/shared-checkout-git-guard.py"
+      }]
+    }]
+  }
+}
+```
+
+The matcher, `detect(command, cwd)`, is a pure function, so other runtimes can
+reuse it. Lesson: `lessons/workflow/shared-checkout-git-safety.md`.

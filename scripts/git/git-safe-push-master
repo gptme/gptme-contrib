@@ -398,6 +398,7 @@ fi
 trap 'exec 9>&-' EXIT
 
 # Acquire the shared commit lock (same flock as git-safe-commit)
+command -v flock >/dev/null 2>&1 || { echo "git-safe-push-master: flock not found (macOS: brew install flock; Linux: util-linux)" >&2; exit 2; }
 exec 9>"$LOCKFILE"
 if ! flock --timeout "$LOCK_TIMEOUT" 9; then
     echo "error: timed out waiting for commit lock (${LOCK_TIMEOUT}s)" >&2

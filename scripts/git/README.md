@@ -4,6 +4,19 @@
 flock for cooperating operations. Ordinary editors and other filesystem writers
 do not acquire it. Never remove the lock pathname to resolve contention.
 
+## Setting up a shared checkout
+
+`setup-shared-checkout.sh [--check] [REPO]` prepares a checkout several sessions
+commit to: it sets `safety.sharedCheckout=true` (the opt-in for the Claude Code
+guard in `scripts/claude-code-hooks/`), `pull.ff=only` and local
+`rebase.autoStash=false`/`merge.autoStash=false`, and installs a pre-commit hook
+that execs `pre-commit-auto-stage`. That hook serializes on the commit flock and
+runs prek/pre-commit with `--files <staged paths>`, so unlike a plain
+`prek install` hook it never stashes other sessions' unstaged changes. An
+existing different hook is kept as `pre-commit.bak.<timestamp>`; `--check`
+reports what is missing and exits 1. All four helpers need `flock`
+(macOS: `brew install flock`). See `lessons/workflow/shared-checkout-git-safety.md`.
+
 ## Safe-push publication and local materialization
 
 `git-safe-push-master` derives the remote/trunk, fetches, and publishes either a

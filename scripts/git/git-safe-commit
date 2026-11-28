@@ -604,6 +604,22 @@ hook_allows_untracked_dirty_guard_relaxation() {
         return 0
     fi
 
+    # The wrapper setup-shared-checkout.sh installs execs that hook through a
+    # HOOK= path (often $HOME-relative); judge the script it points at.
+    if grep -Fq "Installed by gptme-contrib scripts/git/setup-shared-checkout.sh" "$hook_path" 2>/dev/null; then
+        local target
+        target="$(sed -n 's/^HOOK="\(.*\)"$/\1/p' "$hook_path" | head -n 1)"
+        # shellcheck disable=SC2016  # literal $HOME as written in the wrapper
+        target="${target/#\$HOME/$HOME}"
+        # Undo the setup script's double-quote escaping (\\ \" \$ \`).
+        target="$(printf '%s' "$target" | sed 's/\\\([\\"$`]\)/\1/g')"
+        if [ -n "$target" ] && [ "$target" != "$hook_path" ] && [ -f "$target" ] && \
+           ! grep -Fq "Installed by gptme-contrib scripts/git/setup-shared-checkout.sh" "$target" 2>/dev/null; then
+            hook_allows_untracked_dirty_guard_relaxation "$target"
+            return $?
+        fi
+    fi
+
     return 1
 }
 
@@ -1314,6 +1330,7 @@ case "$LOCK_TIMEOUT" in
         ;;
 esac
 
+command -v flock >/dev/null 2>&1 || { echo "git-safe-commit: flock not found (macOS: brew install flock; Linux: util-linux)" >&2; exit 1; }
 exec 9>"$LOCKFILE"
 if ! flock --timeout "$LOCK_TIMEOUT" 9; then
     report_commit_lock_timeout "$LOCKFILE" "$LOCK_TIMEOUT"
