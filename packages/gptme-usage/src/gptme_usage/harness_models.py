@@ -21,7 +21,7 @@ import sys
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TypedDict
+from typing import Any, TypedDict
 
 # Approximate agent-session token mix used to blend input/output list prices into
 # a single $/1M-token-equivalent floor. Agent runs are usually prompt-heavy due
@@ -173,51 +173,60 @@ def load_quota_config(path: Path | None = None) -> HarnessQuotaConfig:
     except Exception:
         return HarnessQuotaConfig()
 
+    def _table(name: str) -> dict[str, Any]:
+        # A mistyped section (``prices = 5``) is ignored like an unparsable
+        # file, rather than crashing every caller of the loader.
+        value = raw.get(name)
+        return value if isinstance(value, dict) else {}
+
+    def _finite_nonneg(value: Any) -> float | None:
+        try:
+            number = float(value)
+        except (TypeError, ValueError, OverflowError):
+            # OverflowError: TOML accepts integers too large for a float.
+            return None
+        return number if math.isfinite(number) and number >= 0 else None
+
     price_table: dict[tuple[str, str], tuple[float, float]] = {}
-    for backend, models in (raw.get("prices") or {}).items():
+    for backend, models in _table("prices").items():
         if not isinstance(models, dict):
             continue
         for model, pair in models.items():
             if isinstance(pair, list) and len(pair) == 2:
-                try:
-                    price_table[(backend, model)] = (float(pair[0]), float(pair[1]))
-                except (TypeError, ValueError):
-                    pass
+                inp, out = _finite_nonneg(pair[0]), _finite_nonneg(pair[1])
+                if inp is not None and out is not None:
+                    price_table[(backend, model)] = (inp, out)
 
     cache_read_price_table: dict[tuple[str, str], float] = {}
-    for backend, models in (raw.get("cache_read_prices") or {}).items():
+    for backend, models in _table("cache_read_prices").items():
         if not isinstance(models, dict):
             continue
         for model, value in models.items():
-            try:
-                rate = float(value)
-            except (TypeError, ValueError):
-                continue
-            if math.isfinite(rate) and rate >= 0:
+            rate = _finite_nonneg(value)
+            if rate is not None:
                 cache_read_price_table[(backend, model)] = rate
 
     tps_table: dict[tuple[str, str], float] = {}
-    for backend, models in (raw.get("tps") or {}).items():
+    for backend, models in _table("tps").items():
         if not isinstance(models, dict):
             continue
         for model, tps in models.items():
-            try:
-                tps_table[(backend, model)] = float(tps)
-            except (TypeError, ValueError):
-                pass
+            rate = _finite_nonneg(tps)
+            if rate is not None:
+                tps_table[(backend, model)] = rate
 
     quota_sources: dict[str, str] = {}
-    for model, src in (raw.get("quota_sources") or {}).items():
+    for model, src in _table("quota_sources").items():
         if isinstance(src, str):
             quota_sources[model] = src
 
     model_routes: dict[str, str] = {}
-    for model, route in (raw.get("model_routes") or {}).items():
+    for model, route in _table("model_routes").items():
         if isinstance(route, str):
             model_routes[model] = route
 
     openrouter_key_contexts: dict[str, str] = {}
-    for key, ctx in (raw.get("openrouter_key_contexts") or {}).items():
+    for key, ctx in _table("openrouter_key_contexts").items():
         if isinstance(ctx, str):
             openrouter_key_contexts[key] = ctx
 
@@ -330,6 +339,14 @@ def quota_pool_label(
     return "unknown"
 
 
+def _cc_family(resolved: str) -> str:
+    """Collapse a resolved Claude Code arm (``opus-5-5``) to its family row."""
+    for family in ("opus", "sonnet", "haiku"):
+        if resolved == family or resolved.startswith(f"{family}-"):
+            return family
+    return resolved
+
+
 def pricing_key_for_model(
     harness: str,
     model: str,
@@ -339,12 +356,16 @@ def pricing_key_for_model(
     normalized_model = model
     if harness == "claude-code":
         resolved = resolve_cc_version(model)
-        for family in ("opus", "sonnet", "haiku"):
-            if resolved == family or resolved.startswith(f"{family}-"):
-                normalized_model = family
-                break
-        else:
-            normalized_model = resolved
+        # A versioned row (e.g. ``opus-5-5``) prices its own version; only a
+        # version without a row of its own falls back to the family row.
+        price_table = (
+            config.price_table
+            if (config is not None and config.price_table)
+            else HARNESS_PRICE_USD_PER_1M
+        )
+        if (harness, resolved) in price_table:
+            return (harness, resolved)
+        normalized_model = _cc_family(resolved)
     elif harness == "gptme":
         # Config replaces the module-level routes entirely (consistent with
         # price_table and tps_table: all three use replace-not-merge) so a
@@ -518,9 +539,18 @@ def estimate_session_cost(
 
     input_price, output_price = prices
     provider = _CACHE_PRICING_PROVIDER.get(key)
+    if provider is None and harness == "claude-code":
+        # Claude Code only serves Anthropic models, so a version missing from
+        # the table above still gets Anthropic cache pricing.
+        provider = "anthropic"
     configured_cache_read_price = (
         config.cache_read_price_table.get(key) if config is not None else None
     )
+    if configured_cache_read_price is None and config is not None:
+        # A versioned row with its own price but no cache rate of its own
+        # keeps the family's configured cache rate (e.g. a free 0.0).
+        family_key = (key[0], _cc_family(key[1])) if harness == "claude-code" else key
+        configured_cache_read_price = config.cache_read_price_table.get(family_key)
     cache_read_price = configured_cache_read_price
     if cache_read_price is None:
         cache_read_price = input_price * CACHE_READ_MULTIPLIER.get(provider or "", 1.0)
@@ -535,7 +565,7 @@ def estimate_session_cost(
         # Empirical validation: 1,104 CC sessions with full breakdowns
         # show 99.9%+ of billed tokens are cache reads, so token_count
         # ≈ cache_read_tokens for these sessions.
-        if token_count and token_count > 0 and key in SUBSCRIPTION_BACKED_MODELS:
+        if token_count and token_count > 0 and _is_subscription_backed(key):
             # A provider heuristic or an explicit configured rate both price the
             # cache-read-dominated token_count. A subscription model with neither
             # stays unknown rather than guessing at the full input price.
@@ -581,11 +611,31 @@ def estimate_session_cost(
 # Backends where quota pressure should be translated into effective cost. API
 # models already pay real marginal dollars, but subscription-backed models need
 # a synthetic pressure term once quota gets tight.
+def _is_subscription_backed(key: tuple[str, str]) -> bool:
+    """Whether a pricing key belongs to a subscription pool.
+
+    A configured versioned Claude Code row (``opus-5``) selects that version as
+    the pricing key; it is in the same pool as its family, even when the set
+    below does not list the version yet.
+    """
+    if key in SUBSCRIPTION_BACKED_MODELS:
+        return True
+    harness, model = key
+    return (
+        harness == "claude-code"
+        and (harness, _cc_family(model)) in SUBSCRIPTION_BACKED_MODELS
+    )
+
+
 SUBSCRIPTION_BACKED_MODELS: set[tuple[str, str]] = {
     ("claude-code", "opus"),
     ("claude-code", "opus-5-5"),  # 2026-09-22: same Claude Max pool as opus
     ("claude-code", "sonnet"),
+    ("claude-code", "sonnet-5-5"),
+    ("claude-code", "haiku"),
     ("claude-code", "fable-5"),
+    ("claude-code", "fable-5-1"),
+    ("claude-code", "fable-5-2"),
     ("grok-build", "grok-build"),
     ("codex", "gpt-5.4"),
     ("codex", "gpt-5.5"),
@@ -651,6 +701,9 @@ def estimate_tokens_from_duration(
     )
     key = pricing_key_for_model(harness, model, config)
     tps = tps_table.get(key)
+    if tps is None and harness == "claude-code":
+        # A versioned price row may exist without a versioned TPS row.
+        tps = tps_table.get((harness, _cc_family(resolve_cc_version(model))))
     if tps is None:
         tps = tps_table.get((harness, model))
     if tps is None:

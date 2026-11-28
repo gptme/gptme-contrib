@@ -128,3 +128,26 @@ def test_unknown_model_stays_unknown() -> None:
         )
         is None
     )
+
+
+def test_versioned_cc_row_keeps_the_family_cache_rate() -> None:
+    cfg = HarnessQuotaConfig(
+        price_table={
+            ("claude-code", "opus"): (5.0, 25.0),
+            ("claude-code", "opus-5-5"): (4.0, 20.0),
+        },
+        cache_read_price_table={("claude-code", "opus"): 0.0},
+    )
+    assert (
+        estimate_session_cost(
+            "claude-code", "claude-opus-5-5", cache_read_tokens=1_000_000, config=cfg
+        )
+        == 0.0
+    )
+
+
+def test_rate_too_large_for_a_float_is_rejected_not_raised(tmp_path: Path) -> None:
+    path = tmp_path / "quota.toml"
+    path.write_text("[tps.claude-code]\nopus = 1" + "0" * 400 + "\nsonnet = 5.0\n")
+    cfg = load_quota_config(path)
+    assert cfg.tps_table == {("claude-code", "sonnet"): 5.0}

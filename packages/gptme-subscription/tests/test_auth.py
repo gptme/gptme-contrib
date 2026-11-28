@@ -167,3 +167,30 @@ def test_to_dict_omits_none_fields(tmp_path: Path) -> None:
     assert "expires_at" not in d
     assert d["status"] == "missing"
     assert d["sub"] == "alice"
+
+
+def test_probe_credential_holds_the_slot_probe_lock_while_probing(
+    tmp_path: Path,
+) -> None:
+    # Overlapping probes of one slot would both compare their refresh against
+    # the same pre-probe content and drop the newer, unconsumed token.
+    path = tmp_path / "alice.json"
+    _write_credential(path, expires_at_ms=int((time.time() + 3600) * 1000))
+    lock = tmp_path / ".alice.json.probe.lock"
+    script = tmp_path / "probe.py"
+    script.write_text(
+        f"""#!/usr/bin/env python3
+import fcntl, sys
+with open({str(lock)!r}, "ab") as fh:
+    try:
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        sys.exit(0)  # held by the caller, as it must be
+sys.exit(9)
+"""
+    )
+    script.chmod(0o755)
+
+    info, ok, msg = probe_credential(path, "alice", usage_script=script)
+
+    assert ok is True, msg

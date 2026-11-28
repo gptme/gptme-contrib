@@ -93,7 +93,7 @@ def read_snapshot(
     if isinstance(collected_at, float) and not math.isfinite(collected_at):
         return False, None
     current = time.time() if now is None else now
-    if current - collected_at > ttl_seconds:
+    if not 0 <= current - collected_at <= ttl_seconds:
         return False, None
     if "value" not in payload:
         return False, None
@@ -129,7 +129,7 @@ def write_snapshot(
     try:
         cache_dir.mkdir(parents=True, exist_ok=True)
         fd, tmp_name = tempfile.mkstemp(
-            prefix=f".{name}.", suffix=".tmp", dir=cache_dir
+            prefix=f".{_SAFE_NAME.sub('_', name)}.", suffix=".tmp", dir=cache_dir
         )
         try:
             with os.fdopen(fd, "w") as fh:
