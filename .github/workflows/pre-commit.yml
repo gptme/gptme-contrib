@@ -30,6 +30,10 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The file-size ratchet's growth budget compares against the merge
+          # commit's first parent (the base branch tip), which depth 1 omits.
+          fetch-depth: 2
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -68,4 +72,11 @@ jobs:
         run: |
           uv sync --all-packages --locked
       - name: Run pre-commit
+        env:
+          # Per-change growth for the file-size ratchet. On pull_request and
+          # merge_group the checked-out commit's first parent is the base tip,
+          # so the whole PR is measured. A push run compares to HEAD, i.e. it
+          # checks only the new-file rule: the change already landed, and
+          # failing master retroactively for growth helps nobody.
+          FILE_SIZE_RATCHET_BASE: ${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'HEAD^1' || '' }}
         run: pre-commit run --all-files

@@ -15,6 +15,23 @@ as above. On GitHub Actions each warning is also emitted as an annotation.
 pre-commit hides a passing hook's output, so set ``verbose: true`` on the hook
 to see warnings locally.
 
+``--growth=budget`` is the steady-state rule. Growth is measured against the
+merge base, not the baseline, so a file that grew in an earlier PR does not keep
+warning. A listed file may grow by up to ``--budget`` lines (default 30) with a
+warning. More than that fails unless the new files added by the change are at
+least as large as the growth (the code moved into a new module) -- a token new
+file does not exempt an arbitrarily large growth. More than ``--hard-stop``
+lines (default 100) to a file that was already ``--hard-stop-size`` lines
+(default 5,000) at the base always fails. The base is ``--base`` if given, else
+``origin/$GITHUB_BASE_REF`` on a GitHub pull request, else ``HEAD`` (what a
+local commit adds). When the base cannot be resolved (e.g. a shallow checkout)
+a listed file that grows above its baseline entry fails instead of passing
+silently: fetch the base branch or pass ``--base``.
+
+``--growth=off`` keeps only the new-file rule: growth is not checked and the
+baseline is never rewritten or required to be staged, so contributors who
+shrink a listed file do not have to touch the baseline.
+
 The baseline (default ``file-size-baseline.json`` in the repo root)::
 
     {
@@ -101,7 +118,10 @@ DEFAULT_EXCLUDE = (
 
 def count_lines(path: Path) -> int:
     """Line count, same rule as the codesize report; unreadable files raise."""
-    data = path.read_bytes()
+    return count_bytes(path.read_bytes())
+
+
+def count_bytes(data: bytes) -> int:
     if not data or b"\x00" in data:
         return 0
     return data.count(b"\n") + (0 if data.endswith(b"\n") else 1)
@@ -175,6 +195,51 @@ def init_baseline(path: Path, threshold: int) -> int:
     return 0
 
 
+def resolve_base(base: str | None) -> str | None:
+    """Commit that growth is measured against, or None if it cannot be resolved."""
+    if base is None:
+        base = os.environ.get("FILE_SIZE_RATCHET_BASE") or (
+            f"origin/{os.environ['GITHUB_BASE_REF']}"
+            if os.environ.get("GITHUB_BASE_REF")
+            else "HEAD"
+        )
+    cmd = (
+        ["git", "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}"]
+        if base == "HEAD"
+        else ["git", "merge-base", base, "HEAD"]
+    )
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+def lines_at(rev: str, rel: str) -> int | None:
+    result = subprocess.run(["git", "show", f"{rev}:./{rel}"], capture_output=True)
+    return count_bytes(result.stdout) if result.returncode == 0 else None
+
+
+def added_code_lines(rev: str, exclude: list[str]) -> int:
+    """Lines added in checked files created since ``rev`` (staged or committed).
+
+    The new-module exception is sized against this: a token new file must not
+    exempt an arbitrarily large growth of a listed file.
+    """
+    out = subprocess.run(
+        ["git", "-c", "core.quotePath=false", "diff", "--numstat", "-z"]
+        + ["--diff-filter=A", rev],
+        capture_output=True,
+    ).stdout.decode("utf-8", errors="replace")
+    total = 0
+    for record in out.split("\0"):
+        if not record:
+            continue
+        added, _deleted, path = record.split("\t", 2)
+        if is_checked(path, exclude):
+            total += int(added) if added.isdigit() else 0
+    return total
+
+
 def warn(path: str, message: str) -> None:
     """Print a non-blocking finding; also annotate it on GitHub Actions."""
     print(f"warning: {path}: {message}")
@@ -189,6 +254,10 @@ def check(
     baseline_path: Path,
     default_threshold: int,
     growth: str = "error",
+    base: str | None = None,
+    budget: int = 30,
+    hard_stop: int = 100,
+    hard_stop_size: int = 5000,
 ) -> int:
     if baseline_path.exists():
         data = load_baseline(baseline_path)
@@ -199,6 +268,14 @@ def check(
     errors: list[str] = []
     changed = False
     sizes: dict[str, int] = {}
+    base_rev = resolve_base(base) if growth == "budget" else None
+    if growth == "budget" and base_rev is None:
+        warn(
+            str(baseline_path),
+            "cannot resolve the growth base; a listed file that grows will fail "
+            "instead of being measured against the change.",
+        )
+    new_module_lines: int | None = None
 
     for rel in dict.fromkeys(paths):
         file = Path(rel)
@@ -219,6 +296,33 @@ def check(
                 f"{rel}: {lines} lines, at or over the {threshold}-line limit. "
                 "Split it instead of adding to it."
             )
+        elif growth == "off":
+            continue
+        elif base_rev is not None:
+            before = lines_at(base_rev, rel)
+            before = allowed if before is None else before
+            grown = lines - before
+            if grown > 0:
+                if new_module_lines is None:
+                    new_module_lines = added_code_lines(base_rev, data["exclude"])
+                grew = f"grew by {grown} lines (from {before} to {lines})"
+                if before >= hard_stop_size and grown > hard_stop:
+                    errors.append(
+                        f"{rel}: {grew}; files over {hard_stop_size} lines may "
+                        f"grow by at most {hard_stop} lines per change. Split it."
+                    )
+                elif grown > budget and new_module_lines < grown:
+                    errors.append(
+                        f"{rel}: {grew}, over the {budget}-line budget for a "
+                        f"file at or over the {threshold}-line limit, and the new "
+                        f"files in this change add only {new_module_lines} lines. "
+                        "Move the new code into a new module."
+                    )
+                else:
+                    warn(rel, f"{grew}; it is already over the limit.")
+            if lines < allowed and lines < before:
+                files[rel] = lines
+                changed = True
         elif lines > allowed:
             grew = (
                 f"grew from {allowed} to {lines} lines; it is already at or over "
@@ -226,11 +330,35 @@ def check(
             )
             if growth == "warn":
                 warn(rel, f"{grew}. Prefer putting new code in a new module.")
+            elif growth == "budget":
+                errors.append(
+                    f"{rel}: {grew} and the growth base could not be resolved "
+                    "(shallow checkout?); fetch the base branch or pass --base so "
+                    "the budget can measure the change, or do not grow the file."
+                )
             else:
                 errors.append(f"{rel}: {grew} and may only shrink.")
         elif lines < allowed:
-            files[rel] = lines
-            changed = True
+            if growth == "budget":
+                # base_rev is None here. The baseline can be stale (above the
+                # file's size at the real base), so lowering it would let a
+                # file that grew relative to the base pass unseen: baseline 15,
+                # base 12, current 14 reads as a shrink against 15. Leave the
+                # entry unchanged and say so; only --growth=error may lower it.
+                warn(
+                    rel,
+                    f"{lines} lines is below the {allowed}-line baseline, but the "
+                    "growth base could not be resolved; leaving the entry "
+                    "unchanged so a stale baseline cannot hide growth.",
+                )
+            else:
+                files[rel] = lines
+                changed = True
+
+    if growth == "off":
+        for error in errors:
+            print(error, file=sys.stderr)
+        return 1 if errors else 0
 
     # Index membership distinguishes deletions (including git rm --cached)
     # from tracked files merely omitted by a sparse checkout.
@@ -251,7 +379,8 @@ def check(
     stale = [
         rel
         for rel, allowed in staged.items()
-        if rel not in tracked or sizes.get(rel, allowed) < allowed
+        if rel not in tracked
+        or (rel in sizes and (rel not in files or files[rel] < allowed))
     ]
     if stale:
         errors.append(
@@ -282,16 +411,40 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--growth",
-        choices=("error", "warn"),
+        choices=("error", "warn", "budget", "off"),
         default="error",
-        help="Whether growth of a file already over the limit fails or only warns.",
+        help="How growth of a file already over the limit is handled.",
+    )
+    parser.add_argument(
+        "--base", help="Growth base for --growth=budget (merge base with HEAD)."
+    )
+    parser.add_argument(
+        "--budget", type=int, default=30, help="Lines a listed file may grow."
+    )
+    parser.add_argument(
+        "--hard-stop", type=int, default=100, help="Growth that always fails..."
+    )
+    parser.add_argument(
+        "--hard-stop-size",
+        type=int,
+        default=5000,
+        help="...for files at least this long at the base.",
     )
     args = parser.parse_args(argv)
     baseline = Path(args.baseline)
     if args.init:
         return init_baseline(baseline, args.threshold)
     try:
-        return check(args.paths, baseline, args.threshold, args.growth)
+        return check(
+            args.paths,
+            baseline,
+            args.threshold,
+            args.growth,
+            base=args.base,
+            budget=args.budget,
+            hard_stop=args.hard_stop,
+            hard_stop_size=args.hard_stop_size,
+        )
     except (ValueError, OSError) as exc:
         print(exc, file=sys.stderr)
         return 1

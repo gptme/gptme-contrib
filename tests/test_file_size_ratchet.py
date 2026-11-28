@@ -17,6 +17,10 @@ THRESHOLD = 10
 
 @pytest.fixture
 def repo(tmp_path, monkeypatch):
+    # A GitHub pull-request run sets GITHUB_BASE_REF; the fixture repo has no
+    # such remote branch, so the inherited value would hide the budget base.
+    monkeypatch.delenv("GITHUB_BASE_REF", raising=False)
+    monkeypatch.delenv("FILE_SIZE_RATCHET_BASE", raising=False)
     monkeypatch.chdir(tmp_path)
     subprocess.run(["git", "init", "-q"], check=True)
     return tmp_path
@@ -253,3 +257,163 @@ def test_line_count_matches_codesize_rule(repo):
     Path("b.py").write_bytes(b"\x00binary\n")
     assert ratchet.count_lines(Path("a.py")) == 2
     assert ratchet.count_lines(Path("b.py")) == 0
+
+
+def commit(message: str = "c") -> None:
+    # The fixture repo must not run the developer's global hooks or signing.
+    config = ["user.name=t", "user.email=t@t", "core.hooksPath=/dev/null"]
+    config.append("commit.gpgsign=false")
+    flags = [arg for item in config for arg in ("-c", item)]
+    subprocess.run(["git", *flags, "commit", "-qm", message], check=True)
+
+
+BUDGET = ["--growth=budget", "--budget=3", "--hard-stop=5", "--hard-stop-size=30"]
+
+
+def test_budget_growth_within_budget_warns(repo, capsys):
+    baseline({"big.py": 15})
+    write("big.py", 15)
+    commit()
+    assert ratchet.main([*BUDGET, write("big.py", 18)]) == 0
+    assert "grew by 3 lines (from 15 to 18)" in capsys.readouterr().out
+    assert read_baseline()["files"] == {"big.py": 15}
+
+
+def test_budget_growth_over_budget_fails(repo, capsys):
+    baseline({"big.py": 15})
+    write("big.py", 15)
+    commit()
+    assert ratchet.main([*BUDGET, write("big.py", 19)]) == 1
+    assert "over the 3-line budget" in capsys.readouterr().err
+
+
+def test_budget_allows_more_growth_when_a_new_module_is_added(repo):
+    baseline({"big.py": 15})
+    write("big.py", 15)
+    commit()
+    write("helpers.py", 6)  # at least the 4 lines big.py grows by
+    assert ratchet.main([*BUDGET, write("big.py", 19)]) == 0
+
+
+def test_budget_rejects_growth_larger_than_the_new_module(repo, capsys):
+    # A token new file must not exempt an arbitrarily large growth.
+    baseline({"big.py": 15})
+    write("big.py", 15)
+    commit()
+    write("helpers.py", 2)
+    assert ratchet.main([*BUDGET, write("big.py", 19)]) == 1
+    assert "new files in this change add only 2 lines" in capsys.readouterr().err
+
+
+def test_budget_hard_stop_ignores_the_new_module_exception(repo, capsys):
+    baseline({"huge.py": 30})
+    write("huge.py", 30)
+    commit()
+    write("helpers.py", 2)
+    assert ratchet.main([*BUDGET, write("huge.py", 36)]) == 1
+    assert "may grow by at most 5 lines" in capsys.readouterr().err
+
+
+def test_budget_measures_growth_from_the_base_not_the_baseline(repo, capsys):
+    # An earlier change grew big.py to 20 without raising the baseline.
+    baseline({"big.py": 15})
+    write("big.py", 20)
+    commit()
+    assert ratchet.main([*BUDGET, write("big.py", 21)]) == 0
+    assert "grew by 1 lines (from 20 to 21)" in capsys.readouterr().out
+    assert ratchet.main([*BUDGET, write("big.py", 20)]) == 0
+    assert "grew" not in capsys.readouterr().out
+
+
+def test_budget_uses_the_merge_base_of_base_ref(repo):
+    baseline({"big.py": 15})
+    write("big.py", 15)
+    commit()
+    subprocess.run(["git", "branch", "-q", "trunk"], check=True)
+    # Two commits on the branch, each within budget, add up to more than it.
+    write("big.py", 17)
+    commit()
+    path = write("big.py", 19)
+    assert ratchet.main([*BUDGET, path]) == 0  # vs HEAD: +2
+    assert ratchet.main([*BUDGET, "--base=trunk", path]) == 1  # vs merge base: +4
+
+
+def test_budget_reads_github_base_ref(repo, monkeypatch):
+    baseline({"big.py": 15})
+    write("big.py", 15)
+    commit()
+    subprocess.run(
+        ["git", "update-ref", "refs/remotes/origin/trunk", "HEAD"], check=True
+    )
+    write("big.py", 17)
+    commit()
+    path = write("big.py", 19)
+    monkeypatch.setenv("GITHUB_BASE_REF", "trunk")
+    assert ratchet.main([*BUDGET, path]) == 1
+
+
+def test_budget_without_a_resolvable_base_fails_on_growth(repo, capsys):
+    # A shallow checkout must not silently turn the budget into a warning.
+    baseline({"big.py": 15})  # no commits: HEAD does not resolve
+    assert ratchet.main([*BUDGET, write("big.py", 40)]) == 1
+    captured = capsys.readouterr()
+    assert "cannot resolve the growth base" in captured.out
+    assert "the growth base could not be resolved" in captured.err
+
+
+def test_budget_does_not_lower_the_baseline_above_the_base_size(repo, capsys):
+    # The base has 12 lines while the baseline is stale at 15; trimming to 14
+    # is growth relative to the base, so the baseline must not be rewritten --
+    # and, with the baseline staged as in a real repo, must not fail the stale
+    # check for an entry the run did not lower.
+    baseline({"big.py": 15})
+    subprocess.run(["git", "add", ratchet.DEFAULT_BASELINE], check=True)
+    write("big.py", 12)
+    commit()
+    assert ratchet.main([*BUDGET, write("big.py", 14)]) == 0
+    assert read_baseline()["files"] == {"big.py": 15}
+    assert "staged copy is not lowered" not in capsys.readouterr().err
+
+
+def test_budget_still_fails_new_oversized_files(repo, capsys):
+    baseline({})
+    commit_path = write("seed.py", 1)
+    commit()
+    assert ratchet.main([*BUDGET, commit_path, write("new.py", THRESHOLD)]) == 1
+    assert "new.py: 10 lines" in capsys.readouterr().err
+
+
+def test_growth_off_keeps_only_the_new_file_rule(repo, capsys):
+    baseline({"big.py": 15})
+    subprocess.run(["git", "add", ratchet.DEFAULT_BASELINE], check=True)
+    # Growth passes, and a shrink needs no baseline edit.
+    assert ratchet.main(["--growth=off", write("big.py", 40)]) == 0
+    assert ratchet.main(["--growth=off", write("big.py", 12)]) == 0
+    assert ratchet.main(["--growth=off", write("big.py", 5)]) == 0
+    assert read_baseline()["files"] == {"big.py": 15}
+    assert ratchet.main(["--growth=off", write("new.py", THRESHOLD)]) == 1
+    assert "new.py: 10 lines" in capsys.readouterr().err
+
+
+def test_budget_base_env_measures_a_pr_merge_commit(repo, monkeypatch):
+    # CI checks out the PR merge commit; its first parent is the base tip.
+    baseline({"big.py": 15})
+    write("big.py", 15)
+    commit()
+    write("big.py", 19)
+    commit()
+    path = write("big.py", 19)
+    assert ratchet.main([*BUDGET, path]) == 0  # vs HEAD: no growth
+    monkeypatch.setenv("FILE_SIZE_RATCHET_BASE", "HEAD^1")
+    assert ratchet.main([*BUDGET, path]) == 1  # vs the base tip: +4
+
+
+def test_budget_unresolved_base_does_not_lower_a_stale_baseline(repo, capsys):
+    # No commit: HEAD does not resolve, so the budget falls back to the
+    # baseline. Baseline 15 with a real base of 12 and current 14 is growth
+    # relative to the base; lowering the baseline to 14 would hide it.
+    baseline({"big.py": 15})
+    assert ratchet.main([*BUDGET, write("big.py", 14)]) == 0
+    assert read_baseline()["files"] == {"big.py": 15}
+    captured = capsys.readouterr()
+    assert "leaving the entry unchanged" in captured.out
