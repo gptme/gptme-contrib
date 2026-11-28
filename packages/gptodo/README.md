@@ -108,6 +108,7 @@ gptodo edit set-up-ci --add requires write-project-readme
 
 # Claim, work, finish
 gptodo claim write-project-readme --agent alice   # state: active, assigned_to: alice
+# Another agent's claim of an active task is refused unless it passes --force
 gptodo edit write-project-readme --set state done # set-up-ci is now ready
 ```
 
