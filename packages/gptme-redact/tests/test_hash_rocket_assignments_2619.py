@@ -39,6 +39,21 @@ def test_hash_rocket_secret_is_redacted(text: str) -> None:
 @pytest.mark.parametrize(
     "text",
     [
+        "'password' => '" + SECRET,  # truncated single-quoted value (EOF)
+        '"password" => "' + SECRET,  # truncated double-quoted value (EOF)
+        ":password => '" + SECRET,  # truncated Ruby symbol value
+        "'api_key' => '" + SECRET + "\nnext line",  # truncated at newline
+    ],
+)
+def test_truncated_hash_rocket_secret_is_redacted(text: str) -> None:
+    out = _redacted(text)
+    assert SECRET not in out
+    assert "[REDACTED:secret_assignment]" in out
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
         "items.map(key => key.trim())",  # JS arrow function
         "const f = key => key.trim()",  # bare arrow
         "foreach ($data as $key => $headerValue) {}",  # PHP foreach

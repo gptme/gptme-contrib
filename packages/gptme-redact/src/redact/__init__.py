@@ -682,6 +682,11 @@ _PATTERNS: list[Pattern] = [
     # (gptme/gptme-contrib#2619). A variable-valued hash rocket
     # (``'password' => $hash``) is intentionally NOT matched: without a quoted
     # value the shape is indistinguishable from a plain foreach loop.
+    # The value may be truncated by tool output, exactly like the catch-all
+    # above: a complete quoted value is preferred, but an unterminated one ends
+    # at a line boundary or EOF instead of failing open (review P1, #2625).
+    # Excluding raw newlines from the truncated branch keeps it from swallowing
+    # the rest of a multi-line document.
     Pattern(
         re.compile(
             r"(?P<key>"
@@ -690,7 +695,10 @@ _PATTERNS: list[Pattern] = [
             r"|:(?:[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)*_)?"
             r"(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)\b)"
             r"[ \t]*=>[ \t]*"
-            r"(?P<quote>['\"])(?P<value>(?:\\.|(?!(?P=quote))[^\\])+)(?P=quote)",
+            r"(?P<quote>['\"])(?P<value>"
+            r"(?:(?:\\[\s\S]|(?!(?P=quote))[^\\])+(?=(?P=quote))"
+            r"|(?:\\[\s\S]|(?!(?P=quote))[^\\\r\n])+)"
+            r")(?:(?P=quote)|(?=[\r\n]|\Z))",
             re.IGNORECASE,
         ),
         Severity.CRITICAL,
