@@ -81,6 +81,25 @@ def test_cli_out_writes_through_a_symlink_and_keeps_the_mode(tmp_path) -> None:
     assert target.stat().st_mode & 0o777 == 0o644
 
 
+def test_cli_out_refuses_to_replace_a_read_only_target(tmp_path, capsys) -> None:
+    """os.replace only needs directory write permission, so the atomic path
+    must keep the old open(path, "w") PermissionError on a read-only target
+    instead of silently replacing it."""
+    src = tmp_path / "in.txt"
+    src.write_text("plain text\n", encoding="utf-8")
+    out = tmp_path / "locked.txt"
+    out.write_text("old\n", encoding="utf-8")
+    out.chmod(0o444)
+    try:
+        assert main(["--no-env-secrets", "--out", str(out), str(src)]) == 2
+        assert "cannot write" in capsys.readouterr().err
+        assert out.read_text(encoding="utf-8") == "old\n"
+        assert out.stat().st_mode & 0o777 == 0o444
+    finally:
+        out.chmod(0o644)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["in.txt", "locked.txt"]
+
+
 def test_cli_out_write_failure_keeps_existing_file(tmp_path) -> None:
     """Encode happens before any truncate, so a surrogate cannot destroy --out.
 
