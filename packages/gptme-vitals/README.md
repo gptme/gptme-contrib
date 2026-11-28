@@ -9,8 +9,13 @@ gptme-contrib catalog on GitHub Pages.
 
 ## Status
 
-Slice 1, in progress. This commit lands the piece the rest depends on: the
-typed **page envelope**.
+The skeleton is shipped: typed page envelopes, route registry, shared light/dark
+theme, derived fleet envelopes, portal, static envelope pages, build CLI and
+generated timers. Agents register their own collectors and specialized pages.
+
+Opt-in private views consume the existing sessions, task-list, fleet-core and
+thread exports, including an optional fleet grid and exact-ID multi-agent thread
+join. Merged-output and adopter verification remain open on the parent issue.
 
 ## The page envelope
 
@@ -169,9 +174,124 @@ and badges meet WCAG AA (4.5:1) on every surface in both schemes. The light
 accent is `#9c5204`, darker than a straight inversion would give, because the
 first draft measured 4.46:1 on the tile surface.
 
-## Next in slice 1
+## Standard private pages
 
-The portal and `build` emitting the derived `core.json`/`headline.json` pair.
+Use the source tools' native JSON exports; the viewer does not collect or reparse
+workspace files. For example, from an agent workspace:
+
+```sh
+gptme-sessions query --since 7d --json > /private/sessions.json
+gptodo list --json --pool all > /private/tasks.json
+gptme-vitals sessions --input /private/sessions.json \
+  --private-root /private/vitals --public-root /served/vitals
+gptme-vitals tasks --input /private/tasks.json \
+  --private-root /private/vitals --public-root /served/vitals
+gptme-vitals vitals --input /served/vitals/core.json \
+  --private-root /private/vitals --public-root /served/vitals
+```
+
+These write `sessions/index.html`, `tasks/index.html`, and `vitals/index.html`
+under the private root, using the same theme and private publication boundary as
+the thread views. Each renderer displays an explicit field set, not arbitrary
+export fields. Empty data and absent values stay visible as empty/unknown.
+
+- Sessions consume the **bare array** from `query --json`, showing identity,
+  session start, model/harness, outcome, duration and trajectory grade. Record
+  creation time is not substituted for a missing session start. Costs are omitted;
+  nominal API-equivalent subscription cost is not necessarily billed spend.
+- Tasks consume the `{tasks: [...]}` envelope from `list --json --pool all` or
+  `status --json`. IDs are exported filename slugs, not parsed Markdown titles.
+  State, priority, owner, pool, next action and blocker are shown without inferring
+  readiness from state. `--pool all` keeps other task pools from disappearing.
+- Vitals consume `fleet-vitals/core@1`: agent, status, source timestamp and each
+  named dimension's status/finite numeric metrics. Nested detail and arbitrary
+  text fields are excluded; extra named dimensions such as delivery remain visible.
+
+There are no new collectors, source dependencies, public routes or timers. The
+normal envelope build/portal remains the public dashboard surface. All offline
+views use mode-0600 files outside its served root and the same 0/1/2 exit codes.
+
+## Private thread map and log
+
+The viewer consumes the existing session-lineage export; it does not mine a new
+forest, fetch sources or read journal files. Run it explicitly,
+replacing `example-agent` with the agent identity in your session store:
+
+```sh
+gptme-sessions threads --since 1d --agent example-agent --no-journals --json > /private/threads.json
+gptme-vitals threads --input /private/threads.json \
+  --private-root /private/vitals --public-root /served/vitals
+```
+
+It writes `/private/vitals/threads/index.html` (a per-thread UTC timeline with
+predecessor links) and `log.html` (a chronological session log). Each node links
+to its log row; log rows link to predecessors and their map. Evidence kinds,
+keys and weights stay visible, and references outside the export stay marked.
+An absent link is not proof of independent work or causality.
+
+Both HTML files use the shared theme/toggle and are atomically replaced with mode
+0600. The public root is a required exclusion boundary: it must be disjoint from
+the private root and receives no files. Output symlink aliases are rejected.
+Complete input validation happens before either file is written. Pair replacement
+is not a two-file transaction; serialize concurrent invocations, as for
+`core.json`/`headline.json`.
+
+Session titles and evidence are private. Do not serve the private root through an
+unauthenticated HTTP server or copy it into the public tree. The viewer ignores
+extra fields, including journal excerpts; `--no-journals` also prevents the exporter
+from reading journal text for titles/evidence. This command does not create a
+public registry route or enable a timer. Exit codes are 0 for success, 2 for
+invalid input/roots, and 1 for I/O failure.
+
+### Multi-agent thread joins
+
+Repeat `--input` to join native exports on an aggregating host with authorized
+access to each source. Use a dedicated private root, never an agent's served tree:
+
+```sh
+gptme-vitals threads --input /private/bob-threads.json --input /private/alice-threads.json \
+  --private-root /private/fleet-views --public-root /served/vitals
+```
+
+Only exact session IDs resolve cross-export predecessors. Identical overlapping
+rows collapse; conflicting IDs (including different agents) reject the whole join.
+Short IDs and equal task/title strings do not create links. Thread groups are
+recomputed from the explicit predecessor forest, not stale source thread labels.
+Missing predecessors remain marked outside the export. Chronology is checked over
+the union before either page is written. The normal single-input view is unchanged.
+There is no cross-agent collector, inference pass, public route or timer.
+
+## Optional private fleet grid
+
+The grid uses Alice's existing agent-health card model, not Bob's unrelated public
+historical model/session metrics dashboard. It accepts either a collected
+`fleet-vitals/fleet@1` export (as produced by Alice's aggregator) or one or more
+individual `fleet-vitals/core@1` exports:
+
+```sh
+gptme-vitals fleet --input /private/fleet.json \
+  --private-root /private/fleet-views --public-root /served/vitals
+
+gptme-vitals fleet --input /private/bob-core.json --input /private/alice-core.json \
+  --private-root /private/fleet-views --public-root /served/vitals \
+  --stale-after-seconds 1200
+```
+
+Output is `fleet/index.html`, using the shared light/dark theme and responsive
+cards. Only agent, source timestamp, status, dimension statuses and finite numeric
+metrics are displayed. Fleet wrappers additionally expose reachability and
+self/observed/effective statuses, separately. Headline/probe/reason text, nested
+detail, URLs and journal data are not projected. Metrics retain their exported
+names/units; subscription utilization is never relabelled as dollars.
+
+Freshness is recomputed from the core timestamp (default threshold 900 seconds).
+A fresh export is not proof of independent health. Stale/future data and absent
+cores stay explicit; an observed outage or unreachable agent cannot be hidden by
+a healthy self-report. Duplicate agent identities and malformed display fields
+are usage errors before writing. The existing private-root exclusion, atomic
+per-file replacement and mode-0600 rules apply. Fetching, independent probes,
+agent membership, serving and deployment remain with the caller. No existing
+Alice or Bob deployment is switched by this command.
 
 ## Derived `core.json` / `headline.json`
 
