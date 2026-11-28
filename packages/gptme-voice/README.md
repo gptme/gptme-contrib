@@ -288,6 +288,7 @@ emits one JSONL `utterance_trace` with `asr_ms` (speech stopped → transcript),
 | `GPTME_VOICE_SUBAGENT_MODEL_FAST` / `_SMART` | `openrouter/anthropic/claude-haiku-4.5` / gptme default | Subagent models (`GPTME_VOICE_SUBAGENT_MODEL` sets both) |
 | `GPTME_VOICE_SUBAGENT_TIMEOUT_FAST_SECONDS` / `_SMART_SECONDS` | `60` / `120` | Subagent timeouts |
 | `GPTME_VOICE_SUBAGENT_PATH` | `gptme` on `PATH` | gptme binary used for subagents |
+| `GPTME_VOICE_LOOKUP_MODE` | `conversation` | Webui calls bound to a conversation run lookups as steps of that conversation (visible in the chat, its model, tools and workspace); `subagent` uses the separate gptme subprocess instead. Phone, local and probe calls always use the subprocess |
 | `GPTME_VOICE_SUBAGENT_TRANSCRIPT_TAIL_MODE` | `prompt` | How the call transcript tail reaches the subagent: `prompt` sends it on the subprocess's stdin, which gptme appends to the prompt (never in argv); `flags` passes `--transcript-tail-file`/`--transcript-tail-turns` to a wrapper script that accepts them |
 | `GPTME_VOICE_RESUME_WINDOW_SECONDS` | `300` | Reconnects within this window resume the previous transcript |
 | `GPTME_VOICE_STATE_DIR` | `/tmp/gptme-voice-call-state` | Per-call state and transcript records |

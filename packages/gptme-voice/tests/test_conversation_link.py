@@ -5,14 +5,19 @@ import json
 import os
 from dataclasses import dataclass
 
+import gptme_voice.realtime.tool_bridge as tool_bridge_module
 import httpx
 import pytest
+from gptme_voice.realtime import conversation_link
 from gptme_voice.realtime.conversation_link import (
     CONTEXT_MAX_CHARS_PER_MESSAGE,
+    LOOKUP_MAX_TOOL_CALLS,
+    ConversationLookup,
     LiveTranscriptSink,
     fetch_conversation_context,
     format_conversation_context,
 )
+from gptme_voice.realtime.tool_bridge import GptmeToolBridge, ToolResult
 
 
 @dataclass
@@ -419,3 +424,527 @@ def test_sink_reposts_a_turn_the_provider_revised() -> None:
             }
         ],
     ]
+
+
+# --- lookups as conversation steps -------------------------------------------
+
+
+def _sse(*events: dict) -> bytes:
+    return b"".join(f"data: {json.dumps(e)}\n\n".encode() for e in events)
+
+
+# Events after this marker are sent once a step starts (by default, all
+# events after the first).
+STEP = {"type": "_step"}
+
+
+class _LookupServer:
+    """A fake gptme-server: an SSE stream plus append/step/interrupt endpoints.
+
+    Like the real server, appending a message sends its ``message_added``,
+    and a step's events follow the step request.
+    """
+
+    def __init__(self, events: list[dict], *, hang: bool = False) -> None:
+        if STEP in events:
+            at = events.index(STEP)
+            self.before, self.after = events[:at], events[at + 1 :]
+        else:
+            self.before, self.after = events[:1], events[1:]
+        self.hang = hang
+        self.calls: list[tuple[str, dict]] = []
+        self.step_statuses: list[int] = []
+        self.queue: asyncio.Queue[dict | None] | None = None
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path.endswith("/events"):
+
+            async def body():
+                self.queue = asyncio.Queue()
+                yield _sse(*self.before)
+                while (event := await self.queue.get()) is not None:
+                    yield _sse(event)
+                if self.hang:
+                    await asyncio.sleep(3600)
+
+            return httpx.Response(200, content=body())
+        payload = json.loads(request.content)
+        kind = path.rsplit("/", 1)[-1]
+        self.calls.append((kind, payload))
+        status = 200
+        if kind == "step" and self.step_statuses:
+            status = self.step_statuses.pop(0)
+        if self.queue is not None and status == 200:
+            if kind == "conv-1":
+                self.queue.put_nowait(_msg("user", payload["content"]))
+            elif kind == "step":
+                for event in self.after:
+                    self.queue.put_nowait(event)
+                self.queue.put_nowait(None)
+        return httpx.Response(status, json={})
+
+    def lookup(self, client: httpx.AsyncClient, **kwargs) -> ConversationLookup:
+        return ConversationLookup(
+            server_url="http://server",
+            api_key="key",
+            conversation_id="conv-1",
+            client=client,
+            **kwargs,
+        )
+
+
+def _run_lookup(server: _LookupServer, task: str = "star count?", **kwargs):
+    async def run():
+        transport = httpx.MockTransport(server.handler)
+        async with httpx.AsyncClient(transport=transport) as c:
+            return await server.lookup(c, **kwargs)(task, mode="fast")
+
+    return asyncio.run(run())
+
+
+def _msg(role: str, content: str) -> dict:
+    return {"type": "message_added", "message": {"role": role, "content": content}}
+
+
+def test_lookup_runs_as_a_step_and_returns_the_last_assistant_reply() -> None:
+    server = _LookupServer(
+        [
+            {"type": "connected", "session_id": "s1", "generating": False},
+            _msg("assistant", "a spoken voice turn, not the answer"),
+            {"type": "generation_started"},
+            _msg("assistant", "Let me check.\n```shell\ngh api ...\n```"),
+            {"type": "tool_pending", "tool_id": "t1", "auto_confirm": True},
+            # The first generation ends; the tool runs; a continuation starts.
+            {"type": "generation_complete"},
+            {"type": "step_complete"},
+            {"type": "tool_executing", "tool_id": "t1"},
+            _msg("system", "Ran command: 4321"),
+            {"type": "tool_complete", "tool_id": "t1"},
+            {"type": "generation_started"},
+            _msg("assistant", "<think>\nreport it\n</think>\n\ngptme has 4321 stars."),
+            {"type": "generation_complete"},
+            {"type": "step_complete"},
+        ]
+    )
+    order: list[str] = []
+
+    async def before() -> None:
+        order.append(f"flush after {len(server.calls)} calls")
+
+    result = _run_lookup(server, before_lookup=before)
+
+    assert result.success and result.output == "gptme has 4321 stars."
+    assert order == ["flush after 0 calls"]
+    (append_kind, append), (step_kind, step) = server.calls
+    assert append_kind == "conv-1" and append["role"] == "user"
+    assert append["content"].startswith("[Voice call lookup] star count?")
+    assert step_kind == "step"
+    assert step == {"session_id": "s1", "auto_confirm": LOOKUP_MAX_TOOL_CALLS}
+
+
+def test_lookup_waits_for_a_running_reply_before_adding_to_the_chat() -> None:
+    server = _LookupServer(
+        [
+            {"type": "connected", "session_id": "s1", "generating": True},
+            {"type": "step_complete"},  # the user's own text reply finished
+            STEP,
+            {"type": "generation_started"},
+            _msg("assistant", "done"),
+            {"type": "step_complete"},
+        ]
+    )
+    result = _run_lookup(server)
+    assert result.success and result.output == "done"
+    assert [k for k, _ in server.calls] == ["conv-1", "step"]
+
+
+def test_lookup_retries_a_busy_step(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(conversation_link, "LOOKUP_BUSY_RETRY_SECONDS", 0.01)
+    server = _LookupServer(
+        [
+            {"type": "connected", "session_id": "s1"},
+            {"type": "generation_started"},
+            _msg("assistant", "ok"),
+            {"type": "step_complete"},
+        ]
+    )
+    server.step_statuses = [409, 409, 200]
+    result = _run_lookup(server)
+    assert result.success
+    assert [k for k, _ in server.calls] == ["conv-1", "step", "step", "step"]
+
+
+@pytest.mark.parametrize(
+    ("event", "error"),
+    [
+        ({"type": "error", "error": "model refused"}, "model refused"),
+        ({"type": "tool_pending", "auto_confirm": False}, "confirmation click"),
+    ],
+)
+def test_lookup_failure_interrupts_the_step(event: dict, error: str) -> None:
+    server = _LookupServer(
+        [
+            {"type": "connected", "session_id": "s1"},
+            {"type": "generation_started"},
+            event,
+        ]
+    )
+    result = _run_lookup(server)
+    assert not result.success and error in (result.error or "")
+    assert server.calls[-1] == ("interrupt", {"session_id": "s1"})
+
+
+def test_lookup_timeout_interrupts_the_step() -> None:
+    server = _LookupServer(
+        [{"type": "connected", "session_id": "s1"}, {"type": "generation_started"}],
+        hang=True,
+    )
+    result = _run_lookup(server, timeouts={"fast": 0.2})
+    assert not result.success and "did not finish" in (result.error or "")
+    assert server.calls[-1] == ("interrupt", {"session_id": "s1"})
+
+
+def test_lookup_cancel_interrupts_the_step() -> None:
+    server = _LookupServer(
+        [{"type": "connected", "session_id": "s1"}, {"type": "generation_started"}],
+        hang=True,
+    )
+
+    async def run() -> None:
+        transport = httpx.MockTransport(server.handler)
+        async with httpx.AsyncClient(transport=transport) as c:
+            task = asyncio.create_task(server.lookup(c)("q", mode="fast"))
+            for _ in range(100):
+                if any(k == "step" for k, _ in server.calls):
+                    break
+                await asyncio.sleep(0.01)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    asyncio.run(run())
+    assert server.calls[-1] == ("interrupt", {"session_id": "s1"})
+
+
+def test_lookup_without_an_answer_fails() -> None:
+    server = _LookupServer(
+        [
+            {"type": "connected", "session_id": "s1"},
+            _msg("assistant", "a voice turn posted before the step started"),
+            {"type": "generation_started"},
+            {"type": "step_complete"},
+        ]
+    )
+    result = _run_lookup(server)
+    assert not result.success and "no answer" in (result.error or "")
+
+
+def test_lookup_ignores_text_from_a_generation_before_the_last() -> None:
+    server = _LookupServer(
+        [
+            {"type": "connected", "session_id": "s1"},
+            {"type": "generation_started"},
+            _msg("assistant", "Let me check."),
+            {"type": "tool_pending", "tool_id": "t1", "auto_confirm": True},
+            {"type": "step_complete"},
+            {"type": "generation_started"},  # the continuation says nothing
+            {"type": "step_complete"},
+        ]
+    )
+    result = _run_lookup(server)
+    assert not result.success and "no answer" in (result.error or "")
+
+
+def test_lookup_timeout_reports_a_timeout_returncode() -> None:
+    server = _LookupServer(
+        [{"type": "connected", "session_id": "s1"}, {"type": "generation_started"}],
+        hang=True,
+    )
+    completed: list[int] = []
+
+    async def run():
+        transport = httpx.MockTransport(server.handler)
+        async with httpx.AsyncClient(transport=transport) as c:
+            lookup = server.lookup(c, timeouts={"fast": 0.2})
+            return await lookup(
+                "q", mode="fast", on_completed=lambda rc, _t: completed.append(rc)
+            )
+
+    result = asyncio.run(run())
+    assert not result.success and completed == [124]
+
+
+def test_lookup_fails_when_the_request_cannot_be_added_to_the_chat() -> None:
+    server = _LookupServer([{"type": "connected", "session_id": "s1"}])
+    original = server.handler
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/conv-1"):
+            return httpx.Response(500, json={})
+        return original(request)
+
+    server.handler = handler  # type: ignore[method-assign]
+    result = _run_lookup(server)
+    assert not result.success
+    assert all(kind != "step" for kind, _ in server.calls)
+
+
+def test_lookup_interrupts_a_step_whose_post_got_no_response() -> None:
+    server = _LookupServer([{"type": "connected", "session_id": "s1"}])
+    original = server.handler
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/step"):
+            raise httpx.ReadTimeout("no response", request=request)
+        return original(request)
+
+    server.handler = handler  # type: ignore[method-assign]
+    result = _run_lookup(server)
+    assert not result.success
+    assert server.calls[-1] == ("interrupt", {"session_id": "s1"})
+
+
+def test_lookup_busy_chat_does_not_interrupt_the_other_reply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(conversation_link, "LOOKUP_BUSY_RETRY_SECONDS", 0.05)
+    server = _LookupServer([{"type": "connected", "session_id": "s1"}], hang=True)
+    server.step_statuses = [409] * 100
+    completed: list[int] = []
+
+    async def run():
+        transport = httpx.MockTransport(server.handler)
+        async with httpx.AsyncClient(transport=transport) as c:
+            lookup = server.lookup(c, timeouts={"fast": 0.2})
+            return await lookup(
+                "q", mode="fast", on_completed=lambda rc, _t: completed.append(rc)
+            )
+
+    result = asyncio.run(run())
+    # Busy is not a timeout: no timeout cue, and nothing to interrupt.
+    assert not result.success and "busy" in (result.error or "")
+    assert completed == []
+    assert all(kind != "interrupt" for kind, _ in server.calls)
+
+
+def test_interrupted_lookup_is_not_an_answer() -> None:
+    server = _LookupServer(
+        [
+            {"type": "connected", "session_id": "s1"},
+            {"type": "generation_started"},
+            _msg("assistant", "Half an ans"),
+            {"type": "interrupted"},
+        ]
+    )
+    result = _run_lookup(server)
+    assert not result.success and "interrupted" in (result.error or "")
+
+
+def test_sse_event_data_may_span_lines() -> None:
+    async def lines():
+        for line in ['data: {"type":', 'data: "ping"}', "", ": comment", ""]:
+            yield line
+
+    async def collect():
+        return [e async for e in conversation_link._sse_events(lines())]
+
+    assert asyncio.run(collect()) == [{"type": "ping"}]
+
+
+def test_lookup_ignores_a_reply_that_is_not_its_own() -> None:
+    """Events carry no step id: a reply that ran before our request (or ended
+    after it, before our step) must not be taken for the lookup's answer."""
+    server = _LookupServer(
+        [
+            {"type": "connected", "session_id": "s1", "generating": False},
+            {"type": "generation_started"},  # another client's reply
+            _msg("assistant", "an unrelated auto-reply"),
+            STEP,
+            {"type": "step_complete"},  # ...which ends after our request
+            {"type": "generation_started"},
+            _msg("assistant", "the lookup answer"),
+            {"type": "step_complete"},
+        ]
+    )
+    result = _run_lookup(server)
+    assert result.success and result.output == "the lookup answer"
+
+
+def test_lookup_waits_out_a_running_reply_that_ends_in_an_error() -> None:
+    server = _LookupServer(
+        [
+            {"type": "connected", "session_id": "s1", "generating": True},
+            {"type": "error", "error": "the user's reply failed"},
+            STEP,
+            {"type": "generation_started"},
+            _msg("assistant", "done"),
+            {"type": "step_complete"},
+        ]
+    )
+    result = _run_lookup(server, timeouts={"fast": 2})
+    assert result.success and result.output == "done"
+
+
+def test_lookup_retries_posting_the_spoken_turns_while_the_chat_is_busy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(conversation_link, "LOOKUP_BUSY_RETRY_SECONDS", 0.01)
+    server = _LookupServer(
+        [
+            {"type": "connected", "session_id": "s1"},
+            {"type": "generation_started"},
+            _msg("assistant", "ok"),
+            {"type": "step_complete"},
+        ]
+    )
+    flushes: list[str] = []
+
+    async def before() -> str:
+        flushes.append(f"after {len(server.calls)} calls")
+        return "retry" if len(flushes) < 3 else "ok"
+
+    result = _run_lookup(server, before_lookup=before)
+    assert result.success
+    assert flushes == ["after 0 calls"] * 3  # all before the request is added
+
+
+def test_lookup_goes_ahead_when_the_spoken_turns_cannot_be_posted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(conversation_link, "LOOKUP_BUSY_RETRY_SECONDS", 0.01)
+    monkeypatch.setattr(conversation_link, "LOOKUP_FLUSH_WAIT_SECONDS", 0.05)
+    server = _LookupServer(
+        [
+            {"type": "connected", "session_id": "s1"},
+            {"type": "generation_started"},
+            _msg("assistant", "ok"),
+            {"type": "step_complete"},
+        ]
+    )
+
+    async def before() -> str:
+        return "retry"  # e.g. the transcript POST keeps failing
+
+    result = _run_lookup(server, before_lookup=before)
+    assert result.success and result.output == "ok"
+
+
+def test_failed_lookup_is_not_reported_as_completed() -> None:
+    server = _LookupServer(
+        [
+            {"type": "connected", "session_id": "s1"},
+            {"type": "generation_started"},
+            {"type": "step_complete"},  # no answer
+        ]
+    )
+    completed: list[int] = []
+
+    async def run():
+        transport = httpx.MockTransport(server.handler)
+        async with httpx.AsyncClient(transport=transport) as c:
+            return await server.lookup(c)(
+                "q", mode="fast", on_completed=lambda rc, _t: completed.append(rc)
+            )
+
+    result = asyncio.run(run())
+    assert not result.success and completed == []
+
+
+def test_lookup_ignores_another_replys_error_and_does_not_interrupt() -> None:
+    server = _LookupServer(
+        [
+            {"type": "connected", "session_id": "s1"},
+            STEP,
+            {"type": "error", "error": "another reply failed"},  # not ours
+            {"type": "step_complete"},
+            {"type": "generation_started"},
+            _msg("assistant", "the lookup answer"),
+            {"type": "step_complete"},
+        ]
+    )
+    result = _run_lookup(server)
+    assert result.success and result.output == "the lookup answer"
+    assert all(kind != "interrupt" for kind, _ in server.calls)
+
+
+def test_lookup_reports_its_own_step_failing_before_it_generates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(conversation_link, "LOOKUP_EARLY_ERROR_GRACE_SECONDS", 0.05)
+    server = _LookupServer(
+        [
+            {"type": "connected", "session_id": "s1"},
+            STEP,
+            {"type": "error", "error": "context too long"},
+            {"type": "step_complete"},
+        ],
+        hang=True,
+    )
+    result = _run_lookup(server, timeouts={"fast": 5})
+    assert not result.success and "context too long" in (result.error or "")
+
+
+def test_cancel_during_a_busy_wait_does_not_interrupt_the_other_reply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(conversation_link, "LOOKUP_BUSY_RETRY_SECONDS", 0.05)
+    server = _LookupServer([{"type": "connected", "session_id": "s1"}], hang=True)
+    server.step_statuses = [409] * 1000
+
+    async def run() -> None:
+        transport = httpx.MockTransport(server.handler)
+        async with httpx.AsyncClient(transport=transport) as c:
+            task = asyncio.create_task(server.lookup(c)("q", mode="fast"))
+            for _ in range(100):
+                if any(k == "step" for k, _ in server.calls):
+                    break
+                await asyncio.sleep(0.01)
+            await asyncio.sleep(0.02)  # inside the wait after a 409
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    asyncio.run(run())
+    assert all(kind != "interrupt" for kind, _ in server.calls)
+
+
+def test_a_step_request_that_never_connected_does_not_interrupt() -> None:
+    server = _LookupServer([{"type": "connected", "session_id": "s1"}])
+    original = server.handler
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/step"):
+            raise httpx.ConnectError("refused", request=request)
+        return original(request)
+
+    server.handler = handler  # type: ignore[method-assign]
+    result = _run_lookup(server)
+    assert not result.success
+    assert all(kind != "interrupt" for kind, _ in server.calls)
+
+
+def test_execute_delegates_to_the_lookup_runner() -> None:
+    """With a lookup runner (webui calls), no gptme subprocess is spawned."""
+    seen: list[tuple] = []
+
+    async def _runner(task, *, mode, on_started, on_progress, on_completed):
+        seen.append((task, mode))
+        on_started(1.0)
+        return ToolResult(success=True, output="42")
+
+    async def _no_spawn(*args, **kwargs):
+        raise AssertionError("spawned a subprocess")
+
+    async def _exercise() -> None:
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(tool_bridge_module, "_spawn_subagent", _no_spawn)
+            bridge = GptmeToolBridge(workspace="/fake", lookup_runner=_runner)
+            started: list[float] = []
+            result = await bridge._execute(
+                "the answer", mode="smart", on_started=started.append
+            )
+        assert result.output == "42" and started == [1.0]
+
+    asyncio.run(_exercise())
+    assert seen == [("the answer", "smart")]

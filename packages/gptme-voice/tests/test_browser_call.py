@@ -811,3 +811,58 @@ def test_call_about_another_workspace_leaves_no_call_record(
     monkeypatch.setattr("gptme_voice.realtime.server.GptmeToolBridge", _DummyToolBridge)
     asyncio.run(server.handle_browser_websocket(websocket))
     assert ended == []
+
+
+@pytest.mark.parametrize(
+    ("mode", "expect_runner"),
+    [(None, True), ("conversation", True), ("subagent", False)],
+)
+def test_conversation_bound_call_runs_lookups_in_the_conversation(
+    monkeypatch: pytest.MonkeyPatch, mode: str | None, expect_runner: bool
+) -> None:
+    from gptme_voice.realtime.conversation_link import (
+        ConversationContext,
+        ConversationLookup,
+    )
+
+    if mode is None:
+        monkeypatch.delenv("GPTME_VOICE_LOOKUP_MODE", raising=False)
+    else:
+        monkeypatch.setenv("GPTME_VOICE_LOOKUP_MODE", mode)
+    server = VoiceServer(enable_browser_transport=True)
+    server.browser_secret = "s3cret"
+    server.gptme_server_url = "http://127.0.0.1:5700"
+    server.gptme_server_key = "k"
+
+    async def _fetch(*args, **kwargs):
+        return ConversationContext(instructions=None, workspace=None)
+
+    bridges: list[dict] = []
+
+    class _RecordingBridge(_DummyToolBridge):
+        def __init__(self, *args, **kwargs) -> None:
+            bridges.append(kwargs)
+
+    async def _build(*, caller_id: str, handoff_id: str | None) -> str:
+        return "You are Bob."
+
+    websocket = _DummyBrowserWebSocket([{"type": "websocket.disconnect"}])
+    websocket.query_params = {"conversation_id": "conv-1"}
+    websocket.headers = {"x-gptme-voice-secret": "s3cret"}
+    websocket.client = None
+    monkeypatch.setattr(
+        "gptme_voice.realtime.server.fetch_conversation_context", _fetch
+    )
+    monkeypatch.setattr(server, "_build_session_instructions", _build)
+    monkeypatch.setattr(
+        server, "_make_client", lambda _cfg, **_kw: _FakeRealtimeClient()
+    )
+    monkeypatch.setattr("gptme_voice.realtime.server.GptmeToolBridge", _RecordingBridge)
+    asyncio.run(server.handle_browser_websocket(websocket))
+
+    runner = bridges[0]["lookup_runner"]
+    if expect_runner:
+        assert isinstance(runner, ConversationLookup)
+        assert runner._conversation_id == "conv-1"
+    else:
+        assert runner is None
