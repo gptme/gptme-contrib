@@ -231,12 +231,37 @@ def _load_cached_claude_usage() -> tuple[dict[str, object], int] | None:
     return data, age_seconds
 
 
+def _codex_capture_time_is_fresh(data: dict[str, object]) -> bool:
+    """True when the snapshot's capture time is absent (legacy) or fresh.
+
+    File mtime alone cannot tell a live snapshot from a copy or restore: copying
+    an old cache renews its mtime. When the scraper records ``_captured_at`` the
+    capture time is authoritative, so a stale, future-dated or unparseable value
+    makes the whole snapshot untrustworthy — for pacing as much as for credits.
+    An absent value means a legacy cache; the file-age check in
+    ``_load_codex_usage_cache`` is then the only freshness signal.
+    """
+    captured_at = data.get("_captured_at")
+    if captured_at is None:
+        return True
+    if not isinstance(captured_at, str):
+        return False
+    try:
+        captured = datetime.fromisoformat(captured_at)
+        age = (datetime.now(timezone.utc) - captured).total_seconds()
+    except (ValueError, TypeError):
+        return False
+    return 0 <= age <= CODEX_USAGE_MAX_AGE_SECONDS
+
+
 def _load_codex_usage_cache() -> dict[str, object] | None:
     """Read the scraped codex /status snapshot once.
 
     Returns None when the cache is missing, malformed, or stale
-    (>CODEX_USAGE_MAX_AGE_SECONDS). Pacing and credits are both derived from the
-    returned dict so one quota row never mixes two snapshots of the file.
+    (>CODEX_USAGE_MAX_AGE_SECONDS by file age, or by ``_captured_at`` when the
+    scraper recorded one). Pacing and credits are both derived from the returned
+    dict, so one quota row never mixes two snapshots of the file and a stale
+    gauge can never open the pool just because its file mtime looks fresh.
     """
     age = _file_age_seconds(CODEX_USAGE_CACHE_FILE)
     if age is None or age > CODEX_USAGE_MAX_AGE_SECONDS:
@@ -245,7 +270,11 @@ def _load_codex_usage_cache() -> dict[str, object] | None:
         data = json.loads(CODEX_USAGE_CACHE_FILE.read_text())
     except (OSError, json.JSONDecodeError):
         return None
-    return data if isinstance(data, dict) else None
+    if not isinstance(data, dict):
+        return None
+    if not _codex_capture_time_is_fresh(data):
+        return None
+    return data
 
 
 def _codex_main_pacing(
@@ -284,22 +313,11 @@ def _codex_credits(data: dict[str, object]) -> int | None:
     When the weekly plan allowance is spent, Codex keeps serving against this
     balance (codex /status: "Weekly limit: 0% left ... Credits: N credits"), so
     a weekly-exhausted pool with credits left is NOT a hard stop. An absent
-    value is unknown, NOT zero. When supplied by the scraper, the capture time
-    must also be fresh: copying an old snapshot must not renew its balance.
-    Legacy caches without a capture time retain the file-age check above.
-    Negative balances count as exhausted, just like zero.
+    value is unknown, NOT zero. Snapshot freshness is enforced once in
+    ``_load_codex_usage_cache`` for pacing and credits alike, so a stale or
+    copied snapshot cannot vouch for a balance. Negative balances count as
+    exhausted, just like zero.
     """
-    captured_at = data.get("_captured_at")
-    if captured_at is not None:
-        if not isinstance(captured_at, str):
-            return None
-        try:
-            captured = datetime.fromisoformat(captured_at)
-            age = (datetime.now(timezone.utc) - captured).total_seconds()
-        except (ValueError, TypeError):
-            return None
-        if age < 0 or age > CODEX_USAGE_MAX_AGE_SECONDS:
-            return None
     credits = data.get("credits")
     if isinstance(credits, bool) or not isinstance(credits, int):
         return None

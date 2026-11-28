@@ -295,9 +295,9 @@ def test_old_capture_cannot_lift_block_after_cache_copy(
 
     row = quota_mod._shared_codex_pool_quota("codex", "gpt-5.6-sol")
 
-    assert row is not None
-    assert row.available is False
-    assert row.metadata["credits"] is None
+    # The capture time invalidates the whole snapshot, not just the balance:
+    # pacing falls back to the crash heuristic instead of trusting the gauge.
+    assert row is None
 
 
 @pytest.mark.parametrize(
@@ -311,10 +311,24 @@ def test_invalid_capture_cannot_lift_block(quota_mod, monkeypatch, tmp_path, cap
         {"credits": 25_706, "_captured_at": captured},
     )
 
-    row = quota_mod._shared_codex_pool_quota("codex", "gpt-5.6-sol")
+    assert quota_mod._shared_codex_pool_quota("codex", "gpt-5.6-sol") is None
 
-    assert row.available is False
-    assert row.metadata["credits"] is None
+
+def test_stale_capture_rejects_pacing_with_headroom(quota_mod, monkeypatch, tmp_path):
+    """A copied snapshot at weekly 30% must not open the pool on a fresh mtime."""
+    captured = datetime.fromtimestamp(
+        time.time() - quota_mod.CODEX_USAGE_MAX_AGE_SECONDS - 60, timezone.utc
+    ).isoformat()
+    cache_file = _patch_pool(
+        quota_mod, monkeypatch, tmp_path, {"credits": 25_706, "_captured_at": captured}
+    )
+    cache = json.loads(cache_file.read_text())
+    cache["main"]["weekly"] = {"utilization": 0.3, "resets_in_seconds": 50_000}
+    cache_file.write_text(json.dumps(cache))
+
+    # Fresh mtime: the only thing that can reject it is the capture time.
+    assert quota_mod._file_age_seconds(cache_file) is not None
+    assert quota_mod._shared_codex_pool_quota("codex", "gpt-5.6-sol") is None
 
 
 @pytest.mark.parametrize("age, available", [(899, True), (900, True), (901, False)])
@@ -340,4 +354,9 @@ def test_credit_capture_freshness_boundary(
 
     row = quota_mod._shared_codex_pool_quota("codex", "gpt-5.6-sol")
 
-    assert row.available is available
+    if available:
+        assert row is not None
+        assert row.available is True
+    else:
+        # Just past the window the whole snapshot is stale, not only credits.
+        assert row is None
