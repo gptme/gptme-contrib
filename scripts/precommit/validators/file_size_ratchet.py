@@ -18,8 +18,10 @@ to see warnings locally.
 ``--growth=budget`` is the steady-state rule. Growth is measured against the
 merge base, not the baseline, so a file that grew in an earlier PR does not keep
 warning. A listed file may grow by up to ``--budget`` lines (default 30) with a
-warning. More than that fails unless the change also adds a new code file (new
-code went into a new module). More than ``--hard-stop`` lines (default 100) to a
+warning. More than that fails unless the new files added by the change are at
+least as large as the growth (the code moved into a new module) -- a token new
+file does not exempt an arbitrarily large growth. More than ``--hard-stop``
+lines (default 100) to a
 file that was already ``--hard-stop-size`` lines (default 5,000) at the base
 always fails. The base is ``--base`` if given, else ``origin/$GITHUB_BASE_REF``
 on a GitHub pull request, else ``HEAD`` (what a local commit adds). When the
@@ -216,14 +218,25 @@ def lines_at(rev: str, rel: str) -> int | None:
     return count_bytes(result.stdout) if result.returncode == 0 else None
 
 
-def added_code_files(rev: str, exclude: list[str]) -> list[str]:
-    """Checked files added since ``rev`` (staged or committed)."""
+def added_code_lines(rev: str, exclude: list[str]) -> int:
+    """Lines added in checked files created since ``rev`` (staged or committed).
+
+    The new-module exception is sized against this: a token new file must not
+    exempt an arbitrarily large growth of a listed file.
+    """
     out = subprocess.run(
-        ["git", "-c", "core.quotePath=false", "diff", "--name-only", "-z"]
+        ["git", "-c", "core.quotePath=false", "diff", "--numstat", "-z"]
         + ["--diff-filter=A", rev],
         capture_output=True,
     ).stdout.decode("utf-8", errors="replace")
-    return [p for p in out.split("\0") if p and is_checked(p, exclude)]
+    total = 0
+    for record in out.split("\0"):
+        if not record:
+            continue
+        added, _deleted, path = record.split("\t", 2)
+        if is_checked(path, exclude):
+            total += int(added) if added.isdigit() else 0
+    return total
 
 
 def warn(path: str, message: str) -> None:
@@ -261,7 +274,7 @@ def check(
             "cannot resolve the growth base; growth is compared to the baseline "
             "and only warns.",
         )
-    new_module: list[str] | None = None
+    new_module_lines: int | None = None
 
     for rel in dict.fromkeys(paths):
         file = Path(rel)
@@ -289,19 +302,20 @@ def check(
             before = allowed if before is None else before
             grown = lines - before
             if grown > 0:
-                if new_module is None:
-                    new_module = added_code_files(base_rev, data["exclude"])
+                if new_module_lines is None:
+                    new_module_lines = added_code_lines(base_rev, data["exclude"])
                 grew = f"grew by {grown} lines (from {before} to {lines})"
                 if before >= hard_stop_size and grown > hard_stop:
                     errors.append(
                         f"{rel}: {grew}; files over {hard_stop_size} lines may "
                         f"grow by at most {hard_stop} lines per change. Split it."
                     )
-                elif grown > budget and not new_module:
+                elif grown > budget and new_module_lines < grown:
                     errors.append(
                         f"{rel}: {grew}, over the {budget}-line budget for a "
-                        f"file at or over the {threshold}-line limit. Put the new "
-                        "code in a new module."
+                        f"file at or over the {threshold}-line limit, and the new "
+                        f"files in this change add only {new_module_lines} lines. "
+                        "Move the new code into a new module."
                     )
                 else:
                     warn(rel, f"{grew}; it is already over the limit.")

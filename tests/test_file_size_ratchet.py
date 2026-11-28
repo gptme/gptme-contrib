@@ -291,8 +291,18 @@ def test_budget_allows_more_growth_when_a_new_module_is_added(repo):
     baseline({"big.py": 15})
     write("big.py", 15)
     commit()
-    write("helpers.py", 2)
+    write("helpers.py", 6)  # at least the 4 lines big.py grows by
     assert ratchet.main([*BUDGET, write("big.py", 19)]) == 0
+
+
+def test_budget_rejects_growth_larger_than_the_new_module(repo, capsys):
+    # A token new file must not exempt an arbitrarily large growth.
+    baseline({"big.py": 15})
+    write("big.py", 15)
+    commit()
+    write("helpers.py", 2)
+    assert ratchet.main([*BUDGET, write("big.py", 19)]) == 1
+    assert "new files in this change add only 2 lines" in capsys.readouterr().err
 
 
 def test_budget_hard_stop_ignores_the_new_module_exception(repo, capsys):

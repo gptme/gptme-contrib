@@ -73,6 +73,10 @@ jobs:
           uv sync --all-packages --locked
       - name: Run pre-commit
         env:
-          # Per-PR growth for the file-size ratchet; push runs compare to HEAD.
-          FILE_SIZE_RATCHET_BASE: ${{ github.event_name == 'pull_request' && 'HEAD^1' || '' }}
+          # Per-change growth for the file-size ratchet. On pull_request and
+          # merge_group the checked-out commit's first parent is the base tip,
+          # so the whole PR is measured. A push run compares to HEAD, i.e. it
+          # checks only the new-file rule: the change already landed, and
+          # failing master retroactively for growth helps nobody.
+          FILE_SIZE_RATCHET_BASE: ${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'HEAD^1' || '' }}
         run: pre-commit run --all-files
