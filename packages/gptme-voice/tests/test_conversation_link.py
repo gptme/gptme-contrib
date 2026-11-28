@@ -664,6 +664,56 @@ def test_lookup_fails_when_the_request_cannot_be_added_to_the_chat() -> None:
     assert all(kind != "step" for kind, _ in server.calls)
 
 
+def test_lookup_interrupts_a_step_whose_post_got_no_response() -> None:
+    server = _LookupServer([{"type": "connected", "session_id": "s1"}])
+    original = server.handler
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/step"):
+            raise httpx.ReadTimeout("no response", request=request)
+        return original(request)
+
+    server.handler = handler  # type: ignore[method-assign]
+    result = _run_lookup(server)
+    assert not result.success
+    assert server.calls[-1] == ("interrupt", {"session_id": "s1"})
+
+
+def test_lookup_busy_chat_does_not_interrupt_the_other_reply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(conversation_link, "LOOKUP_BUSY_RETRY_SECONDS", 0.05)
+    server = _LookupServer([{"type": "connected", "session_id": "s1"}], hang=True)
+    server.step_statuses = [409] * 100
+    result = _run_lookup(server, timeouts={"fast": 0.2})
+    assert not result.success
+    assert all(kind != "interrupt" for kind, _ in server.calls)
+
+
+def test_interrupted_lookup_is_not_an_answer() -> None:
+    server = _LookupServer(
+        [
+            {"type": "connected", "session_id": "s1"},
+            {"type": "generation_started"},
+            _msg("assistant", "Half an ans"),
+            {"type": "interrupted"},
+        ]
+    )
+    result = _run_lookup(server)
+    assert not result.success and "interrupted" in (result.error or "")
+
+
+def test_sse_event_data_may_span_lines() -> None:
+    async def lines():
+        for line in ['data: {"type":', 'data: "ping"}', "", ": comment", ""]:
+            yield line
+
+    async def collect():
+        return [e async for e in conversation_link._sse_events(lines())]
+
+    assert asyncio.run(collect()) == [{"type": "ping"}]
+
+
 def test_execute_delegates_to_the_lookup_runner() -> None:
     """With a lookup runner (webui calls), no gptme subprocess is spawned."""
     seen: list[tuple] = []

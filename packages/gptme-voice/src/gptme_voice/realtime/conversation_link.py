@@ -391,6 +391,10 @@ class _LookupFailed(Exception):
     pass
 
 
+class _ChatBusy(asyncio.TimeoutError):
+    """Another reply kept the chat busy until the deadline; no step started."""
+
+
 class ConversationLookup:
     """Run a voice lookup as a step of the call's conversation.
 
@@ -459,8 +463,15 @@ class ConversationLookup:
                     {"role": "user", "content": _LOOKUP_PREFIX + task + _LOOKUP_SUFFIX},
                 )
                 appended.raise_for_status()
-                await self._start_step(session_id, deadline)
+                # A step POST that got no response may still have started the
+                # step: interrupt on any error from here, unless the server
+                # answered (busy, or an error status) and so started nothing.
                 stepping = True
+                try:
+                    await self._start_step(session_id, deadline)
+                except (_ChatBusy, httpx.HTTPStatusError):
+                    stepping = False
+                    raise
                 if on_started:
                     on_started(time.monotonic())
                 answer = await self._await_answer(events, deadline, on_progress)
@@ -516,7 +527,7 @@ class ConversationLookup:
                 return
             # Another reply started between our check and the step.
             if time.monotonic() + LOOKUP_BUSY_RETRY_SECONDS > deadline:
-                raise asyncio.TimeoutError
+                raise _ChatBusy
             await asyncio.sleep(LOOKUP_BUSY_RETRY_SECONDS)
 
     async def _await_answer(
@@ -573,6 +584,10 @@ class ConversationLookup:
                 ran_tools = True
             elif kind == "step_complete" and ran_tools:
                 continue
+            elif kind == "interrupted":
+                # Superseded (e.g. the user typed), not finished: partial
+                # text is not the answer.
+                raise _LookupFailed("the lookup step was interrupted")
             else:
                 return answer
 
@@ -584,13 +599,20 @@ class ConversationLookup:
 
 
 async def _sse_events(lines: AsyncIterator[str]) -> AsyncIterator[dict[str, Any]]:
+    """JSON events from an SSE stream; an event's data may span several lines."""
+    data: list[str] = []
     async for line in lines:
-        if not line.startswith("data:"):
+        if line.startswith("data:"):
+            data.append(line[5:].removeprefix(" "))
+            continue
+        if line.strip() or not data:  # event:/id:/comment lines, or no data
             continue
         try:
-            event = json.loads(line[5:].strip())
+            event = json.loads("\n".join(data))
         except json.JSONDecodeError:
             continue
+        finally:
+            data.clear()
         if isinstance(event, dict):
             yield event
 
