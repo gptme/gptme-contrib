@@ -523,8 +523,10 @@ def test_null_success_response_reports_unavailable() -> None:
     _assert_bad_response_isolated("null", "Unavailable")
 
 
-def test_partial_stdout_with_failure_reports_no_actions() -> None:
-    _assert_bad_response_isolated("partial_failure", "No Actions")
+def test_partial_stdout_with_failure_reports_unavailable() -> None:
+    # A failed `gh run list` is not a repo with no workflows; report the explicit
+    # Unavailable marker so the consumer keeps the counts unknown instead of 0.
+    _assert_bad_response_isolated("partial_failure", "Unavailable")
 
 
 def test_valid_empty_array_still_reports_no_runs() -> None:

@@ -175,7 +175,15 @@ check_repo() {
     fi
 
     if [ "$run_json" = "error" ]; then
-        echo -e "${YELLOW}-${NC} $label: No Actions"
+        # A failed `gh run list` (rate limit, network, auth) is not the same as
+        # a repo with no workflows. The old "- ... No Actions" row parsed as a
+        # neutral skip downstream, so a fully failed collection read as a
+        # definitive ci_failing=0 and left the delivery tile green
+        # (ErikBjare/bob#1607 operator finding, 2026-11-28). Emit the explicit
+        # Unavailable marker the consumer already understands as unknown.
+        local err_detail
+        err_detail=$(printf '%s' "$run_err" | tr '\n' ' ' | cut -c1-200)
+        echo -e "${YELLOW}?${NC} $label: Unavailable (gh run list: ${err_detail:-unknown error})"
         return
     fi
 
