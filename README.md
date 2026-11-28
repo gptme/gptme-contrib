@@ -14,6 +14,8 @@ If [gptme](https://github.com/gptme/gptme) is the engine and [gptme-agent-templa
 
 **Check gptme core before reaching here.** Core already ships a lot, notably the extensive `gptme-util` CLI with subcommands for context (`index`, `retrieve`, `search-conversations`, `git`, `tree`, `journal`), token counting, chat search, models/providers, LLM helpers, tools, prompts, skills, hooks, MCP, status, snapshots, and session resume. See [`gptme-util` docs](https://gptme.org/docs/cli/gptme-util.html). If a capability isn't in core or here, it may exist as a community plugin — see [Discover more](#discover-more).
 
+**Keeping up:** agent-facing changes live in [`CHANGELOG.md`](./CHANGELOG.md). After a submodule bump, `python3 gptme-contrib/scripts/print-agent-changelog.py OLD NEW`, run from the agent workspace root, prints `recommended`/`required` rows between the old and new pin.
+
 ## Assembling a full agent
 
 A capability-oriented map of this repo. Each entry links to a plugin (`plugins/`), package (`packages/`), or script collection (`scripts/`) below.

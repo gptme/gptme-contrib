@@ -60,6 +60,7 @@ files are skipped. Keep ShellCheck enabled alongside it.
 | [gptme-heartbeat-validate.py](./gptme-heartbeat-validate.py) | Validate heartbeat protocol messages ([protocol docs](../docs/protocols/gptme-heartbeat.md)) |
 | [kuma_push.py](./kuma_push.py) | Uptime Kuma push helper: URL encoding, acknowledgement checks, ack ledger ([docs](../docs/principal-notify.md)) |
 | [perplexity.py](./perplexity.py) | Web search via the Perplexity API |
+| [print-agent-changelog.py](./print-agent-changelog.py) | Print `recommended`/`required` [`CHANGELOG.md`](../CHANGELOG.md) rows between two submodule pins |
 | [principal_notify.py](./principal_notify.py) | Escalate to the agent's principal: Tier-0 local alert plus `github`/`pushover`/`telegram`/`ntfy` ([docs](../docs/principal-notify.md)) |
 | [quota-gate.sh](./quota-gate.sh) | Gate session start on available quota |
 | [search.py](./search.py) | Workspace-wide search |

@@ -103,6 +103,7 @@ ALLOWED_ROOT_ENTRIES = frozenset(
         ".mailmap",
         ".pre-commit-config.yaml",
         ".pre-commit-hooks.yaml",
+        "CHANGELOG.md",  # Agent-facing upgrade log (gptme/gptme-contrib#2611).
         "CONTRIBUTING.md",
         "conftest.py",  # Shared in-process CI interpreter guard for package tests.
         "file-size-baseline.json",  # file-size-ratchet hook ceilings.
