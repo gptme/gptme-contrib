@@ -433,21 +433,38 @@ def _sse(*events: dict) -> bytes:
     return b"".join(f"data: {json.dumps(e)}\n\n".encode() for e in events)
 
 
+# Events after this marker are sent once a step starts (by default, all
+# events after the first).
+STEP = {"type": "_step"}
+
+
 class _LookupServer:
-    """A fake gptme-server: an SSE stream plus append/step/interrupt endpoints."""
+    """A fake gptme-server: an SSE stream plus append/step/interrupt endpoints.
+
+    Like the real server, appending a message sends its ``message_added``,
+    and a step's events follow the step request.
+    """
 
     def __init__(self, events: list[dict], *, hang: bool = False) -> None:
-        self.events = events
+        if STEP in events:
+            at = events.index(STEP)
+            self.before, self.after = events[:at], events[at + 1 :]
+        else:
+            self.before, self.after = events[:1], events[1:]
         self.hang = hang
         self.calls: list[tuple[str, dict]] = []
         self.step_statuses: list[int] = []
+        self.queue: asyncio.Queue[dict | None] | None = None
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
         if path.endswith("/events"):
 
             async def body():
-                yield _sse(*self.events)
+                self.queue = asyncio.Queue()
+                yield _sse(*self.before)
+                while (event := await self.queue.get()) is not None:
+                    yield _sse(event)
                 if self.hang:
                     await asyncio.sleep(3600)
 
@@ -455,9 +472,17 @@ class _LookupServer:
         payload = json.loads(request.content)
         kind = path.rsplit("/", 1)[-1]
         self.calls.append((kind, payload))
+        status = 200
         if kind == "step" and self.step_statuses:
-            return httpx.Response(self.step_statuses.pop(0), json={})
-        return httpx.Response(200, json={})
+            status = self.step_statuses.pop(0)
+        if self.queue is not None and status == 200:
+            if kind == "conv-1":
+                self.queue.put_nowait(_msg("user", payload["content"]))
+            elif kind == "step":
+                for event in self.after:
+                    self.queue.put_nowait(event)
+                self.queue.put_nowait(None)
+        return httpx.Response(status, json={})
 
     def lookup(self, client: httpx.AsyncClient, **kwargs) -> ConversationLookup:
         return ConversationLookup(
@@ -523,6 +548,7 @@ def test_lookup_waits_for_a_running_reply_before_adding_to_the_chat() -> None:
         [
             {"type": "connected", "session_id": "s1", "generating": True},
             {"type": "step_complete"},  # the user's own text reply finished
+            STEP,
             {"type": "generation_started"},
             _msg("assistant", "done"),
             {"type": "step_complete"},
@@ -553,7 +579,7 @@ def test_lookup_retries_a_busy_step(monkeypatch: pytest.MonkeyPatch) -> None:
     ("event", "error"),
     [
         ({"type": "error", "error": "model refused"}, "model refused"),
-        ({"type": "tool_pending", "auto_confirm": False}, "more tool calls"),
+        ({"type": "tool_pending", "auto_confirm": False}, "confirmation click"),
     ],
 )
 def test_lookup_failure_interrupts_the_step(event: dict, error: str) -> None:
@@ -712,6 +738,49 @@ def test_sse_event_data_may_span_lines() -> None:
         return [e async for e in conversation_link._sse_events(lines())]
 
     assert asyncio.run(collect()) == [{"type": "ping"}]
+
+
+def test_lookup_ignores_a_reply_that_is_not_its_own() -> None:
+    """Events carry no step id: a reply that ran before our request (or ended
+    after it, before our step) must not be taken for the lookup's answer."""
+    server = _LookupServer(
+        [
+            {"type": "connected", "session_id": "s1", "generating": False},
+            {"type": "generation_started"},  # another client's reply
+            _msg("assistant", "an unrelated auto-reply"),
+            STEP,
+            {"type": "step_complete"},  # ...which ends after our request
+            {"type": "generation_started"},
+            _msg("assistant", "the lookup answer"),
+            {"type": "step_complete"},
+        ]
+    )
+    result = _run_lookup(server)
+    assert result.success and result.output == "the lookup answer"
+
+
+def test_lookup_waits_out_a_running_reply_that_ends_in_an_error() -> None:
+    server = _LookupServer(
+        [
+            {"type": "connected", "session_id": "s1", "generating": True},
+            {"type": "error", "error": "the user's reply failed"},
+            STEP,
+            {"type": "generation_started"},
+            _msg("assistant", "done"),
+            {"type": "step_complete"},
+        ]
+    )
+    result = _run_lookup(server, timeouts={"fast": 2})
+    assert result.success and result.output == "done"
+
+
+def test_lookup_budgets_follow_the_subprocess_env_vars() -> None:
+    from gptme_voice.realtime import tool_bridge
+
+    assert conversation_link.LOOKUP_TIMEOUT_SECONDS == {
+        "fast": float(tool_bridge._FAST_MODE_BUDGET_SECONDS),
+        "smart": float(tool_bridge._SMART_MODE_BUDGET_SECONDS),
+    }
 
 
 def test_execute_delegates_to_the_lookup_runner() -> None:
