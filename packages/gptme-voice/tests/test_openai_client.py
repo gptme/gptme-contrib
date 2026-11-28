@@ -15,23 +15,7 @@ from gptme_voice.realtime.openai_client import (
 from websockets.datastructures import Headers
 from websockets.http11 import Response
 
-
-class _FakeWebSocket:
-    def __init__(self) -> None:
-        self.sent: list[dict] = []
-        self.closed = False
-
-    async def send(self, message: str) -> None:
-        self.sent.append(json.loads(message))
-
-    def __aiter__(self) -> "_FakeWebSocket":
-        return self
-
-    async def __anext__(self) -> str:
-        raise StopAsyncIteration
-
-    async def close(self) -> None:
-        self.closed = True
+from .voice_fakes import _FakeWebSocket
 
 
 class _QueuedWebSocket(_FakeWebSocket):

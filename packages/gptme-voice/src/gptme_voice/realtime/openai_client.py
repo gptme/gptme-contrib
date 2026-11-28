@@ -12,7 +12,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Literal, Sequence
+from typing import Any, Awaitable, Callable, Literal, Sequence
 
 import websockets
 from gptme.config import get_config, get_project_config
@@ -43,6 +43,8 @@ _MAX_INSTRUCTIONS_LEN = 4096
 _MAX_PENDING_AUDIO_CHUNKS = 500
 # A provider handshake should normally complete in under a second. Bound text
 # turns so a missing ready event cannot pin a /local connection forever.
+# How long a typed message waits for an interrupted reply to end.
+_TYPED_CANCEL_WAIT_SECONDS = 2.0
 _SESSION_READY_TIMEOUT_SECONDS = 10.0
 # OpenAI's model catalog currently markets `gpt-realtime-2`, while the
 # Realtime API reference may still enumerate the older generic alias instead.
@@ -463,6 +465,13 @@ class OpenAIRealtimeClient:
         self._ws: websockets.ClientConnection | None = None
         self._receive_task: asyncio.Task | None = None
         self._responding = False  # True while AI is generating a response
+        # Set between response.done and the next response.created.
+        self._response_idle = asyncio.Event()
+        self._response_idle.set()
+        self._response_requested = False
+        # Set on response.created; lets a typed message wait for its own reply
+        # to be acknowledged before the next one is allowed through.
+        self._response_started = asyncio.Event()
 
         # Audio arriving before the session is ready would be forwarded to a
         # session that is not configured yet, causing silent calls (observed on
@@ -828,6 +837,107 @@ class OpenAIRealtimeClient:
         )
         await self._send_event("response.create", {})
 
+    @property
+    def responding(self) -> bool:
+        """True while the model is producing a response."""
+        return self._responding
+
+    async def send_typed_message(
+        self,
+        text: str,
+        before_reply: Callable[[], Awaitable[None]] | None = None,
+        on_delivered: Callable[[], None] | None = None,
+    ) -> bool:
+        """Deliver a message the user typed during the call.
+
+        Like :meth:`send_text_message`, but a message typed while the model is
+        talking interrupts that reply first (the typed equivalent of speaking
+        over it), since a second ``response.create`` would be rejected while
+        one is active. Returns True if a reply was interrupted.
+        """
+        await self.wait_until_ready()
+        # Bounds the cancel handshake only, not session setup.
+        deadline = asyncio.get_running_loop().time() + _TYPED_CANCEL_WAIT_SECONDS
+        interrupted = await self._cancel_until_idle(deadline)
+        logger.info("Sending typed message: %s...", text[:100])
+        await self._send_event(
+            "conversation.item.create",
+            {
+                "item": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": text}],
+                }
+            },
+        )
+        # The provider has the message now: record it before anything that
+        # waits (cancels, the reply acknowledgement), so it can't be ordered
+        # after its own answer or lost to a teardown cancel.
+        if on_delivered is not None:
+            on_delivered()
+        # A reply can start while the item is sent (e.g. for an injected
+        # lookup result); check again right before response.create, with no
+        # await in between other than the send itself.
+        # Clear playback first: it can yield (a websocket send), and a reply
+        # could start meanwhile (an injected lookup result), so the final
+        # idle check must sit right before response.create.
+        if before_reply is not None:
+            await before_reply()
+        try:
+            interrupted = await self._cancel_until_idle(deadline) or interrupted
+        except asyncio.TimeoutError:
+            # The provider already has the message (the item was created), so
+            # it counts as delivered; only its own reply can't be requested
+            # while another stays active. It is in context for the next reply.
+            logger.warning(
+                "Typed message delivered, but a reply that started meanwhile "
+                "was not confirmed cancelled; not requesting a reply for it"
+            )
+            return True
+        self._response_started.clear()
+        await self._send_event("response.create", {})
+        # Hold until the provider acknowledges the reply (bounded): typed
+        # messages are serialized, and the next one must see this reply as
+        # active (and cancel it) instead of sending a rejected response.create.
+        try:
+            await asyncio.wait_for(
+                self._response_started.wait(), _TYPED_CANCEL_WAIT_SECONDS
+            )
+        except asyncio.TimeoutError:
+            logger.warning("No response.created for the typed message's reply")
+        return interrupted
+
+    async def _cancel_until_idle(self, deadline: float) -> bool:
+        """Cancel active replies until the provider confirms none is running.
+
+        Returns True if a reply was cancelled.
+
+        response.create is rejected until the provider confirms a cancel with
+        response.done, so our own flag is not trusted for that. A reply that
+        starts meanwhile is superseded by the typed message too.
+        """
+        loop = asyncio.get_running_loop()
+        cancelled = False
+        while self._responding or self._response_requested:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                # A response.create now would be rejected, leaving the typed
+                # turn unanswered. Report it undelivered instead.
+                raise asyncio.TimeoutError(
+                    "provider did not confirm cancelling the active reply"
+                )
+            if self._responding:
+                await self._send_event("response.cancel", {})
+                cancelled = True
+                wait = remaining
+            else:
+                wait = min(0.05, remaining)  # requested: wait for it to start
+            try:
+                await asyncio.wait_for(self._response_idle.wait(), wait)
+            except asyncio.TimeoutError:
+                continue
+        return cancelled
+
     async def wait_until_ready(self, timeout: float | None = None) -> None:
         """Wait until the provider has applied our session configuration.
 
@@ -1174,6 +1284,11 @@ class OpenAIRealtimeClient:
             raise RuntimeError("Not connected to OpenAI Realtime API")
 
         event = {"type": event_type, **data}
+        if event_type == "response.create":
+            # Requested but not yet acknowledged (inject_message, tool output,
+            # typed): a typed message must treat it as active, not idle.
+            self._response_requested = True
+            self._response_idle.clear()
         await self._ws.send(json.dumps(event))
 
     async def _receive_loop(self) -> None:
@@ -1266,11 +1381,16 @@ class OpenAIRealtimeClient:
         # Response lifecycle — mute mic while responding
         elif event_type == "response.created":
             self._responding = True
+            self._response_requested = False
+            self._response_idle.clear()
+            self._response_started.set()
             if self.on_response_start:
                 await self._call_callback(self.on_response_start)
             logger.debug("Response started (mic muted)")
         elif event_type == "response.done":
             self._responding = False
+            self._response_requested = False
+            self._response_idle.set()
             if self.on_response_end:
                 await self._call_callback(self.on_response_end)
             status = event.get("response", {}).get("status", "")
@@ -1307,6 +1427,10 @@ class OpenAIRealtimeClient:
 
         # Errors
         elif event_type == "error":
+            if self._response_requested and not self._responding:
+                # The requested reply was rejected: nothing is pending.
+                self._response_requested = False
+                self._response_idle.set()
             error = event.get("error") or {}
             if not isinstance(error, dict):
                 error = {"message": str(error)}

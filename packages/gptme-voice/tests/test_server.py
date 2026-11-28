@@ -46,6 +46,13 @@ from gptme_voice.realtime.twilio_integration import (
     verify_stream_params,
 )
 
+from .voice_fakes import (
+    _DummyBrowserWebSocket,
+    _DummyToolBridge,
+    _FakeRealtimeClient,
+    _PeerWebSocket,
+)
+
 
 class _DummyWebSocket:
     def __init__(self) -> None:
@@ -78,29 +85,6 @@ class _ClosableWebSocket(_DummyWebSocket):
         self.closed = True
 
 
-class _DummyBrowserWebSocket:
-    def __init__(self, incoming: list[dict[str, object]]) -> None:
-        self.query_params: dict[str, str] = {}
-        self._incoming = incoming
-        self.accepted = False
-        self.text_messages: list[str] = []
-        self.binary_messages: list[bytes] = []
-
-    async def accept(self) -> None:
-        self.accepted = True
-
-    async def receive(self) -> dict[str, object]:
-        if self._incoming:
-            return self._incoming.pop(0)
-        return {"type": "websocket.disconnect"}
-
-    async def send_text(self, message: str) -> None:
-        self.text_messages.append(message)
-
-    async def send_bytes(self, message: bytes) -> None:
-        self.binary_messages.append(message)
-
-
 class _DummyTwilioWebSocket(_DummyWebSocket):
     def __init__(self, incoming: list[dict[str, object]]) -> None:
         super().__init__()
@@ -124,75 +108,6 @@ class _DummyTwilioWebSocket(_DummyWebSocket):
     @property
     def query_params(self) -> dict[str, str]:
         return {}
-
-
-class _PeerWebSocket:
-    def __init__(
-        self, host: str | None, incoming: list[dict[str, object]] | None = None
-    ) -> None:
-        self.client = None if host is None else (host, 12345)
-        self.query_params: dict[str, str] = {}
-        self._incoming = [json.dumps(message) for message in incoming or []]
-        self.accepted = False
-        self.close_code: int | None = None
-
-    async def accept(self) -> None:
-        self.accepted = True
-
-    async def close(self, code: int = 1000) -> None:
-        self.close_code = code
-
-    def iter_text(self):
-        async def _gen():
-            for message in self._incoming:
-                yield message
-
-        return _gen()
-
-
-class _FakeRealtimeClient:
-    def __init__(self) -> None:
-        self.sent_audio: list[bytes] = []
-        self.sent_text: list[str] = []
-        self.commit_count = 0
-        self.disconnect_kwargs: dict[str, object] | None = None
-        self.activate_session_count = 0
-        self.on_function_call = None
-
-    async def connect(self) -> None:
-        return None
-
-    async def activate_session(self) -> None:
-        self.activate_session_count += 1
-
-    async def send_audio(self, audio_data: bytes) -> None:
-        self.sent_audio.append(audio_data)
-
-    async def commit_audio(self) -> None:
-        self.commit_count += 1
-
-    async def disconnect(self, **kwargs: object) -> None:
-        self.disconnect_kwargs = kwargs
-
-    async def inject_message(self, _text: str) -> None:
-        return None
-
-    async def send_text_message(self, text: str) -> None:
-        self.sent_text.append(text)
-
-
-class _DummyToolBridge:
-    def __init__(self, *args, **kwargs) -> None:
-        return None
-
-    async def handle_function_call(self, _name: str, _args: dict) -> None:
-        return None
-
-    def pending_task_ids(self) -> list[str]:
-        return []
-
-    def get_timings(self) -> list[dict[str, object]]:
-        return []
 
 
 @pytest.mark.parametrize("host", ["203.0.113.1", None])

@@ -38,7 +38,21 @@ from ..body import body_adapter_from_env, body_tool_schemas
 from ..handoff import HandoffWriter, get_valid_agents
 from ..rag import VoiceRag, rag_instruction_preamble, rag_tool_schema
 from ..vision import VisionSessionBridge, vision_tool_schema
+from . import browser_call
 from .audio import AudioConverter
+from .browser_call import (  # noqa: F401 - re-exported: /local and tests use them
+    _is_probe_call,
+    _notify_after,
+    _probe_caller_id,
+    _probe_reporting,
+    _same_dir,
+)
+
+# Used by browser_call via this module (and patched here in tests).
+from .conversation_link import (  # noqa: F401
+    LiveTranscriptSink,
+    fetch_conversation_context,
+)
 from .latency import latency_trace_from_env
 from .missed_call_context import (
     CALLBACK_GREETING,
@@ -80,6 +94,14 @@ from .twilio_integration import (
     verify_stream_params,
 )
 from .xai_client import XAIRealtimeClient, _get_xai_api_key
+
+# Longest typed message accepted from the browser during a call.
+# Teardown waits this long for typed messages still being delivered.
+_TYPED_DRAIN_TIMEOUT_SECONDS = 3.0
+_MAX_TYPED_MESSAGE_CHARS = 8000
+
+# Header gptme-server's tunnel sets when this process is its voice sidecar.
+_BROWSER_SECRET_HEADER = "x-gptme-voice-secret"
 
 
 def _websocket_peer_host(websocket) -> str | None:
@@ -675,16 +697,16 @@ def _append_transcript_turn(
     # Replace only when the new text is at least as long as the stored one —
     # a shorter retransmission (e.g. a provider-side correction) is silently
     # ignored so we never truncate a longer partial already in the transcript.
-    if (
-        allow_continuation
-        and item_id is not None
-        and transcript
-        and transcript[-1].role == role
-        and transcript[-1].item_id == item_id
-    ):
-        if len(cleaned) >= len(transcript[-1].text):
-            transcript[-1] = TranscriptTurn(role=role, text=cleaned, item_id=item_id)
-        return  # same item_id — never append a second entry regardless
+    # Look back a few turns: a typed turn can land between a partial and its completion.
+    if allow_continuation and item_id is not None:
+        for index in range(len(transcript) - 1, max(-1, len(transcript) - 6), -1):
+            turn = transcript[index]
+            if turn.role == role and turn.item_id == item_id:
+                if len(cleaned) >= len(turn.text):
+                    transcript[index] = TranscriptTurn(
+                        role=role, text=cleaned, item_id=item_id
+                    )
+                return  # same item_id — never append a second entry regardless
 
     # Prefix heuristic fallback: only when BOTH the current event and the
     # stored entry have no item_id.  If the stored entry has item_id="A"
@@ -899,6 +921,9 @@ class VoiceServer:
         self.post_call_command = _get_config_env("GPTME_VOICE_POST_CALL_COMMAND")
         self.gptme_server_url = _get_config_env("GPTME_VOICE_GPTME_SERVER_URL") or ""
         self.gptme_server_key = _get_config_env("GPTME_VOICE_GPTME_SERVER_KEY") or ""
+        # Set by gptme-server when it runs this process as its voice sidecar:
+        # /voice then requires the secret and accepts ?conversation_id=.
+        self.browser_secret = _get_config_env("GPTME_VOICE_BROWSER_SECRET") or ""
         self.state_dir = Path(
             _get_config_env("GPTME_VOICE_STATE_DIR") or _DEFAULT_STATE_DIR
         )
@@ -987,15 +1012,7 @@ class VoiceServer:
         # Built here, after the handoff roster is resolved, so the prompt never
         # describes a handoff tool the deployment cannot serve (the client drops
         # the tool when ``_available_agents`` is empty).
-        self._instructions = (
-            f"IDENTITY: You are {_display_name(self._agent_name)}. "
-            "Never claim to be another agent.\n\n"
-            + _build_runtime_identity_instructions(self.provider, self.model)
-            + "\n\n"
-            + _load_project_instructions(
-                self.workspace, available_agents=self._available_agents
-            )
-        )
+        self._instructions = self._base_instructions(self.workspace)
 
         # Active connections: call_sid -> (twilio_ws, realtime_client)
         self._connections: dict[str, tuple] = {}
@@ -1793,8 +1810,12 @@ class VoiceServer:
         standup_brief: str | None = None,
         consume_recent: bool = True,
         anonymous_is_operator: bool = True,
+        workspace_context: bool = True,
+        base_instructions: str | None = None,
     ) -> SessionBootstrap:
-        instructions = self._instructions
+        instructions = (
+            base_instructions if base_instructions is not None else self._instructions
+        )
         if from_number:
             instructions = _build_caller_instructions(
                 instructions, from_number, self.workspace
@@ -1823,8 +1844,13 @@ class VoiceServer:
         if from_number:
             identity = _lookup_caller_identity(from_number, self.workspace)
             caller_is_operator = bool(identity and identity.is_operator)
+        # The digest and call history describe this server's workspace; a
+        # call about another workspace (a webui conversation elsewhere) gets
+        # neither.
         activity_digest = (
-            _load_voice_digest(self.workspace) if caller_is_operator else None
+            _load_voice_digest(self.workspace)
+            if caller_is_operator and workspace_context
+            else None
         )
         if activity_digest and not standup_brief:
             instructions = _prepend_activity_digest(activity_digest, instructions)
@@ -1832,7 +1858,7 @@ class VoiceServer:
         # Inject the compact call history index for operator inbound calls.
         # CALLBACK_WINDOW no longer gates this — the index covers all recent
         # calls so the agent can reference them on demand without a time cap.
-        if caller_is_operator and not standup_brief:
+        if caller_is_operator and workspace_context and not standup_brief:
             history_index = load_callback_history_index(self.workspace)
             if history_index:
                 instructions = history_index + "\n\n" + instructions
@@ -2088,18 +2114,34 @@ class VoiceServer:
         # so a later inbound does not report those tasks as prior_leg.
         self._drop_prior_subagent_status(from_number)
 
+    def _base_instructions(self, workspace: str | None) -> str:
+        """Identity + runtime + the project prompt files of *workspace*."""
+        return (
+            f"IDENTITY: You are {_display_name(self._agent_name)}. "
+            "Never claim to be another agent.\n\n"
+            + _build_runtime_identity_instructions(self.provider, self.model)
+            + "\n\n"
+            + _load_project_instructions(
+                workspace, available_agents=self._available_agents
+            )
+        )
+
     async def _build_session_instructions(
         self,
         *,
         caller_id: str | None,
         from_number: str = "",
         handoff_id: str | None = None,
+        workspace_context: bool = True,
+        base_instructions: str | None = None,
     ) -> str:
         return (
             await self._build_session_bootstrap(
                 caller_id=caller_id,
                 from_number=from_number,
                 handoff_id=handoff_id,
+                workspace_context=workspace_context,
+                base_instructions=base_instructions,
             )
         ).instructions
 
@@ -2410,6 +2452,9 @@ class VoiceServer:
         if not self.gptme_server_url or not self.gptme_server_key:
             return
 
+        if metadata.get("transcript_posted_live"):
+            logger.debug("Skipping transcript promotion for %s: posted live", caller_id)
+            return
         call_sid = metadata.get("call_sid")
         if not call_sid:
             logger.warning(
@@ -3326,8 +3371,14 @@ class VoiceServer:
 
         await websocket.accept()
 
-        caller_id = self._get_local_caller_id(websocket)
-        handoff_id = self._get_local_handoff_id(websocket)
+        probe = _is_probe_call(websocket)
+        # A probe gets a caller id of its own, so it never resumes (and thereby
+        # consumes) a real caller's recent-call record or pending follow-up.
+        caller_id = (
+            _probe_caller_id() if probe else self._get_local_caller_id(websocket)
+        )
+        # A probe must not consume a real caller's pending handoff bootstrap.
+        handoff_id = None if probe else self._get_local_handoff_id(websocket)
         realtime_client: OpenAIRealtimeClient | None = None
         tool_bridge: GptmeToolBridge | None = None
         vision_bridge: VisionSessionBridge | None = None
@@ -3358,6 +3409,11 @@ class VoiceServer:
                     call_sid=None,
                 )
             )
+            wrap_result = None
+            if probe:
+                on_ai_transcript, on_user_transcript, wrap_result = _probe_reporting(
+                    websocket, on_ai_transcript, on_user_transcript
+                )
             realtime_client = self._make_client(
                 session_cfg,
                 on_audio=lambda audio: self._send_local_audio(websocket, audio),
@@ -3368,7 +3424,11 @@ class VoiceServer:
 
             tool_bridge = GptmeToolBridge(
                 workspace=self.workspace,
-                on_result=realtime_client.inject_message,
+                on_result=(
+                    wrap_result(realtime_client.inject_message)
+                    if wrap_result
+                    else realtime_client.inject_message
+                ),
                 on_dispatch=self._make_sound_cue_callback(websocket, "dispatch"),
                 on_timeout=self._make_sound_cue_callback(websocket, "timeout"),
                 on_cancel=self._make_sound_cue_callback(websocket, "cancel"),
@@ -3422,6 +3482,11 @@ class VoiceServer:
                             text,
                             allow_continuation=False,
                         )
+                        if probe:
+                            await self._send_probe_event(
+                                websocket,
+                                {"type": "transcript", "role": "user", "text": text},
+                            )
 
         except WebSocketDisconnect:
             pass  # Normal path when _schedule_hangup closes the WebSocket
@@ -3439,136 +3504,14 @@ class VoiceServer:
                 vision_bridge.close()
             if realtime_client:
                 await self._disconnect_realtime_client(realtime_client)
+            if probe:
+                logger.info(
+                    "Probe call ended (%d turns); no call record", len(transcript)
+                )
+                return
             await self._on_call_end(
                 caller_id,
                 "local",
-                transcript,
-                {
-                    "caller_id": caller_id,
-                    "provider": self.provider,
-                    **({"handoff_id": handoff_id} if handoff_id else {}),
-                },
-                tool_bridge=tool_bridge,
-            )
-
-    async def handle_browser_websocket(self, websocket):
-        """
-        Handle WebSocket connection for browser voice transport.
-
-        Accepts raw binary PCM16 audio frames at 16kHz from the browser side.
-        Control messages remain JSON text frames.
-        """
-        await websocket.accept()
-
-        caller_id = self._get_local_caller_id(websocket)
-        handoff_id = self._get_local_handoff_id(websocket)
-        realtime_client: OpenAIRealtimeClient | None = None
-        tool_bridge: GptmeToolBridge | None = None
-        transcript: list[TranscriptTurn] = []
-        audio_converter = AudioConverter()
-
-        try:
-            instructions = await self._build_session_instructions(
-                caller_id=caller_id,
-                handoff_id=handoff_id,
-            )
-            body_adapter = self._body_adapter_for_websocket(
-                websocket, transport="browser"
-            )
-            rag_for_ws = self._rag_for_websocket(websocket, transport="browser")
-            session_cfg = self._build_session_config(
-                instructions=instructions,
-                include_body_tools=body_adapter is not None,
-                include_rag_tools=rag_for_ws is not None,
-            )
-            on_ai_transcript, on_user_transcript, _browser_hangup = (
-                self._make_transcript_callbacks(
-                    transcript=transcript,
-                    websocket=websocket,
-                    source="browser",
-                    call_sid=None,
-                )
-            )
-            realtime_client = self._make_client(
-                session_cfg,
-                on_audio=lambda audio: self._send_browser_audio(websocket, audio),
-                on_audio_end=lambda: self._send_browser_audio_end(websocket),
-                on_ai_transcript=on_ai_transcript,
-                on_user_transcript=on_user_transcript,
-            )
-
-            tool_bridge = GptmeToolBridge(
-                workspace=self.workspace,
-                on_result=realtime_client.inject_message,
-                on_dispatch=self._make_sound_cue_callback(websocket, "dispatch"),
-                on_timeout=self._make_sound_cue_callback(websocket, "timeout"),
-                on_cancel=self._make_sound_cue_callback(websocket, "cancel"),
-                on_hangup=_browser_hangup,
-                on_handoff=self._make_handoff_callback([caller_id], transcript),
-                transcript_provider=lambda: transcript,
-                body_adapter=body_adapter,
-                rag=rag_for_ws,
-            )
-            self._seed_bridge_from_prior_leg(tool_bridge, caller_id)
-            realtime_client.on_function_call = tool_bridge.handle_function_call
-            # A rejected session.update must end the call instead of leaving
-            # the caller with an unconfigured (or silent) provider session.
-            realtime_client.on_session_failed = _hangup_on_session_failure(
-                _browser_hangup
-            )
-
-            await realtime_client.connect()
-            await websocket.send_text(
-                json.dumps(
-                    {
-                        "type": "ready",
-                        "input_sample_rate": AudioConverter.BROWSER_RATE,
-                        "output_sample_rate": AudioConverter.OPENAI_RATE,
-                    }
-                )
-            )
-
-            while True:
-                message = await websocket.receive()
-                message_type = message.get("type")
-                if message_type == "websocket.disconnect":
-                    break
-
-                audio_data = message.get("bytes")
-                if isinstance(audio_data, bytes):
-                    await realtime_client.send_audio(
-                        audio_converter.browser_to_openai(audio_data)
-                    )
-                    continue
-
-                text = message.get("text")
-                if not isinstance(text, str):
-                    continue
-
-                try:
-                    data = json.loads(text)
-                except json.JSONDecodeError:
-                    logger.warning(
-                        "Browser websocket: ignoring malformed JSON text frame"
-                    )
-                    continue
-                if data.get("type") == "commit":
-                    await realtime_client.commit_audio()
-
-        except WebSocketDisconnect:
-            pass
-        except RuntimeError as exc:
-            if "not connected" not in str(exc).lower():
-                raise
-            logger.debug("Browser websocket already closed before receive: %s", exc)
-        except Exception as e:
-            logger.exception("Error handling browser connection: %s", e)
-        finally:
-            if realtime_client:
-                await self._disconnect_realtime_client(realtime_client)
-            await self._on_call_end(
-                caller_id,
-                "browser",
                 transcript,
                 {
                     "caller_id": caller_id,
@@ -3727,9 +3670,22 @@ class VoiceServer:
         await websocket.send_bytes(audio_data)
 
     async def _send_browser_audio_end(self, websocket):
-        """Signal to the browser transport that playback is complete."""
+        """Signal that the provider finished streaming this reply's audio.
+
+        The browser keeps playing what it has buffered; this is not a stop.
+        """
         message = {"type": "audio_end"}
         await websocket.send_text(json.dumps(message))
+
+    async def handle_browser_websocket(self, websocket):
+        """Browser call on ``/voice`` (see :mod:`.browser_call`)."""
+        await browser_call.handle_browser_websocket(self, websocket)
+
+    async def _send_probe_event(self, websocket, event: dict) -> None:
+        await browser_call.send_probe_event(websocket, event)
+
+    async def _send_browser_clear(self, websocket) -> None:
+        await browser_call.send_browser_clear(websocket)
 
     def run(self):
         """Run the server."""
