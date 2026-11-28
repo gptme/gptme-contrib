@@ -3161,6 +3161,30 @@ _CONTRIB_AGENT_LITERAL_RE = re.compile(
 )
 
 
+# Positive allowlist for the doc exemption. Much of the prose in this repo is
+# loaded into agent context (SKILL.md, lessons, AGENTS.md, prompt templates,
+# packaged resources), so a doc extension alone does not make a file inert.
+_CONTRIB_HUMAN_DOC_STEMS = frozenset({"readme", "changelog", "contributing"})
+_CONTRIB_RUNTIME_PROSE_DIRS = frozenset({"src", "skills", "lessons"})
+_CONTRIB_AGENT_INSTRUCTION_NAMES = frozenset({"agents.md", "claude.md"})
+
+
+def _contrib_is_human_doc(path: str) -> bool:
+    """Whether a normalized path is documentation that no agent runtime loads.
+
+    Only READMEs, changelogs, contributing guides and files under ``docs/``
+    qualify. Everything else, including unrecognised layouts, stays scanned.
+    """
+    if not is_doc_file(path):
+        return False
+    *dirs, name = path.split("/")
+    if _CONTRIB_RUNTIME_PROSE_DIRS.intersection(dirs):
+        return False
+    if name.lower() in _CONTRIB_AGENT_INSTRUCTION_NAMES:
+        return False
+    return Path(name).stem.lower() in _CONTRIB_HUMAN_DOC_STEMS or "docs" in dirs
+
+
 def _contrib_repo_root() -> Path:
     """Repo root for the gptme-contrib checkout this script itself lives in.
 
@@ -3475,7 +3499,7 @@ def _contrib_added_lines(patch: str | None) -> list[str]:
 
 
 def contrib_agent_literal_reasons(file_shapes: list[dict[str, Any]]) -> list[str]:
-    """Agent-name literals added in non-test code route to Erik.
+    """Agent-name literals added outside tests and human docs route to Erik.
 
     Erik — "Bob shouldn't have his configuration in gptme-contrib"
     (auto-merge-analysis §3 cluster 2, contrib#1088). Test fixtures
@@ -3486,9 +3510,11 @@ def contrib_agent_literal_reasons(file_shapes: list[dict[str, Any]]) -> list[str
     hits: dict[str, set[str]] = {}
     for entry in file_shapes:
         path = _contrib_normalize(str(entry.get("path", "")))
-        if is_test_file(path):
+        if is_test_file(path) or _contrib_is_human_doc(path):
             continue
         for line in _contrib_added_lines(cast("str | None", entry.get("patch"))):
+            # Scan source lines regardless of prefix: even '#' can be runtime
+            # prompt content inside a multiline string, not a comment.
             for match in _CONTRIB_AGENT_LITERAL_RE.finditer(line):
                 hits.setdefault(match.group(1).lower(), set()).add(path)
     if not hits:
