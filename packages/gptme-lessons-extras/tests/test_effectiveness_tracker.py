@@ -477,3 +477,71 @@ def test_legacy_state_rebuilds_without_skipping_earlier_log(tmp_path: Path) -> N
     assert s.processed_count == 2
     assert s.total_sessions == 2
     assert s.lesson_stats["lessons/workflow/a.md"].total_inclusions == 2
+
+
+def test_pending_log_directory_is_skipped_until_written(tmp_path: Path) -> None:
+    # gptme creates the log directory before its first message, and aborted
+    # sessions can leave an empty one behind. A stray directory must not abort
+    # the run, must not be recorded as processed, and must be picked up once
+    # its conversation file appears.
+    logs, state = tmp_path / "logs", tmp_path / "state.json"
+    _write_log(logs, "2025-10-02-amber")
+    pending = logs / "2025-10-02-zesty-pending"
+    pending.mkdir(parents=True)
+
+    tracker = EffectivenessTracker(logs_dir=logs, state_file=state)
+    s = tracker.analyze()
+    assert s.processed_count == 1
+    assert s.processed_logs == ["2025-10-02-amber"]
+
+    # A second incremental run still skips it instead of failing.
+    s = EffectivenessTracker(logs_dir=logs, state_file=state).analyze()
+    assert s.processed_count == 1
+    assert s.processed_logs == ["2025-10-02-amber"]
+
+    # Once the conversation is written the directory is processed normally.
+    (pending / "conversation.jsonl").write_text(
+        json.dumps(
+            {
+                "role": "system",
+                "content": (
+                    "# Relevant Lessons\n\n## Lesson A\n"
+                    "*Path: lessons/workflow/a.md*\n*Matched by: keyword:git*\n"
+                ),
+            }
+        )
+        + "\n"
+    )
+    s = EffectivenessTracker(logs_dir=logs, state_file=state).analyze()
+    assert s.processed_count == 2
+    assert sorted(s.processed_logs) == ["2025-10-02-amber", "2025-10-02-zesty-pending"]
+    assert s.lesson_stats["lessons/workflow/a.md"].total_inclusions == 2
+
+
+def test_full_rebuild_skips_stray_directory(tmp_path: Path) -> None:
+    logs, state = tmp_path / "logs", tmp_path / "state.json"
+    _write_log(logs, "2025-10-02-amber")
+    EffectivenessTracker(logs_dir=logs, state_file=state).analyze()
+    (logs / "2025-10-02-empty").mkdir()
+
+    s = EffectivenessTracker(logs_dir=logs, state_file=state).analyze(incremental=False)
+    assert s.processed_count == s.total_sessions == 1
+    assert s.processed_logs == ["2025-10-02-amber"]
+
+
+def test_full_rebuild_refuses_missing_counted_log_directory(tmp_path: Path) -> None:
+    # Rebuilding without a previously counted directory would silently drop
+    # its statistics. Refuse before touching the saved state.
+    logs, state = tmp_path / "logs", tmp_path / "state.json"
+    _write_log(logs, "2025-10-02-amber")
+    _write_log(logs, "2025-10-02-zesty")
+    EffectivenessTracker(logs_dir=logs, state_file=state).analyze()
+    original = state.read_bytes()
+    (logs / "2025-10-02-amber").rename(tmp_path / "archived")
+
+    tracker = EffectivenessTracker(logs_dir=logs, state_file=state)
+    before = tracker.state.to_dict()
+    with pytest.raises(FileNotFoundError, match="previously counted log"):
+        tracker.analyze(incremental=False)
+    assert state.read_bytes() == original
+    assert tracker.state.to_dict() == before

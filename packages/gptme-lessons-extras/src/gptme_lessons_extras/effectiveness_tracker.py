@@ -201,14 +201,30 @@ class EffectivenessTracker:
 
         return lessons
 
-    def _process_log(self, log_dir: Path) -> list[dict[str, str | list[str]]]:
+    def _process_log(
+        self, log_dir: Path, *, require_conversation: bool = False
+    ) -> list[dict[str, str | list[str]]] | None:
         """
         Process a single conversation log.
 
-        Returns list of lessons found in the conversation.
+        Returns the lessons found in the conversation, or ``None`` when the log
+        directory exists but its conversation file has not been written yet.
+
+        Args:
+            require_conversation: Treat a missing conversation file as an error.
+                Set for logs that earlier runs already counted: their absence
+                means statistics would be lost, not that a session is pending.
         """
         conv_file = log_dir / "conversation.jsonl"
         lessons_found: list[dict[str, str | list[str]]] = []
+
+        if not conv_file.exists():
+            if require_conversation:
+                raise FileNotFoundError(f"Conversation log unavailable: {conv_file}")
+            # gptme creates a log directory before writing its first message,
+            # and aborted sessions can leave one behind. Skip it without
+            # recording it as processed so a later run picks it up.
+            return None
 
         # Let read failures propagate: unreadable is not a log with no lessons.
         with open(conv_file) as f:
@@ -297,6 +313,31 @@ class EffectivenessTracker:
                 )
         log_dirs = self._get_log_dirs(incremental=incremental)
 
+        # Logs that earlier runs counted must still be readable before a rebuild
+        # discards their totals. Never rebuild silently from a partial archive.
+        previous_members = set(self.state.processed_logs)
+        legacy_watermark = (
+            self.state.last_processed if not self.state.processed_logs else None
+        )
+        if not incremental:
+            available = {d.name for d in log_dirs}
+            missing = sorted(previous_members - available)
+            if missing:
+                preview = ", ".join(missing[:3])
+                more = f" and {len(missing) - 3} more" if len(missing) > 3 else ""
+                raise FileNotFoundError(
+                    f"Cannot rebuild statistics: {len(missing)} previously counted "
+                    f"log(s) are missing: {preview}{more}. "
+                    "Restore archived logs before rebuilding."
+                )
+
+        def _require_conversation(log_dir: Path) -> bool:
+            if log_dir.name in previous_members:
+                return True
+            # A legacy watermark implies the log was visited; its conversation
+            # file is required so a rebuild cannot silently drop its statistics.
+            return legacy_watermark is not None and log_dir.name <= legacy_watermark
+
         if limit:
             log_dirs = log_dirs[:limit]
 
@@ -304,17 +345,27 @@ class EffectivenessTracker:
         # a later unreadable log must not destroy the previous statistics.
         rebuilt_logs = None
         if not incremental:
-            rebuilt_logs = [self._process_log(log_dir) for log_dir in log_dirs]
+            rebuilt_logs = [
+                self._process_log(
+                    log_dir, require_conversation=_require_conversation(log_dir)
+                )
+                for log_dir in log_dirs
+            ]
             self.state = TrackerState()
 
         print(f"Processing {len(log_dirs)} log directories...")
 
+        processed_now = 0
         for i, log_dir in enumerate(log_dirs):
             lessons = (
                 rebuilt_logs[i]
                 if rebuilt_logs is not None
                 else self._process_log(log_dir)
             )
+
+            if lessons is None:
+                print(f"  Skipping {log_dir.name}: conversation file not written yet")
+                continue
 
             if lessons:
                 self._update_stats(log_dir.name, lessons)
@@ -323,6 +374,7 @@ class EffectivenessTracker:
             self.state.processed_count += 1
             self.state.last_processed = log_dir.name
             self.state.processed_logs.append(log_dir.name)
+            processed_now += 1
 
             # Checkpoint periodically
             if (i + 1) % checkpoint_interval == 0:
@@ -332,7 +384,7 @@ class EffectivenessTracker:
         # Final save
         self._save_state()
         print(
-            f"Processed {len(log_dirs)} logs, {self.state.total_sessions} sessions with lessons"
+            f"Processed {processed_now} logs, {self.state.total_sessions} sessions with lessons"
         )
 
         return self.state
