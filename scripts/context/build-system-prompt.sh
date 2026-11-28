@@ -2,7 +2,8 @@
 
 # build-system-prompt.sh — Build a system prompt file for non-gptme harnesses
 #
-# Reads gptme.toml to extract bootstrap identity files and runs context_cmd.
+# Loads the gptme.toml [prompt] files via `gptme-util context files` and runs
+# context_cmd.
 # Output is suitable for --append-system-prompt-file with Claude Code or similar.
 #
 # Usage:
@@ -34,7 +35,6 @@ with open(os.environ['WORKSPACE'] + '/gptme.toml', 'rb') as f:
     cfg = tomllib.load(f)
 prompt = cfg.get('prompt', {})
 json.dump({
-    'files': prompt.get('files', []),
     'context_cmd': prompt.get('context_cmd', ''),
 }, sys.stdout)
 "
@@ -44,20 +44,20 @@ CONFIG=$(read_toml_config)
 CONTEXT_CMD=$(echo "$CONFIG" | python3 -c "import json,sys; print(json.load(sys.stdin)['context_cmd'])")
 
 # --- Bootstrap identity files ---
+# gptme-util resolves [prompt] files exactly as gptme does: glob entries,
+# [prompt] exclude and both gptme.toml schemas. gptme is a hard dependency of
+# an agent workspace (`pipx install gptme` provides gptme-util).
+if ! command -v gptme-util >/dev/null 2>&1; then
+    echo "Error: gptme-util not found on PATH (install gptme: pipx install gptme)" >&2
+    exit 1
+fi
+
 echo "# Bootstrap Identity Files"
 echo ""
 
-python3 -c "import json,sys; [print(f) for f in json.load(sys.stdin)['files']]" <<< "$CONFIG" | while IFS= read -r f; do
-    filepath="$WORKSPACE/$f"
-    if [ -f "$filepath" ]; then
-        echo "## FILE: $f"
-        echo ""
-        cat "$filepath"
-        echo ""
-        echo "---"
-        echo ""
-    fi
-done
+# Exits 1 with a stderr note when no prompt files are configured; that is an
+# empty section, not a build failure.
+gptme-util context files --config "$WORKSPACE/gptme.toml" || true
 
 # --- Dynamic context (context_cmd from gptme.toml) ---
 echo "# Dynamic Context"
