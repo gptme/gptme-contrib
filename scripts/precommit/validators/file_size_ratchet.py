@@ -24,8 +24,9 @@ file does not exempt an arbitrarily large growth. More than ``--hard-stop``
 lines (default 100) to a file that was already ``--hard-stop-size`` lines
 (default 5,000) at the base always fails. The base is ``--base`` if given, else
 ``origin/$GITHUB_BASE_REF`` on a GitHub pull request, else ``HEAD`` (what a
-local commit adds). When the base cannot be resolved, growth is compared
-against the baseline and only warns.
+local commit adds). When the base cannot be resolved (e.g. a shallow checkout)
+a listed file that grows above its baseline entry fails instead of passing
+silently: fetch the base branch or pass ``--base``.
 
 ``--growth=off`` keeps only the new-file rule: growth is not checked and the
 baseline is never rewritten or required to be staged, so contributors who
@@ -271,8 +272,8 @@ def check(
     if growth == "budget" and base_rev is None:
         warn(
             str(baseline_path),
-            "cannot resolve the growth base; growth is compared to the baseline "
-            "and only warns.",
+            "cannot resolve the growth base; a listed file that grows will fail "
+            "instead of being measured against the change.",
         )
     new_module_lines: int | None = None
 
@@ -319,7 +320,7 @@ def check(
                     )
                 else:
                     warn(rel, f"{grew}; it is already over the limit.")
-            if lines < allowed:
+            if lines < allowed and lines < before:
                 files[rel] = lines
                 changed = True
         elif lines > allowed:
@@ -327,8 +328,14 @@ def check(
                 f"grew from {allowed} to {lines} lines; it is already at or over "
                 f"the {threshold}-line limit"
             )
-            if growth in ("warn", "budget"):
+            if growth == "warn":
                 warn(rel, f"{grew}. Prefer putting new code in a new module.")
+            elif growth == "budget":
+                errors.append(
+                    f"{rel}: {grew} and the growth base could not be resolved "
+                    "(shallow checkout?); fetch the base branch or pass --base so "
+                    "the budget can measure the change, or do not grow the file."
+                )
             else:
                 errors.append(f"{rel}: {grew} and may only shrink.")
         elif lines < allowed:

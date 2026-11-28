@@ -352,10 +352,23 @@ def test_budget_reads_github_base_ref(repo, monkeypatch):
     assert ratchet.main([*BUDGET, path]) == 1
 
 
-def test_budget_without_a_resolvable_base_only_warns(repo, capsys):
+def test_budget_without_a_resolvable_base_fails_on_growth(repo, capsys):
+    # A shallow checkout must not silently turn the budget into a warning.
     baseline({"big.py": 15})  # no commits: HEAD does not resolve
-    assert ratchet.main([*BUDGET, write("big.py", 40)]) == 0
-    assert "cannot resolve the growth base" in capsys.readouterr().out
+    assert ratchet.main([*BUDGET, write("big.py", 40)]) == 1
+    captured = capsys.readouterr()
+    assert "cannot resolve the growth base" in captured.out
+    assert "the growth base could not be resolved" in captured.err
+
+
+def test_budget_does_not_lower_the_baseline_above_the_base_size(repo, capsys):
+    # The base has 12 lines while the baseline is stale at 15; trimming to 14
+    # is growth relative to the base, so the baseline must not be rewritten.
+    baseline({"big.py": 15})
+    write("big.py", 12)
+    commit()
+    assert ratchet.main([*BUDGET, write("big.py", 14)]) == 0
+    assert read_baseline()["files"] == {"big.py": 15}
 
 
 def test_budget_still_fails_new_oversized_files(repo, capsys):
