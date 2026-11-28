@@ -47,6 +47,18 @@ if argv[:2] == ["run", "list"]:
         if mode == "partial_failure":
             print("[", end="")
             raise SystemExit(1)
+        if mode == "retry_failure":
+            # First call fails branch-not-found (triggers the cache-invalidate
+            # retry); the retry fails for a different reason. The emitted row
+            # must report the retry's error, not the stale first one.
+            calls_file = os.environ["FAKE_GH_RETRY_COUNTER"]
+            calls = int(open(calls_file).read() or 0)
+            open(calls_file, "w").write(str(calls + 1))
+            if calls == 0:
+                print("fatal: branch 'trunk' not found", file=sys.stderr)
+            else:
+                print("HTTP 502: bad gateway", file=sys.stderr)
+            raise SystemExit(1)
         if mode == "null":
             print("null")
         raise SystemExit(0)
@@ -527,6 +539,28 @@ def test_partial_stdout_with_failure_reports_unavailable() -> None:
     # A failed `gh run list` is not a repo with no workflows; report the explicit
     # Unavailable marker so the consumer keeps the counts unknown instead of 0.
     _assert_bad_response_isolated("partial_failure", "Unavailable")
+
+
+def test_retry_failure_reports_the_retry_error_not_the_stale_first_one(
+    tmp_path: Path,
+) -> None:
+    """The branch-not-found retry discards its stderr unless it is captured, so
+    the Unavailable row would quote the first failure while a different one
+    (network/rate-limit) actually caused the row (AI review P2, 2026-11-28)."""
+    counter = tmp_path / "calls"
+    counter.write_text("0")
+    result = _run_script(
+        extra_env={
+            "FAKE_GH_BAD_REPO": "gptme/bad",
+            "FAKE_GH_BAD_MODE": "retry_failure",
+            "FAKE_GH_RETRY_COUNTER": str(counter),
+        },
+        args=["gptme/bad:bad"],
+    )
+    out = result.stdout + result.stderr
+    assert "bad: Unavailable" in out
+    assert "bad gateway" in out
+    assert "not found" not in out
 
 
 def test_valid_empty_array_still_reports_no_runs() -> None:
