@@ -21,11 +21,11 @@ warning. A listed file may grow by up to ``--budget`` lines (default 30) with a
 warning. More than that fails unless the new files added by the change are at
 least as large as the growth (the code moved into a new module) -- a token new
 file does not exempt an arbitrarily large growth. More than ``--hard-stop``
-lines (default 100) to a
-file that was already ``--hard-stop-size`` lines (default 5,000) at the base
-always fails. The base is ``--base`` if given, else ``origin/$GITHUB_BASE_REF``
-on a GitHub pull request, else ``HEAD`` (what a local commit adds). When the
-base cannot be resolved, growth is compared against the baseline and only warns.
+lines (default 100) to a file that was already ``--hard-stop-size`` lines
+(default 5,000) at the base always fails. The base is ``--base`` if given, else
+``origin/$GITHUB_BASE_REF`` on a GitHub pull request, else ``HEAD`` (what a
+local commit adds). When the base cannot be resolved, growth is compared
+against the baseline and only warns.
 
 ``--growth=off`` keeps only the new-file rule: growth is not checked and the
 baseline is never rewritten or required to be staged, so contributors who
