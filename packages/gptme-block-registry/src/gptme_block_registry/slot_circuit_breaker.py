@@ -188,10 +188,14 @@ class _SlotBreaker:
                 # up past it.
                 self._probe_abandoned_at = self._probe_started_at
             elif (
-                self._probe_abandoned_at is not None and now >= self._probe_abandoned_at
+                self._probe_abandoned_at is not None and now > self._probe_abandoned_at
             ):
-                # The replacement starts at or after the abandoned grant, so
-                # the ordinary identity check already rejects the old epoch.
+                # The replacement starts strictly after the abandoned grant, so
+                # the ordinary identity check already rejects the old epoch. At
+                # exact equality it does not: the identity comparison is strict,
+                # so a verdict stamped at the abandoned grant would pass it.
+                # Keep the marker then; the next re-grant (past the grant)
+                # clears it.
                 self._probe_abandoned_at = None
             self._probe_started_at = now
             self._probe_timeout_started_at = now
