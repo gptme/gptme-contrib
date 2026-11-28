@@ -248,6 +248,9 @@ def load_fallback_config(path: Path) -> FallbackConfig:
 
     if not isinstance(oad, dict):
         raise ValueError("[on_auth_death] must be a TOML table, not a scalar")
+    if not oad:
+        # An empty table is the documented "no fallback" default, like a missing one.
+        return FallbackConfig()
 
     missing = [k for k in ("backend", "model", "scope", "label") if k not in oad]
     if missing:

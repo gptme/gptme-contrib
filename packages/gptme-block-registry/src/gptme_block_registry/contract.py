@@ -121,6 +121,13 @@ def parse_until(raw: str) -> datetime | None:
     return ts
 
 
+def _name_part(name: str, what: str) -> str:
+    """Reject a filename part that could leave ``state_dir`` (``/``, ``\\``, NUL)."""
+    if any(c in name for c in "/\\\0"):
+        raise ValueError(f"unsafe {what} name for a block path: {name!r}")
+    return name
+
+
 def arm_block_path(state_dir: Path, backend: str, model: str, kind: str) -> Path:
     """Path of an arm-level block file. ``kind`` must be in :data:`ARM_BLOCK_KINDS`."""
     try:
@@ -129,17 +136,18 @@ def arm_block_path(state_dir: Path, backend: str, model: str, kind: str) -> Path
         raise ValueError(
             f"unknown arm block kind {kind!r}; expected one of {sorted(ARM_BLOCK_KINDS)}"
         ) from None
-    return state_dir / f"{backend}-{model_safe(model)}-{suffix}"
+    model_part = _name_part(model_safe(model), "model")
+    return state_dir / f"{_name_part(backend, 'backend')}-{model_part}-{suffix}"
 
 
 def backend_block_path(state_dir: Path, backend: str) -> Path:
     """Path of the backend-level block, e.g. all arms on a shared premium pool."""
-    return state_dir / f"{backend}-{_POOL_SUFFIX}"
+    return state_dir / f"{_name_part(backend, 'backend')}-{_POOL_SUFFIX}"
 
 
 def pool_block_path(state_dir: Path, pool: str) -> Path:
     """Path of a pool-level block, shared by every route drawing from ``pool``."""
-    return state_dir / f"pool-{pool}-{_POOL_SUFFIX}"
+    return state_dir / f"pool-{_name_part(pool, 'pool')}-{_POOL_SUFFIX}"
 
 
 def openrouter_block_path(state_dir: Path, context: str | None = None) -> Path:
@@ -156,4 +164,5 @@ def openrouter_block_path(state_dir: Path, context: str | None = None) -> Path:
     """
     if not context:
         return state_dir / f"openrouter-{_OPENROUTER_SUFFIX}"
-    return state_dir / f"openrouter-{context.lower()}-{_OPENROUTER_SUFFIX}"
+    context = _name_part(context, "context").lower()
+    return state_dir / f"openrouter-{context}-{_OPENROUTER_SUFFIX}"

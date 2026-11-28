@@ -6,6 +6,7 @@ import fcntl
 import json
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 from gptme_block_registry.slot_circuit_breaker import (
@@ -70,6 +71,21 @@ class TestSlotBreaker:
         assert b.is_open(now + 11.1) is True
         assert b.is_open(now + 11.2) is True
 
+    def test_lost_probe_is_not_regranted_on_the_cooldown(self) -> None:
+        """A slow probe must not overlap its own replacement.
+
+        Re-granting on the (shorter) cooldown put two attempts on one slot; only
+        silence past ``probe_timeout`` counts as a lost probe.
+        """
+        b = self._breaker(threshold=1, cooldown=10.0)
+        now = time.time()
+        b.record_failure(now)
+        assert b.is_open(now + 11.0) is False  # probe granted
+        # Well past the cooldown, still inside probe_timeout: suppressed.
+        assert b.is_open(now + 11.0 + 600.0) is True
+        # Past the default probe timeout the probe counts as lost and is re-granted.
+        assert b.is_open(now + 11.0 + 1801.0) is False
+
     def test_half_open_probe_failure_reopens(self) -> None:
         b = self._breaker(threshold=1, cooldown=10.0)
         now = time.time()
@@ -108,7 +124,7 @@ class TestSlotBreaker:
 
 
 class TestPersistence:
-    def _breaker(self, **kw: object) -> _SlotBreaker:
+    def _breaker(self, **kw: Any) -> _SlotBreaker:
         return _SlotBreaker(failure_threshold=3, cooldown=300.0, **kw)
 
     def test_closed_roundtrip(self) -> None:
@@ -152,8 +168,8 @@ class TestPersistence:
         # resets a non-dict top-level. But the outer try/except in _load_breaker
         # also covers any AttributeError / TypeError from a bad slot payload.
         b = _load_breaker({"opened_at": "not-a-float", "state": "OPEN"}, 3, 300.0)
-        # opened_at parse error is silently reset to None; state is preserved
-        assert b.state == CircuitState.OPEN
+        # OPEN without a usable opened_at could never cool down: reset the slot.
+        assert b.state == CircuitState.CLOSED
         assert b._opened_at is None
 
     @pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])
@@ -171,7 +187,11 @@ class TestPersistence:
             300.0,
         )
         assert b._probe_started_at is None
-        assert _apply_verdict(b, PRODUCTIVE, 402.0, 90.0) is True
+        # The stale success grants a replacement probe; it cannot close it.
+        assert _apply_verdict(b, PRODUCTIVE, 402.0, 90.0) is False
+        assert b.state == CircuitState.HALF_OPEN
+        assert b._probe_started_at == 402.0
+        assert _apply_verdict(b, PRODUCTIVE, 403.0, 90.0) is True
         assert b.state == CircuitState.HALF_OPEN
 
     def test_non_bool_probe_pending_resets_to_closed(self) -> None:

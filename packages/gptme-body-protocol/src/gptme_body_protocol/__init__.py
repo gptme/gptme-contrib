@@ -8,6 +8,7 @@ voice runtime or a body-specific driver.
 from __future__ import annotations
 
 import json
+import math
 import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
@@ -40,12 +41,34 @@ class Command:
 
 def encode_message(message: Handshake | Command) -> bytes:
     """Encode one newline-framed protocol message."""
-    return (json.dumps(asdict(message), separators=(",", ":")) + "\n").encode()
+    # allow_nan=False: NaN/Infinity are not JSON, and a non-finite goal must be
+    # refused here rather than framed for the body node.
+    payload = json.dumps(asdict(message), separators=(",", ":"), allow_nan=False)
+    return (payload + "\n").encode()
+
+
+def _reject_constant(token: str) -> Any:
+    raise ValueError(f"body-node response contains non-JSON constant {token}")
+
+
+def _reject_non_finite(raw: str) -> float:
+    """Reject a number literal that overflows to infinity (e.g. ``1e999``).
+
+    ``1e999`` is valid JSON, so it reaches ``json`` as a float without going
+    through ``parse_constant``; refusing it here keeps the non-finite guard
+    from being bypassed by an overflowing literal.
+    """
+    value = float(raw)
+    if not math.isfinite(value):
+        raise ValueError(f"body-node response contains a non-finite number: {raw}")
+    return value
 
 
 def decode_message(line: bytes) -> dict[str, Any]:
     """Decode one response, rejecting non-object JSON and foreign protocols."""
-    value = json.loads(line)
+    value = json.loads(
+        line, parse_constant=_reject_constant, parse_float=_reject_non_finite
+    )
     if not isinstance(value, dict):
         raise ValueError("body-node response must be a JSON object")
     protocol = value.get("protocol")

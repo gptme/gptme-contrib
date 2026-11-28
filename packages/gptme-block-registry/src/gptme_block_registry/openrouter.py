@@ -28,6 +28,9 @@ _WINDOW_RE = re.compile(
     r"key limit exceeded[^)]*\((daily|weekly|monthly) limit\)", re.IGNORECASE
 )
 _CREDITS_RE = re.compile(r"insufficient credits|requires more credits", re.IGNORECASE)
+# A key-management link identifies a per-key cap. "Can only afford" alone
+# also appears in account-credit errors, so it cannot identify a daily reset.
+_KEY_CAP_402_RE = re.compile(r"openrouter\.ai/settings/keys|/keys/", re.IGNORECASE)
 
 
 def limit_window_from_text(text: str) -> str | None:
@@ -38,7 +41,7 @@ def limit_window_from_text(text: str) -> str | None:
     for a credit-exhaustion body, or ``None`` when the text reports neither.
     """
     if _CREDITS_RE.search(text):
-        return "credits"
+        return "daily" if _KEY_CAP_402_RE.search(text) else "credits"
     if "key limit exceeded" in text.lower():
         match = _WINDOW_RE.search(text)
         return match.group(1).lower() if match else "daily"
