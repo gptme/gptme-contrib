@@ -382,6 +382,9 @@ LOOKUP_TIMEOUT_SECONDS = {
 LOOKUP_RESULT_MAX_CHARS = 4000
 LOOKUP_CONNECT_SECONDS = 10.0
 LOOKUP_BUSY_RETRY_SECONDS = 1.0
+# How long to keep re-posting the caller's spoken turns before the lookup
+# goes ahead anyway (their order in the chat is not worth the lookup).
+LOOKUP_FLUSH_WAIT_SECONDS = 5.0
 _STEP_DONE_EVENTS = frozenset({"step_complete", "interrupted"})
 # How a reply that is not ours can end (an error ends it too).
 _REPLY_DONE_EVENTS = _STEP_DONE_EVENTS | {"error"}
@@ -503,11 +506,18 @@ class ConversationLookup:
                         await _next_event_of(events, _REPLY_DONE_EVENTS, deadline)
                     if self._before_lookup is not None:
                         # Post the caller's pending spoken turns first, so the
-                        # chat reads question, lookup, answer; "retry" means
-                        # the chat is busy, so try again until it is posted.
-                        while await self._before_lookup() == "retry":
-                            if time.monotonic() + LOOKUP_BUSY_RETRY_SECONDS > deadline:
-                                raise _ChatBusy
+                        # chat reads question, lookup, answer. "retry" (busy,
+                        # or a transient error) is tried again for a while;
+                        # then the lookup goes ahead, and a real outage shows
+                        # up as its own request failing.
+                        flush_until = min(
+                            deadline, time.monotonic() + LOOKUP_FLUSH_WAIT_SECONDS
+                        )
+                        while (
+                            await self._before_lookup() == "retry"
+                            and time.monotonic() + LOOKUP_BUSY_RETRY_SECONDS
+                            < flush_until
+                        ):
                             await asyncio.sleep(LOOKUP_BUSY_RETRY_SECONDS)
                     request = _LOOKUP_PREFIX + task + _LOOKUP_SUFFIX
                     appended = await self._post(
@@ -554,12 +564,12 @@ class ConversationLookup:
         finally:
             if self._client is None:
                 await client.aclose()
-        if on_completed:
-            on_completed(0, time.monotonic())
         if not answer:
             return ToolResult(
                 success=False, output="", error="the chat agent gave no answer"
             )
+        if on_completed:
+            on_completed(0, time.monotonic())
         if len(answer) > LOOKUP_RESULT_MAX_CHARS:
             answer = answer[:LOOKUP_RESULT_MAX_CHARS].rstrip() + " [...]"
         return ToolResult(success=True, output=answer)

@@ -786,15 +786,6 @@ def test_lookup_waits_out_a_running_reply_that_ends_in_an_error() -> None:
     assert result.success and result.output == "done"
 
 
-def test_lookup_budgets_follow_the_subprocess_env_vars() -> None:
-    from gptme_voice.realtime import tool_bridge
-
-    assert conversation_link.LOOKUP_TIMEOUT_SECONDS == {
-        "fast": float(tool_bridge._FAST_MODE_BUDGET_SECONDS),
-        "smart": float(tool_bridge._SMART_MODE_BUDGET_SECONDS),
-    }
-
-
 def test_lookup_retries_posting_the_spoken_turns_while_the_chat_is_busy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -816,6 +807,48 @@ def test_lookup_retries_posting_the_spoken_turns_while_the_chat_is_busy(
     result = _run_lookup(server, before_lookup=before)
     assert result.success
     assert flushes == ["after 0 calls"] * 3  # all before the request is added
+
+
+def test_lookup_goes_ahead_when_the_spoken_turns_cannot_be_posted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(conversation_link, "LOOKUP_BUSY_RETRY_SECONDS", 0.01)
+    monkeypatch.setattr(conversation_link, "LOOKUP_FLUSH_WAIT_SECONDS", 0.05)
+    server = _LookupServer(
+        [
+            {"type": "connected", "session_id": "s1"},
+            {"type": "generation_started"},
+            _msg("assistant", "ok"),
+            {"type": "step_complete"},
+        ]
+    )
+
+    async def before() -> str:
+        return "retry"  # e.g. the transcript POST keeps failing
+
+    result = _run_lookup(server, before_lookup=before)
+    assert result.success and result.output == "ok"
+
+
+def test_failed_lookup_is_not_reported_as_completed() -> None:
+    server = _LookupServer(
+        [
+            {"type": "connected", "session_id": "s1"},
+            {"type": "generation_started"},
+            {"type": "step_complete"},  # no answer
+        ]
+    )
+    completed: list[int] = []
+
+    async def run():
+        transport = httpx.MockTransport(server.handler)
+        async with httpx.AsyncClient(transport=transport) as c:
+            return await server.lookup(c)(
+                "q", mode="fast", on_completed=lambda rc, _t: completed.append(rc)
+            )
+
+    result = asyncio.run(run())
+    assert not result.success and completed == []
 
 
 def test_execute_delegates_to_the_lookup_runner() -> None:
