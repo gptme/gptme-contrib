@@ -614,6 +614,56 @@ def test_lookup_without_an_answer_fails() -> None:
     assert not result.success and "no answer" in (result.error or "")
 
 
+def test_lookup_ignores_text_from_a_generation_before_the_last() -> None:
+    server = _LookupServer(
+        [
+            {"type": "connected", "session_id": "s1"},
+            {"type": "generation_started"},
+            _msg("assistant", "Let me check."),
+            {"type": "tool_pending", "tool_id": "t1", "auto_confirm": True},
+            {"type": "step_complete"},
+            {"type": "generation_started"},  # the continuation says nothing
+            {"type": "step_complete"},
+        ]
+    )
+    result = _run_lookup(server)
+    assert not result.success and "no answer" in (result.error or "")
+
+
+def test_lookup_timeout_reports_a_timeout_returncode() -> None:
+    server = _LookupServer(
+        [{"type": "connected", "session_id": "s1"}, {"type": "generation_started"}],
+        hang=True,
+    )
+    completed: list[int] = []
+
+    async def run():
+        transport = httpx.MockTransport(server.handler)
+        async with httpx.AsyncClient(transport=transport) as c:
+            lookup = server.lookup(c, timeouts={"fast": 0.2})
+            return await lookup(
+                "q", mode="fast", on_completed=lambda rc, _t: completed.append(rc)
+            )
+
+    result = asyncio.run(run())
+    assert not result.success and completed == [124]
+
+
+def test_lookup_fails_when_the_request_cannot_be_added_to_the_chat() -> None:
+    server = _LookupServer([{"type": "connected", "session_id": "s1"}])
+    original = server.handler
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/conv-1"):
+            return httpx.Response(500, json={})
+        return original(request)
+
+    server.handler = handler  # type: ignore[method-assign]
+    result = _run_lookup(server)
+    assert not result.success
+    assert all(kind != "step" for kind, _ in server.calls)
+
+
 def test_execute_delegates_to_the_lookup_runner() -> None:
     """With a lookup runner (webui calls), no gptme subprocess is spawned."""
     seen: list[tuple] = []

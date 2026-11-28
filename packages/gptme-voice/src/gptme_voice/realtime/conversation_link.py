@@ -454,10 +454,11 @@ class ConversationLookup:
                     # Post the caller's pending spoken turns first, so the chat
                     # reads question, lookup, answer.
                     await self._before_lookup()
-                await self._post(
+                appended = await self._post(
                     "",
                     {"role": "user", "content": _LOOKUP_PREFIX + task + _LOOKUP_SUFFIX},
                 )
+                appended.raise_for_status()
                 await self._start_step(session_id, deadline)
                 stepping = True
                 if on_started:
@@ -471,6 +472,8 @@ class ConversationLookup:
         except asyncio.TimeoutError:
             if stepping and session_id:
                 await self._interrupt(session_id)
+            if on_completed:
+                on_completed(124, time.monotonic())  # as a timed-out subprocess
             return ToolResult(
                 success=False,
                 output="",
@@ -544,8 +547,11 @@ class ConversationLookup:
             )
             kind = event.get("type")
             if kind == "generation_started":
+                # Only the final generation's text answers: an earlier one's
+                # "Let me check" is not the result.
                 generating = True
                 ran_tools = False
+                answer = ""
             elif kind == "message_added":
                 message = event.get("message")
                 if not generating or not isinstance(message, dict):
