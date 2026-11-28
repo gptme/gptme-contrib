@@ -50,6 +50,9 @@ class TrackerState:
 
     version: str = "1.0"
     last_processed: str | None = None  # Last log directory processed
+    # Every processed log directory name. Log names are "<date>-<random words>",
+    # so name order is not creation order and a high-water mark misses logs.
+    processed_logs: list[str] = field(default_factory=list)
     processed_count: int = 0
     total_sessions: int = 0
     lesson_stats: dict[str, LessonStats] = field(default_factory=dict)
@@ -68,6 +71,7 @@ class TrackerState:
         return cls(
             version=data.get("version", "1.0"),
             last_processed=data.get("last_processed"),
+            processed_logs=list(data.get("processed_logs", [])),
             processed_count=data.get("processed_count", 0),
             total_sessions=data.get("total_sessions", 0),
             lesson_stats=lesson_stats,
@@ -126,12 +130,12 @@ class EffectivenessTracker:
         with open(self.state_file, "w") as f:
             json.dump(self.state.to_dict(), f, indent=2)
 
-    def _get_log_dirs(self, since: str | None = None) -> list[Path]:
+    def _get_log_dirs(self, incremental: bool = True) -> list[Path]:
         """
         Get log directories to process.
 
         Args:
-            since: Only process logs newer than this directory name
+            incremental: Skip logs already processed in an earlier run
         """
         if not self.logs_dir.exists():
             return []
@@ -141,9 +145,9 @@ class EffectivenessTracker:
             key=lambda x: x.name,
         )
 
-        if since:
-            # Filter to only newer logs
-            dirs = [d for d in dirs if d.name > since]
+        if incremental:
+            processed = set(self.state.processed_logs)
+            dirs = [d for d in dirs if d.name not in processed]
 
         return dirs
 
@@ -197,38 +201,49 @@ class EffectivenessTracker:
 
         return lessons
 
-    def _process_log(self, log_dir: Path) -> list[dict[str, str | list[str]]]:
+    def _process_log(
+        self, log_dir: Path, *, require_conversation: bool = False
+    ) -> list[dict[str, str | list[str]]] | None:
         """
         Process a single conversation log.
 
-        Returns list of lessons found in the conversation.
+        Returns the lessons found in the conversation, or ``None`` when the log
+        directory exists but its conversation file has not been written yet.
+
+        Args:
+            require_conversation: Treat a missing conversation file as an error.
+                Set for logs that earlier runs already counted: their absence
+                means statistics would be lost, not that a session is pending.
         """
         conv_file = log_dir / "conversation.jsonl"
-        if not conv_file.exists():
-            return []
-
         lessons_found: list[dict[str, str | list[str]]] = []
 
-        try:
-            with open(conv_file) as f:
-                for line in f:
-                    try:
-                        msg = json.loads(line)
-                        if msg.get("role") != "system":
-                            continue
+        if not conv_file.exists():
+            if require_conversation:
+                raise FileNotFoundError(f"Conversation log unavailable: {conv_file}")
+            # gptme creates a log directory before writing its first message,
+            # and aborted sessions can leave one behind. Skip it without
+            # recording it as processed so a later run picks it up.
+            return None
 
-                        content = msg.get("content", "")
-                        if "# Relevant Lessons" not in content:
-                            continue
-
-                        # Parse lessons from this system message
-                        lessons = self._parse_lessons_from_content(content)
-                        lessons_found.extend(lessons)
-
-                    except json.JSONDecodeError:
+        # Let read failures propagate: unreadable is not a log with no lessons.
+        with open(conv_file) as f:
+            for line in f:
+                try:
+                    msg = json.loads(line)
+                    if msg.get("role") != "system":
                         continue
-        except OSError as e:
-            print(f"Warning: Could not read {conv_file}: {e}")
+
+                    content = msg.get("content", "")
+                    if "# Relevant Lessons" not in content:
+                        continue
+
+                    # Parse lessons from this system message
+                    lessons = self._parse_lessons_from_content(content)
+                    lessons_found.extend(lessons)
+
+                except json.JSONDecodeError:
+                    continue
 
         return lessons_found
 
@@ -284,16 +299,92 @@ class EffectivenessTracker:
         Returns:
             Updated TrackerState
         """
-        since = self.state.last_processed if incremental else None
-        log_dirs = self._get_log_dirs(since=since)
+        if incremental and self.state.last_processed and not self.state.processed_logs:
+            # A watermark cannot identify exact membership, and some historical
+            # logs may be archived. Never discard their totals automatically.
+            raise ValueError(
+                "Legacy tracker state requires --full to rebuild from available logs. "
+                "Restore archived logs before rebuilding to retain their statistics."
+            )
+        if not incremental:
+            if not self.logs_dir.is_dir():
+                raise FileNotFoundError(
+                    f"Cannot rebuild statistics: logs directory unavailable: {self.logs_dir}"
+                )
+        log_dirs = self._get_log_dirs(incremental=incremental)
+
+        # Logs that earlier runs counted must still be readable before a rebuild
+        # discards their totals. Never rebuild silently from a partial archive.
+        previous_members = set(self.state.processed_logs)
+        if not incremental:
+            by_name = {d.name: d for d in log_dirs}
+            missing = sorted(previous_members - by_name.keys())
+            if missing:
+                preview = ", ".join(missing[:3])
+                more = f" and {len(missing) - 3} more" if len(missing) > 3 else ""
+                raise FileNotFoundError(
+                    f"Cannot rebuild statistics: {len(missing)} previously counted "
+                    f"log(s) are missing: {preview}{more}. "
+                    "Restore archived logs before rebuilding."
+                )
+            # Validate every counted log, not only the ones this run reads: a
+            # rebuild resets the totals for all of them, so a log outside a
+            # --limit slice would otherwise lose its statistics silently.
+            unreadable = sorted(
+                name
+                for name in previous_members
+                if not (by_name[name] / "conversation.jsonl").exists()
+            )
+            if unreadable:
+                preview = ", ".join(unreadable[:3])
+                more = f" and {len(unreadable) - 3} more" if len(unreadable) > 3 else ""
+                raise FileNotFoundError(
+                    f"Cannot rebuild statistics: {len(unreadable)} previously counted "
+                    f"log(s) have no conversation file: {preview}{more}. "
+                    "Restore archived logs before rebuilding."
+                )
+
+        def _require_conversation(log_dir: Path) -> bool:
+            # Only logs this tracker counted have a proven conversation file: it
+            # was readable when their statistics were recorded, so its absence
+            # now means statistics would be lost.
+            #
+            # Legacy membership is inferred from a name watermark, and the old
+            # tracker counted a directory whose conversation file never existed
+            # (an aborted session) as a zero-lesson log. Requiring the file for
+            # every name at or below that watermark protects no statistics and
+            # would block migration forever on one stray directory, so those are
+            # skipped like pending logs and retried if the file ever appears.
+            return log_dir.name in previous_members
 
         if limit:
             log_dirs = log_dirs[:limit]
 
+        # Read the selected rebuild inputs before resetting or checkpointing:
+        # a later unreadable log must not destroy the previous statistics.
+        rebuilt_logs = None
+        if not incremental:
+            rebuilt_logs = [
+                self._process_log(
+                    log_dir, require_conversation=_require_conversation(log_dir)
+                )
+                for log_dir in log_dirs
+            ]
+            self.state = TrackerState()
+
         print(f"Processing {len(log_dirs)} log directories...")
 
+        processed_now = 0
         for i, log_dir in enumerate(log_dirs):
-            lessons = self._process_log(log_dir)
+            lessons = (
+                rebuilt_logs[i]
+                if rebuilt_logs is not None
+                else self._process_log(log_dir)
+            )
+
+            if lessons is None:
+                print(f"  Skipping {log_dir.name}: conversation file not written yet")
+                continue
 
             if lessons:
                 self._update_stats(log_dir.name, lessons)
@@ -301,6 +392,8 @@ class EffectivenessTracker:
 
             self.state.processed_count += 1
             self.state.last_processed = log_dir.name
+            self.state.processed_logs.append(log_dir.name)
+            processed_now += 1
 
             # Checkpoint periodically
             if (i + 1) % checkpoint_interval == 0:
@@ -310,7 +403,7 @@ class EffectivenessTracker:
         # Final save
         self._save_state()
         print(
-            f"Processed {len(log_dirs)} logs, {self.state.total_sessions} sessions with lessons"
+            f"Processed {processed_now} logs, {self.state.total_sessions} sessions with lessons"
         )
 
         return self.state
@@ -472,10 +565,13 @@ def main(
         return
 
     # Run analysis
-    tracker.analyze(
-        limit=limit,
-        incremental=not full,
-    )
+    try:
+        tracker.analyze(
+            limit=limit,
+            incremental=not full,
+        )
+    except (ValueError, OSError) as e:
+        raise click.ClickException(str(e)) from e
 
     # Print summary report
     print()

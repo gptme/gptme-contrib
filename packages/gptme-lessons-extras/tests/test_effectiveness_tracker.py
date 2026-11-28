@@ -4,10 +4,13 @@ import json
 import tempfile
 from pathlib import Path
 
+import pytest
+from click.testing import CliRunner
 from gptme_lessons_extras.effectiveness_tracker import (
     EffectivenessTracker,
     LessonStats,
     TrackerState,
+    main,
 )
 
 
@@ -225,3 +228,381 @@ Test rule.
 
             assert len(lessons) >= 1
             assert any(lesson["path"] == "/lessons/test.md" for lesson in lessons)
+
+
+def _write_log(logs: Path, name: str, lesson: str = "lessons/workflow/a.md") -> None:
+    d = logs / name
+    d.mkdir(parents=True)
+    content = (
+        "# Relevant Lessons\n\n## Lesson A\n"
+        f"*Path: {lesson}*\n*Matched by: keyword:git*\n"
+    )
+    (d / "conversation.jsonl").write_text(
+        json.dumps({"role": "system", "content": content}) + "\n"
+    )
+
+
+@pytest.mark.parametrize("missing_logs", [False, True], ids=["legacy", "missing-logs"])
+def test_cli_reports_rebuild_errors_cleanly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, missing_logs: bool
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    logs, state = tmp_path / "logs", tmp_path / "state.json"
+    _write_log(logs, "2025-10-02-zesty")
+    EffectivenessTracker(logs_dir=logs, state_file=state).analyze()
+    saved = json.loads(state.read_text())
+    del saved["processed_logs"]
+    state.write_text(json.dumps(saved))
+    original = state.read_bytes()
+
+    args = ["--state-file", str(state)]
+    if missing_logs:
+        # The default logs path is not validated by Click's --logs-dir option.
+        args.append("--full")
+        expected = "Cannot rebuild statistics: logs directory unavailable"
+    else:
+        args.extend(["--logs-dir", str(logs)])
+        expected = "Legacy tracker state requires --full"
+    result = CliRunner().invoke(main, args)
+
+    assert result.exit_code == 1
+    assert f"Error: {expected}" in result.output
+    assert isinstance(result.exception, SystemExit)
+    assert state.read_bytes() == original
+
+
+def test_incremental_processes_log_whose_name_sorts_earlier(tmp_path: Path) -> None:
+    # #2362 E1: gptme log dirs are "<date>-<random words>", so a log created
+    # after the last run can sort before it and was never processed.
+    logs, state = tmp_path / "logs", tmp_path / "state.json"
+    _write_log(logs, "2025-10-02-zesty-blue-fish")
+    EffectivenessTracker(logs_dir=logs, state_file=state).analyze()
+
+    _write_log(logs, "2025-10-02-amber-red-owl")
+    s = EffectivenessTracker(logs_dir=logs, state_file=state).analyze()
+    assert s.processed_count == 2
+    assert s.lesson_stats["lessons/workflow/a.md"].total_inclusions == 2
+
+    # A third run has nothing new to do
+    s = EffectivenessTracker(logs_dir=logs, state_file=state).analyze()
+    assert s.processed_count == 2
+
+
+def test_full_run_does_not_double_count(tmp_path: Path) -> None:
+    # #2362 E2: --full re-read every log into the loaded totals.
+    logs, state = tmp_path / "logs", tmp_path / "state.json"
+    _write_log(logs, "2025-10-02-one")
+    EffectivenessTracker(logs_dir=logs, state_file=state).analyze()
+
+    s = EffectivenessTracker(logs_dir=logs, state_file=state).analyze(incremental=False)
+    stats = s.lesson_stats["lessons/workflow/a.md"]
+    assert s.total_sessions == 1
+    assert s.processed_count == 1
+    assert stats.total_inclusions == 1
+    assert stats.sessions_included == ["2025-10-02-one"]
+
+
+def test_legacy_state_preserves_archived_log_statistics(tmp_path: Path) -> None:
+    logs, state = tmp_path / "logs", tmp_path / "state.json"
+    _write_log(logs, "2025-10-02-amber")
+    _write_log(logs, "2025-10-02-zesty")
+    EffectivenessTracker(logs_dir=logs, state_file=state).analyze()
+    saved = json.loads(state.read_text())
+    del saved["processed_logs"]
+    state.write_text(json.dumps(saved))
+    (logs / "2025-10-02-amber").rename(tmp_path / "archived")
+    original = state.read_bytes()
+
+    tracker = EffectivenessTracker(logs_dir=logs, state_file=state)
+    with pytest.raises(ValueError, match="Restore archived logs"):
+        tracker.analyze()
+    assert state.read_bytes() == original
+    assert tracker.state.total_sessions == 2
+    assert tracker.state.lesson_stats["lessons/workflow/a.md"].total_inclusions == 2
+
+
+@pytest.mark.parametrize("checkpoint_interval", [1, 100])
+@pytest.mark.parametrize("missing", [False, True], ids=["unreadable", "missing"])
+def test_full_rebuild_preserves_state_on_unreadable_log(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    checkpoint_interval: int,
+    missing: bool,
+) -> None:
+    logs, state = tmp_path / "logs", tmp_path / "state.json"
+    for name in ["2025-10-02-amber", "2025-10-02-zesty"]:
+        _write_log(logs, name)
+    EffectivenessTracker(logs_dir=logs, state_file=state).analyze()
+    original = state.read_bytes()
+    tracker = EffectivenessTracker(logs_dir=logs, state_file=state)
+    before = tracker.state.to_dict()
+    original_open = open
+
+    def deny_zesty(file, *args, **kwargs):
+        if Path(file) == logs / "2025-10-02-zesty" / "conversation.jsonl":
+            raise PermissionError("temporarily unreadable")
+        return original_open(file, *args, **kwargs)
+
+    conversation = logs / "2025-10-02-zesty" / "conversation.jsonl"
+    contents = conversation.read_bytes()
+    if missing:
+        conversation.unlink()
+    with monkeypatch.context() as patch:
+        if not missing:
+            patch.setattr("builtins.open", deny_zesty)
+        with pytest.raises(FileNotFoundError if missing else PermissionError):
+            tracker.analyze(incremental=False, checkpoint_interval=checkpoint_interval)
+    assert state.read_bytes() == original
+    assert tracker.state.to_dict() == before
+    if missing:
+        conversation.write_bytes(contents)
+    rebuilt = tracker.analyze(incremental=False)
+    assert rebuilt.total_sessions == rebuilt.processed_count == 2
+    assert rebuilt.lesson_stats["lessons/workflow/a.md"].total_inclusions == 2
+
+
+@pytest.mark.parametrize("legacy", [False, True], ids=["full", "legacy"])
+def test_rebuild_preserves_state_when_logs_unavailable(
+    tmp_path: Path, legacy: bool
+) -> None:
+    logs, state = tmp_path / "logs", tmp_path / "state.json"
+    _write_log(logs, "2025-10-02-zesty")
+    EffectivenessTracker(logs_dir=logs, state_file=state).analyze()
+    if legacy:
+        saved = json.loads(state.read_text())
+        del saved["processed_logs"]
+        state.write_text(json.dumps(saved))
+    if legacy:
+        # Legacy migration requires an explicit full rebuild.
+        with pytest.raises(ValueError, match="--full"):
+            EffectivenessTracker(logs_dir=logs, state_file=state).analyze()
+    original = state.read_bytes()
+    logs.rename(tmp_path / "offline-logs")
+
+    tracker = EffectivenessTracker(logs_dir=logs, state_file=state)
+    before = tracker.state.to_dict()
+    with pytest.raises(FileNotFoundError, match="Cannot rebuild"):
+        tracker.analyze(incremental=False)
+    assert state.read_bytes() == original
+    assert tracker.state.to_dict() == before
+
+    # Once logs return, the same tracker can rebuild normally.
+    (tmp_path / "offline-logs").rename(logs)
+    rebuilt = tracker.analyze(incremental=False)
+    assert rebuilt.processed_count == rebuilt.total_sessions == 1
+    assert rebuilt.processed_logs == ["2025-10-02-zesty"]
+
+
+@pytest.mark.parametrize("legacy", [False, True], ids=["full", "legacy"])
+@pytest.mark.parametrize("interrupted", [False, True], ids=["limit", "checkpoint"])
+def test_rebuild_resumes_exactly_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, legacy: bool, interrupted: bool
+) -> None:
+    logs, state = tmp_path / "logs", tmp_path / "state.json"
+    names = ["2025-10-02-amber", "2025-10-02-middle", "2025-10-02-zesty"]
+    for name in names:
+        _write_log(logs, name)
+    EffectivenessTracker(logs_dir=logs, state_file=state).analyze()
+    if legacy:
+        saved = json.loads(state.read_text())
+        del saved["processed_logs"]
+        state.write_text(json.dumps(saved))
+
+    tracker = EffectivenessTracker(logs_dir=logs, state_file=state)
+    if legacy:
+        original = state.read_bytes()
+        with pytest.raises(ValueError, match="--full"):
+            tracker.analyze(limit=1)
+        assert state.read_bytes() == original
+    if interrupted:
+        save_state = tracker._save_state
+
+        def interrupt_after_checkpoint() -> None:
+            save_state()
+            raise RuntimeError("interrupted after first checkpoint")
+
+        monkeypatch.setattr(tracker, "_save_state", interrupt_after_checkpoint)
+        with pytest.raises(RuntimeError, match="interrupted after first checkpoint"):
+            tracker.analyze(incremental=False, checkpoint_interval=1)
+    else:
+        tracker.analyze(incremental=False, limit=1)
+
+    partial = EffectivenessTracker(logs_dir=logs, state_file=state).state
+    assert partial.processed_count == partial.total_sessions == 1
+    assert partial.processed_logs == names[:1]
+    assert partial.last_processed == names[0]
+    assert partial.lesson_stats["lessons/workflow/a.md"].total_inclusions == 1
+
+    # Resume from disk, then repeat: neither remaining logs nor the checkpointed
+    # log may be skipped or counted twice.
+    for _ in range(2):
+        resumed = EffectivenessTracker(logs_dir=logs, state_file=state).analyze()
+        assert resumed.processed_count == resumed.total_sessions == len(names)
+        assert resumed.processed_logs == names
+        assert resumed.last_processed == names[-1]
+        stats = resumed.lesson_stats["lessons/workflow/a.md"]
+        assert stats.total_inclusions == len(names)
+        assert stats.sessions_included == names
+        assert stats.keywords_matched == {"git": len(names)}
+
+
+def test_legacy_state_rebuilds_without_skipping_earlier_log(tmp_path: Path) -> None:
+    logs, state = tmp_path / "logs", tmp_path / "state.json"
+    old = "2025-10-02-zesty-blue-fish"
+    new = "2025-10-02-amber-red-owl"
+    _write_log(logs, old)
+    EffectivenessTracker(logs_dir=logs, state_file=state).analyze()
+    # Simulate the pre-upgrade state, which has counters but no processed set.
+    legacy = json.loads(state.read_text())
+    del legacy["processed_logs"]
+    state.write_text(json.dumps(legacy))
+    _write_log(logs, new)
+
+    original = state.read_bytes()
+    tracker = EffectivenessTracker(logs_dir=logs, state_file=state)
+    with pytest.raises(ValueError, match="--full"):
+        tracker.analyze()
+    assert state.read_bytes() == original
+    s = tracker.analyze(incremental=False)
+    assert s.processed_count == 2
+    assert s.total_sessions == 2
+    assert sorted(s.processed_logs) == [new, old]
+    stats = s.lesson_stats["lessons/workflow/a.md"]
+    assert stats.total_inclusions == 2
+    assert sorted(stats.sessions_included) == [new, old]
+    assert stats.keywords_matched == {"git": 2}
+
+    # The rebuilt state persists exact membership, not a guessed watermark.
+    s = EffectivenessTracker(logs_dir=logs, state_file=state).analyze()
+    assert s.processed_count == 2
+    assert s.total_sessions == 2
+    assert s.lesson_stats["lessons/workflow/a.md"].total_inclusions == 2
+
+
+def test_pending_log_directory_is_skipped_until_written(tmp_path: Path) -> None:
+    # gptme creates the log directory before its first message, and aborted
+    # sessions can leave an empty one behind. A stray directory must not abort
+    # the run, must not be recorded as processed, and must be picked up once
+    # its conversation file appears.
+    logs, state = tmp_path / "logs", tmp_path / "state.json"
+    _write_log(logs, "2025-10-02-amber")
+    pending = logs / "2025-10-02-zesty-pending"
+    pending.mkdir(parents=True)
+
+    tracker = EffectivenessTracker(logs_dir=logs, state_file=state)
+    s = tracker.analyze()
+    assert s.processed_count == 1
+    assert s.processed_logs == ["2025-10-02-amber"]
+
+    # A second incremental run still skips it instead of failing.
+    s = EffectivenessTracker(logs_dir=logs, state_file=state).analyze()
+    assert s.processed_count == 1
+    assert s.processed_logs == ["2025-10-02-amber"]
+
+    # Once the conversation is written the directory is processed normally.
+    (pending / "conversation.jsonl").write_text(
+        json.dumps(
+            {
+                "role": "system",
+                "content": (
+                    "# Relevant Lessons\n\n## Lesson A\n"
+                    "*Path: lessons/workflow/a.md*\n*Matched by: keyword:git*\n"
+                ),
+            }
+        )
+        + "\n"
+    )
+    s = EffectivenessTracker(logs_dir=logs, state_file=state).analyze()
+    assert s.processed_count == 2
+    assert sorted(s.processed_logs) == ["2025-10-02-amber", "2025-10-02-zesty-pending"]
+    assert s.lesson_stats["lessons/workflow/a.md"].total_inclusions == 2
+
+
+def test_full_rebuild_skips_stray_directory(tmp_path: Path) -> None:
+    logs, state = tmp_path / "logs", tmp_path / "state.json"
+    _write_log(logs, "2025-10-02-amber")
+    EffectivenessTracker(logs_dir=logs, state_file=state).analyze()
+    (logs / "2025-10-02-empty").mkdir()
+
+    s = EffectivenessTracker(logs_dir=logs, state_file=state).analyze(incremental=False)
+    assert s.processed_count == s.total_sessions == 1
+    assert s.processed_logs == ["2025-10-02-amber"]
+
+
+def test_full_rebuild_refuses_missing_counted_log_directory(tmp_path: Path) -> None:
+    # Rebuilding without a previously counted directory would silently drop
+    # its statistics. Refuse before touching the saved state.
+    logs, state = tmp_path / "logs", tmp_path / "state.json"
+    _write_log(logs, "2025-10-02-amber")
+    _write_log(logs, "2025-10-02-zesty")
+    EffectivenessTracker(logs_dir=logs, state_file=state).analyze()
+    original = state.read_bytes()
+    (logs / "2025-10-02-amber").rename(tmp_path / "archived")
+
+    tracker = EffectivenessTracker(logs_dir=logs, state_file=state)
+    before = tracker.state.to_dict()
+    with pytest.raises(FileNotFoundError, match="previously counted log"):
+        tracker.analyze(incremental=False)
+    assert state.read_bytes() == original
+    assert tracker.state.to_dict() == before
+
+
+def test_legacy_state_migrates_past_stray_directory(tmp_path: Path) -> None:
+    # The old tracker counted a directory without a conversation file as a
+    # zero-lesson log, so a stray directory below the legacy watermark cannot
+    # hold statistics. It must not block the one-time migration.
+    logs, state = tmp_path / "logs", tmp_path / "state.json"
+    _write_log(logs, "2025-10-02-zesty")
+    EffectivenessTracker(logs_dir=logs, state_file=state).analyze()
+    legacy = json.loads(state.read_text())
+    del legacy["processed_logs"]
+    state.write_text(json.dumps(legacy))
+    (logs / "2025-10-02-amber-aborted").mkdir()
+
+    tracker = EffectivenessTracker(logs_dir=logs, state_file=state)
+    with pytest.raises(ValueError, match="--full"):
+        tracker.analyze()
+
+    s = tracker.analyze(incremental=False)
+    assert s.processed_count == s.total_sessions == 1
+    assert s.processed_logs == ["2025-10-02-zesty"]
+    assert s.lesson_stats["lessons/workflow/a.md"].total_inclusions == 1
+
+    # The skipped directory was not recorded, so a conversation written later
+    # is still picked up instead of being treated as processed.
+    (logs / "2025-10-02-amber-aborted" / "conversation.jsonl").write_text(
+        json.dumps(
+            {
+                "role": "system",
+                "content": (
+                    "# Relevant Lessons\n\n## Lesson A\n"
+                    "*Path: lessons/workflow/a.md*\n*Matched by: keyword:git*\n"
+                ),
+            }
+        )
+        + "\n"
+    )
+    s = EffectivenessTracker(logs_dir=logs, state_file=state).analyze()
+    assert s.processed_count == s.total_sessions == 2
+    assert sorted(s.processed_logs) == ["2025-10-02-amber-aborted", "2025-10-02-zesty"]
+
+
+@pytest.mark.parametrize("limit", [None, 1], ids=["no-limit", "limit"])
+def test_full_rebuild_refuses_missing_counted_conversation(
+    tmp_path: Path, limit: int | None
+) -> None:
+    # A rebuild resets every counted log's totals, so a counted log without a
+    # conversation file must refuse even when --limit keeps it out of this run.
+    logs, state = tmp_path / "logs", tmp_path / "state.json"
+    for name in ["2025-10-02-amber", "2025-10-02-zesty"]:
+        _write_log(logs, name)
+    EffectivenessTracker(logs_dir=logs, state_file=state).analyze()
+    original = state.read_bytes()
+    (logs / "2025-10-02-zesty" / "conversation.jsonl").unlink()
+
+    tracker = EffectivenessTracker(logs_dir=logs, state_file=state)
+    before = tracker.state.to_dict()
+    with pytest.raises(FileNotFoundError, match="no conversation file"):
+        tracker.analyze(incremental=False, limit=limit)
+    assert state.read_bytes() == original
+    assert tracker.state.to_dict() == before
