@@ -641,7 +641,7 @@ _PATTERNS: list[Pattern] = [
             # short HIGH value and the secret leaked. `=>` is deliberately not
             # included: it makes ordinary arrow functions and PHP foreach loops
             # (``key => key.trim()``) a CRITICAL fail-closed block.
-            r"(?P<sep>['\"][ \t\r\n]*:[ \t\r\n]*|['\"]?[ \t]*(?::=|[:=])[ \t]*)"
+            r"(?P<sep>['\"][ \t\r\n]*:[ \t\r\n]*|['\"]?[ \t]*(?::=|[:=](?!>))[ \t]*)"
             # Quoted values include punctuation/spaces and escaped delimiters.
             # Prefer a complete quoted value, including embedded newlines.
             # Truncated snippets end at a line boundary or EOF instead of a
@@ -665,6 +665,32 @@ _PATTERNS: list[Pattern] = [
             # punctuation (``["TOKEN=abc", …]``) still closes the word.
             r"|[^\s'\"]+(?:['\"]+(?![,;)\]}])[^\s'\"]+)*)))"
             r"(?(quote)(?:(?P=quote)|(?=[\r\n]|\Z)))",
+            re.IGNORECASE,
+        ),
+        Severity.CRITICAL,
+        "secret_assignment",
+        value_only=True,
+    ),
+    # PHP/Ruby hash-rocket assignment: a QUOTED key (PHP ``'password' =>``) or a
+    # Ruby symbol key (``:password =>``) followed by ``=>`` and a quoted value.
+    # Requiring a quoted/symbol key AND a quoted value is what keeps ordinary
+    # arrow functions and ``foreach`` loops (``key => key.trim()``,
+    # ``$key => $headerValue``) from matching: those have a bare identifier key
+    # and/or a non-quoted value. This is split out of the main
+    # ``secret_assignment`` separator, which deliberately omits ``=>`` because
+    # the generic name+separator shape over-fires on arrow functions
+    # (gptme/gptme-contrib#2619). A variable-valued hash rocket
+    # (``'password' => $hash``) is intentionally NOT matched: without a quoted
+    # value the shape is indistinguishable from a plain foreach loop.
+    Pattern(
+        re.compile(
+            r"(?P<key>"
+            r"['\"](?:[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)*_)?"
+            r"(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)['\"]"
+            r"|:(?:[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)*_)?"
+            r"(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)\b)"
+            r"[ \t]*=>[ \t]*"
+            r"(?P<quote>['\"])(?P<value>(?:\\.|(?!(?P=quote))[^\\])+)(?P=quote)",
             re.IGNORECASE,
         ),
         Severity.CRITICAL,
