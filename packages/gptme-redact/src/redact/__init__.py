@@ -671,43 +671,40 @@ _PATTERNS: list[Pattern] = [
         "secret_assignment",
         value_only=True,
     ),
-    # PHP/Ruby hash-rocket assignment: a secret-named key (PHP ``'password' =>``,
-    # a Ruby symbol ``:password =>``, or a bare identifier ``password =>``)
-    # followed by ``=>`` and a QUOTED value. Requiring a quoted value is what
-    # keeps ordinary arrow functions and ``foreach`` loops (``key => key.trim()``,
-    # ``$key => $headerValue``) from matching: their values are not quoted
-    # literals. The bare-identifier key form is included because a quoted value
-    # after ``=>`` is unambiguously a literal assignment, and the generic
-    # pattern no longer reaches it now that ``=>`` is excluded there (review P1,
-    # #2625). This is split out of the main
+    # PHP/Ruby hash-rocket assignment: a QUOTED key (PHP ``'password' =>``) or a
+    # Ruby symbol key (``:password =>``) followed by ``=>`` and a QUOTED value.
+    # Both sides must be literals: that is what keeps ordinary arrow functions
+    # and ``foreach`` loops (``key => key.trim()``, ``$key => $headerValue``)
+    # from matching. A bare identifier key (``password => 'x'``) is deliberately
+    # NOT matched: it is valid JavaScript (an arrow function returning a string)
+    # but invalid PHP/Ruby hash syntax, so matching it would re-introduce the
+    # arrow false positives this split exists to avoid. The literal words
+    # ``key``/``keys`` are excluded from both key forms because ``['key' => 'x']``
+    # is an ordinary array entry, not a credential. This is split out of the main
     # ``secret_assignment`` separator, which deliberately omits ``=>`` because
     # the generic name+separator shape over-fires on arrow functions
-    # (gptme/gptme-contrib#2619). A variable-valued hash rocket
-    # (``'password' => $hash``) is intentionally NOT matched: without a quoted
-    # value the shape is indistinguishable from a plain foreach loop.
+    # (gptme/gptme-contrib#2619). Accepted trade-off: an unquoted hash-rocket
+    # value (``password=>hunter2``, ``'password' => $hash``) is not matched — the
+    # generic separator no longer reaches ``=>``, and the shape is otherwise
+    # indistinguishable from an arrow function or a plain foreach loop.
     # The value may be truncated by tool output, exactly like the catch-all
     # above: a complete quoted value is preferred, but an unterminated one ends
     # at a line boundary or EOF instead of failing open (review P1, #2625).
-    # Excluding raw newlines from the truncated branch keeps it from swallowing
-    # the rest of a multi-line document.
+    # The truncated branch stops at a raw newline (a trailing backslash keeps
+    # the backslash but not the break) so it cannot swallow a whole document.
     Pattern(
         re.compile(
             r"(?P<key>"
-            r"['\"](?:[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)*_)?"
+            r"['\"](?!keys?['\"])"
+            r"(?:[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)*_)?"
             r"(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)['\"]"
-            r"|:(?:[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)*_)?"
-            r"(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)\b"
-            # A bare key must not be the literal word ``key``: ``key => 'x'``
-            # is an ordinary arrow function with a string body, not a hash
-            # rocket. Prefixed names (``api_key``) still qualify. The leading
-            # ``\b`` keeps this alternative linear: without it the optional
-            # prefix rescans every offset of a long word run (quadratic).
-            r"|\b(?!keys?\b)(?:[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)*_)?"
+            r"|:(?!keys?\b)"
+            r"(?:[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)*_)?"
             r"(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)\b)"
             r"[ \t]*=>[ \t]*"
             r"(?P<quote>['\"])(?P<value>"
             r"(?:(?:\\[\s\S]|(?!(?P=quote))[^\\])+(?=(?P=quote))"
-            r"|(?:\\[\s\S]|(?!(?P=quote))[^\\\r\n])+)"
+            r"|(?:\\[^\r\n]|\\(?=[\r\n]|\Z)|(?!(?P=quote))[^\\\r\n])+)"
             r")(?:(?P=quote)|(?=[\r\n]|\Z))",
             re.IGNORECASE,
         ),
