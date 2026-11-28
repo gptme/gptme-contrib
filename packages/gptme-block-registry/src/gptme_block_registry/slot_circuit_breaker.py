@@ -131,6 +131,10 @@ class _SlotBreaker:
         # Timeout origin can be rebased after a clock step; attempt identity
         # must stay at the original grant to reject pre-probe outcomes.
         self._probe_timeout_started_at: float | None = None
+        # Grant time of a probe abandoned by a backward clock step that made it
+        # look timed out. Verdicts stamped at or after it belong to the old
+        # epoch and must not settle the replacement probe.
+        self._probe_abandoned_at: float | None = None
         self._probe_requires_timestamp: bool = False
         # Grant time of the probe that last closed the breaker. Verdicts from
         # attempts that started before it predate the recovery and are stale.
@@ -177,6 +181,18 @@ class _SlotBreaker:
             and now - self._probe_timeout_started_at >= self.probe_timeout
         ):
             self._probe_pending = False
+            if self._probe_started_at is not None and now < self._probe_started_at:
+                # A backward clock step made the in-flight probe look lost.
+                # Remember its grant: its late verdict is stamped in the old
+                # epoch and must stay stale even after the clock catches back
+                # up past it.
+                self._probe_abandoned_at = self._probe_started_at
+            elif (
+                self._probe_abandoned_at is not None and now >= self._probe_abandoned_at
+            ):
+                # The replacement starts at or after the abandoned grant, so
+                # the ordinary identity check already rejects the old epoch.
+                self._probe_abandoned_at = None
             self._probe_started_at = now
             self._probe_timeout_started_at = now
             return False
@@ -189,6 +205,7 @@ class _SlotBreaker:
             self._opened_at = now
             self._probe_started_at = None
             self._probe_timeout_started_at = None
+            self._probe_abandoned_at = None
             self._probe_requires_timestamp = False
         else:
             self._failure_count += 1
@@ -205,6 +222,7 @@ class _SlotBreaker:
         self._probe_pending = False
         self._probe_started_at = None
         self._probe_timeout_started_at = None
+        self._probe_abandoned_at = None
         self._probe_requires_timestamp = False
 
 
@@ -305,6 +323,14 @@ def _load_breaker(
             b._probe_timeout_started_at
         ):
             b._probe_timeout_started_at = b._probe_started_at
+        abandoned_at = slot_state.get("probe_abandoned_at")
+        b._probe_abandoned_at = (
+            float(abandoned_at) if abandoned_at is not None else None
+        )
+        if b._probe_abandoned_at is not None and not math.isfinite(
+            b._probe_abandoned_at
+        ):
+            b._probe_abandoned_at = None
         if b._state == CircuitState.HALF_OPEN and b._probe_started_at is None:
             # Legacy or corrupt state cannot identify an in-flight probe.
             # Treat the next call as a fresh grant, never as its outcome.
@@ -324,6 +350,7 @@ def _load_breaker(
         b._probe_pending = False
         b._probe_started_at = None
         b._probe_timeout_started_at = None
+        b._probe_abandoned_at = None
         b._probe_requires_timestamp = False
         b._recovered_at = None
     return b
@@ -338,6 +365,7 @@ def _save_breaker(b: _SlotBreaker) -> dict[str, Any]:
         "probe_pending": b._probe_pending,
         "probe_started_at": b._probe_started_at,
         "probe_timeout_started_at": b._probe_timeout_started_at,
+        "probe_abandoned_at": b._probe_abandoned_at,
         "probe_requires_timestamp": b._probe_requires_timestamp,
         "recovered_at": b._recovered_at,
     }
@@ -449,7 +477,12 @@ def _apply_verdict(
         or (
             verdict_started_at is not None
             and (
-                b._probe_started_at is None or verdict_started_at < b._probe_started_at
+                b._probe_started_at is None
+                or verdict_started_at < b._probe_started_at
+                or (
+                    b._probe_abandoned_at is not None
+                    and verdict_started_at >= b._probe_abandoned_at
+                )
             )
         )
     ):
