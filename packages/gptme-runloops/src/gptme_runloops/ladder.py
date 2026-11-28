@@ -1,0 +1,201 @@
+"""Deepen ladder: find work when the queue is dry, instead of idling or starting noop sessions.
+
+Tracking: gptme/gptme-contrib#2310 (principles 1 and 2).
+
+A dispatcher tick that is behind its capacity target and has fewer bindable items
+than slots runs the ladder. Rungs run **in order** until the deficit is filled.
+Each rung is a source of candidate work items, ordered by the host from cheapest
+and most trusted (own open work needing action) to heaviest (deeper work on the
+best open item). If every rung comes back empty, the result says so with
+per-rung zero counts, and the caller idles on purpose.
+
+Same contract as :mod:`gptme_runloops.gates`: this module owns the mechanism,
+the host owns the policy.
+
+* A rung is a ``produce`` callable that returns candidate items (and an optional
+  note). It is called only when the deficit is still open, so expensive rungs
+  cost nothing on a tick an earlier rung already satisfied.
+* Filing is the host's ``file_items`` callback. It receives at most the remaining
+  deficit and returns the items it actually filed (dedupe may drop some).
+* No I/O here: no task format, no ledger path, no GitHub client.
+
+The companion :func:`bound_session_gate` enforces principle 1: a work session
+starts only when it holds a bound item (a task, a program instance, or a scout
+job with its own output contract).
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field
+from typing import Generic, TypeVar
+
+from .gates import GateDecision
+
+T = TypeVar("T")
+
+
+@dataclass(frozen=True)
+class RungOutput(Generic[T]):
+    """What one rung produced: candidate items plus an optional human note."""
+
+    items: Sequence[T] = ()
+    note: str = ""
+
+
+@dataclass(frozen=True)
+class Rung(Generic[T]):
+    """One ordered source of candidate work.
+
+    ``produce`` runs only while the deficit is open. Raise nothing for "empty":
+    return an empty :class:`RungOutput` with a note saying why (for example
+    ``"unavailable: producer not built"``), so the zero is visible in the log.
+    """
+
+    name: str
+    produce: Callable[[], RungOutput[T]]
+
+
+@dataclass(frozen=True)
+class RungResult:
+    """Per-rung counts. ``emitted`` candidates, ``filed`` after the host's dedupe."""
+
+    emitted: int
+    filed: int
+    note: str = ""
+    error: str = ""
+
+
+@dataclass
+class LadderResult(Generic[T]):
+    """Outcome of one ladder run.
+
+    ``rungs`` holds every rung that ran, zero counts included, in run order.
+    Rungs after the one that closed the deficit do not run and are absent.
+    ``produced_by`` is the first rung that filed anything, or ``None``.
+    ``None`` rather than a ``"none"`` sentinel, because a rung may be named
+    ``none``: a sentinel is not distinguishable from such a rung's own name.
+    """
+
+    deficit: int
+    rungs: dict[str, RungResult] = field(default_factory=dict)
+    filed: list[T] = field(default_factory=list)
+    produced_by: str | None = None
+
+    @property
+    def remaining(self) -> int:
+        return max(self.deficit - len(self.filed), 0)
+
+    @property
+    def idle_on_purpose(self) -> bool:
+        """True when the deficit was open, no source failed, and none filed work."""
+        return (
+            self.deficit > 0
+            and not self.filed
+            and not any(rung.error for rung in self.rungs.values())
+        )
+
+    def summary(self) -> str:
+        """One log line with filed/emitted counts, source notes and errors.
+
+        The producer uses repr: ``None`` means no producer, ``'none'`` is a name.
+        """
+        counts = " ".join(
+            f"{k}={v.filed}/{v.emitted}"
+            + (f" error={v.error!r}" if v.error else "")
+            + (f" note={v.note!r}" if v.note else "")
+            for k, v in self.rungs.items()
+        )
+        return f"produced_by={self.produced_by!r} {counts}".rstrip()
+
+
+def run_ladder(
+    rungs: Sequence[Rung[T]],
+    deficit: int,
+    file_items: Callable[[str, Sequence[T]], Sequence[T]],
+) -> LadderResult[T]:
+    """Run ``rungs`` in order until ``deficit`` items are filed.
+
+    ``file_items(rung_name, items)`` receives at most the remaining deficit and
+    returns the subset it actually filed, not a count; it is not called with an
+    empty list. After a
+    dedupe shortfall, remaining candidates from the same rung are offered in
+    batches bounded by the updated deficit before advancing to the next rung.
+    Each candidate is offered at most once. A rung
+    whose ``produce`` raises is recorded with ``error`` and the ladder moves on:
+    one broken source must not starve the rest. A ``file_items`` failure is
+    not caught, because the caller cannot tell what was filed.
+
+    ``LadderResult.filed`` contains exactly the items returned by the host,
+    including when dedupe rejects candidates from anywhere in a batch.
+    Returned items must form a subset of the offered batch, matched by equality
+    with each offered occurrence used at most once; otherwise ``ValueError`` is
+    raised just as for an oversized return. Items need not be hashable.
+    """
+    if deficit < 0:
+        raise ValueError(f"deficit must be >= 0, got {deficit}")
+    names: set[str] = set()
+    for rung in rungs:
+        if rung.name in names:
+            raise ValueError(f"duplicate rung name: {rung.name!r}")
+        names.add(rung.name)
+    result: LadderResult[T] = LadderResult(deficit=deficit)
+    for rung in rungs:
+        if result.remaining <= 0:
+            break
+        try:
+            out = rung.produce()
+            # A rung that returns the wrong shape is as broken as one that
+            # raises: keep the failure on that rung instead of failing the run.
+            items = list(out.items)
+        except Exception as exc:  # one broken source must not starve the rest
+            result.rungs[rung.name] = RungResult(
+                emitted=0, filed=0, error=f"{type(exc).__name__}: {exc}"
+            )
+            continue
+        offset = 0
+        rung_filed = 0
+        while offset < len(items) and result.remaining > 0:
+            take = items[offset : offset + result.remaining]
+            offset += len(take)
+            offered = list(take)
+            filed = list(file_items(rung.name, take))
+            if len(filed) > len(take):
+                raise ValueError(
+                    f"file_items for {rung.name!r} returned {len(filed)} items, "
+                    f"expected at most {len(take)}"
+                )
+            for item in filed:
+                try:
+                    offered.remove(item)
+                except ValueError:
+                    raise ValueError(
+                        f"file_items for {rung.name!r} must return a subset "
+                        "of the offered batch"
+                    ) from None
+            rung_filed += len(filed)
+            if filed:
+                if result.produced_by is None:
+                    result.produced_by = rung.name
+                result.filed.extend(filed)
+        result.rungs[rung.name] = RungResult(
+            emitted=len(items), filed=rung_filed, note=getattr(out, "note", "")
+        )
+    return result
+
+
+def bound_session_gate(bound_item: str | None) -> GateDecision:
+    """Admit a work session only when it holds a bound item.
+
+    ``bound_item`` is the host's identity for what the session will work on
+    (a task id, a program instance, a scout job). ``None`` or an empty string
+    means the dispatcher found nothing: the caller should run the ladder or
+    idle, not start a session that will discover the queue is dry.
+    """
+    if bound_item and bound_item.strip():
+        return GateDecision(True, f"bound to {bound_item.strip()}", cause="bound")
+    return GateDecision(
+        False,
+        "no bound item: run the deepen ladder or idle on purpose",
+        cause="unbound",
+    )

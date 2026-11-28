@@ -294,6 +294,12 @@ Other modules:
 - `gptme_runloops.gates` — composable runtime-admission gates ("does this triggered session
   deserve to spend inference?"), as pure functions
 - `gptme_runloops.triggers` — composable trigger gates ("should a scheduled slot fire at all?")
+- `gptme_runloops.ladder` — the deepen ladder (`run_ladder`): when a dispatcher tick is short of
+  bound work, run host-ordered rungs (work sources) until the deficit is filed, recording zero
+  counts per rung so an all-empty run idles on purpose. The host's `file_items(name, items)`
+  callback returns the subset actually filed, not a count, so deduplication preserves exact
+  identities in `LadderResult.filed`. The module also provides `bound_session_gate`, which admits a
+  work session only when it holds a bound item ([#2310](https://github.com/gptme/gptme-contrib/issues/2310))
 - `gptme_runloops.pr_review` — versioned, forge-neutral `ReviewArtifact`/`Finding` schema, reviewer,
   verifier, GitHub adapter and a golden corpus for evaluating reviewer models
 - `gptme_runloops.pm_dispatch`, `merge_lifecycle`, `pm_bandit`, `worker_records`,
