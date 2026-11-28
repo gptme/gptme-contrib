@@ -851,6 +851,79 @@ def test_failed_lookup_is_not_reported_as_completed() -> None:
     assert not result.success and completed == []
 
 
+def test_lookup_ignores_another_replys_error_and_does_not_interrupt() -> None:
+    server = _LookupServer(
+        [
+            {"type": "connected", "session_id": "s1"},
+            STEP,
+            {"type": "error", "error": "another reply failed"},  # not ours
+            {"type": "step_complete"},
+            {"type": "generation_started"},
+            _msg("assistant", "the lookup answer"),
+            {"type": "step_complete"},
+        ]
+    )
+    result = _run_lookup(server)
+    assert result.success and result.output == "the lookup answer"
+    assert all(kind != "interrupt" for kind, _ in server.calls)
+
+
+def test_lookup_reports_its_own_step_failing_before_it_generates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(conversation_link, "LOOKUP_EARLY_ERROR_GRACE_SECONDS", 0.05)
+    server = _LookupServer(
+        [
+            {"type": "connected", "session_id": "s1"},
+            STEP,
+            {"type": "error", "error": "context too long"},
+            {"type": "step_complete"},
+        ],
+        hang=True,
+    )
+    result = _run_lookup(server, timeouts={"fast": 5})
+    assert not result.success and "context too long" in (result.error or "")
+
+
+def test_cancel_during_a_busy_wait_does_not_interrupt_the_other_reply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(conversation_link, "LOOKUP_BUSY_RETRY_SECONDS", 0.05)
+    server = _LookupServer([{"type": "connected", "session_id": "s1"}], hang=True)
+    server.step_statuses = [409] * 1000
+
+    async def run() -> None:
+        transport = httpx.MockTransport(server.handler)
+        async with httpx.AsyncClient(transport=transport) as c:
+            task = asyncio.create_task(server.lookup(c)("q", mode="fast"))
+            for _ in range(100):
+                if any(k == "step" for k, _ in server.calls):
+                    break
+                await asyncio.sleep(0.01)
+            await asyncio.sleep(0.02)  # inside the wait after a 409
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    asyncio.run(run())
+    assert all(kind != "interrupt" for kind, _ in server.calls)
+
+
+def test_a_step_request_that_never_connected_does_not_interrupt() -> None:
+    server = _LookupServer([{"type": "connected", "session_id": "s1"}])
+    original = server.handler
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/step"):
+            raise httpx.ConnectError("refused", request=request)
+        return original(request)
+
+    server.handler = handler  # type: ignore[method-assign]
+    result = _run_lookup(server)
+    assert not result.success
+    assert all(kind != "interrupt" for kind, _ in server.calls)
+
+
 def test_execute_delegates_to_the_lookup_runner() -> None:
     """With a lookup runner (webui calls), no gptme subprocess is spawned."""
     seen: list[tuple] = []

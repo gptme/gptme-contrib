@@ -385,6 +385,10 @@ LOOKUP_BUSY_RETRY_SECONDS = 1.0
 # How long to keep re-posting the caller's spoken turns before the lookup
 # goes ahead anyway (their order in the chat is not worth the lookup).
 LOOKUP_FLUSH_WAIT_SECONDS = 5.0
+# An error and step end before any generation are ours (the step failed while
+# preparing) unless a generation follows within this long; then they were the
+# end of another reply.
+LOOKUP_EARLY_ERROR_GRACE_SECONDS = 3.0
 _STEP_DONE_EVENTS = frozenset({"step_complete", "interrupted"})
 # How a reply that is not ours can end (an error ends it too).
 _REPLY_DONE_EVENTS = _STEP_DONE_EVENTS | {"error"}
@@ -437,6 +441,18 @@ class _EventPump:
         await asyncio.gather(self._task, return_exceptions=True)
 
 
+class _StepState:
+    """Whether our step may be running, so an error path must interrupt it.
+
+    True only from sending a step request until the server answered it with
+    a refusal: a request that got no answer may have started the step, while
+    a 409 or an error status means it did not, and interrupting then would
+    stop another client's reply instead.
+    """
+
+    maybe_started = False
+
+
 class _ChatBusy(_LookupFailed):
     """Another reply kept the chat busy until the deadline; no step started."""
 
@@ -487,7 +503,7 @@ class ConversationLookup:
             timeout=httpx.Timeout(10.0, read=None)
         )
         session_id: str | None = None
-        stepping = False
+        step = _StepState()
         try:
             async with client.stream(
                 "GET", self._url("/events"), headers=self._headers
@@ -527,27 +543,19 @@ class ConversationLookup:
                     # Events carry no session or step id. The stream is
                     # ordered, so nothing before our own request is ours.
                     await _until_own_request(events, request, deadline)
-                    # A step POST that got no response may still have started
-                    # the step: interrupt on any error from here, unless the
-                    # server answered (busy, or an error status).
-                    stepping = True
-                    try:
-                        await self._start_step(session_id, events, deadline)
-                    except (_ChatBusy, httpx.HTTPStatusError):
-                        stepping = False
-                        raise
+                    await self._start_step(session_id, events, deadline, step)
                     if on_started:
                         on_started(time.monotonic())
                     answer = await self._await_answer(events, deadline, on_progress)
-                    stepping = False
+                    step.maybe_started = False
                 finally:
                     await events.aclose()
         except asyncio.CancelledError:
-            if stepping and session_id:
+            if step.maybe_started and session_id:
                 await asyncio.shield(self._interrupt(session_id))
             raise
         except asyncio.TimeoutError:
-            if stepping and session_id:
+            if step.maybe_started and session_id:
                 await self._interrupt(session_id)
             if on_completed:
                 on_completed(124, time.monotonic())  # as a timed-out subprocess
@@ -557,7 +565,7 @@ class ConversationLookup:
                 error=f"the lookup in the chat did not finish within {timeout:.0f} s",
             )
         except (httpx.HTTPError, _LookupFailed, ValueError) as exc:
-            if stepping and session_id:
+            if step.maybe_started and session_id:
                 await self._interrupt(session_id)
             logger.warning("Conversation lookup failed: %s", exc)
             return ToolResult(success=False, output="", error=str(exc) or "failed")
@@ -585,11 +593,18 @@ class ConversationLookup:
                 await client.aclose()
 
     async def _start_step(
-        self, session_id: str, events: _EventPump, deadline: float
+        self, session_id: str, events: _EventPump, deadline: float, step: _StepState
     ) -> None:
         payload = {"session_id": session_id, "auto_confirm": LOOKUP_MAX_TOOL_CALLS}
         while True:
-            resp = await self._post("/step", payload)
+            step.maybe_started = True
+            try:
+                resp = await self._post("/step", payload)
+            except (httpx.ConnectError, httpx.ConnectTimeout):
+                step.maybe_started = False  # the request never reached it
+                raise
+            if resp.status_code != 200:
+                step.maybe_started = False  # refused: nothing of ours runs
             if resp.status_code != 409:
                 resp.raise_for_status()
                 return
@@ -621,18 +636,28 @@ class ConversationLookup:
         # the server runs them and starts a continuation, so the lookup is
         # done only after a generation that called none.
         ran_tools = False
+        # An error, then a step end, before our generation: our step failing
+        # while preparing, or the end of another reply (no step ids to tell).
+        early_error: str | None = None
+        early_end: float | None = None
+        kinds = {
+            "generation_started",
+            "message_added",
+            "error",
+            "tool_pending",
+            *_STEP_DONE_EVENTS,
+        }
         while True:
-            event = await _next_event_of(
-                events,
-                {
-                    "generation_started",
-                    "message_added",
-                    "error",
-                    "tool_pending",
-                    *_STEP_DONE_EVENTS,
-                },
-                deadline,
-            )
+            wait_until = deadline
+            if early_end is not None:
+                wait_until = min(deadline, early_end + LOOKUP_EARLY_ERROR_GRACE_SECONDS)
+            try:
+                event = await _next_event_of(events, kinds, wait_until)
+            except asyncio.TimeoutError:
+                if early_error is not None and time.monotonic() < deadline:
+                    # No generation followed: it was our step that failed.
+                    raise _LookupFailed(early_error) from None
+                raise
             kind = event.get("type")
             if kind == "generation_started":
                 # Only the final generation's text answers: an earlier one's
@@ -640,6 +665,7 @@ class ConversationLookup:
                 generating = True
                 ran_tools = False
                 answer = ""
+                early_error = early_end = None
             elif kind == "message_added":
                 message = event.get("message")
                 if not generating or not isinstance(message, dict):
@@ -649,12 +675,16 @@ class ConversationLookup:
                     answer = content
                 if content and on_progress:
                     on_progress(content.splitlines()[0][:200], time.monotonic())
+            elif not generating:
+                # Not our generation (yet): another reply that started before
+                # our step, or our step failing before it generates.
+                if kind == "error":
+                    early_error = str(event.get("error") or "the step failed")
+                elif kind in _STEP_DONE_EVENTS and early_error is not None:
+                    early_end = time.monotonic()
+                continue
             elif kind == "error":
                 raise _LookupFailed(str(event.get("error") or "the step failed"))
-            elif not generating:
-                # A reply that was not ours (it started before our step):
-                # keep waiting for our generation.
-                continue
             elif kind == "tool_pending":
                 # Every tool is announced; one left for a click means the
                 # budget is used up, or the tool always needs confirmation.
