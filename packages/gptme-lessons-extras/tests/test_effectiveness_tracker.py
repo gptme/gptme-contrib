@@ -585,3 +585,24 @@ def test_legacy_state_migrates_past_stray_directory(tmp_path: Path) -> None:
     s = EffectivenessTracker(logs_dir=logs, state_file=state).analyze()
     assert s.processed_count == s.total_sessions == 2
     assert sorted(s.processed_logs) == ["2025-10-02-amber-aborted", "2025-10-02-zesty"]
+
+
+@pytest.mark.parametrize("limit", [None, 1], ids=["no-limit", "limit"])
+def test_full_rebuild_refuses_missing_counted_conversation(
+    tmp_path: Path, limit: int | None
+) -> None:
+    # A rebuild resets every counted log's totals, so a counted log without a
+    # conversation file must refuse even when --limit keeps it out of this run.
+    logs, state = tmp_path / "logs", tmp_path / "state.json"
+    for name in ["2025-10-02-amber", "2025-10-02-zesty"]:
+        _write_log(logs, name)
+    EffectivenessTracker(logs_dir=logs, state_file=state).analyze()
+    original = state.read_bytes()
+    (logs / "2025-10-02-zesty" / "conversation.jsonl").unlink()
+
+    tracker = EffectivenessTracker(logs_dir=logs, state_file=state)
+    before = tracker.state.to_dict()
+    with pytest.raises(FileNotFoundError, match="no conversation file"):
+        tracker.analyze(incremental=False, limit=limit)
+    assert state.read_bytes() == original
+    assert tracker.state.to_dict() == before

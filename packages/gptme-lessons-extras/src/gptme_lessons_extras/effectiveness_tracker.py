@@ -317,14 +317,30 @@ class EffectivenessTracker:
         # discards their totals. Never rebuild silently from a partial archive.
         previous_members = set(self.state.processed_logs)
         if not incremental:
-            available = {d.name for d in log_dirs}
-            missing = sorted(previous_members - available)
+            by_name = {d.name: d for d in log_dirs}
+            missing = sorted(previous_members - by_name.keys())
             if missing:
                 preview = ", ".join(missing[:3])
                 more = f" and {len(missing) - 3} more" if len(missing) > 3 else ""
                 raise FileNotFoundError(
                     f"Cannot rebuild statistics: {len(missing)} previously counted "
                     f"log(s) are missing: {preview}{more}. "
+                    "Restore archived logs before rebuilding."
+                )
+            # Validate every counted log, not only the ones this run reads: a
+            # rebuild resets the totals for all of them, so a log outside a
+            # --limit slice would otherwise lose its statistics silently.
+            unreadable = sorted(
+                name
+                for name in previous_members
+                if not (by_name[name] / "conversation.jsonl").exists()
+            )
+            if unreadable:
+                preview = ", ".join(unreadable[:3])
+                more = f" and {len(unreadable) - 3} more" if len(unreadable) > 3 else ""
+                raise FileNotFoundError(
+                    f"Cannot rebuild statistics: {len(unreadable)} previously counted "
+                    f"log(s) have no conversation file: {preview}{more}. "
                     "Restore archived logs before rebuilding."
                 )
 
