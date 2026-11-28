@@ -200,7 +200,12 @@ def _find_all_marker_comments(repo: str, number: int) -> list[dict]:
         c
         for c in comments
         if isinstance(c, dict)
-        and _io.MARKER_PREFIX in (c.get("body") or "")
+        # Match both supported marker formats, not the bare prefix:
+        # `<!-- rev` also claims (and deletes) another namespace's `rev-ai`.
+        and (
+            _marker_re().search(c.get("body") or "")
+            or _legacy_marker_re().search(c.get("body") or "")
+        )
         # Marker namespaces are public: anyone can paste one. Only the
         # reviewer's own comments carry state, and only those may be deleted.
         and _is_reviewer_comment(c, _io.REVIEWER_IDENTITY)
@@ -233,7 +238,7 @@ def find_marker_comment(repo: str, number: int) -> dict | None:
     Raises ``ReviewError`` when the comments cannot be read: an unreadable
     list is not an empty one.
 
-    Matched on the marker prefix ALONE — not on the SHA — so that a re-review
+    Matched on the exact marker namespace — not on the SHA — so that a re-review
     edits the same comment instead of stacking a new one per commit.
 
     If concurrent reviewer runs left multiple marker comments, the stale
@@ -271,14 +276,16 @@ def _marker_re() -> re.Pattern[str]:
     )
 
 
+def _legacy_marker_re() -> re.Pattern[str]:
+    # Pre-upsert comments used `<!-- bob-ai-review head-sha: X -->`.
+    return re.compile(rf"<!-- {re.escape(_io.MARKER_NAMESPACE)} head-sha: (\S+) -->")
+
+
 def marker_state(body: str) -> dict:
     """Machine-readable state embedded in the marker comment."""
     m = _marker_re().search(body or "")
     if not m:
-        # Pre-upsert comments used `<!-- bob-ai-review head-sha: X -->`.
-        legacy = re.search(
-            rf"<!-- {re.escape(_io.MARKER_NAMESPACE)} head-sha: (\S+) -->", body or ""
-        )
+        legacy = _legacy_marker_re().search(body or "")
         if legacy:
             return {"sha": legacy.group(1), "history": []}
         return {}

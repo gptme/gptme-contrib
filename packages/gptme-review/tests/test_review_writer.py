@@ -94,6 +94,37 @@ def test_copied_marker_from_another_author_is_ignored_not_deleted(alice_io):
     assert calls == []
 
 
+@pytest.mark.parametrize(
+    ("marker", "sha_key"),
+    [
+        ('<!-- rev {"sha": "abc"} -->', "sha"),
+        ('<!-- rev-publishing {"publishing_sha": "abc"} -->', "publishing_sha"),
+        ("<!-- rev head-sha: abc -->", "sha"),
+    ],
+)
+def test_marker_namespace_is_not_matched_as_a_prefix(marker, sha_key):
+    # Same author runs namespace `rev` and `rev-ai`: `<!-- rev` is a substring
+    # of `<!-- rev-ai`, which made the newer rev-ai marker the keeper and
+    # deleted the real `rev` marker (contrib#2384 defect 12).
+    io = writer.default_io(sweep_identity("alice-agent", "rev"))
+    me = {"login": "alice-agent"}
+    own = {"id": 1, "body": marker, "updated_at": "2026-01-01", "user": me}
+    other = {
+        "id": 2,
+        "body": "<!-- rev-ai {} -->",
+        "updated_at": "2026-02-01",
+        "user": me,
+    }
+    calls: list[list[str]] = []
+    io.gh_json = lambda args: [[own, other]]
+    io.run = lambda cmd, **kw: calls.append(cmd)
+    w = writer.bind_io(io)
+    keeper = w.find_marker_comment("o/r", 7)
+    assert keeper is not None and keeper["id"] == 1
+    assert w.marker_state(keeper["body"])[sha_key] == "abc"
+    assert calls == []
+
+
 def test_two_hosts_resolve_independently_and_at_call_time():
     a = SimpleNamespace(MARKER_NAMESPACE="a", MARKER_PREFIX="<!-- a")  # no I/O needed
     b = SimpleNamespace(MARKER_NAMESPACE="b", MARKER_PREFIX="<!-- b")
