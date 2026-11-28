@@ -170,12 +170,32 @@ check_repo() {
         if echo "$run_err" | grep -qiE "not found|no commit|does not exist|unknown ref|no ref|could not resolve|no such branch"; then
             rm -f "$_DB_CACHE_DIR/${repo//\//__}" 2>/dev/null || true
             default_branch=$(_default_branch "$repo")
-            run_json=$(gh run list --repo "$repo" --branch "$default_branch" --limit 20 --json "$run_fields" 2>/dev/null) || run_json="error"
+            # Keep the retry's stderr: reporting the *first* failure's text
+            # beside a retry that failed for a different reason (network,
+            # rate limit) misleads the operator about the actual failure.
+            run_err_file=$(mktemp)
+            run_json=$(gh run list --repo "$repo" --branch "$default_branch" --limit 20 --json "$run_fields" 2>"$run_err_file") || run_json="error"
+            run_err=$(cat "$run_err_file"); rm -f "$run_err_file"
         fi
     fi
 
     if [ "$run_json" = "error" ]; then
-        echo -e "${YELLOW}-${NC} $label: No Actions"
+        # A failed `gh run list` (rate limit, network, auth) is not the same as
+        # a repo with no workflows. The old "- ... No Actions" row parsed as a
+        # neutral skip downstream, so a fully failed collection read as a
+        # definitive ci_failing=0 and left the delivery tile green (2026-11-28
+        # operator finding). Emit the explicit Unavailable marker the consumer
+        # already understands as unknown.
+        local err_detail
+        # Collapse newlines and drop remaining control bytes (CR, backspace,
+        # ANSI escapes) before printing: a stderr relayed from a proxy can
+        # overwrite or hide the row on a terminal.
+        err_detail=$(printf '%s' "$run_err" | tr '\n' ' ' \
+            | tr -d '\000-\011\013-\037\177' | cut -c1-200)
+        # Print the untrusted detail with %s, not echo -e: a literal `\n` or
+        # `\c` in gh's stderr (JSON-escaped API bodies carry them) would
+        # otherwise split or truncate the single Unavailable row.
+        printf '%b?%b %s: Unavailable (gh run list: %s)\n' "${YELLOW}" "${NC}" "$label" "${err_detail:-unknown error}"
         return
     fi
 
