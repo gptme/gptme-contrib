@@ -31,7 +31,7 @@
     "plugins/gptme-lsp/src/gptme_lsp/lsp_client.py": 2142,
     "scripts/check-quota.py": 2210,
     "scripts/claude-code-hooks/match-lessons.py": 2748,
-    "scripts/github/activity-gate.sh": 2940,
+    "scripts/github/activity-gate.sh": 2930,
     "scripts/github/self-merge-check.py": 5199,
     "scripts/twitter/twitter.py": 2019,
     "scripts/twitter/workflow.py": 3366,
