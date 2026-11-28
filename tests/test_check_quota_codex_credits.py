@@ -253,9 +253,12 @@ def test_scraper_omits_credits_as_none_when_absent():
     [
         ("│ Credits: 25,706 credits │", 25_706),
         ("Credits: 25706 credits", 25_706),
+        ("Credits: 25,706 credits remaining", 25_706),
+        ("Credits: 25,706", 25_706),
         ("Credits: 25,706 credits\nCredits: 25,706 credits", 25_706),
         ("Note: Credits: 25,706 credits", None),
         ("Credits: 25,70 credits", None),
+        ("Credits: 25,7061", None),
         ("Credits: -1 credits", None),
     ],
 )

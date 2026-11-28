@@ -331,10 +331,14 @@ if split_idx < len(output):
 # reads this). This is account-wide and can appear after the Spark section.
 # Conflicting lines are ambiguous: never pick the first pool's balance. Repeated
 # identical lines (e.g. TUI scrollback) still describe one balance.
+# The unit word is not required: codex builds differ ("... credits" vs a bare
+# balance), and a stricter pattern silently turns a real balance into unknown.
+# The lookahead still rejects a malformed thousands group ("25,70"), and tmux
+# capture-pane -p emits no ANSI escapes to tolerate.
 credit_balances = {
     int(value.replace(',', ''))
     for value in re.findall(
-        r'^[ \t│┃]*Credits:[ \t]+([0-9]+(?:,[0-9]{3})*)[ \t]+credits\b',
+        r'^[ \t│┃]*Credits:[ \t]+([0-9]+(?:,[0-9]{3})*)(?=[ \t│┃]|$)',
         output, re.MULTILINE,
     )
 }
