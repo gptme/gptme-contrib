@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import os
 import re
@@ -213,7 +214,11 @@ def _main_redact(argv: list[str] | None = None) -> int:
             return 2
         out = result.redacted
         if args.out:
-            _write_atomic(Path(args.out), out)
+            try:
+                _write_atomic(Path(args.out), out)
+            except OSError as exc:
+                print(f"error: cannot write {args.out}: {exc}", file=sys.stderr)
+                return 2
         else:
             sys.stdout.write(out)
 
@@ -303,6 +308,13 @@ def _write_atomic(path: Path, text: str) -> None:
         umask = os.umask(0)
         os.umask(umask)
         mode = 0o666 & ~umask
+    else:
+        # os.replace only needs write permission on the *directory*, so the
+        # atomic path would silently replace a target that the old
+        # open(path, "w") refused with PermissionError -- detaching hardlinks
+        # and resetting ownership as a side effect. Keep the old contract.
+        if not os.access(path, os.W_OK):
+            raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), str(path))
     try:
         fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
     except OSError:
