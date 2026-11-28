@@ -1272,17 +1272,38 @@ class ProjectMonitoringRun(BaseRunLoop):
             ]
 
             with locked_state_file(state_file):
-                prev_notifications = set()
+                # State format: one notification per line, "<id>\t<updated_at>".
+                # GitHub reuses the notification id across follow-up comments on
+                # the same thread and only advances `updated_at`, so a
+                # presence-only check silently drops legitimate follow-ups
+                # (gptme-contrib#802: Erik's follow-up on gptme-cloud#195 was
+                # missed for 12+ hours). Re-emit when `updated_at` is strictly
+                # newer than the stored watermark, matching the activity-gate
+                # contract. A legacy bare-id line (presence-only state) has no
+                # watermark: re-emit it exactly once, then record one.
+                prev_notifications: dict[str, str | None] = {}
                 if state_file.exists():
-                    prev_notifications = set(state_file.read_text().strip().split("\n"))
+                    for raw in state_file.read_text().splitlines():
+                        if not raw.strip():
+                            continue
+                        if "\t" in raw:
+                            prev_id, prev_ts = raw.split("\t", 1)
+                            prev_notifications[prev_id.strip()] = prev_ts.strip()
+                        else:
+                            prev_notifications[raw.strip()] = None
 
-                current_notifications = set()
+                current_notifications: dict[str, str | None] = {}
                 for notif in relevant_notifications:
-                    notif_id = notif["id"]
+                    notif_id = str(notif["id"])
+                    updated_at = str(notif.get("updated_at") or "")
 
                     if notif_id in prev_notifications:
-                        current_notifications.add(notif_id)
-                        continue
+                        prior_ts = prev_notifications[notif_id]
+                        if prior_ts is not None and (
+                            not updated_at or prior_ts >= updated_at
+                        ):
+                            current_notifications[notif_id] = prior_ts
+                            continue
 
                     repo = notif["repository"]["full_name"]
                     subject = notif["subject"]
@@ -1315,7 +1336,7 @@ class ProjectMonitoringRun(BaseRunLoop):
                         )
                         continue
 
-                    current_notifications.add(notif_id)
+                    current_notifications[notif_id] = updated_at
                     details = f"Notification reason: {reason}\nType: {subject_type}"
                     work_items.append(
                         WorkItem(
@@ -1328,7 +1349,13 @@ class ProjectMonitoringRun(BaseRunLoop):
                         )
                     )
 
-                atomic_write_text(state_file, "\n".join(sorted(current_notifications)))
+                atomic_write_text(
+                    state_file,
+                    "\n".join(
+                        f"{nid}\t{ts or ''}"
+                        for nid, ts in sorted(current_notifications.items())
+                    ),
+                )
 
         except Exception as e:
             self.logger.error(f"Error checking notifications: {e}")
