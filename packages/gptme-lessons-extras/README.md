@@ -340,9 +340,13 @@ Incremental tracking now records exact processed log names rather than a name
 watermark. A legacy state with a watermark but no processed-name list is kept
 unchanged and analysis asks for an explicit `--full` rebuild. Back up that state
 and restore archived logs before rebuilding if their statistics must be retained:
-`--full` replaces totals using only available logs. A missing logs directory
-aborts a rebuild without overwriting state. Rebuilds read all selected logs before
-resetting or checkpointing totals; a read failure leaves the previous state intact.
+`--full` replaces totals using only available logs. A missing logs directory,
+a previously counted log directory, or its conversation file aborts a rebuild
+without overwriting state. Rebuilds read all selected logs before resetting or
+checkpointing totals; a read failure leaves the previous state intact. Log
+directories that were never counted and have no `conversation.jsonl` yet (a log
+started but not written, or an aborted session) are skipped and retried on a
+later run rather than failing the tracker.
 A limited rebuild (`--full --limit N`)
 or one interrupted after a checkpoint can be resumed with an ordinary incremental
 run (omit `--full`); processed names prevent skipped or double-counted logs.
